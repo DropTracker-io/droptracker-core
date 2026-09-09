@@ -30,17 +30,20 @@ SEASONAL_PREFIX = "seasonal_"
 # Ordered category list (mirrors the TS CONFIG_CATEGORIES; TS calls the key
 # field `id`).
 CONFIG_CATEGORIES: List[Dict[str, str]] = [
-    {"key": "channels", "label": "Channels"},
+    {"key": "profile", "label": "Group profile"},
+    {"key": "channels", "label": "Discord channels"},
     {"key": "drops", "label": "Drop notifications"},
+    {"key": "achievements", "label": "Achievement notifications"},
     {"key": "deaths", "label": "Deaths"},
     {"key": "levels", "label": "Level notifications"},
     {"key": "milestones", "label": "Milestones"},
-    {"key": "pbs", "label": "Personal best"},
-    {"key": "cas", "label": "Combat achievements"},
+    {"key": "pbs", "label": "Personal bests & Hall of Fame"},
     {"key": "board", "label": "Lootboard"},
     {"key": "recaps", "label": "Monthly recaps"},
     {"key": "clan_log", "label": "Clan Log"},
-    {"key": "integration", "label": "Integration & info"},
+    {"key": "clan_chat", "label": "Clan chat"},
+    {"key": "voice", "label": "Voice channel counters"},
+    {"key": "integration", "label": "WiseOldMan & API"},
 ]
 
 # type ∈ channel | boolean | int | string | text | csv | bosslist | select
@@ -63,7 +66,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "lootboard_channel_id",
         "label": "Lootboard channel",
-        "category": "channels",
+        "category": "board",
         "type": "channel",
         "help": "Channel where the lootboard image is posted/updated.",
         "default": None,
@@ -71,7 +74,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "lootboard_message_id",
         "label": "Lootboard message id",
-        "category": "channels",
+        "category": "board",
         "type": "string",
         "help": "Message the bot edits when reposting the board. Managed automatically.",
         "default": None,
@@ -211,7 +214,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "notify_clogs",
         "label": "Notify collection logs",
-        "category": "drops",
+        "category": "achievements",
         "type": "boolean",
         "help": "Post a notification on new collection-log slots.",
         "default": True,
@@ -220,7 +223,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "notify_cas",
         "label": "Notify combat achievements",
-        "category": "drops",
+        "category": "achievements",
         "type": "boolean",
         "help": "Post a notification on combat-achievement completions.",
         "default": True,
@@ -229,7 +232,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "notify_pets",
         "label": "Notify pets",
-        "category": "drops",
+        "category": "achievements",
         "type": "boolean",
         "help": "Post a notification on pet drops.",
         "default": True,
@@ -238,7 +241,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "notify_quests",
         "label": "Notify quests",
-        "category": "drops",
+        "category": "achievements",
         "type": "boolean",
         "help": "Post a notification on quest completions.",
         "default": False,
@@ -247,7 +250,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "notify_special_quests",
         "label": "Notify special quests",
-        "category": "drops",
+        "category": "achievements",
         "type": "boolean",
         "help": "Notify on milestone/special quests even when general quest notifications are off.",
         "default": True,
@@ -256,7 +259,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "notify_diaries",
         "label": "Notify achievement diaries",
-        "category": "drops",
+        "category": "achievements",
         "type": "boolean",
         "help": "Post a notification on achievement-diary completions.",
         "default": False,
@@ -540,7 +543,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "min_ca_tier_to_notify",
         "label": "Minimum CA tier",
-        "category": "cas",
+        "category": "achievements",
         "type": "select",
         "help": "Lowest combat-achievement tier that triggers a notification.",
         "default": "EASY",
@@ -553,7 +556,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "min_diary_tier_to_notify",
         "label": "Minimum diary tier",
-        "category": "drops",
+        "category": "achievements",
         "type": "select",
         "help": "Lowest achievement-diary tier that triggers a notification.",
         "default": "EASY",
@@ -638,7 +641,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "channel_id_to_post_manual_review",
         "label": "Manual review channel",
-        "category": "channels",
+        "category": "drops",
         "type": "channel",
         "help": "Optional. Where to ping when a manual submission is held for approval (the \"Hold for admin approval\" policy). Leave unset to review only on the website.",
         "default": None,
@@ -660,7 +663,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "vc_to_display_monthly_loot",
         "label": "Monthly loot voice channel",
-        "category": "integration",
+        "category": "voice",
         "type": "channel",
         "help": "Voice channel renamed every 10 minutes to show the group's monthly loot total. Nobody needs to be able to talk in it — the name is the display. Give the bot Manage Channel on it.",
         "default": None,
@@ -668,7 +671,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "vc_to_display_monthly_loot_text",
         "label": "Monthly loot channel text",
-        "category": "integration",
+        "category": "voice",
         "type": "string",
         "help": "Template for the loot voice channel name. Placeholders: {month}, {gp_amount}.",
         "default": "{month}: {gp_amount} gp",
@@ -676,7 +679,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "vc_to_display_droptracker_users",
         "label": "Member count voice channel",
-        "category": "integration",
+        "category": "voice",
         "type": "channel",
         "help": "Voice channel renamed every 10 minutes to show the group's tracked member count. Nobody needs to be able to talk in it — the name is the display. Give the bot Manage Channel on it.",
         "default": None,
@@ -684,7 +687,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "vc_to_display_droptracker_users_text",
         "label": "Member count channel text",
-        "category": "integration",
+        "category": "voice",
         "type": "string",
         "help": "Template for the member-count voice channel name. Placeholder: {member_count}.",
         "default": "{member_count} members",
@@ -697,7 +700,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "group_name",
         "label": "Group name",
-        "category": "integration",
+        "category": "profile",
         "type": "string",
         "help": "Display name of the group. Renaming updates it everywhere — group page, leaderboards, search and Discord messages.",
         "default": "",
@@ -706,7 +709,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "group_description",
         "label": "Description",
-        "category": "integration",
+        "category": "profile",
         "type": "text",
         "help": "Short description shown on the public group page.",
         "default": "",
@@ -714,7 +717,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "clan_chat_name",
         "label": "Clan chat name",
-        "category": "integration",
+        "category": "clan_chat",
         "type": "string",
         "help": "Your in-game clan chat channel name, exactly as it appears in game. Required for clan broadcast tracking: relayed broadcasts only bind to this group when the relayer's clan matches this name.",
         "default": "",
@@ -727,7 +730,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "clan_broadcast_tracking",
         "label": "Clan broadcast tracking",
-        "category": "integration",
+        "category": "clan_chat",
         "type": "boolean",
         "help": "Track drops, pets and collection log slots for members who don't run the plugin, parsed from in-game clan broadcast messages relayed by clanmates who do. Requires the clan chat name to be set. Chat-tracked entries are unverified, carry no screenshots, and never count toward events, points or splits.",
         "default": False,
@@ -735,7 +738,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "clan_broadcast_min_value",
         "label": "Clan broadcast minimum value",
-        "category": "integration",
+        "category": "clan_chat",
         "type": "int",
         "help": "Extra GP floor for chat-relayed drops: broadcasts below this are not recorded for this group at all. 0 records everything the clan's in-game broadcast threshold lets through.",
         "default": 0,
@@ -747,7 +750,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "clan_broadcast_notify_without_images",
         "label": "Notify clan broadcasts without screenshots",
-        "category": "integration",
+        "category": "clan_chat",
         "type": "boolean",
         "help": "Relayed clan broadcasts never carry a screenshot, so leave this on if you use \"Only send messages with images\" — otherwise chat-tracked drops, personal bests, pets and collection log slots are recorded but never announced. Turn it off to keep those announcements out of your channels entirely.",
         "default": True,
@@ -759,7 +762,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "clan_chat_bridge_enabled",
         "label": "Clan chat bridge",
-        "category": "integration",
+        "category": "clan_chat",
         "type": "boolean",
         "help": "Two-way sync between your in-game clan chat and the bridge channel: game chat is mirrored into the channel, and channel messages appear in game for members running the plugin with the bridge enabled. Requires the clan chat name and a bridge channel.",
         "default": False,
@@ -767,7 +770,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "channel_id_clan_chat_bridge",
         "label": "Clan chat bridge channel",
-        "category": "integration",
+        "category": "clan_chat",
         "type": "channel",
         "help": "The Discord channel your in-game clan chat is mirrored to, and whose messages are relayed into the game. Anyone who can type in this channel can speak to the clan — restrict it accordingly.",
         "default": None,
@@ -775,7 +778,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     {
         "key": "discord_url",
         "label": "Discord invite URL",
-        "category": "integration",
+        "category": "profile",
         "type": "string",
         "help": "Public Discord invite shown on the group page.",
         "default": "",
