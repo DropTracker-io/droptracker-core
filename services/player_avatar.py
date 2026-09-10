@@ -109,6 +109,15 @@ _MIN_HEAD_WIDTH = 0.045
 # against transparency, so edge pixels feather.
 _ALPHA_FLOOR = 16
 
+# Shortest figure, in body heights, that is still drawn at the fixed camera's
+# scale. Headgear and raised weapons only ever add height, so a shorter figure
+# means the renderer stepped back to fit something wide beside the player (a
+# large pet), and every body-relative measurement here would then be wrong.
+# Measured 2026-09-10: 365 production renders without a pet were all 0.965 or
+# taller; pet renders whose crop framed empty air were 0.63-0.86, and those
+# that cropped well were 0.91 and up (bar one at 0.85, lost to this line).
+_MIN_FIGURE = 0.88
+
 
 # Cache of player_id -> (fingerprint or None, expiry). The site asks for an
 # avatar per row, and the overwhelming majority of those rows are players with
@@ -259,11 +268,20 @@ def _crop_box(alpha) -> Optional[Tuple[int, int, int, int]]:
     # Sanity: a real render is a standing figure occupying most of the frame and
     # resting near the bottom. Anything else is a broken screenshot — there are
     # such files on disk (one measured at 3.9% of the frame height) and framing
-    # one would produce a confident-looking picture of nothing.
+    # one would produce a confident-looking picture of nothing. The ones
+    # examined since were pet renders from before the viewer stopped standing
+    # the pet twenty tiles away (web a0ee557): two specks, far apart.
     if (bottom - top) < height * 0.20 or feet < height * 0.5:
         return None
 
     body = height * _BODY_FRACTION
+
+    # Everything below is measured in body heights of the fixed camera. A figure
+    # well short of one body is not drawn at that scale (see _MIN_FIGURE), and a
+    # crop sized for it would frame the air above the player's head, so it gets
+    # the letter placeholder instead.
+    if (bottom - top) < body * _MIN_FIGURE:
+        return None
 
     # Horizontal centre, taken over the boot band only — legs are always under
     # the body, whereas anything at head height may be a held weapon.

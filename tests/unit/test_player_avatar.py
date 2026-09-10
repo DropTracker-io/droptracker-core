@@ -147,6 +147,19 @@ class TestRejectsWhatIsNotAFigure:
         floating.paste(Image.new("L", (120, 400), 255), (340, 50))
         assert _crop_box(floating) is None
 
+    def test_rejects_a_player_the_camera_stepped_back_from(self):
+        """A large pet widens the pair, so the renderer backs off to fit it.
+
+        The player then stands well short of one body at the fixed camera's
+        scale. Every measurement here is in those body heights, so a crop of
+        this frames empty air above the head; the placeholder is better.
+        """
+        player = int(BODY * 0.8)
+        pair = Image.new("L", (WIDTH, HEIGHT), 0)
+        pair.paste(Image.new("L", (96, player), 255), (220, FEET - player))
+        pair.paste(Image.new("L", (300, 220), 255), (380, FEET - 220))
+        assert _crop_box(pair) is None
+
 
 class TestBuildAvatar:
     def test_produces_a_square_image(self, tmp_path):

@@ -63,17 +63,23 @@ def _page_url(player_id: int, fingerprint: str, *, with_pet: bool) -> str:
     return url
 
 
-async def render_gear_image(player_id: int, fingerprint: str) -> Optional[str]:
+async def render_gear_image(player_id: int, fingerprint: str,
+                            *, force: bool = False) -> Optional[str]:
     """Renders and stores the character image, returning its public URL.
 
     Returns None rather than raising: this decorates a notification, and a
     notification must never be delayed or lost because a picture could not be
     drawn.
+
+    ``force`` redraws an image that already exists. The upload path never
+    needs it, because the fingerprint names the outfit. But a render drawn by
+    a renderer that has since been fixed stays wrong until it is drawn again
+    (``scripts/rerender_model_specks.py``).
     """
     if not fingerprint or not model_exists(player_id, fingerprint):
         return None
 
-    if image_exists(player_id, fingerprint):
+    if not force and image_exists(player_id, fingerprint):
         return image_url(player_id, fingerprint)
 
     from services.page_screenshot import screenshot_url
