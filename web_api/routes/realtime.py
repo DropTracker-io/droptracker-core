@@ -148,6 +148,58 @@ def _may_watch_event(user_id, event_id: int) -> bool:
         return False
 
 
+def _tasks_hidden_from(user_id, event_id: int) -> bool:
+    """Whether ``user_id`` must not see task names on an event's frames
+    (web112a): the organisers keep the board to themselves and this viewer
+    isn't one of them. The frames are display-ready and carry the label of
+    every completion, so a participant who could read them live would learn
+    the board tile by tile — the site page they refresh from withholds it.
+
+    Runs once per connection, like :func:`_may_watch_event`. Fails closed:
+    the names are the thing being protected, and a scrubbed frame still
+    tells the page to refetch.
+    """
+    from db.models import Event
+    from web_api.common import db_session
+    from web_api.routes.events import _tasks_kept_to_admins, _tasks_visible
+
+    try:
+        with db_session() as s:
+            ev = s.query(Event).filter(Event.id == event_id).first()
+            if ev is None or not _tasks_kept_to_admins(ev):
+                return False
+            return not _tasks_visible(s, user_id, ev)
+    except Exception:
+        return True
+
+
+#: Envelope keys that carry a task's name (services/event_engine._publish
+#: call sites): completions, bingo cells, the board game's next tile.
+_TASK_NAME_KEYS = frozenset({"task_label", "cell_label", "cell_labels",
+                             "next_task_label"})
+
+
+def scrub_task_names(frame: str) -> str:
+    """The frame with every task-naming key removed, at any depth (web112a).
+    Pure. The rest of the envelope — type, ids, points, scores, players — is
+    untouched, so the page still refreshes and the standings still move. A
+    frame that isn't JSON has nothing structured to strip and passes through.
+    """
+    try:
+        envelope = json.loads(frame)
+    except Exception:
+        return frame
+
+    def _walk(node):
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items() if k not in _TASK_NAME_KEYS}
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        return node
+
+    return json.dumps(_walk(envelope), default=str)
+
+
 def _may_read_thread(user_id, thread_id: int) -> bool:
     """Whether ``user_id`` may subscribe to a chat thread's frames (web96a).
 
@@ -196,10 +248,14 @@ def _may_read_ticket(user_id, ticket_id: int) -> bool:
         return False
 
 
-async def _authorize_channels(raw: str) -> list[str]:
+async def _authorize_channels(raw: str) -> tuple[list[str], set[str]]:
     """Validate + filter requested channels. Drops private ``player:`` scopes
     unless a valid session is present, and ``event:``/``chat:``/``user:`` scopes
-    the viewer may not see."""
+    the viewer may not see.
+
+    Returns ``(channels, scrubbed)``: the scopes to subscribe, and the subset
+    whose frames must lose their task names before they reach this viewer
+    (web112a — an event whose board is hidden from them)."""
     user_id = None
     have_session = False
     try:
@@ -209,6 +265,7 @@ async def _authorize_channels(raw: str) -> list[str]:
         have_session = False
 
     out = []
+    scrubbed: set[str] = set()
     for ch in (raw or "").split(","):
         ch = ch.strip()
         if not ch:
@@ -262,10 +319,14 @@ async def _authorize_channels(raw: str) -> list[str]:
             )
             if not allowed:
                 continue
+            if await asyncio.to_thread(
+                _tasks_hidden_from, user_id if have_session else None, event_id
+            ):
+                scrubbed.add(ch)
         out.append(ch)
         if len(out) >= _MAX_CHANNELS:
             break
-    return out
+    return out, scrubbed
 
 
 def _redis_url() -> dict:
@@ -318,7 +379,7 @@ async def feed_recent():
 
 @realtime_bp.get("/stream")
 async def stream():
-    channels = await _authorize_channels(request.args.get("channels", "global"))
+    channels, scrubbed = await _authorize_channels(request.args.get("channels", "global"))
     if not channels:
         channels = ["global"]
     rt_channels = [f"rt:{c}" for c in channels]
@@ -343,8 +404,11 @@ async def stream():
                         data = data.decode("utf-8", "ignore")
                     # The channel, not the envelope, decides which hiding rules
                     # apply — a connection can hold several scopes at once.
-                    if await _is_hidden_event(data, _frame_scope(message.get("channel"))):
+                    scope = _frame_scope(message.get("channel"))
+                    if await _is_hidden_event(data, scope):
                         continue
+                    if scope in scrubbed:
+                        data = scrub_task_names(data)
                     yield f"data: {data}\n\n".encode("utf-8")
 
                 now = asyncio.get_event_loop().time()

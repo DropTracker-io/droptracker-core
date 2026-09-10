@@ -917,6 +917,16 @@ def _team_recent_submissions(session, event_id, team_id, tasks_by_id) -> list:
     return entries
 
 
+def tasks_kept_to_admins(event) -> bool:
+    """Board/task visibility (web112a): the organisers keep this event's tasks
+    to themselves. The plugin speaks for a player, not a user, so it has no
+    notion of who is an admin — in-game the task list, the focus pick and the
+    board pop-out are withheld from everyone while this is on; managers use
+    the site. A board game's landed tile is the exception: a team must know
+    the task it is standing on to play at all."""
+    return (getattr(event, "tasks_visibility", None) or "public") == "admins"
+
+
 def compose_event_state(session, player_id) -> dict:
     """The plugin's HUD/Events-tab state: one entry per active event the
     player is rostered in. All composition happens here so the client stays a
@@ -975,6 +985,8 @@ def compose_event_state(session, player_id) -> dict:
         tasks_total = len(task_rows)
         tasks_completed = sum(1 for p in progress_rows if p.completed)
         tiles = _batch_task_tiles(session, task_rows)
+        # Counts stay either way — "3 of 25 done" gives nothing away.
+        blind = tasks_kept_to_admins(event)
 
         board_status = None
         focus_row = None
@@ -998,7 +1010,9 @@ def compose_event_state(session, player_id) -> dict:
                         .first()
                     )
                     focus_source = "board"
-        if focus_row is None:
+        # A blind event has no server pick for the HUD (that would name a
+        # task); the board game's landed tile above is the one focus it keeps.
+        if focus_row is None and not blind:
             task_dicts = [
                 {"id": t.id, "label": t.label, "type": t.type,
                  "target_value": t.target_value}
@@ -1085,7 +1099,7 @@ def compose_event_state(session, player_id) -> dict:
         # track it on the HUD instead of the server's focus pick), tooltips
         # explaining each task's requirements, and per-task progress rows.
         tasks_payload = []
-        for task_row in task_rows[:TASKS_LIMIT]:
+        for task_row in ([] if blind else task_rows[:TASKS_LIMIT]):
             state = progress_by_task.get(task_row.id) or {}
             need = 1 if task_row.type in ("pb_target", "skill_target") \
                 else max(int(task_row.target_value or 0), 1)
@@ -1162,10 +1176,14 @@ def compose_event_state(session, player_id) -> dict:
         # team-scoped sibling of the player panel's recent submissions. Tasks
         # and tiles are already loaded, so the feed costs one indexed read
         # per team per TEAM_SUBMISSIONS_CACHE_SECONDS.
+        # Blind: the feed keeps the items and who got them, but a row credits
+        # "a hidden task" rather than naming it (or borrowing its icon).
         team_recent_submissions = _team_recent_submissions(
             session, event.id, team.id,
-            {t.id: {"label": t.label, "type": t.type,
-                    "icon_path": (tiles.get(t.id) or {}).get("icon_path")}
+            {t.id: ({"label": "Hidden task", "type": t.type, "icon_path": None}
+                    if blind else
+                    {"label": t.label, "type": t.type,
+                     "icon_path": (tiles.get(t.id) or {}).get("icon_path")})
              for t in task_rows},
         )
 
@@ -1194,11 +1212,15 @@ def compose_event_state(session, player_id) -> dict:
             "tasks_completed": tasks_completed,
             "tasks_total": tasks_total,
             "tasks": tasks_payload,
+            # Additive (web112a): newer plugins can say WHY the list is empty
+            # and the board button is gone; older ones just see neither.
+            "tasks_hidden": blind,
             "members": members,
             "members_total": members_total,
             "team_recent_submissions": team_recent_submissions,
             "board": {
-                "available": bool(event.has_bingo or event.kind == "board_game"),
+                "available": bool(event.has_bingo or event.kind == "board_game")
+                             and not blind,
                 "team_id": team.id,
             },
             "standings": standings,

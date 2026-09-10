@@ -110,7 +110,8 @@ class TestMayReadThread:
 # --------------------------------------------------------------------------- #
 def _authorize(monkeypatch, raw, *, user_id):
     monkeypatch.setattr(rt, "optional_user_id", lambda: user_id)
-    return asyncio.run(rt._authorize_channels(raw))
+    # (channels, scrubbed) since web112a; these tests are about admission.
+    return asyncio.run(rt._authorize_channels(raw))[0]
 
 
 class TestUserScope:

@@ -89,6 +89,14 @@ EVENT_TASK_VISIBILITIES = ("public", "private")
 # only about task-library reuse.
 EVENT_VISIBILITIES = ("public", "private")
 
+# Board/task visibility (web_events.tasks_visibility): "public" — everyone who
+# can see the event sees its task list, bingo cells, board-game tiles and
+# board images (the default, unchanged behaviour); "admins" — only event
+# admins and event managers do, so an event can be played blind or its board
+# kept back until the organisers reveal it. Scoring and notifications are
+# unaffected. Orthogonal to EVENT_VISIBILITIES (who can see the event at all).
+EVENT_TASKS_VISIBILITIES = ("public", "admins")
+
 # Event ownership shape (web_events.mode): "standard" (one owning group, or
 # global when group_id is NULL) vs "clan_vs_clan" (a host group plus invited
 # opponent groups, tracked in web_event_groups).
@@ -442,6 +450,12 @@ class Event(Base):
     # enter mid-event, right up to the end. Admins can always place players
     # manually either way (the roster stays open until the event is past).
     allow_late_signups = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Board/task visibility (web112a): EVENT_TASKS_VISIBILITIES. "admins" keeps
+    # the task list, bingo cells, board-game tiles and board images to event
+    # admins and event managers; participants still score, get notified and
+    # see standings. Public is the default so existing events are untouched.
+    tasks_visibility = Column(String(16), nullable=False,
+                              default="public", server_default="public")
     # Recurring activation schedule (web82a): JSON rule describing WHEN inside
     # [starts_at, ends_at] scoring is open (e.g. every weekend of the month,
     # all weekends counting as one event). NULL = continuous (every event

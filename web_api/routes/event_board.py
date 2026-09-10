@@ -61,6 +61,7 @@ from web_api.routes.events import (
     _effective_status,
     _is_event_admin,
     _is_restricted,
+    _tasks_visible,
 )
 
 event_board_bp = Blueprint("v1_event_board", __name__)
@@ -328,7 +329,22 @@ def _validate_settings_patch(body: dict) -> dict:
 # --------------------------------------------------------------------------- #
 # Serialization
 # --------------------------------------------------------------------------- #
-def _tile_row(t: EventBoardTile, task_labels: dict) -> dict:
+def _tile_row(t: EventBoardTile, task_labels: dict, *, conceal: bool = False) -> dict:
+    """One tile of the track. ``conceal`` (web112a) keeps the geometry and
+    kind — the track still draws and the pieces still move — but says nothing
+    about what the tile asks for: a team learns a tile by landing on it (its
+    task then arrives as the position's ``current_task``)."""
+    if conceal:
+        return {
+            "idx": int(t.idx),
+            "x": float(t.x or 0.0),
+            "y": float(t.y or 0.0),
+            "label": None,
+            "difficulty": None,
+            "task_id": None,
+            "task_label": None,
+            "tile_kind": t.tile_kind or "normal",
+        }
     return {
         "idx": int(t.idx),
         "x": float(t.x or 0.0),
@@ -499,7 +515,11 @@ def _active_tile_effects(s, event_id: int) -> list:
     return out
 
 
-def _board_payload(s, ev) -> dict:
+def _board_payload(s, ev, *, conceal: bool = False) -> dict:
+    """The board as the site draws it. ``conceal`` (web112a) blanks every
+    tile's task and label for a viewer the organisers keep the board from;
+    positions, pieces, active effects and each team's ``current_task`` stay,
+    so the game is still playable — just not readable ahead."""
     from services.boardgame_engine import board_settings, finish_idx
 
     config = (s.query(EventBoardConfig)
@@ -507,7 +527,7 @@ def _board_payload(s, ev) -> dict:
     tiles = (s.query(EventBoardTile)
              .filter(EventBoardTile.event_id == ev.id)
              .order_by(EventBoardTile.idx).all())
-    task_ids = [t.task_id for t in tiles if t.task_id]
+    task_ids = [] if conceal else [t.task_id for t in tiles if t.task_id]
     task_labels = {}
     if task_ids:
         task_labels = dict(
@@ -526,7 +546,8 @@ def _board_payload(s, ev) -> dict:
         "bg_width": config.bg_width if config else None,
         "bg_height": config.bg_height if config else None,
         "settings": board_settings(config.settings if config else None),
-        "tiles": [_tile_row(t, task_labels) for t in tiles],
+        "tiles": [_tile_row(t, task_labels, conceal=conceal) for t in tiles],
+        "tiles_hidden": conceal,
         "finish_idx": finish_idx(tiles),
         "positions": [
             _position_row(s, p, teams.get(p.team_id), effects_by_team)
@@ -742,7 +763,12 @@ async def get_board(event_id: int):
                     and not _can_view_restricted(s, viewer_id, ev)):
                 _deny_restricted(ev, viewer_id)
                 abort_problem(404, "Event not found", f"No event {event_id}.")
-            return _board_payload(s, ev)
+            # Board/task visibility (web112a): the render token sees the whole
+            # board (its picture only ever reaches admins — see
+            # event_board_image._collect_render_inputs); a participant gets
+            # the track with the tiles blanked.
+            conceal = not render_bypass and not _tasks_visible(s, viewer_id, ev)
+            return _board_payload(s, ev, conceal=conceal)
 
     return private_no_store(jsonify(await asyncio.to_thread(_read)))
 
@@ -1121,7 +1147,10 @@ async def board_png(event_id: int):
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 _deny_restricted(ev, viewer_id)
                 abort_problem(404, "Event not found", f"No event {event_id}.")
-            if _collect_render_inputs(s, ev) is None:
+            # A board kept to the organisers (web112a) renders only for one
+            # of them; everyone else is told there is nothing to draw.
+            if _collect_render_inputs(
+                    s, ev, for_admin=_is_event_admin(s, viewer_id, ev)) is None:
                 abort_problem(404, "No visual board",
                               "This event has no bingo or board-game board to render.")
 

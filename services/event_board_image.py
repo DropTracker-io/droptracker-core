@@ -230,9 +230,23 @@ def _competition_signature(session, event) -> Optional[dict]:
     }
 
 
-def _collect_render_inputs(session, event, team_id=None) -> Optional[dict]:
+def board_kept_to_admins(event) -> bool:
+    """Board/task visibility (web112a): whether this event's board is for its
+    organisers only. Competition events are exempt — their picture is a
+    standings snapshot naming players, not tasks."""
+    if getattr(event, "kind", None) in ("sotw", "botw"):
+        return False
+    return (getattr(event, "tasks_visibility", None) or "public") == "admins"
+
+
+def _collect_render_inputs(session, event, team_id=None, *,
+                           for_admin: bool = False) -> Optional[dict]:
     """State signature for one event's board view: ``{"kind", "hash_src"}`` —
-    or ``None`` for events with no visual board (standard task-list events).
+    or ``None`` for events with no visual board (standard task-list events),
+    and for a board its organisers keep to themselves (web112a) unless the
+    caller is one (``for_admin``). Every consumer treats ``None`` as "no
+    picture": the Discord announcements and leaderboard post go out without
+    the image, the team channels post none, and the in-game pop-out 404s.
 
     ``hash_src`` folds everything that changes the rendered picture, so the
     Redis cache re-screenshots exactly when the board actually changes.
@@ -240,6 +254,8 @@ def _collect_render_inputs(session, event, team_id=None) -> Optional[dict]:
     board game's shared track / a loot sweep's shared standings keep a
     team-agnostic signature (the team param only highlights "their" row/piece —
     the per-team cache keys keep the highlighted variants apart)."""
+    if not for_admin and board_kept_to_admins(event):
+        return None
     if getattr(event, "has_bingo", False):
         sig = _bingo_signature(session, event, team_id)
     elif getattr(event, "kind", None) == "board_game":

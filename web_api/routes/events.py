@@ -290,6 +290,10 @@ def _summary(ev: Event) -> dict:
         # render the current setting. The per-player figures are omitted
         # entirely when it's "admins" and the viewer isn't one.
         "effort_visibility": getattr(ev, "effort_visibility", None) or "public",
+        # Board/task display gate (web112a) — the setting itself, for the
+        # manager form. What it hides is omitted from the detail payload when
+        # it's "admins" and the viewer isn't one (see `tasks_hidden` there).
+        "tasks_visibility": getattr(ev, "tasks_visibility", None) or "public",
         # Sign-up window (web70a): the toggle, plus the derived answers the
         # join panel and the sign-up post both read — sign-ups close when the
         # event starts unless allow_late_signups is on.
@@ -529,6 +533,16 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
     # untouched.
     base["schedule"] = _schedule_state(s, ev)
 
+    # Resolved once: it decides `can_manage` at the bottom and, on an event
+    # whose organisers keep the tasks to themselves (web112a), whether this
+    # viewer gets them at all.
+    is_admin = _is_event_admin(s, viewer_id, ev)
+    show_tasks = is_admin or not _tasks_kept_to_admins(ev)
+    # Hidden => the tasks, bingo cells and per-task progress below are never
+    # computed, so they cannot leak through a stray key; the flag lets the
+    # client say why the board is missing rather than show an empty one.
+    base["tasks_hidden"] = not show_tasks
+
     tasks = [
         {
             "id": t.id,
@@ -547,7 +561,8 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             # settings — task UIs render it read-only/hidden.
             "managed": t.type == "competition",
         }
-        for t in s.query(EventTask).filter(EventTask.event_id == ev.id).all()
+        for t in (s.query(EventTask).filter(EventTask.event_id == ev.id).all()
+                  if show_tasks else [])
     ]
     _attach_task_tiles(s, tasks)
 
@@ -697,7 +712,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         }
 
     bingo = None
-    if ev.has_bingo:
+    if ev.has_bingo and show_tasks:
         cells = (
             s.query(EventBingoCell)
             .filter(EventBingoCell.event_id == ev.id)
@@ -765,7 +780,10 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
     # progress bars instead of only final team scores. Each row carries its
     # team-aware ``target`` (whole_team pb tasks scale to the roster; the
     # client's pure threshold mirror can't know that).
-    progress_rows = s.query(EventProgress).filter(EventProgress.event_id == ev.id).all()
+    # A progress row names its task, so a hidden board has none of these
+    # either — the team scores on the standings are the participant's view.
+    progress_rows = (s.query(EventProgress).filter(EventProgress.event_id == ev.id).all()
+                     if show_tasks else [])
     row_targets: dict = {}
     try:
         from services.event_engine import effective_threshold
@@ -802,7 +820,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                 EventCompletion.status == "pending")
         .distinct()
         .all()
-    )
+    ) if show_tasks else []
     if pending_pairs:
         try:
             from services.event_engine import pending_projection
@@ -876,7 +894,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
     base["join_requires_code"] = bool(ev.join_code)
     # Explicit admin signal for clients (the Activity's review affordances key
     # off it) — join_code/discord_guild_id presence is not a reliable proxy.
-    base["can_manage"] = _is_event_admin(s, viewer_id, ev)
+    base["can_manage"] = is_admin
     if base["can_manage"]:
         base["join_code"] = ev.join_code
         base["discord_guild_id"] = ev.discord_guild_id
@@ -1249,7 +1267,7 @@ async def get_event_team(event_id: int, team_id: int):
                     return None
                 return {
                     "task_id": c.task_id,
-                    "task_label": task_labels.get(c.task_id),
+                    "task_label": task_labels.get(c.task_id) if show_tasks else None,
                     "task_type": task_types.get(c.task_id),
                     "quantity": int(c.quantity or 1),
                     "source_type": c.source_type,
@@ -1283,6 +1301,11 @@ async def get_event_team(event_id: int, team_id: int):
             show_effort = _effort_visible(s, viewer_id, ev)
             effort = (effort_by_player(s, event_id, roster_pids)
                       if show_effort else {})
+            # Board/task visibility (web112a): a hidden board withholds every
+            # task name on this page — the task list, each member's per-task
+            # split, and the labels on the activity feed. Counts and points
+            # stay, so the roster still reads as a scoreboard.
+            show_tasks = _tasks_visible(s, viewer_id, ev)
             members = []
             for m, player_name in member_rows:
                 agg = contrib.get(m.player_id) or {}
@@ -1308,7 +1331,8 @@ async def get_event_team(event_id: int, team_id: int):
                         _MEMBER_ITEM_PREVIEW,
                     ),
                     # Per-task split of what they did, richest first — backs the
-                    # roster's expandable contribution breakdown.
+                    # roster's expandable contribution breakdown. Withheld
+                    # whole when the tasks are: every row names one.
                     "tasks": sorted(
                         ({"task_id": tid,
                           "task_label": task_labels.get(tid),
@@ -1318,7 +1342,7 @@ async def get_event_team(event_id: int, team_id: int):
                          for tid, (n, qty) in rows_by_task.items()),
                         key=lambda r: (-r["contributions"], -r["quantity"],
                                        (r["task_label"] or "").lower()),
-                    )[:_MEMBER_TASK_PREVIEW],
+                    )[:_MEMBER_TASK_PREVIEW] if show_tasks else [],
                 })
 
             # Leadership context for the roster UI: the viewer's own player on
@@ -1357,7 +1381,7 @@ async def get_event_team(event_id: int, team_id: int):
                 ).all()
             }
             tasks = []
-            for t in task_rows:
+            for t in (task_rows if show_tasks else []):
                 p = prog_by_task.get(t.id)
                 tasks.append({
                     "id": t.id,
@@ -1391,7 +1415,7 @@ async def get_event_team(event_id: int, team_id: int):
                 {
                     "id": c.id,
                     "task_id": c.task_id,
-                    "task_label": task_labels.get(c.task_id),
+                    "task_label": task_labels.get(c.task_id) if show_tasks else None,
                     "player_id": c.player_id,
                     "player_name": player_names.get(c.player_id),
                     "quantity": int(c.quantity or 1),
@@ -1428,6 +1452,7 @@ async def get_event_team(event_id: int, team_id: int):
                 "members": members,
                 "items": team_items,
                 "tasks": tasks,
+                "tasks_hidden": not show_tasks,
                 "activity": activity,
                 "viewer": viewer_block,
             }
@@ -1544,6 +1569,10 @@ async def get_event_team_contributions(event_id: int, team_id: int):
             if team is None:
                 return None
             is_admin = _is_event_admin(s, viewer_id, ev)
+            # Board/task visibility (web112a): the log keeps its rows — what
+            # the team put on the board is theirs to read — but drops the
+            # task names when the board is hidden from this viewer.
+            hide_labels = not is_admin and _tasks_kept_to_admins(ev)
 
             task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
             tasks = {t.id: t for t in task_rows}
@@ -1632,7 +1661,7 @@ async def get_event_team_contributions(event_id: int, team_id: int):
                     return {
                         "completion_id": r.id,
                         "task_id": r.task_id,
-                        "task_label": task.label if task else None,
+                        "task_label": task.label if (task and not hide_labels) else None,
                         "task_type": task.type if task else None,
                         "player_id": None if masked else r.player_id,
                         "player_name": ("Hidden player" if masked
@@ -2073,6 +2102,51 @@ def _effort_visible(s, viewer_id, ev) -> bool:
     return _is_event_admin(s, viewer_id, ev)
 
 
+#: Per-event board/task visibility (web112a). "public" shows the task list,
+#: bingo cells, board-game tiles and board images to everyone who can see the
+#: event; "admins" keeps them to event admins and event managers, so an event
+#: can be played blind or its board held back until the reveal. Scoring,
+#: standings and completion notifications carry on regardless.
+TASKS_VISIBILITY_VALUES = ("public", "admins")
+
+
+def _tasks_visibility_value(raw) -> str:
+    """Coerce a submitted value to a known one, defaulting to public — the
+    same forgiveness as :func:`_effort_visibility_value`, for the same reason:
+    a stray value must not fail an otherwise valid event save."""
+    value = str(raw or "").strip().lower()
+    return value if value in TASKS_VISIBILITY_VALUES else "public"
+
+
+def _tasks_kept_to_admins(ev) -> bool:
+    """The setting alone, viewer-free: does this event hide its tasks?
+    Pre-migration rows and legacy objects read as public."""
+    return (getattr(ev, "tasks_visibility", None) or "public") == "admins"
+
+
+def _tasks_visible(s, viewer_id, ev) -> bool:
+    """Whether this viewer may see the event's tasks and board.
+
+    Public events never pay for the role lookup; on a hidden one only an event
+    admin (group owner/admin, event manager, superadmin) gets through. The
+    detail read resolves the admin check once and folds this in itself; every
+    other task-bearing read calls this."""
+    if not _tasks_kept_to_admins(ev):
+        return True
+    return _is_event_admin(s, viewer_id, ev)
+
+
+def _deny_hidden_tasks() -> None:
+    """403 for a task-scoped read on an event whose tasks are hidden from the
+    viewer. Reasoned (a `code`) so the site can explain rather than 404: the
+    event itself is not a secret, only what it asks for."""
+    abort_problem(
+        403, "Tasks hidden",
+        "This event's tasks and board are only visible to its organisers.",
+        extra={"code": "event_tasks_hidden"},
+    )
+
+
 def _player_effort(s, event_id: int, player_id: int, *, boss_limit: int = 20):
     """One player's EHE breakdown, or None when they have no tracked effort."""
     from web_api.event_effort import effort_by_player
@@ -2139,11 +2213,15 @@ async def get_event_player(event_id: int, player_id: int):
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 _deny_restricted(ev, viewer_id)
                 return None
+            is_admin = _is_event_admin(s, viewer_id, ev)
             # Privacy opt-out: a hidden player's drill-down isn't exposed to a
             # non-admin (the list already masks them to an unlinkable "Hidden
             # player", so this is only reachable by guessing the id).
-            if not _is_event_admin(s, viewer_id, ev) and player_id in hidden_player_ids():
+            if not is_admin and player_id in hidden_player_ids():
                 return None
+            # Board/task visibility (web112a): the per-task split and the
+            # activity labels name tasks; the totals and items do not.
+            show_tasks = is_admin or not _tasks_kept_to_admins(ev)
 
             name = (
                 s.query(Player.player_name)
@@ -2223,7 +2301,8 @@ async def get_event_player(event_id: int, player_id: int):
                 {
                     "id": c.id,
                     "task_id": c.task_id,
-                    "task_label": task_meta.get(c.task_id, (None, None))[0],
+                    "task_label": (task_meta.get(c.task_id, (None, None))[0]
+                                   if show_tasks else None),
                     "quantity": int(c.quantity or 1),
                     "source_type": c.source_type,
                     "matched_target": c.matched_target,
@@ -2256,7 +2335,8 @@ async def get_event_player(event_id: int, player_id: int):
                                if _effort_visible(s, viewer_id, ev) else None),
                 },
                 "items": items,
-                "tasks": tasks,
+                "tasks": tasks if show_tasks else [],
+                "tasks_hidden": not show_tasks,
                 "activity": activity,
             }
 
@@ -2291,6 +2371,10 @@ async def get_task_breakdown(event_id: int, task_id: int):
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 _deny_restricted(ev, viewer_id)
                 return None
+            # Board/task visibility (web112a): this read is about one task by
+            # name — nothing of it is for a viewer the board is hidden from.
+            if not _tasks_visible(s, viewer_id, ev):
+                _deny_hidden_tasks()
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)
@@ -2419,6 +2503,10 @@ async def get_task_requirements(event_id: int, task_id: int):
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 _deny_restricted(ev, viewer_id)
                 return None
+            # Board/task visibility (web112a): this read is about one task by
+            # name — nothing of it is for a viewer the board is hidden from.
+            if not _tasks_visible(s, viewer_id, ev):
+                _deny_hidden_tasks()
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)
@@ -2473,6 +2561,9 @@ async def get_loot_sweep_board(event_id: int):
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 _deny_restricted(ev, viewer_id)
                 return None
+            # Board/task visibility (web112a): the sets ARE the tasks.
+            if not _tasks_visible(s, viewer_id, ev):
+                _deny_hidden_tasks()
             tasks = (
                 s.query(EventTask)
                 .filter(EventTask.event_id == event_id, EventTask.type == "loot_sweep")
@@ -2623,6 +2714,11 @@ async def get_loot_sweep_summary(event_id: int):
                     and not _can_view_restricted(s, viewer_id, ev)):
                 _deny_restricted(ev, viewer_id)
                 return None
+            # Board/task visibility (web112a): the top sets name tasks. The
+            # render token still reads it — its picture only reaches admins
+            # (services/event_board_image._collect_render_inputs).
+            if not render_bypass and not _tasks_visible(s, viewer_id, ev):
+                _deny_hidden_tasks()
             tasks = (s.query(EventTask)
                      .filter(EventTask.event_id == event_id, EventTask.type == "loot_sweep")
                      .order_by(EventTask.id.asc()).all())
@@ -2717,6 +2813,9 @@ async def get_loot_sweep_receipts(event_id: int):
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 _deny_restricted(ev, viewer_id)
                 return None
+            # Board/task visibility (web112a): receipts are read per set.
+            if not _tasks_visible(s, viewer_id, ev):
+                _deny_hidden_tasks()
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id,
@@ -3026,6 +3125,9 @@ async def get_completion_history(event_id: int):
                 visible_task_ids = {
                     t.id for t in task_rows if (t.visibility or "public") == "public"
                 }
+            # Board/task visibility (web112a): the history keeps its rows —
+            # who scored, for which team, when — minus the task names.
+            hide_labels = not is_admin and _tasks_kept_to_admins(ev)
 
             base = {
                 "event_id": event_id,
@@ -3064,7 +3166,8 @@ async def get_completion_history(event_id: int):
                     # inside its TTL would read as all-progress.
                     cache_key = (
                         f"events:{event_id}:history:v2:"
-                        f"{'admin' if is_admin else 'pub'}:{version}")
+                        f"{'admin' if is_admin else 'blind' if hide_labels else 'pub'}"
+                        f":{version}")
                     cached = _rc.client.get(cache_key)
                     if cached:
                         entries_all = json.loads(cached)
@@ -3119,7 +3222,7 @@ async def get_completion_history(event_id: int):
                     entries_all.append({
                         "completion_id": r.id,
                         "task_id": r.task_id,
-                        "task_label": task.label if task else None,
+                        "task_label": task.label if (task and not hide_labels) else None,
                         "task_type": task.type if task else None,
                         "task_points": int(task.points or 0) if task else 0,
                         "team_id": r.team_id,
@@ -4224,6 +4327,8 @@ async def create_event():
                 allow_live_edits=bool(body.get("allow_live_edits")),
                 effort_visibility=_effort_visibility_value(
                     body.get("effort_visibility")),
+                tasks_visibility=_tasks_visibility_value(
+                    body.get("tasks_visibility")),
                 allow_late_signups=bool(body.get("allow_late_signups")),
                 submission_policy=submission_policy,
                 join_code=join_code or None,
@@ -4323,6 +4428,7 @@ def _event_settings_snapshot(ev) -> dict:
         "buyins_enabled": bool(getattr(ev, "buyins_enabled", False)),
         "allow_live_edits": bool(getattr(ev, "allow_live_edits", False)),
         "effort_visibility": getattr(ev, "effort_visibility", None) or "public",
+        "tasks_visibility": getattr(ev, "tasks_visibility", None) or "public",
         "allow_late_signups": bool(getattr(ev, "allow_late_signups", False)),
         "starts_at": starts_at.isoformat() if starts_at else None,
         "ends_at": ends_at.isoformat() if ends_at else None,
@@ -4526,6 +4632,14 @@ async def update_event(event_id: int):
                 # unaffected, so flipping it ON later reveals the full history.
                 ev.effort_visibility = _effort_visibility_value(
                     body.get("effort_visibility"))
+            if "tasks_visibility" in body:
+                # web112a: whether participants see the task list and board,
+                # or only the organisers do. Flippable at any status — turn
+                # it off to reveal a board that was built in private, or
+                # leave it on for an event played blind. Every flip lands in
+                # the settings-snapshot audit diff below.
+                ev.tasks_visibility = _tasks_visibility_value(
+                    body.get("tasks_visibility"))
             if "allow_late_signups" in body:
                 # web70a: keep self sign-ups open after the event begins. Off by
                 # default — the sign-up window normally ends at the start, and
