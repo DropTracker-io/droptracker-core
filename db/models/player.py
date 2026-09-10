@@ -55,6 +55,7 @@ class Player(Base):
         quests: List of QuestCompletionEntry objects for this player
         deaths: List of PlayerDeath objects for this player
         diaries: List of DiaryCompletionEntry objects for this player
+        slayer_tasks: List of SlayerTaskCompletionEntry objects for this player
         groups: List of Group objects this player is a member of
         notifications: List of NotificationQueue objects for this player
         notified_submissions: List of NotifiedSubmission objects for this player
@@ -125,6 +126,7 @@ class Player(Base):
     quests = relationship("QuestCompletionEntry", back_populates="player")
     deaths = relationship("PlayerDeath", back_populates="player")
     diaries = relationship("DiaryCompletionEntry", back_populates="player")
+    slayer_tasks = relationship("SlayerTaskCompletionEntry", back_populates="player")
     player_points = relationship("PlayerPoints", back_populates="player")
     groups = relationship("Group", secondary=user_group_association, back_populates="players")
     notifications = relationship("NotificationQueue", back_populates="player")

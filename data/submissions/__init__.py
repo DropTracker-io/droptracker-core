@@ -31,6 +31,7 @@ from .experience import experience_processor  # noqa: F401
 from .quest import quest_processor  # noqa: F401
 from .death import death_processor  # noqa: F401
 from .diary import diary_processor  # noqa: F401
+from .slayer import slayer_processor  # noqa: F401
 
 # Utilities used externally
 from .common import (
@@ -52,6 +53,7 @@ __all__ = [
     "quest_processor",
     "death_processor",
     "diary_processor",
+    "slayer_processor",
     "SubmissionResponse",
     "RawDropData",
     "try_create_player",

@@ -28,6 +28,7 @@ from db import (
     QuestCompletionEntry,
     PlayerDeath,
     DiaryCompletionEntry,
+    SlayerTaskCompletionEntry,
     PlayerPet,
     session,
     NpcList,
@@ -859,7 +860,7 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
     return player, authed, user_exists
 
 
-unique_id_cache = {"clog": [], "drop": [], "pb": [], "ca": [], "pet": [], "quest": [], "death": [], "diary": []}
+unique_id_cache = {"clog": [], "drop": [], "pb": [], "ca": [], "pet": [], "quest": [], "death": [], "diary": [], "slayer": []}
 _UNIQUE_ID_CACHE_SIZE = 1000
 
 
@@ -970,6 +971,11 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
                 # Diary completions share one table across world types (world_type column).
                 return session.query(DiaryCompletionEntry).filter(
                     DiaryCompletionEntry.unique_id == unique_id,
+                ).first()
+            case "slayer" | "seasonal_slayer":
+                # Slayer task completions share one table across world types (world_type column).
+                return session.query(SlayerTaskCompletionEntry).filter(
+                    SlayerTaskCompletionEntry.unique_id == unique_id,
                 ).first()
             case "seasonal_drop":
                 # Same fix as the "drop" case above: the transport flag must

@@ -1175,3 +1175,74 @@ def test_progress_notify_empty_string_is_inherit():
         "config": {"kind": "any_of", "items": ["Boater"], "progress_notify": ""},
     })
     assert "progress_notify" not in _cfg(out)
+
+
+# ── slayer_target ─────────────────────────────────────────────────────────────
+
+def test_slayer_target_defaults_exclude_the_reset_masters():
+    out = _validate({"type": "slayer_target", "target_value": 25})
+    assert out["target"] is None
+    assert out["target_value"] == 25
+    assert _cfg(out) == {"exclude_masters": [1, 9]}
+
+
+def test_slayer_target_defaults_to_one_task():
+    out = _validate({"type": "slayer_target"})
+    assert out["target_value"] == 1
+
+
+def test_slayer_target_allow_list_accepts_names_and_ids():
+    out = _validate({"type": "slayer_target", "target_value": 10,
+                     "config": {"masters": ["Duradel", "kuradal", 8]}})
+    assert _cfg(out) == {"masters": [5, 8]}
+
+
+def test_slayer_target_explicit_empty_exclusion_means_every_master():
+    out = _validate({"type": "slayer_target", "config": {"exclude_masters": []}})
+    assert _cfg(out) == {"exclude_masters": []}
+
+
+def test_slayer_target_custom_exclusion_is_resolved_to_ids():
+    out = _validate({"type": "slayer_target", "config": {"exclude_masters": ["Turael", "Spria", "Krystilia"]}})
+    assert _cfg(out) == {"exclude_masters": [1, 7, 9]}
+
+
+def test_slayer_target_rejects_unknown_master():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "slayer_target", "config": {"masters": ["Duradel", "Bob"]}})
+    assert exc.value.status == 422
+    assert "Bob" in exc.value.detail
+
+
+def test_slayer_target_rejects_both_lists():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "slayer_target", "config": {"masters": [5], "exclude_masters": [1]}})
+    assert exc.value.status == 422
+
+
+def test_slayer_target_rejects_non_list_masters():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "slayer_target", "config": {"masters": "Duradel"}})
+    assert exc.value.status == 422
+
+
+def test_slayer_target_pins_assignment_names_from_target_and_config():
+    out = _validate({"type": "slayer_target", "target": "abyssal demons",
+                     "config": {"tasks": ["Cave Kraken", "Abyssal demons"], "boss_only": True}})
+    assert out["target"] is None
+    assert _cfg(out) == {"exclude_masters": [1, 9],
+                         "tasks": ["Abyssal demons", "Cave kraken"], "boss_only": True}
+
+
+def test_slayer_target_rejects_unknown_assignment():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "slayer_target", "config": {"tasks": ["Goblin"]}})
+    assert exc.value.status == 422
+    assert "Goblin" in exc.value.detail
+
+
+def test_slayer_target_bounds_the_task_count():
+    with pytest.raises(ProblemException):
+        _validate({"type": "slayer_target", "target_value": 0})
+    with pytest.raises(ProblemException):
+        _validate({"type": "slayer_target", "target_value": etv.MAX_SLAYER_TASK_COUNT + 1})

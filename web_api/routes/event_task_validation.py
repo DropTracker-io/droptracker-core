@@ -84,6 +84,10 @@ MAX_CONFIG_BYTES = 60000
 # kc_target may list several NPCs ("kill 50 of any Dagannoth King") via
 # config.npcs — a kill of ANY listed NPC advances the one shared counter.
 MAX_KC_NPCS = 10
+# slayer_target: how many completed tasks one goal may ask for. Nobody
+# completes more in an event; the bound keeps a typo from creating a goal no
+# board can show as anything but 0%.
+MAX_SLAYER_TASK_COUNT = 5000
 
 # SOTW/BOTW competition config bounds — mirror services/competition.py (this
 # module keeps its no-service-imports rule, so the numbers live twice; the
@@ -257,6 +261,71 @@ def _validated_source_npcs(s, raw) -> list[str]:
             + ", ".join(sorted(set(unknown))[:10]),
         )
     return out
+
+
+def _validated_slayer_target(s, target: str, tv, config: dict | None) -> tuple:
+    """Validate a ``slayer_target`` task: ``(target, target_value, config)``.
+
+    A slayer envelope carries the assignment name and the RAW id of the master
+    that gave it. The config decides which masters count, and it is written
+    here in exactly one of two shapes so the matcher never has to guess:
+
+    - ``masters``: a non-empty allow-list ("10 tasks from Duradel"), or
+    - ``exclude_masters``: a deny-list, defaulting to the streak-reset masters
+      (Turael/Aya, Spria) — "Turael skipping" is the way to shed tasks in
+      seconds, and counting those would make any task-count goal trivially
+      farmable. An explicit empty list means every master counts.
+
+    Names and ids are both accepted on input; ids are what is stored, so a
+    registry correction (utils/slayer_masters.py) never invalidates a saved
+    task. ``target`` / ``config.tasks`` optionally pin the assignment names
+    ("5 Abyssal demon tasks"); ``boss_only`` keeps boss tasks only.
+    """
+    from utils.slayer_masters import (DEFAULT_EXCLUDED_MASTER_IDS,
+                                      normalize_master_ids, normalize_task_names)
+
+    config = config or {}
+    tv = _require_target_value(tv if tv is not None else 1, what="Number of tasks",
+                               hi=MAX_SLAYER_TASK_COUNT)
+
+    raw_masters = config.get("masters")
+    raw_excluded = config.get("exclude_masters")
+    for key, raw in (("masters", raw_masters), ("exclude_masters", raw_excluded)):
+        if raw is not None and not isinstance(raw, list):
+            abort_problem(422, "Invalid config",
+                          f"'{key}' must be an array of slayer master names or ids.")
+    if raw_masters and raw_excluded:
+        abort_problem(422, "Invalid config",
+                      "Provide either 'masters' (only these count) or "
+                      "'exclude_masters' (all but these), not both.")
+
+    out: dict = {}
+    resolved_masters = None
+    try:
+        if raw_masters:
+            resolved_masters = ("masters", normalize_master_ids(raw_masters))
+        elif raw_excluded is None:
+            resolved_masters = ("exclude_masters", sorted(DEFAULT_EXCLUDED_MASTER_IDS))
+        else:
+            resolved_masters = ("exclude_masters", normalize_master_ids(raw_excluded))
+    except ValueError as exc:
+        abort_problem(422, "Unknown slayer master", str(exc))
+    out[resolved_masters[0]] = resolved_masters[1]
+
+    raw_tasks = config.get("tasks")
+    if raw_tasks is not None and not isinstance(raw_tasks, list):
+        abort_problem(422, "Invalid config", "'tasks' must be an array of slayer assignment names.")
+    names = ([target] if target else []) + [str(n) for n in (raw_tasks or [])]
+    if names:
+        resolved_tasks = None
+        try:
+            resolved_tasks = normalize_task_names(names)
+        except ValueError as exc:
+            abort_problem(422, "Unknown slayer task", str(exc))
+        out["tasks"] = resolved_tasks
+    if config.get("boss_only"):
+        out["boss_only"] = True
+    return "", tv, out
 
 
 def _validated_ca_target(s, target: str, tv, config: dict | None) -> tuple:
@@ -1038,7 +1107,7 @@ def _derived_progress_shape(ttype: str, config: dict | None, tv) -> tuple:
         return "count", max(int(need or 1), 1)
     if ttype == "skill_target":
         return "count", 1              # reaching the level is a single event
-    return "count", value              # loot_value, pet_collection, ca_target
+    return "count", value              # loot_value, pet_collection, ca_target, slayer_target
 
 
 #: Envelope kinds that can credit each embedded task type — a cheap pre-filter
@@ -1717,6 +1786,9 @@ def validate_task_payload(s, body: dict) -> dict:
 
     elif ttype == "ca_target":
         target, tv, config = _validated_ca_target(s, target, tv, config)
+
+    elif ttype == "slayer_target":
+        target, tv, config = _validated_slayer_target(s, target, tv, config)
 
     elif ttype in ("ehp_target", "ehb_target"):
         tv = _require_target_value(tv, what="Target " + ttype[:3].upper())

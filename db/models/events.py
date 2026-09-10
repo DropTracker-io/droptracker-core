@@ -44,6 +44,13 @@ EVENT_TASK_TYPES = (
     # enforceable requirement rather than an admin's word. target_value is how
     # many of them to complete. See event_engine.match_task.
     "ca_target",
+    # Slayer task completions. target_value is how many tasks; config carries
+    # either ``masters`` (an allow-list of slayer master ids) or
+    # ``exclude_masters`` (a deny-list — by default the streak-reset masters
+    # Turael/Aya and Spria, so "Turael skipping" cannot farm a task count),
+    # plus an optional ``tasks`` allow-list of assignment names and
+    # ``boss_only``. Ids/names: utils/slayer_masters.py. See event_engine.
+    "slayer_target",
     # Loot Sweep (loot_sweep kind): one task per boss/"set". Each config item
     # awards points that DECAY per successive team receipt, capped per item;
     # collecting a full set awards a bonus (capped). Scored continuously off

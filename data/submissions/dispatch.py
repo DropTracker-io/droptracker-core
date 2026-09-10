@@ -43,6 +43,10 @@ TYPE_ALIASES = {
     "player_death": "death",
     "achievement_diary": "diary",
     "diary_completion": "diary",
+    # Slayer task completions (plugin SlayerHandler stamps "slayer_task").
+    "slayer_task": "slayer",
+    "slayer_completion": "slayer",
+    "slayer_task_completion": "slayer",
 }
 
 
@@ -57,6 +61,7 @@ _PROCESSORS = {
     "quest": "quest_processor",
     "death": "death_processor",
     "diary": "diary_processor",
+    "slayer": "slayer_processor",
     "pet": "pet_processor",
     "adventure_log": "adventure_log_processor",
     "clan_broadcast": "clan_broadcast_processor",
@@ -78,6 +83,7 @@ SEASONAL_TYPES = frozenset({
     "quest",
     "death",
     "diary",
+    "slayer",
 })
 
 
@@ -138,6 +144,8 @@ def resolve_submission_type(declared_type, title, field_names, field_values):
         return "death"
     if "achievement_diary" in field_values or "diary_completion" in field_values:
         return "diary"
+    if "slayer_task" in field_values:
+        return "slayer"
     if "pet" in field_values and "pet_name" in field_names:
         return "pet"
     if "adventure_log" in field_values:

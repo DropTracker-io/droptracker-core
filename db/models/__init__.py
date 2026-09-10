@@ -32,6 +32,7 @@ from .player_pet import PlayerPet
 from .quest_completion import QuestCompletionEntry
 from .player_death import PlayerDeath
 from .diary_completion import DiaryCompletionEntry
+from .slayer_task_completion import SlayerTaskCompletionEntry
 from .group_configuration import GroupConfiguration
 from .group_notification import GroupNotification
 from .group_notification_blacklist import GroupNotificationBlacklist
@@ -249,6 +250,7 @@ __all__ = [
     "QuestCompletionEntry",
     "PlayerDeath",
     "DiaryCompletionEntry",
+    "SlayerTaskCompletionEntry",
     "GroupConfiguration",
     "GroupNotification",
     "GroupNotificationBlacklist",

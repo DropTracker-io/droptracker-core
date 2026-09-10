@@ -78,6 +78,7 @@ class TestCanonicalTable:
             ("level_up", "experience"),
             ("quest_completion", "quest"),
             ("player_death", "death"),
+            ("slayer_task", "slayer"),
             ("PLAYER_DEATH", "death"),
             (" Death ", "death"),
             ("achievement_diary", "diary"),

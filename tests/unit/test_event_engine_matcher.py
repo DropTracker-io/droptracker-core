@@ -1486,3 +1486,92 @@ class TestDuplicatePets:
         # Pre-upgrade envelopes carry no flag; they were new by construction.
         t = _task(type="pet_collection", target="Baby mole")
         assert engine.match_task(t, _env("pet", {"pet_name": "Baby mole"})) is not None
+
+
+# ── slayer_target ─────────────────────────────────────────────────────────────
+
+class TestSlayerTarget:
+    """One unit per completed task; which masters count is the task's call."""
+
+    @staticmethod
+    def _completion(master_id=5, master_name="Duradel", task_name="Abyssal demons", **extra):
+        data = {"task_name": task_name, "master_id": master_id, "master_name": master_name,
+                "is_boss": False}
+        data.update(extra)
+        return _env("slayer", data)
+
+    def test_default_excludes_the_reset_masters(self):
+        t = _task(type="slayer_target", target_value=25, config={})
+        assert engine.match_task(t, self._completion(master_id=1, master_name="Turael")) is None
+        assert engine.match_task(t, self._completion(master_id=9, master_name="Spria")) is None
+        assert engine.match_task(t, self._completion(master_id=5)) == {
+            "mode": "count", "quantity": 1, "matched_target": "Abyssal demons (Duradel)",
+        }
+
+    def test_stored_exclude_list_is_honoured(self):
+        t = _task(type="slayer_target", config={"exclude_masters": [1, 9]})
+        assert engine.match_task(t, self._completion(master_id=9)) is None
+        assert engine.match_task(t, self._completion(master_id=7)) is not None
+
+    def test_explicit_empty_exclusion_counts_every_master(self):
+        t = _task(type="slayer_target", config={"exclude_masters": []})
+        assert engine.match_task(t, self._completion(master_id=1, master_name="Turael")) == {
+            "mode": "count", "quantity": 1, "matched_target": "Abyssal demons (Turael)",
+        }
+
+    def test_unknown_master_is_credited_only_when_nothing_is_excluded(self):
+        # A deny-list in force: no master on the envelope cannot prove itself.
+        t = _task(type="slayer_target", config={})
+        assert engine.match_task(t, self._completion(master_id=None, master_name=None)) is None
+        assert engine.match_task(t, self._completion(master_id="", master_name=None)) is None
+        # Nothing excluded: it counts.
+        t = _task(type="slayer_target", config={"exclude_masters": []})
+        assert engine.match_task(t, self._completion(master_id=None, master_name=None)) == {
+            "mode": "count", "quantity": 1, "matched_target": "Abyssal demons",
+        }
+
+    def test_allow_list_mode(self):
+        t = _task(type="slayer_target", config={"masters": [5, 8]})
+        assert engine.match_task(t, self._completion(master_id=5)) is not None
+        assert engine.match_task(t, self._completion(master_id="8")) is not None
+        assert engine.match_task(t, self._completion(master_id=6, master_name="Nieve")) is None
+        assert engine.match_task(t, self._completion(master_id=None)) is None
+
+    def test_allow_list_wins_over_a_stale_exclude_list(self):
+        t = _task(type="slayer_target", config={"masters": [1], "exclude_masters": [1]})
+        assert engine.match_task(t, self._completion(master_id=1, master_name="Turael")) is not None
+
+    def test_task_name_allow_list(self):
+        t = _task(type="slayer_target", config={"tasks": ["Abyssal demons", "Cave kraken"]})
+        assert engine.match_task(t, self._completion(task_name="  abyssal  DEMONS ")) is not None
+        assert engine.match_task(t, self._completion(task_name="Zulrah")) is None
+
+    def test_boss_only(self):
+        t = _task(type="slayer_target", config={"boss_only": True})
+        assert engine.match_task(t, self._completion(is_boss=False)) is None
+        assert engine.match_task(t, self._completion(task_name="Zulrah", is_boss=True)) is not None
+        assert engine.match_task(t, self._completion(task_name="Zulrah", is_boss="true")) is not None
+
+    def test_wrong_kind_or_missing_name(self):
+        t = _task(type="slayer_target", config={"exclude_masters": []})
+        assert engine.match_task(t, _env("ca", {"task_name": "Abyssal demons", "master_id": 5})) is None
+        assert engine.match_task(t, _env("slayer", {"master_id": 5})) is None
+
+    def test_precomputed_sets_are_used_when_present(self):
+        # _task_to_dict precomputes these once per state load; the matcher
+        # must read them rather than re-deriving from config.
+        t = _task(type="slayer_target", config={},
+                  slayer_master_sets=(None, frozenset({5})), slayer_task_name_set=frozenset())
+        assert engine.match_task(t, self._completion(master_id=5)) is None
+        assert engine.match_task(t, self._completion(master_id=1, master_name="Turael")) is not None
+
+    def test_enrich_precompute_builds_the_sets(self):
+        d = engine._enrich_matcher_precompute({"type": "slayer_target",
+                                               "config": {"masters": ["5", 7], "tasks": ["Cave Kraken"]}})
+        assert d["slayer_master_sets"] == (frozenset({5, 7}), frozenset())
+        assert d["slayer_task_name_set"] == frozenset({"cave kraken"})
+        d = engine._enrich_matcher_precompute({"type": "slayer_target", "config": {}})
+        assert d["slayer_master_sets"] == (None, frozenset({1, 9}))
+
+    def test_is_an_auto_task_type(self):
+        assert "slayer_target" in engine.AUTO_TASK_TYPES

@@ -70,6 +70,16 @@ v1 evaluation semantics (task doc table):
   pet the player owns is not one. ``loot_sweep`` pet entries refuse them too
   (status quo hold, see there); ``item_collection`` ``pet_items`` ACCEPTS
   them — a "5 of these 4 items" tile needs the duplicate.
+- ``slayer_target`` — slayer task completion (``kind == "slayer"``), one unit
+  per completed task. ``config.masters`` is an allow-list of slayer master
+  ids; otherwise ``config.exclude_masters`` is a deny-list. A config that
+  names NEITHER excludes the streak-reset masters (Turael/Aya, Spria — the
+  "Turael skipping" masters) so a hand-built task can never be farmed by
+  accident; an explicit ``[]`` means every master counts. ``config.tasks``
+  optionally pins the assignment names and ``config.boss_only`` the task
+  kind. A completion whose master is UNKNOWN (no varbit on the envelope) is
+  credited only when nothing is excluded: with a deny-list in force there is
+  no way to show it was not a reset-master task. Ids: utils/slayer_masters.
 - ``ehp_target``/``ehb_target``/``custom`` — not auto-evaluated (Task 18
   manual/confirmation only).
 
@@ -130,8 +140,8 @@ _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe
 
 # Task types the engine can evaluate automatically (v1).
 AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "skill_target",
-                   "loot_value", "pet_collection", "ca_target", "loot_sweep",
-                   "competition")
+                   "loot_value", "pet_collection", "ca_target", "slayer_target",
+                   "loot_sweep", "competition")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1237,6 +1247,49 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         return {"mode": "count", "quantity": 1,
                 "matched_target": str(task_name).strip()[:120] or None}
 
+    if task_type == "slayer_target":
+        # Slayer task completions. The producer (data/submissions/slayer.py)
+        # queues one envelope per completed task, deduped by guid before it
+        # gets here, so a match is one unit of progress.
+        #
+        # The master that assigned the task rides along as the RAW varbit id.
+        # Which masters count is a property of the task config — the plugin
+        # never filters — so one completion can count toward "25 tasks" on
+        # one board and not toward "10 Duradel tasks" on another.
+        if kind != "slayer":
+            return None
+        task_name = data.get("task_name")
+        if not task_name:
+            return None
+        sets = task.get("slayer_master_sets")
+        if sets is None:
+            sets = _slayer_master_sets(task.get("config"))
+        allowed, excluded = sets
+        master_id = _slayer_master_id(data.get("master_id"))
+        if allowed is not None:
+            if master_id is None or master_id not in allowed:
+                return None
+        elif excluded:
+            # A deny-list in force and no master on the envelope: nothing
+            # shows this was not a reset-master task, so it earns nothing.
+            if master_id is None or master_id in excluded:
+                return None
+        names = task.get("slayer_task_name_set")
+        if names is None:
+            names = _slayer_task_name_set(task.get("config"))
+        if names and _norm(task_name) not in names:
+            return None
+        if (task.get("config") or {}).get("boss_only"):
+            is_boss = data.get("is_boss")
+            if not (is_boss is True or str(is_boss).strip().lower() in ("1", "true", "yes")):
+                return None
+        matched = str(task_name).strip()
+        master_label = data.get("master_name")
+        if master_label:
+            matched = f"{matched} ({str(master_label).strip()})"
+        return {"mode": "count", "quantity": 1,
+                "matched_target": matched[:120] or None}
+
     if task_type == "competition":
         # SOTW/BOTW race task (services/competition.py). ``competition`` is
         # the plain-data matcher snapshot precomputed in _task_to_dict.
@@ -1570,7 +1623,55 @@ def _enrich_matcher_precompute(d: dict) -> dict:
     elif ttype == "ca_target":
         # Normalized once per state load; the matcher compares against it.
         d["ca_name_set"] = {_norm(n) for n in (config.get("task_names") or ()) if _norm(n)}
+    elif ttype == "slayer_target":
+        d["slayer_master_sets"] = _slayer_master_sets(config)
+        d["slayer_task_name_set"] = _slayer_task_name_set(config)
     return d
+
+
+def _slayer_master_id(value):
+    """A raw master id as an int, or None (bools and junk are not ids)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    return int(text) if text.isdigit() else None
+
+
+def _slayer_master_sets(config) -> tuple:
+    """``(allowed, excluded)`` master-id sets for a ``slayer_target``.
+
+    ``allowed`` is a frozenset when ``config.masters`` is a non-empty
+    allow-list, else None; ``excluded`` is the ``config.exclude_masters``
+    deny-list. A config that names neither gets the registry's default
+    exclusion (the streak-reset masters) — the safe reading of "the author
+    said nothing" — while an explicit empty list means "every master".
+    """
+    config = config or {}
+
+    def _ids(raw) -> frozenset:
+        out = set()
+        for value in (raw or ()):
+            mid = _slayer_master_id(value)
+            if mid is not None:
+                out.add(mid)
+        return frozenset(out)
+
+    allowed = _ids(config.get("masters"))
+    if allowed:
+        return allowed, frozenset()
+    if "exclude_masters" not in config:
+        from utils.slayer_masters import DEFAULT_EXCLUDED_MASTER_IDS
+        return None, frozenset(DEFAULT_EXCLUDED_MASTER_IDS)
+    return None, _ids(config.get("exclude_masters"))
+
+
+def _slayer_task_name_set(config) -> frozenset:
+    """Normalized ``config.tasks`` allow-list; empty means any assignment."""
+    return frozenset(
+        _norm(n) for n in ((config or {}).get("tasks") or ()) if _norm(n)
+    )
 
 
 def _task_to_dict(task) -> dict:
@@ -1621,7 +1722,7 @@ def _task_to_dict(task) -> dict:
             d["loot_sweep_index"] = LootSweepConfig(d["config"]).matcher_index()
         except Exception:
             d["loot_sweep_index"] = {}
-    if task.type == "ca_target":
+    if task.type in ("ca_target", "slayer_target"):
         _enrich_matcher_precompute(d)
     if task.type == "competition":
         # Precompute the sotw/botw matcher snapshot (metric + bonus-rule

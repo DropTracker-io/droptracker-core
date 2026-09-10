@@ -5967,6 +5967,28 @@ async def ca_monster_catalog():
     return jsonify(await asyncio.to_thread(_catalog))
 
 
+@events_bp.get("/events/meta/slayer-masters")
+async def slayer_master_catalog():
+    """The slayer masters a ``slayer_target`` task can name, and the
+    assignment names it can pin (session required) — the task builder's
+    picker.
+
+    Static reference data (utils/slayer_masters.py), served rather than
+    duplicated in the front-end so the master ids the form writes are the ids
+    the matcher reads. ``default_excluded`` is what a task gets when the
+    builder leaves the masters alone: the streak-reset masters.
+    """
+    current_user_id()
+    from utils.slayer_masters import (DEFAULT_EXCLUDED_MASTER_IDS,
+                                      SLAYER_TASK_NAMES, catalog_records)
+
+    return jsonify({
+        "masters": catalog_records(),
+        "default_excluded": sorted(DEFAULT_EXCLUDED_MASTER_IDS),
+        "tasks": list(SLAYER_TASK_NAMES),
+    })
+
+
 @events_bp.get("/events/meta/resolve")
 async def resolve_meta_names():
     """Resolve exact item/NPC names to their game ids (session required).
