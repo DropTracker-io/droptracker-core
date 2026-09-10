@@ -1,7 +1,7 @@
 """Task 11 — recurring subscriptions (group upgrades + user supporter).
 
   GET  /api/v1/subscriptions/tiers                          (public, cached; ?scope=group|user)
-  GET  /api/v1/groups/{id}/subscription                     (group admin)
+  GET  /api/v1/groups/{id}/subscription                     (group admin; event managers get tier + entitlements only)
   POST /api/v1/groups/{id}/subscription/checkout            (group admin) {tier_key}
   POST /api/v1/groups/{id}/subscription/cancel              (group admin)
   POST /api/v1/groups/{id}/subscription/resume              (group admin)
@@ -48,6 +48,7 @@ from web_api.deps import (
     assert_group_admin,
     assert_group_member,
     current_user_id,
+    is_event_manager,
     is_group_admin_role,
     json_body,
     load_user,
@@ -359,10 +360,41 @@ async def list_supporters():
     return with_cache_headers(jsonify(payload), max_age=300)
 
 
-def _require_admin_and_sub(user_id, group_id):
+def _event_manager_sub_view(s, group_id: int, user) -> dict:
+    """The part of a group's plan an event manager (web64a) may read.
+
+    Their Events pages gate on this payload's ``entitlements`` exactly as an
+    admin's do. When this endpoint 403'd them, the site read that as "no
+    entitlements": every event page showed the upgrade card — even in a group
+    paying for events — and its only button led to the admin-only subscription
+    page. So they get the tier, the status and the entitlement map, and nothing
+    about who pays, how much, or when anyone's leg renews. Built as an
+    allow-list on purpose: a billing field added to :func:`_serialize_group_sub`
+    later must not reach them by default.
+    """
+    resolved = effective_group_subscription(s, group_id)
+    tier = resolved["tier"]
+    return {
+        "group_id": group_id,
+        "tier_key": tier.key if tier is not None else None,
+        "status": resolved["status"],
+        "provider": None,
+        "current_period_end": None,
+        "cancel_at_period_end": False,
+        "entitlements": resolve_group_entitlements(s, group_id, user=user),
+    }
+
+
+def _group_sub_for_viewer(user_id, group_id):
     with db_session() as s:
         user = load_user(s, user_id)
-        assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+        mgids = manageable_guild_ids(user_id)
+        role = resolve_group_role(s, user_id, group_id, mgids, user=user)
+        if not is_group_admin_role(role):
+            if is_event_manager(s, user_id, group_id):
+                return _event_manager_sub_view(s, group_id, user)
+            # Neither: the same 403 every group-admin route gives.
+            assert_group_admin(s, user_id, group_id, mgids, user=user)
         entitlements = resolve_group_entitlements(s, group_id, user=user)
         return _serialize_group_sub(
             s, group_id, entitlements=entitlements, viewer_user_id=user_id
@@ -372,7 +404,7 @@ def _require_admin_and_sub(user_id, group_id):
 @subscriptions_bp.get("/groups/<int:group_id>/subscription")
 async def get_subscription(group_id: int):
     user_id = current_user_id()
-    payload = await asyncio.to_thread(_require_admin_and_sub, user_id, group_id)
+    payload = await asyncio.to_thread(_group_sub_for_viewer, user_id, group_id)
     return private_no_store(jsonify(payload))
 
 

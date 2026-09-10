@@ -134,3 +134,75 @@ class TestEventGatesAdmitManager:
             lambda s, uid, gid, *, manage_guild_ids, user: seen.update(uid=uid, gid=gid))
         evr._assert_event_admin(_S(), 7, _event())
         assert seen == {"uid": 7, "gid": 42}
+
+
+# ── the group's plan: a manager reads the entitlements, not the billing ──────
+
+class TestManagerReadsGroupPlan:
+    """GET /groups/{id}/subscription. Every Events page gates on this payload's
+    entitlements; a 403 here showed managers the upgrade card even in a paid
+    group, and its button led to the admin-only subscription page."""
+
+    def _patch(self, mp, *, role, manager):
+        import contextlib
+
+        import web_api.routes.subscriptions as subs
+
+        mp.setattr(subs, "db_session", lambda: contextlib.nullcontext(_S()))
+        mp.setattr(subs, "load_user", lambda s, uid: "USER")
+        mp.setattr(subs, "manageable_guild_ids", lambda uid: set())
+        mp.setattr(subs, "resolve_group_role", lambda s, uid, gid, mg, user=None: role)
+        mp.setattr(subs, "is_event_manager", lambda s, uid, gid: manager)
+        # assert_group_admin is deps' function and resolves the role there.
+        mp.setattr(deps, "resolve_group_role", lambda s, uid, gid, mg, user=None: role)
+        mp.setattr(subs, "effective_group_subscription", lambda s, gid: {
+            "tier": SimpleNamespace(key="gold"),
+            "status": "active",
+            "current_period_end": None,
+            "cancel_at_period_end": False,
+            "total_monthly_cents": 1500,
+            "legs": [],
+            "live_legs": [],
+        })
+        mp.setattr(subs, "resolve_group_entitlements",
+                   lambda s, gid, user=None: {"events": True, "events_max_active": 3})
+        mp.setattr(subs, "_serialize_group_sub",
+                   lambda s, gid, entitlements=None, viewer_user_id=None: {
+                       "full": True, "legs": [{"user_id": 9}], "entitlements": entitlements})
+        return subs
+
+    def test_manager_gets_tier_and_entitlements_only(self, monkeypatch):
+        subs = self._patch(monkeypatch, role="member", manager=True)
+        payload = subs._group_sub_for_viewer(7, 42)
+        assert payload["entitlements"] == {"events": True, "events_max_active": 3}
+        assert payload["tier_key"] == "gold"
+        assert payload["status"] == "active"
+        # An allow-list: who pays, how much and when is admin-only.
+        assert set(payload) == {
+            "group_id", "tier_key", "status", "provider",
+            "current_period_end", "cancel_at_period_end", "entitlements",
+        }
+        assert payload["provider"] is None
+        assert payload["current_period_end"] is None
+
+    def test_manager_outside_any_role_still_gets_the_view(self, monkeypatch):
+        # A manager who isn't in the group's roster resolves to no role at all.
+        subs = self._patch(monkeypatch, role=None, manager=True)
+        assert "legs" not in subs._group_sub_for_viewer(7, 42)
+
+    def test_admin_gets_the_full_payload(self, monkeypatch):
+        subs = self._patch(monkeypatch, role="admin", manager=False)
+        payload = subs._group_sub_for_viewer(7, 42)
+        assert payload["full"] is True
+        assert payload["legs"] == [{"user_id": 9}]
+
+    def test_admin_with_a_manager_grant_still_gets_the_full_payload(self, monkeypatch):
+        subs = self._patch(monkeypatch, role="owner", manager=True)
+        assert subs._group_sub_for_viewer(7, 42)["full"] is True
+
+    def test_plain_member_rejected(self, monkeypatch):
+        subs = self._patch(monkeypatch, role="member", manager=False)
+        with pytest.raises(ProblemException) as e:
+            subs._group_sub_for_viewer(7, 42)
+        assert e.value.status == 403
+        assert e.value.extra.get("code") == "group_admin_required"
