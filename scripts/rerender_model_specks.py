@@ -23,8 +23,11 @@ what profiles, avatars and new notifications show.
 
 Run it only once the fixed renderer is deployed to the page renders are
 taken from (``WEB_BASE_URL``, default blue on :31380). It checks for itself:
-every redraw is measured again, and the run stops at the first one that is
-still a speck.
+every redraw is measured again, and if the first few all come back specks
+the run stops. After one success, a redraw that is still a speck is the
+model's fault, not the renderer's: it is counted and passed over. Models too
+small to be a character (a placeholder quad the plugin sometimes stores) are
+skipped without a redraw.
 
 Usage:
     ./venv/bin/python3 -m scripts.rerender_model_specks [--apply] [--limit N] [--pause S]
@@ -59,6 +62,18 @@ SPECK_MAX_BYTES = 20_000
 # The avatar crop's own sanity bar: a figure under a fifth of the frame's
 # height is not a character drawn at the fixed camera's scale.
 SPECK_MAX_FIGURE = 0.20
+
+# Some stored "models" are not a character at all. One seen was a 1.2 KB flat
+# quad of four vertices: the plugin exported a placeholder. It renders as a
+# sliver whatever the renderer does, so it is skipped, not redrawn. Real
+# player models measured 9.7 KB at the smallest (69 sampled, median 56 KB).
+MIN_MODEL_BYTES = 4_000
+
+# Redraws that come back still a speck before any redraw has succeeded. This
+# many in a row means the renderer at WEB_BASE_URL is not the fixed one, so the
+# run stops. After one success a still-speck is that model's own fault; it is
+# counted and the run goes on.
+UNPROVEN_TRIES = 3
 
 _RENDER_RE = re.compile(r"^([0-9a-f]{1,32})\.png$")
 
@@ -171,7 +186,7 @@ def _current_outfits() -> set:
 async def _run(args) -> int:
     from services.gear_image import render_gear_image
 
-    listed = 0
+    listed = placeholders = 0
     candidates = []  # (player_id, fingerprint, has_pet_now)
     for player_id, files in _player_dirs():
         for name, size in files.items():
@@ -180,16 +195,22 @@ async def _run(args) -> int:
                 continue
             listed += 1
             fingerprint = match.group(1)
-            if size < SPECK_MAX_BYTES and f"{fingerprint}.glb" in files:
-                candidates.append(
-                    (player_id, fingerprint, f"{fingerprint}-pet.glb" in files))
+            model_size = files.get(f"{fingerprint}.glb")
+            if size >= SPECK_MAX_BYTES or model_size is None:
+                continue
+            if model_size < MIN_MODEL_BYTES:
+                placeholders += 1
+                continue
+            candidates.append(
+                (player_id, fingerprint, f"{fingerprint}-pet.glb" in files))
 
     current = _current_outfits()
     candidates.sort(key=lambda c: (c[:2] not in current, c[0], c[1]))
     print(f"{listed} renders stored; {len(candidates)} under "
-          f"{SPECK_MAX_BYTES // 1000} KB with their model still stored")
+          f"{SPECK_MAX_BYTES // 1000} KB with their model still stored "
+          f"(and {placeholders} more whose model is a placeholder, skipped)")
 
-    confirmed = redrawn = failed = not_speck = unreadable = 0
+    confirmed = redrawn = failed = not_speck = unreadable = still_speck = 0
     confirmed_current = confirmed_with_pet = 0
     for player_id, fingerprint, has_pet in candidates:
         if args.limit and confirmed >= args.limit:
@@ -220,17 +241,25 @@ async def _run(args) -> int:
             print(f"  FAILED to redraw {tag}")
             continue
         if figure_fraction(redone) < SPECK_MAX_FIGURE:
-            print(f"  STOPPING: the redraw of {tag} is still a speck. The page at "
-                  f"WEB_BASE_URL is not serving the fixed renderer yet; deploy "
-                  f"web a0ee557 or later first.")
-            return 1
+            still_speck += 1
+            if not redrawn and still_speck >= UNPROVEN_TRIES:
+                print(f"  STOPPING: {still_speck} redraws in a row, the last of "
+                      f"{tag}, are still specks. The page at WEB_BASE_URL is not "
+                      f"serving the fixed renderer yet; deploy web a0ee557 or "
+                      f"later first.")
+                return 1
+            print(f"  still a speck after redrawing {tag}: not a pet speck, "
+                  f"the model itself draws nothing bigger")
+            time.sleep(args.pause)
+            continue
         _drop_avatar(player_id, fingerprint)
         redrawn += 1
         print(f"  redrew {tag}")
         time.sleep(args.pause)
 
     if args.apply:
-        print(f"redrew {redrawn} of {confirmed} specks ({failed} failed); ", end="")
+        print(f"redrew {redrawn} of {confirmed} specks ({failed} failed, "
+              f"{still_speck} still specks after redrawing); ", end="")
     else:
         print(f"would redraw {confirmed} specks; ", end="")
     print(f"{confirmed_current} of them current or pinned outfits, "

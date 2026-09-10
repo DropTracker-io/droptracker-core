@@ -75,14 +75,18 @@ def world(rerender, monkeypatch):
              "dd.png": 9_000, "dd.glb": 50_000,
              "aa-avatar.png": 15_000}),
         (2, {"ee.png": 9_000, "ee.glb": 50_000}),
+        # The plugin's placeholder: a four-vertex quad, nothing to redraw.
+        (3, {"ff.png": 1_500, "ff.glb": 1_216}),
     ]
+    renders[(3, "ff")] = SPECK
     rendered, dropped = [], []
-    fixed = {"renderer": True}
+    fixed = {"renderer": True, "stays_speck": set()}
 
     async def fake_render(player_id, fingerprint, *, force=False):
         assert force, "a speck is only redrawn when the existing render is overridden"
         rendered.append((player_id, fingerprint))
-        renders[(player_id, fingerprint)] = FIGURE if fixed["renderer"] else SPECK
+        ok = fixed["renderer"] and fingerprint not in fixed["stays_speck"]
+        renders[(player_id, fingerprint)] = FIGURE if ok else SPECK
         return f"https://cdn/{player_id}/{fingerprint}.png"
 
     monkeypatch.setattr(rerender, "_player_dirs", lambda: iter(dirs))
@@ -112,6 +116,7 @@ def test_dry_run_picks_confirmed_specks_with_a_model_current_outfits_first(
     ]
     assert "would redraw 2 specks; 1 of them current or pinned outfits, 1 with a pet" in out
     assert "1 small renders were real figures" in out
+    assert "1 more whose model is a placeholder, skipped" in out
 
 
 def test_apply_redraws_and_drops_the_crop_cut_from_the_old_render(rerender, world):
@@ -120,12 +125,27 @@ def test_apply_redraws_and_drops_the_crop_cut_from_the_old_render(rerender, worl
     assert world.dropped == [(2, "ee"), (1, "aa")]
 
 
-def test_stops_at_the_first_redraw_that_is_still_a_speck(rerender, world, capsys):
+def test_stops_when_the_renderer_never_draws_a_figure(rerender, world, monkeypatch,
+                                                      capsys):
+    """Nothing has succeeded and every redraw is still a speck: the page at
+    WEB_BASE_URL is the old renderer, so going on would only burn screenshots."""
+    monkeypatch.setattr(rerender, "UNPROVEN_TRIES", 2)
     world.fixed["renderer"] = False
     assert run(rerender, apply=True) == 1
-    assert world.rendered == [(2, "ee")]
+    assert world.rendered == [(2, "ee"), (1, "aa")]
     assert world.dropped == []
-    assert "still a speck" in capsys.readouterr().out
+    assert "STOPPING" in capsys.readouterr().out
+
+
+def test_one_model_that_stays_a_speck_does_not_stop_a_proven_run(rerender, world,
+                                                                  capsys):
+    # The regression: a single model that draws nothing bigger (a near-empty
+    # export) stopped a run that had already redrawn twenty renders fine.
+    world.fixed["stays_speck"].add("aa")
+    assert run(rerender, apply=True) == 0
+    assert world.rendered == [(2, "ee"), (1, "aa")]
+    assert world.dropped == [(2, "ee")]
+    assert "1 still specks after redrawing" in capsys.readouterr().out
 
 
 def test_limit_counts_confirmed_specks(rerender, world):
