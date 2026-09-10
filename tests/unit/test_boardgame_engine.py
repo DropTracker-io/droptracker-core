@@ -343,6 +343,9 @@ class _F:
     def in_(self, vals):
         return ("in", self.name, list(vals))
 
+    def is_(self, val):
+        return ("eq", self.name, val)
+
 
 class FakePositionModel:
     team_id = _F("team_id")
@@ -725,3 +728,359 @@ class TestExtraDiceFixedStep:
                                   rng=random.Random(1))
         assert eff.status == "consumed"     # drained in dice mode
         assert len(summary["dice"]) == 2    # 1 base + 1 extra die
+
+
+# =========================================================================== #
+# 2026-09: tile helpers, required checkpoints, chutes & ladders, exact finish
+# =========================================================================== #
+def _linked(tiles, idx, to, when=None):
+    """Give tile ``idx`` a link (a chute below / a ladder above)."""
+    cfg = {"jump_to": to}
+    if when:
+        cfg["jump_when"] = when
+    tiles[idx].config = json.dumps(cfg)
+    return tiles
+
+
+def _no_clears(monkeypatch):
+    monkeypatch.setattr(bg, "_cleared_tiles", lambda *a, **k: set())
+
+
+class TestTileHelpers:
+    def test_legacy_special_reads_as_required(self):
+        assert bg.tile_kind(SimpleNamespace(tile_kind="special")) == "required"
+        assert bg.tile_kind(SimpleNamespace(tile_kind="required")) == "required"
+        assert bg.tile_kind(SimpleNamespace(tile_kind=None)) == "normal"
+        assert bg.tile_kind(None) == "normal"
+
+    def test_jump_parsing(self):
+        assert bg.tile_jump(SimpleNamespace(idx=3, config='{"jump_to": 7}')) == (7, "land")
+        assert bg.tile_jump(SimpleNamespace(
+            idx=3, config='{"jump_to": 7, "jump_when": "complete"}')) == (7, "complete")
+        # A chute can never wait for completion — read as a landing trigger.
+        assert bg.tile_jump(SimpleNamespace(
+            idx=6, config='{"jump_to": 2, "jump_when": "complete"}')) == (2, "land")
+        assert bg.tile_jump(SimpleNamespace(idx=3, config='{"jump_to": 3}')) is None
+        assert bg.tile_jump(SimpleNamespace(idx=3, config="{bad")) is None
+        assert bg.tile_jump(SimpleNamespace(idx=3, config=None)) is None
+        assert bg.tile_jump(SimpleNamespace(idx=3, config='{"jump_to": true}')) is None
+
+    def test_has_task(self):
+        assert bg.tile_has_task(SimpleNamespace(task_id=None, difficulty="air"))
+        assert bg.tile_has_task(SimpleNamespace(task_id=4, difficulty=None))
+        assert not bg.tile_has_task(SimpleNamespace(task_id=None, difficulty=None))
+        assert not bg.tile_has_task(None)
+
+
+class TestRequiredTiles:
+    def _board(self, *required):
+        tiles = _tiles()
+        for i in required:
+            tiles[i].tile_kind = "required"
+        return tiles
+
+    def test_overshooting_move_stops_on_the_checkpoint(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        s = FakeSession()
+        pos = _pos()
+        summary = bg._move_piece(s, EVENT_ID, TEAM, pos, self._board(4), 0, 6, _fixed(6))
+        assert summary["to"] == 4 and pos.tile_idx == 4
+        assert summary["required_stop"] == {"tile_idx": 4, "short_by": 2}
+        assert summary["won"] is False
+
+    def test_cleared_checkpoint_no_longer_stops(self, board_models, monkeypatch):
+        monkeypatch.setattr(bg, "_cleared_tiles", lambda *a, **k: {4})
+        s = FakeSession()
+        summary = bg._move_piece(s, EVENT_ID, TEAM, _pos(), self._board(4), 0, 6, _fixed(6))
+        assert summary["to"] == 6 and "required_stop" not in summary
+
+    def test_nearest_checkpoint_wins(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, _pos(),
+                                 self._board(3, 5), 0, 6, _fixed(6))
+        assert summary["to"] == 3
+
+    def test_exact_landing_is_a_normal_landing(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, _pos(),
+                                 self._board(4), 0, 4, _fixed(4))
+        assert summary["to"] == 4 and "required_stop" not in summary
+
+    def test_legacy_special_kind_counts(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        tiles = _tiles()
+        tiles[4].tile_kind = "special"
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, _pos(), tiles, 0, 6, _fixed(6))
+        assert summary["to"] == 4 and summary["required_stop"]["tile_idx"] == 4
+
+    def test_roadblock_before_the_checkpoint_stops_first(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        block = _roadblock(2, behavior={"break_on": "pass", "stall_turns": 0})
+        s = FakeSession(effects=[block])
+        summary = bg._move_piece(s, EVENT_ID, TEAM, _pos(), self._board(4), 0, 6, _fixed(6))
+        assert summary["to"] == 2
+        assert "required_stop" not in summary   # never reached the checkpoint
+        assert block.status == "consumed"
+
+    def test_roadblock_beyond_the_checkpoint_is_not_reached(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        block = _roadblock(5, behavior={"break_on": "pass", "stall_turns": 1})
+        s = FakeSession(effects=[block])
+        summary = bg._move_piece(s, EVENT_ID, TEAM, _pos(), self._board(4), 0, 6, _fixed(6))
+        assert summary["to"] == 4 and block.status == "active"
+        assert "blocked" not in summary
+
+    def test_checkpoint_beats_the_exact_finish_rule(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        settings = bg.board_settings({"movement": {"mode": "fixed_step", "fixed_step": 6},
+                                      "win": {"exact_finish": "stay"}})
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, _pos(tile=5),
+                                 self._board(8), 5, 6, settings)
+        assert summary["to"] == 8 and "overshoot" not in summary
+
+    def test_cleared_tiles_reads_instance_tile_idx(self, board_models, monkeypatch):
+        class FakeProgressModel:
+            event_id = _F("event_id")
+            team_id = _F("team_id")
+            task_id = _F("task_id")
+            completed = _F("completed")
+
+        class FakeTaskModel:
+            id = _F("id")
+            config = _F("config")
+
+        dbm = sys.modules["db.models"]
+        monkeypatch.setattr(dbm, "EventProgress", FakeProgressModel, raising=False)
+        monkeypatch.setattr(dbm, "EventTask", FakeTaskModel, raising=False)
+        s = FakeSession()
+        s._map[FakeProgressModel] = [
+            SimpleNamespace(event_id=EVENT_ID, team_id=TEAM, task_id=50, completed=True),
+            SimpleNamespace(event_id=EVENT_ID, team_id=TEAM, task_id=51, completed=False),
+            SimpleNamespace(event_id=EVENT_ID, team_id=RIVAL, task_id=52, completed=True),
+            SimpleNamespace(event_id=EVENT_ID, team_id=TEAM, task_id=53, completed=True),
+        ]
+        s._map[FakeTaskModel] = [
+            SimpleNamespace(id=50, config='{"board_instance": true, "tile_idx": 4}'),
+            SimpleNamespace(id=51, config='{"board_instance": true, "tile_idx": 6}'),
+            SimpleNamespace(id=52, config='{"board_instance": true, "tile_idx": 8}'),
+            SimpleNamespace(id=53, config='{"board_instance": true}'),   # pre-2026-09
+        ]
+        assert bg._cleared_tiles(s, EVENT_ID, TEAM) == {4}
+
+
+class TestTileLinks:
+    def test_ladder_lifts_on_landing(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        tiles = _linked(_tiles(), 3, 7)
+        pos = _pos()
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, pos, tiles, 0, 3, _fixed(3))
+        assert summary["to"] == 7 and pos.tile_idx == 7
+        assert summary["jump"] == {"kind": "ladder", "from": 3, "to": 7}
+        assert pos.status == "awaiting_roll"     # rest board: roll on from the top
+
+    def test_chute_drops_on_landing(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        tiles = _linked(_tiles(), 5, 1)
+        pos = _pos()
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, pos, tiles, 0, 5, _fixed(5))
+        assert summary["to"] == 1 and pos.tile_idx == 1
+        assert summary["jump"] == {"kind": "chute", "from": 5, "to": 1}
+
+    def test_ladder_onto_a_plain_finish_wins(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        tiles = _linked(_tiles(), 3, 9)
+        pos = _pos()
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, pos, tiles, 0, 3, _fixed(3))
+        assert summary["won"] is True and pos.status == "finished" and pos.tile_idx == 9
+
+    def test_links_never_chain(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        tiles = _linked(_linked(_tiles(), 3, 5), 5, 8)
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, _pos(), tiles, 0, 3, _fixed(3))
+        assert summary["to"] == 5   # the second link is not followed
+
+    def test_complete_trigger_does_not_fire_on_landing(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        tiles = _linked(_tiles(), 3, 7, when="complete")
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, _pos(), tiles, 0, 3, _fixed(3))
+        assert summary["to"] == 3 and "jump" not in summary
+
+    def test_perform_roll_frame_carries_the_jump(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        frames = []
+        rt = types.ModuleType("services.realtime")
+        rt.publish_event_update = lambda eid, frame: frames.append(frame)
+        monkeypatch.setitem(sys.modules, "services.realtime", rt)
+        tiles = _linked(_tiles(), 3, 7)
+        pos = _pos()
+        s = FakeSession(positions=[pos], tiles=tiles)
+        summary = bg.perform_roll(s, None, EVENT_ID, TEAM, settings=_fixed(3))
+        assert summary["jump"]["to"] == 7
+        assert json.loads(pos.last_roll)["to"] == 7
+        rolls = [f for f in frames if f.get("kind") == "board_roll"]
+        assert rolls and rolls[0]["jump"] == {"kind": "ladder", "from": 3, "to": 7}
+
+
+class TestExactFinish:
+    def _settings(self, mode):
+        return bg.board_settings({"movement": {"mode": "fixed_step", "fixed_step": 6},
+                                  "win": {"exact_finish": mode}})
+
+    def test_off_clamps_to_the_finish(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        pos = _pos(tile=7)
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, pos, _tiles(), 7, 6,
+                                 self._settings("off"))
+        assert summary["to"] == 9 and summary["won"] is True
+
+    def test_stay_loses_the_move_and_touches_nothing(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        pos = _pos(tile=7, status="active")
+        pos.current_task_id = 55
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, pos, _tiles(), 7, 6,
+                                 self._settings("stay"))
+        assert summary["to"] == 7 and summary["won"] is False
+        assert summary["overshoot"] == {"mode": "stay", "by": 4}
+        # A fizzled move must not double as a free task skip.
+        assert pos.tile_idx == 7 and pos.status == "active" and pos.current_task_id == 55
+
+    def test_bounce_walks_the_excess_back(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        pos = _pos(tile=7)
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, pos, _tiles(), 7, 6,
+                                 self._settings("bounce"))
+        assert summary["to"] == 5 and pos.tile_idx == 5
+        assert summary["overshoot"] == {"mode": "bounce", "by": 4, "to": 5}
+        assert summary["won"] is False
+
+    def test_exact_roll_still_wins(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        settings = bg.board_settings({"movement": {"mode": "fixed_step", "fixed_step": 2},
+                                      "win": {"exact_finish": "stay"}})
+        pos = _pos(tile=7)
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, pos, _tiles(), 7, 2, settings)
+        assert summary["won"] is True
+
+    def test_settings_validate_defaults(self):
+        assert bg.board_settings(None)["win"]["exact_finish"] == "off"
+        assert bg.board_settings(None)["style"] == "race"
+        assert bg.board_settings({"style": "chutes_ladders"})["style"] == "chutes_ladders"
+
+
+class TestFinishTileTask:
+    """A finish tile that carries a difficulty/pin is a requirement: reaching
+    it assigns the task, completing the task wins."""
+
+    def _fake_assign(self, monkeypatch):
+        calls = []
+
+        def fake_assign(session, event_id, team_id, tile, position, settings, rng=None):
+            calls.append(tile.idx)
+            position.current_task_id = 900
+            position.status = "active"
+            return SimpleNamespace(id=900, label="Final boss", difficulty="fire")
+
+        monkeypatch.setattr(bg, "assign_tile_task", fake_assign)
+        return calls
+
+    def test_landing_on_a_task_finish_assigns_instead_of_winning(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        calls = self._fake_assign(monkeypatch)
+        tiles = _tiles()
+        tiles[9].difficulty = "fire"
+        pos = _pos(tile=5)
+        summary = bg._move_piece(FakeSession(), EVENT_ID, TEAM, pos, tiles, 5, 4, _fixed(4))
+        assert summary["won"] is False and summary["finish_task"] is True
+        assert pos.status == "active" and pos.tile_idx == 9 and calls == [9]
+        assert summary["task_label"] == "Final boss"
+
+    def test_completing_the_finish_task_wins(self, board_models):
+        tiles = _tiles()
+        tiles[9].difficulty = "fire"
+        pos = _pos(tile=9, status="active")
+        pos.current_task_id = 900
+        s = FakeSession(positions=[pos], tiles=tiles)
+        board = bg.handle_board_completion(s, None, {"id": EVENT_ID},
+                                           {"id": 900, "difficulty": "fire"}, TEAM)
+        assert board["won"] is True and pos.status == "finished"
+        assert "roll" not in board
+
+    def test_completion_elsewhere_still_readies_the_roll(self, board_models):
+        pos = _pos(tile=4, status="active")
+        pos.current_task_id = 900
+        s = FakeSession(positions=[pos], tiles=_tiles())
+        board = bg.handle_board_completion(s, None, {"id": EVENT_ID}, {"id": 900}, TEAM)
+        assert "won" not in board and pos.status == "awaiting_roll"
+
+
+class TestEarnedLadder:
+    def test_completion_climbs_the_ladder(self, board_models):
+        tiles = _linked(_tiles(), 3, 7, when="complete")
+        pos = _pos(tile=3, status="active")
+        pos.current_task_id = 900
+        s = FakeSession(positions=[pos], tiles=tiles)
+        board = bg.handle_board_completion(s, None, {"id": EVENT_ID}, {"id": 900}, TEAM)
+        assert board["jump"] == {"kind": "ladder", "from": 3, "to": 7}
+        assert pos.tile_idx == 7 and pos.status == "awaiting_roll"
+        assert pos.current_task_id is None
+
+    def test_earned_ladder_onto_a_plain_finish_wins(self, board_models):
+        tiles = _linked(_tiles(), 3, 9, when="complete")
+        pos = _pos(tile=3, status="active")
+        pos.current_task_id = 900
+        s = FakeSession(positions=[pos], tiles=tiles)
+        board = bg.handle_board_completion(s, None, {"id": EVENT_ID}, {"id": 900}, TEAM)
+        assert board["won"] is True and pos.status == "finished" and pos.tile_idx == 9
+
+    def test_earned_ladder_in_auto_mode_rolls_on(self, board_models, monkeypatch):
+        _no_clears(monkeypatch)
+        tiles = _linked(_tiles(), 3, 5, when="complete")
+        pos = _pos(tile=3, status="active")
+        pos.current_task_id = 900
+        cfg = SimpleNamespace(event_id=EVENT_ID, settings=json.dumps(
+            {"movement": {"mode": "fixed_step", "fixed_step": 6, "trigger": "auto"}}))
+        s = FakeSession(positions=[pos], tiles=tiles)
+        s._map[FakeConfigModel] = [cfg]
+        board = bg.handle_board_completion(s, None, {"id": EVENT_ID}, {"id": 900}, TEAM)
+        assert board["jump"]["to"] == 5
+        assert board["roll"]["won"] is True     # 5 + 6 clamps onto the finish
+        assert pos.status == "finished"
+
+
+class TestTurnNotificationData:
+    def test_dice_roll_with_a_ladder(self):
+        data = bg.turn_notification_data(
+            team_id=1, team_name="Reds", player_name="Zed",
+            roll={"dice": [3], "from": 0, "to": 7, "turn": 2, "won": False,
+                  "jump": {"kind": "ladder", "from": 3, "to": 7}, "task_label": "Whip"},
+            board={"coins_awarded": 5, "coin_balance": 12})
+        assert data["dice_str"] == "3" and data["tile_to"] == 7
+        assert data["jump_line"].startswith("\U0001FA9C") and "`3`" in data["jump_line"]
+        assert data["next_task_label"] == "Whip" and data["coins_awarded"] == 5
+        assert data["won"] is False and "required_line" not in data
+
+    def test_required_stop_and_overshoot_lines(self):
+        stop = bg.turn_notification_data(
+            team_id=1, roll={"dice": [6], "from": 0, "to": 4,
+                             "required_stop": {"tile_idx": 4, "short_by": 2}})
+        assert "required tile `4`" in stop["required_line"]
+        stay = bg.turn_notification_data(
+            team_id=1, roll={"dice": [6], "from": 7, "to": 7,
+                             "overshoot": {"mode": "stay", "by": 4}})
+        assert "the move is lost" in stay["overshoot_line"]
+        bounce = bg.turn_notification_data(
+            team_id=1, roll={"dice": [6], "from": 7, "to": 5,
+                             "overshoot": {"mode": "bounce", "by": 4, "to": 5}})
+        assert "bounced back to tile `5`" in bounce["overshoot_line"]
+
+    def test_roll_less_turns(self):
+        by_task = bg.turn_notification_data(team_id=1, team_name="Reds", board={"won": True})
+        assert by_task["won"] is True and by_task["won_by_task"] is True
+        assert by_task["dice"] == [] and by_task["dice_str"] == "?"
+        climb = bg.turn_notification_data(
+            team_id=1, board={"jump": {"kind": "ladder", "from": 3, "to": 7}, "turn": 4})
+        assert climb["tile_from"] == 3 and climb["tile_to"] == 7 and climb["turn"] == 4
+        assert climb["won"] is False and climb["jump_line"]
+        finish = bg.turn_notification_data(
+            team_id=1, roll={"dice": [2], "from": 7, "to": 9, "finish_task": True})
+        assert "complete its task to win" in finish["finish_line"]

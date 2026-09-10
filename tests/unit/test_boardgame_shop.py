@@ -409,7 +409,7 @@ class TestRerollDifficultyShift:
         monkeypatch.setattr(bg, "_task_pool", fake_pool)
         monkeypatch.setattr(
             bg, "_materialize_instance",
-            lambda s, e, t, src, turn: SimpleNamespace(
+            lambda s, e, t, src, turn, tile_idx=None: SimpleNamespace(
                 id=999, label="inst", difficulty=src.difficulty))
         monkeypatch.setattr(bg, "_mercy_deadline", lambda *a, **k: None)
         monkeypatch.setattr(shop, "_discard_task_instance", lambda *a, **k: None)
@@ -673,7 +673,7 @@ class TestChooseTask:
     def test_apply_task_choice_assigns(self, monkeypatch):
         monkeypatch.setattr(
             bg, "_materialize_instance",
-            lambda s, e, t, src, turn: SimpleNamespace(
+            lambda s, e, t, src, turn, tile_idx=None: SimpleNamespace(
                 id=999, label=src.label, difficulty=src.difficulty))
         monkeypatch.setattr(bg, "_mercy_deadline", lambda *a, **k: None)
         monkeypatch.setattr(shop, "_discard_task_instance", lambda *a, **k: None)
@@ -910,3 +910,62 @@ class TestAvailabilityAndRefresh:
         assert base == dt.timedelta(days=4)
         jit = shop._time_refresh_delta("days", 4, True, rng=random.Random(1))
         assert dt.timedelta(days=2) <= jit <= dt.timedelta(days=6)  # 50–150%
+
+
+# =========================================================================== #
+# 2026-09: knockback lands through the shared resolver; required tiles hold
+# =========================================================================== #
+class TestKnockbackLanding:
+    def test_knockback_onto_a_chute_slides(self):
+        tiles = _tiles(10)
+        tiles[5].config = '{"jump_to": 1}'
+        tpos = _pos(team=2, tile=8, status="active")
+        s = FakeSession(EventBoardPosition=[tpos], EventBoardEffect=[], EventBoardTile=tiles)
+        item = SimpleNamespace(effect="knockback", effect_config='{"tiles": 3}')
+        res = shop._use_knockback(s, None, E, 1, _pos(team=1), item, _fixed(6),
+                                  target={"target_team_id": 2})
+        assert res["from"] == 8 and res["to"] == 1
+        assert res["jump"] == {"kind": "chute", "from": 5, "to": 1}
+        assert tpos.tile_idx == 1
+
+    def test_knockback_onto_a_ladder_climbs(self):
+        tiles = _tiles(10)
+        tiles[5].config = '{"jump_to": 7}'
+        tpos = _pos(team=2, tile=8, status="active")
+        s = FakeSession(EventBoardPosition=[tpos], EventBoardEffect=[], EventBoardTile=tiles)
+        item = SimpleNamespace(effect="knockback", effect_config='{"tiles": 3}')
+        res = shop._use_knockback(s, None, E, 1, _pos(team=1), item, _fixed(6),
+                                  target={"target_team_id": 2})
+        assert res["to"] == 7 and tpos.tile_idx == 7
+
+
+class TestAdvanceHeldByRequiredTile:
+    def test_teleport_refused_on_an_unfinished_required_tile(self):
+        tiles = _tiles(10)
+        tiles[4].tile_kind = "required"
+        pos = _pos(team=1, tile=4, status="active", task=900)
+        s = FakeSession(EventBoardPosition=[pos], EventBoardEffect=[], EventBoardTile=tiles)
+        item = SimpleNamespace(effect="advance", effect_config='{"dice_sides": 6}')
+        with pytest.raises(shop.ShopError) as e:
+            shop._use_advance(s, None, E, 1, pos, item, _fixed(6), rng=random.Random(1))
+        assert e.value.status == 409
+        assert pos.tile_idx == 4
+
+    def test_teleport_refused_on_a_task_finish(self):
+        tiles = _tiles(10)
+        tiles[9].difficulty = "fire"
+        pos = _pos(team=1, tile=9, status="active", task=900)
+        s = FakeSession(EventBoardPosition=[pos], EventBoardEffect=[], EventBoardTile=tiles)
+        item = SimpleNamespace(effect="advance", effect_config='{"dice_sides": 6}')
+        with pytest.raises(shop.ShopError):
+            shop._use_advance(s, None, E, 1, pos, item, _fixed(6), rng=random.Random(1))
+
+    def test_teleport_still_works_off_a_normal_tile(self, monkeypatch):
+        monkeypatch.setattr(bg, "_cleared_tiles", lambda *a, **k: set())
+        tiles = _tiles(10)
+        pos = _pos(team=1, tile=2, status="active", task=900)
+        s = FakeSession(EventBoardPosition=[pos], EventBoardEffect=[], EventBoardTile=tiles,
+                        EventCompletion=[], EventProgress=[], EventTask=[])
+        item = SimpleNamespace(effect="advance", effect_config='{"dice_sides": 6}')
+        res = shop._use_advance(s, None, E, 1, pos, item, _fixed(6), rng=random.Random(1))
+        assert res["teleport"] is True and res["to"] > 2

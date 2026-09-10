@@ -813,19 +813,41 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         dice = data.get("dice") or []
         dice_str = " + ".join(str(d) for d in dice) if dice else "?"
         total = sum(int(d) for d in dice) if dice else 0
+        jump = data.get("jump") if isinstance(data.get("jump"), dict) else {}
+        # The chute/ladder, required-stop, overshoot and finish-task lines
+        # (2026-09) are pre-composed at enqueue — same text as the V2 layout.
+        extra = "\n".join(
+            str(data[k]) for k in ("jump_line", "required_line", "overshoot_line",
+                                   "finish_line") if data.get(k))
         if data.get("won"):
             spec["title"] = f"\U0001F3C6 {team or 'A team'} reached the finish!"
-            spec["description"] = (
-                f"**{team or 'A team'}** rolled `{dice_str}` and crossed the "
-                f"finish line!"
-            )
+            if data.get("won_by_ladder"):
+                how = "took a ladder straight onto the finish!"
+            elif dice:
+                how = f"rolled `{dice_str}` and crossed the finish line!"
+            else:
+                how = "completed the final tile's task and crossed the finish line!"
+            spec["description"] = f"**{team or 'A team'}** {how}"
         else:
-            spec["title"] = f"\U0001F3B2 {team or 'A team'} rolled the dice"
-            spec["description"] = (
-                f"**{team or 'A team'}** rolled `{dice_str}`"
-                + (f" (**{total}**)" if len(dice) > 1 else "")
-                + f" — tile `{data.get('tile_from')}` → `{data.get('tile_to')}`"
-            )
+            if dice:
+                spec["title"] = f"\U0001F3B2 {team or 'A team'} rolled the dice"
+                spec["description"] = (
+                    f"**{team or 'A team'}** rolled `{dice_str}`"
+                    + (f" (**{total}**)" if len(dice) > 1 else "")
+                    + f" — tile `{data.get('tile_from')}` → `{data.get('tile_to')}`"
+                )
+            elif jump.get("kind") == "ladder":
+                spec["title"] = f"\U0001FA9C {team or 'A team'} climbed a ladder"
+                spec["description"] = (
+                    f"**{team or 'A team'}** earned the climb — tile "
+                    f"`{data.get('tile_from')}` → `{data.get('tile_to')}`")
+            else:
+                spec["title"] = f"\U0001F3B2 {team or 'A team'} moved"
+                spec["description"] = (
+                    f"**{team or 'A team'}** — tile `{data.get('tile_from')}` → "
+                    f"`{data.get('tile_to')}`")
+            if extra:
+                spec["description"] += "\n" + extra
             nxt = data.get("next_task_label")
             if nxt:
                 field("Next task", f"**{nxt}**", inline=False)

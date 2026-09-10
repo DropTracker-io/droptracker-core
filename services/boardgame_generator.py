@@ -52,7 +52,10 @@ _BASE_TILES = 54.0
 # Guardrails on the admin-supplied knobs.
 MIN_REGIONS, MAX_REGIONS = 2, 11
 MIN_TILES, MAX_TILES = 10, 400          # 400 < the board's 512 EventBoardTile cap
-STYLES = ("path", "filled")
+# "grid" (2026-09): the numbered Chutes & Ladders board — a boustrophedon
+# grid that starts bottom-left, rendered by build_grid_assets (no hex engine).
+STYLES = ("path", "filled", "grid")
+GRID_COLS = 10
 _MAX_SEED = 2**31 - 1
 
 # Chromium (already on the box) is the only available SVG rasterizer — no
@@ -183,9 +186,139 @@ def board_to_tiles(board: Board) -> list[dict]:
     return tiles
 
 
+# --------------------------------------------------------------------------- #
+# Numbered grid (the Chutes & Ladders board)
+# --------------------------------------------------------------------------- #
+_GRID_CELL = 120
+_GRID_MARGIN = 60
+_GRID_TITLE_BAND = 150
+_GRID_FONT = "Georgia, 'Palatino Linotype', 'Times New Roman', serif"
+
+
+def grid_layout(count: int, cols: int = GRID_COLS) -> list[dict]:
+    """The classic boustrophedon: tile 0 bottom-left, the row above runs the
+    other way, and so on up — the way a Chutes & Ladders board reads. Returns
+    ``[{idx, col, row}]`` with ``row`` 0 = bottom."""
+    out = []
+    for i in range(count):
+        row, within = divmod(i, cols)
+        col = within if row % 2 == 0 else cols - 1 - within
+        out.append({"idx": i, "col": col, "row": row})
+    return out
+
+
+def build_grid_assets(p: GenParams) -> dict:
+    """The numbered-grid board: ``p.tiles`` cells in a ``GRID_COLS``-wide
+    boustrophedon, every cell printed with the SAME idx the site shows ("S",
+    1..N-2, "F") so the art and the overlay never disagree. The chutes and
+    ladders themselves are NOT baked in — they are tile links the board view
+    draws live, so a coordinator can add or move one without regenerating.
+    Pure (no I/O): the same {svg, tiles, width, height, meta} shape as the hex
+    generator."""
+    from services.boardgen.svgcanvas import Canvas
+
+    cols = GRID_COLS
+    n = int(p.tiles)
+    rows = max(1, -(-n // cols))
+    cell, margin, band = _GRID_CELL, _GRID_MARGIN, _GRID_TITLE_BAND
+    width = margin * 2 + cols * cell
+    height = margin * 2 + band + rows * cell
+
+    c = Canvas(width, height)
+    c.add_def('<linearGradient id="g-bg" x1="0" y1="0" x2="0" y2="1">'
+              '<stop offset="0" stop-color="#1b2433"/>'
+              '<stop offset="1" stop-color="#0c131c"/></linearGradient>')
+    c.add_def('<linearGradient id="g-parch" x1="0" y1="0" x2="0" y2="1">'
+              '<stop offset="0" stop-color="#efe0bd"/>'
+              '<stop offset="1" stop-color="#d8c194"/></linearGradient>')
+    c.add_def('<linearGradient id="g-cell-a" x1="0" y1="0" x2="0" y2="1">'
+              '<stop offset="0" stop-color="#e9dcbb"/>'
+              '<stop offset="1" stop-color="#cdb98a"/></linearGradient>')
+    c.add_def('<linearGradient id="g-cell-b" x1="0" y1="0" x2="0" y2="1">'
+              '<stop offset="0" stop-color="#d9c9a0"/>'
+              '<stop offset="1" stop-color="#bda678"/></linearGradient>')
+    c.add_def('<linearGradient id="g-cell-end" x1="0" y1="0" x2="0" y2="1">'
+              '<stop offset="0" stop-color="#f3d67a"/>'
+              '<stop offset="1" stop-color="#c9a23c"/></linearGradient>')
+
+    bg = c.layer("background", "Background")
+    grid = c.layer("grid", "Grid cells")
+    numbers = c.layer("label", "Numbers")
+    title = c.layer("title", "Title & frame")
+
+    bg.add(c.rect(0, 0, width, height, fill="url(#g-bg)"))
+    # Board frame behind the cells.
+    bg.add(c.rect(margin - 14, margin + band - 14, cols * cell + 28, rows * cell + 28,
+                  rx=10, fill="#2b2118", stroke="#9c7d45", stroke_width=4))
+
+    last = n - 1
+    tiles: list[dict] = []
+    for spot in grid_layout(n, cols):
+        i, col, row = spot["idx"], spot["col"], spot["row"]
+        x = margin + col * cell
+        y = margin + band + (rows - 1 - row) * cell
+        end = i == 0 or i == last
+        fill = ("url(#g-cell-end)" if end
+                else "url(#g-cell-a)" if (row + col) % 2 == 0 else "url(#g-cell-b)")
+        grid.add(c.rect(x + 3, y + 3, cell - 6, cell - 6, rx=8, fill=fill,
+                        stroke="#7c6132", stroke_width=2,
+                        **{"class": f"cell cell-{i}", "id": f"cell-{i}"}))
+        label = "S" if i == 0 else "F" if i == last else str(i)
+        numbers.add(c.text(
+            x + cell / 2, y + cell / 2 + (cell * 0.16 if not end else cell * 0.2),
+            label, text_anchor="middle", font_family=_GRID_FONT,
+            font_size=cell * (0.5 if end else 0.36), font_weight="bold",
+            fill="#3a2c14", **{"class": "cell-number"}))
+        tiles.append({
+            "idx": i,
+            "x": round((x + cell / 2) / width, 4),
+            "y": round((y + cell / 2) / height, 4),
+            "difficulty": _difficulty_for(i),
+            "tile_kind": "start" if i == 0 else "finish" if i == last else "normal",
+        })
+
+    # Title scroll across the top band (the hex renderer's parchment look).
+    tx, ty, tw, th = margin, 30, cols * cell, 96
+    title.add(c.rect(tx + 14, ty, tw - 28, th, rx=6, fill="url(#g-parch)",
+                     stroke="#9c7d45", stroke_width=2))
+    title.add(c.rect(tx, ty - 6, 16, th + 12, rx=8, fill="#b8965a", stroke="#7c6132",
+                     stroke_width=2))
+    title.add(c.rect(tx + tw - 16, ty - 6, 16, th + 12, rx=8, fill="#b8965a",
+                     stroke="#7c6132", stroke_width=2))
+    title.add(c.text(tx + tw / 2, ty + 46, p.title.upper(), text_anchor="middle",
+                     font_family=_GRID_FONT, font_size=34, font_weight="bold",
+                     letter_spacing=1, fill="#3a2c14"))
+    title.add(c.text(tx + tw / 2, ty + 76, p.subtitle, text_anchor="middle",
+                     font_family=_GRID_FONT, font_size=16, font_style="italic",
+                     fill="#5c4a24"))
+    if p.watermark:
+        title.add(c.text(width - margin, height - 18, p.watermark, text_anchor="end",
+                         font_family=_GRID_FONT, font_size=18, fill="#c9b17a",
+                         fill_opacity=0.7))
+
+    return {
+        "svg": c.render(),
+        "tiles": tiles,
+        "width": int(width),
+        "height": int(height),
+        "meta": {
+            "seed": p.seed,
+            "style": "grid",
+            "regions": 0,
+            "rows": rows,
+            "cols": cols,
+            "path_tiles": n,
+            "total_tiles": n,
+            "skipped_regions": 0,
+        },
+    }
+
+
 def build_board_assets(p: GenParams) -> dict:
     """The offline half: Board -> {svg, tiles, width, height, meta}. No I/O, so
     a unit test can exercise the whole mapping without B2 or chromium."""
+    if p.style == "grid":
+        return build_grid_assets(p)
     board = build_board(p)
     svg = render(board, watermark=p.watermark).render()
     tiles = board_to_tiles(board)

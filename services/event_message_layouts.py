@@ -323,10 +323,20 @@ DEFAULT_LAYOUTS = {
     "event_board_turn": {
         "accent_color": "#F1C40F",
         "blocks": [
-            {"type": "text", "content": "### \U0001F3B2 {team_name} rolled `{dice_str}`"},
+            # turn_headline: "🎲 Reds rolled `3 + 4`" for a dice move, "🪜 Reds
+            # climbed a ladder" for an earned climb (no dice) — composed in
+            # notification_context so a roll-less turn never reads "rolled ?".
+            {"type": "text", "content": "### {turn_headline}"},
             {
                 "type": "text",
+                # The chute/ladder, required-stop, overshoot and finish-task
+                # lines (2026-09) are pre-composed at enqueue and drop out of
+                # the block when the turn had none.
                 "content": "Tile `{tile_from}` → `{tile_to}`\n"
+                           "{jump_line}\n"
+                           "{required_line}\n"
+                           "{overshoot_line}\n"
+                           "{finish_line}\n"
                            "**Next task** {next_task_label}\n"
                            "**Coins** `+{coins_awarded}` (wallet `{coin_balance}`)\n"
                            "-# Turn #{turn}, rolled after {player_name}'s completion",
@@ -343,8 +353,9 @@ DEFAULT_LAYOUTS = {
             {"type": "text", "content": "## \U0001F3C6 {team_name} reached the finish!"},
             {
                 "type": "text",
-                "content": "**{team_name}** rolled `{dice_str}` and crossed the "
-                           "finish line — the board is theirs!\n"
+                # win_line names HOW the finish was reached: the dice, the
+                # finish tile's own task, or a ladder straight onto it.
+                "content": "{win_line}\n"
                            "-# Final standings follow in the wrap-up message.",
             },
             _EVENT_BUTTON,
@@ -632,6 +643,22 @@ TOKEN_DOCS = {
     "lead_via_line": {"help": "The drop that took the lead (Loot Sweep only)",
                       "sample": "-# with **Twisted bow** (`+120 pts`)"},
     "dice_str": {"help": "The dice roll", "sample": "3 + 4"},
+    "turn_headline": {"help": "The turn's headline — a dice roll, an earned ladder "
+                              "climb, or a finish",
+                      "sample": "\U0001F3B2 Reds rolled `3 + 4`"},
+    "jump_line": {"help": "The chute or ladder the landing triggered (empty otherwise)",
+                  "sample": "\U0001FA9C Climbed a ladder from tile `28` to tile `84`!"},
+    "required_line": {"help": "Set when a required tile stopped the move short",
+                      "sample": "\u26d4 Stopped at required tile `50` — it must be "
+                                "completed before moving on."},
+    "overshoot_line": {"help": "Set when the exact-finish rule caught an overshooting roll",
+                       "sample": "\u21a9\ufe0f Overshot the finish by 2 — the move is "
+                                 "lost, roll again."},
+    "finish_line": {"help": "Set when the team reached a finish tile that carries a task",
+                    "sample": "\U0001F3C1 On the finish tile — complete its task to win!"},
+    "win_line": {"help": "How the finish was reached — the dice, the final task, or a ladder",
+                 "sample": "**Reds** rolled `3 + 4` and crossed the finish line — the "
+                           "board is theirs!"},
     "tile_from": {"help": "Board tile moved from", "sample": "12"},
     "tile_to": {"help": "Board tile landed on", "sample": "19"},
     "turn": {"help": "The team's turn number", "sample": "7"},
@@ -817,15 +844,16 @@ TYPE_META = {
     },
     "event_board_turn": {
         "label": "Board: turn", "group": "Board game",
-        "description": "A team rolled the dice and moved.",
-        "tokens": ("team_name", "player_name", "dice_str", "tile_from", "tile_to",
-                   "turn", "next_task_label", "coins_awarded", "coin_balance"),
+        "description": "A team rolled the dice and moved (or climbed / was stopped).",
+        "tokens": ("turn_headline", "team_name", "player_name", "dice_str", "tile_from",
+                   "tile_to", "turn", "next_task_label", "coins_awarded", "coin_balance",
+                   "jump_line", "required_line", "overshoot_line", "finish_line"),
         "standings": False,
     },
     "event_board_win": {
         "label": "Board: victory", "group": "Board game",
         "description": "A team crossed the finish line.",
-        "tokens": ("team_name", "dice_str"), "standings": False,
+        "tokens": ("team_name", "dice_str", "win_line"), "standings": False,
     },
     "event_board_roll_prompt": {
         "label": "Board: roll prompt", "group": "Board game",
@@ -1517,6 +1545,35 @@ def notification_context(notification_type: str, data: dict) -> dict:
             context[key] = data[key]
     put("next_task_label", data.get("next_task_label"))
     put("coins_awarded", data.get("coins_awarded"))
+    # Chutes & ladders / required tiles / exact finish (2026-09): pre-composed
+    # at enqueue (boardgame_engine.turn_notification_data); absent = no line.
+    for key in ("jump_line", "required_line", "overshoot_line", "finish_line"):
+        put(key, data.get(key))
+    if notification_type == "event_board_turn":
+        team = (data.get("team_name")
+                or (f"Team {data.get('team_id')}" if data.get("team_id") else None)
+                or "A team")
+        jump = data.get("jump") if isinstance(data.get("jump"), dict) else {}
+        if dice:
+            headline = f"\U0001F3B2 {team} rolled `{context['dice_str']}`"
+        elif data.get("won"):
+            headline = f"\U0001F3C6 {team} reached the finish!"
+        elif jump.get("kind") == "ladder":
+            headline = f"\U0001FA9C {team} climbed a ladder"
+        else:
+            headline = f"\U0001F3B2 {team} moved"
+        context["turn_headline"] = headline
+        if data.get("won"):
+            if data.get("won_by_ladder"):
+                win_line = (f"**{team}** took a ladder straight onto the finish — "
+                            "the board is theirs!")
+            elif dice:
+                win_line = (f"**{team}** rolled `{context['dice_str']}` and crossed the "
+                            "finish line — the board is theirs!")
+            else:
+                win_line = (f"**{team}** completed the final tile's task and crossed "
+                            "the finish line — the board is theirs!")
+            context["win_line"] = win_line
     if notification_type == "event_board_roll_prompt" and data.get("player_name"):
         context["roll_thanks_line"] = f" (thanks **{data['player_name']}**)"
     elif notification_type == "event_board_roll_prompt":

@@ -89,3 +89,35 @@ def test_tiles_honor_the_board_endpoint_contract():
     assert assets["svg"].lstrip().startswith("<svg")
     assert assets["width"] > 0 and assets["height"] > 0
     assert assets["meta"]["skipped_regions"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Numbered grid (the Chutes & Ladders board, 2026-09)
+# --------------------------------------------------------------------------- #
+def test_grid_style_is_a_bottom_left_boustrophedon():
+    a = gen.build_board_assets(gen.normalize_params(style="grid", tiles=100, seed=1))
+    tiles = a["tiles"]
+    assert len(tiles) == 100
+    assert a["meta"]["style"] == "grid" and a["meta"]["rows"] == 10 and a["meta"]["cols"] == 10
+    assert [t["idx"] for t in tiles] == list(range(100))
+    assert tiles[0]["tile_kind"] == "start" and tiles[-1]["tile_kind"] == "finish"
+    assert all(0.0 <= t["x"] <= 1.0 and 0.0 <= t["y"] <= 1.0 for t in tiles)
+    # Row 0 runs left→right along the bottom, row 1 comes back right→left
+    # one row up (the classic reading order).
+    assert tiles[0]["x"] < tiles[9]["x"] and abs(tiles[0]["y"] - tiles[9]["y"]) < 1e-9
+    assert abs(tiles[10]["x"] - tiles[9]["x"]) < 1e-9 and tiles[10]["y"] < tiles[9]["y"]
+    assert tiles[19]["x"] < tiles[10]["x"]
+    assert tiles[99]["y"] < tiles[0]["y"]
+    assert {t["difficulty"] for t in tiles} == set(DIFFS)
+    # The art prints the same numbers the overlay shows, S and F at the ends.
+    assert 'id="cell-99"' in a["svg"] and ">S<" in a["svg"] and ">F<" in a["svg"]
+    assert ">42<" in a["svg"]
+    assert a["width"] > 0 and a["height"] > a["width"] * 0.9   # 10 rows + title band
+
+
+def test_grid_partial_last_row_and_reproducible():
+    a = gen.build_board_assets(gen.normalize_params(style="grid", tiles=25))
+    b = gen.build_board_assets(gen.normalize_params(style="grid", tiles=25))
+    assert len(a["tiles"]) == 25 and a["meta"]["rows"] == 3
+    assert a["tiles"] == b["tiles"]
+    assert a["tiles"][24]["tile_kind"] == "finish"

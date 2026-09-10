@@ -464,3 +464,32 @@ class TestContributorListStyles:
         assert "\n" not in contrib
         assert contrib.count("`P") == 6
         assert "\U0001F947" not in contrib
+
+
+class TestBoardTurnEmbed2026:
+    """Legacy embed twin of the 2026-09 layout tokens: the roll-less turns
+    and the extra lines say the same thing as the V2 layout."""
+
+    def test_dice_turn_appends_the_extra_lines(self):
+        spec = _spec("event_board_turn", {
+            "team_name": "Reds", "dice": [6], "tile_from": 0, "tile_to": 4, "turn": 1,
+            "next_task_label": "Zulrah x5",
+            "required_line": "⛔ Stopped at required tile `4` — it must be "
+                             "completed before moving on."})
+        assert spec["title"].endswith("rolled the dice")
+        assert "required tile `4`" in spec["description"]
+        assert any(f["name"] == "Next task" for f in spec["fields"])
+
+    def test_earned_ladder_turn(self):
+        spec = _spec("event_board_turn", {
+            "team_name": "Reds", "dice": [], "tile_from": 3, "tile_to": 7,
+            "jump": {"kind": "ladder", "from": 3, "to": 7},
+            "jump_line": "\U0001FA9C Climbed a ladder from tile `3` to tile `7`!"})
+        assert "climbed a ladder" in spec["title"]
+        assert "`3` → `7`" in spec["description"]
+
+    def test_win_by_the_finish_task(self):
+        spec = _spec("event_board_turn", {
+            "team_name": "Reds", "dice": [], "won": True, "won_by_task": True})
+        assert "reached the finish" in spec["title"]
+        assert "completed the final tile's task" in spec["description"]

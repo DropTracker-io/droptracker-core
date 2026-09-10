@@ -786,7 +786,8 @@ def _reroll_current_task(session, redis_conn, event_id, team_id, pos, settings,
     choice = (rng or random).choice(pool)
 
     instance = _materialize_instance(session, event_id, team_id, choice,
-                                     int(pos.turns_completed or 0))
+                                     int(pos.turns_completed or 0),
+                                     tile_idx=int(tile.idx))
     pos.current_task_id = instance.id
     pos.task_assigned_at = datetime.now()
     pos.mercy_deadline = _mercy_deadline(settings, pos.mercy_count)
@@ -858,7 +859,12 @@ def _use_advance(session, redis_conn, event_id, team_id, pos, item,
     """Teleport forward without completing a task: rolls the item's own die
     (effect_config.dice_sides, default 6) and moves — roadblock-aware, does
     NOT consume a turn, and replaces any live task with the landed tile's."""
-    from services.boardgame_engine import _move_piece, load_tiles
+    from services.boardgame_engine import (
+        _move_piece,
+        finish_idx,
+        load_tiles,
+        tile_kind,
+    )
 
     if pos.status not in ("active", "awaiting_roll"):
         raise ShopError(409, "Cannot teleport",
@@ -866,6 +872,17 @@ def _use_advance(session, redis_conn, event_id, team_id, pos, item,
     tiles = load_tiles(session, event_id)
     if not tiles:
         raise ShopError(409, "No board", "The event has no tiles.")
+    # A checkpoint holds the team until its task is done — the whole point of
+    # a required tile (2026-09); same for a finish tile that carries a task.
+    if pos.status == "active" and pos.current_task_id:
+        here = {int(t.idx): t for t in tiles}.get(int(pos.tile_idx or 0))
+        fin = finish_idx(tiles)
+        if tile_kind(here) == "required":
+            raise ShopError(409, "Required tile",
+                            "This tile must be completed before the team can move on.")
+        if fin is not None and int(pos.tile_idx or 0) >= fin:
+            raise ShopError(409, "Finish tile",
+                            "Complete the final tile's task to win — no teleporting off it.")
     sides = 6
     try:
         sides = max(1, min(20, int(_cfg(item.effect_config).get("dice_sides", 6))))
@@ -1372,7 +1389,8 @@ def apply_task_choice(session, redis_conn, event_id: int, team_id: int,
     settings = load_board_settings(session, event_id)
     old_task_id = pos.current_task_id
     instance = _materialize_instance(session, event_id, team_id, source,
-                                     int(pos.turns_completed or 0))
+                                     int(pos.turns_completed or 0),
+                                     tile_idx=int(pos.tile_idx or 0))
     pos.current_task_id = instance.id
     pos.status = "active"
     pos.task_assigned_at = datetime.now()
@@ -1471,14 +1489,18 @@ def _use_knockback(session, redis_conn, event_id, team_id, pos, item,
         n = max(0, int(_cfg(item.effect_config).get("tiles", 3)))
     except (TypeError, ValueError):
         pass
+    from services.boardgame_engine import _resolve_landing, finish_idx
+
     old = int(tpos.tile_idx or 0)
     old_task_id = tpos.current_task_id
     new = max(0, old - n)
     by_idx = {int(t.idx): t for t in tiles}
-    tpos.tile_idx = new
-    tpos.blocked_until_turn = None
-    assign_tile_task(session, event_id, target_team, by_idx.get(new), tpos,
-                     settings, rng=rng)
+    # Land through the shared resolver so a knockback onto a chute slides and
+    # onto a ladder climbs, exactly as a roll would (2026-09).
+    landing = _resolve_landing(session, event_id, target_team, tpos, by_idx,
+                               finish_idx(tiles), new, settings,
+                               {"from": old, "to": new, "won": False}, rng=rng)
+    new = int(landing["to"])
     # E3: the task the target was working is abandoned — GC its instance +
     # progress (guarded against a credited completion) instead of orphaning it.
     if old_task_id and old_task_id != tpos.current_task_id:
@@ -1501,7 +1523,7 @@ def _use_knockback(session, redis_conn, event_id, team_id, pos, item,
     except Exception:
         pass
     return {"target_team_id": target_team, "from": old, "to": new,
-            "tiles": old - new}
+            "tiles": old - new, **({"jump": landing["jump"]} if landing.get("jump") else {})}
 
 
 def _use_coin_toll(session, redis_conn, event_id, team_id, pos, item,

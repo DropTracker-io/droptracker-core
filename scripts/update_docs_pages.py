@@ -937,6 +937,35 @@ When you're attacked — frozen, knocked back, robbed — you'll see it on the b
 in your team's Discord channel, and a badge shows any effect currently on you
 (❄️ frozen, 🛡 shielded, ✨ boosted, and so on).
 
+## Board styles
+
+Every board game plays the same turn loop; the **board style** changes the
+board and what tiles can do. Pick it at the top of the Board designer.
+
+- **Race** — the original winding track: land, complete, roll, repeat.
+- **Chutes & Ladders** — a numbered grid (one click generates it) where some
+  tiles are **linked** to another tile. Land on a **ladder** and you climb to its
+  top; land on a **chute** and you slide down to its bottom. Links show on the
+  board as arrows, so every team can plan around them. A leader can also make a
+  ladder something you *earn*: complete the task on the ladder's tile and only
+  then climb. Chutes always fire the moment you land.
+
+  Two optional rules go with it: **exact finish** (an overshooting roll either
+  loses the move or bounces back from the finish instead of landing on it) and
+  coins/shop off by default for the classic feel — both are just settings.
+
+## Required tiles
+
+A leader can mark any tile as **required**. A team whose roll would carry it
+*past* a required tile stops **on** it instead and must complete that tile's
+task before rolling on — a checkpoint. Teams that have already completed a
+required tile pass it freely afterwards, so a chute or a knockback past one
+doesn't cost you twice. Teleport tablets can't carry you off a required tile
+you haven't finished either.
+
+The **finish tile** can be a requirement too: give it a difficulty or a pinned
+task and reaching it no longer wins — completing its task does.
+
 ## For group leaders
 
 Everything is configurable per event from the **Board** and **Board settings**
@@ -946,12 +975,13 @@ sections of your draft:
   roll.
 - **Board** — upload art or **generate a board** in one click; set each tile's
   difficulty (or pin a specific task); choose how tiles render (rune icon / outline
-  / invisible).
+  / invisible); pick the **board style**, mark tiles **required**, and on a
+  Chutes & Ladders board link tiles (or let **Add ladders & chutes** place a set).
 - **Economy** — coins on/off, per-difficulty rewards, starting coins.
 - **Shop** — turn the shop on/off, enable/disable individual items, set prices,
   stock and per-team caps, and the restock cadence.
-- **Mercy & win** — the anti-stall timer, and the win rule (first to the finish,
-  ties broken by task score).
+- **Mercy & win** — the anti-stall timer, the win rule (first to the finish,
+  ties broken by task score) and the **exact finish** rule for overshooting rolls.
 
 Set a board's difficulties so every tier you use has tasks in the pool, add at least
 a start and a finish tile, and give each team a piece — then activate. The layout

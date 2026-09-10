@@ -379,7 +379,9 @@ async def _apply_entry(r, shared, entry_bytes) -> None:
         # normal event_ended flow.
         board = outcome.get("board") or {}
         roll = board.get("roll") or {}
-        if roll.get("won"):
+        # ``board["won"]`` (2026-09): a win the dice did not deliver — the
+        # finish tile's own task, or an earned ladder onto a plain finish.
+        if roll.get("won") or board.get("won"):
             # (The winning roll already published an admin bump, so the
             # state refreshes on the next loop pass.)
             try:

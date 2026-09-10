@@ -155,7 +155,25 @@ EVENT_BOARD_SIZES = (3, 4, 5, 6, 7)  # square boards; default 5
 EVENT_TASK_DIFFICULTIES = ("air", "water", "earth", "fire")
 
 # Board-game tile roles (web_event_board_tiles.tile_kind).
-EVENT_BOARD_TILE_KINDS = ("start", "normal", "special", "finish")
+# - "required" (2026-09, replaces the semantics-free "special"): a checkpoint —
+#   a team whose move would carry it past the tile stops ON it instead and must
+#   complete its task before rolling on. Cleared once per team (a later
+#   knockback/chute past it does not re-arm it). Pre-rename rows still say
+#   "special"; LEGACY_BOARD_TILE_KIND_ALIASES maps them at read time and the
+#   web115a migration rewrites them.
+EVENT_BOARD_TILE_KINDS = ("start", "normal", "required", "finish")
+LEGACY_BOARD_TILE_KIND_ALIASES = {"special": "required"}
+
+# Board styles (web_event_board_config.settings.style): a preset the designer
+# and the player copy key off. "chutes_ladders" = the classic numbered grid
+# with tile links (EventBoardTile.config.jump_to); the engine is the same.
+BOARD_STYLES = ("race", "chutes_ladders")
+# When a tile link fires: on landing (classic chute/ladder) or only after the
+# team completes the tile's task (an OSRS twist for ladders — earn the climb).
+BOARD_JUMP_TRIGGERS = ("land", "complete")
+# settings.win.exact_finish: what an overshooting roll does — land on the finish
+# anyway (off), lose the move (stay), or bounce back by the excess (bounce).
+BOARD_EXACT_FINISH_MODES = ("off", "stay", "bounce")
 
 # Per-team turn state (web_event_board_positions.status):
 # - "active"        — the team has a live task on its current tile.

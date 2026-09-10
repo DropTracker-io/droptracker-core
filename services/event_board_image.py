@@ -158,8 +158,10 @@ def _board_game_signature(session, event) -> Optional[dict]:
         "bg": config.background_url,
         "wh": (config.bg_width, config.bg_height),
         "settings": config.settings,
+        # config carries the chute/ladder links (2026-09) — drawn on the
+        # board, so an edited link must re-render the image.
         "tiles": [(t.idx, t.difficulty, t.tile_kind, round(t.x or 0.0, 4),
-                   round(t.y or 0.0, 4)) for t in tiles],
+                   round(t.y or 0.0, 4), t.config or None) for t in tiles],
         # Coarse per-team state — tile / status / turn / task / coins / piece.
         # (Raw task progress is deliberately excluded so the image doesn't
         # re-render on every increment; it refreshes on real moves.)

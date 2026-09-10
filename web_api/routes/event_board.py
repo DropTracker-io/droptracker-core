@@ -85,6 +85,14 @@ _TILE_RENDER_MODES = ("rune", "invisible", "outline")
 _WIN_RULES = ("finish_tile",)  # P1; threshold/time-boxed variants later
 # Ordered tiebreak metrics for a finish_tile race (event_lifecycle.final_standings).
 _WIN_TIEBREAKS = ("score", "coins")
+# Board styles / tile links / exact finish (2026-09). Literal mirrors of
+# db.models.events.BOARD_STYLES / BOARD_JUMP_TRIGGERS /
+# BOARD_EXACT_FINISH_MODES / LEGACY_BOARD_TILE_KIND_ALIASES — the unit tests
+# stub the db package, and a MagicMock's ``.get`` would swallow a tile kind.
+BOARD_STYLES = ("race", "chutes_ladders")
+BOARD_JUMP_TRIGGERS = ("land", "complete")
+BOARD_EXACT_FINISH_MODES = ("off", "stay", "bounce")
+LEGACY_BOARD_TILE_KIND_ALIASES = {"special": "required"}
 # Tile-bound effect consumption modes (services/boardgame_effects.BREAK_MODES).
 _EFFECT_BREAK_MODES = ("pass", "land", "both")
 # Per-event shop stock refresh cadence (DEFAULT_BOARD_SETTINGS.shop). "days"
@@ -301,11 +309,24 @@ def _validate_settings_patch(body: dict) -> dict:
         if it:
             out["items"] = it
 
+    style = body.get("style")
+    if style is not None:
+        if style not in BOARD_STYLES:
+            abort_problem(422, "Invalid settings",
+                          f"style must be one of {list(BOARD_STYLES)}.")
+        out["style"] = style
+
     win = body.get("win")
     if win is not None:
         if not isinstance(win, dict):
             abort_problem(422, "Invalid settings", "'win' must be an object.")
         w: dict = {}
+        if "exact_finish" in win:
+            if win["exact_finish"] not in BOARD_EXACT_FINISH_MODES:
+                abort_problem(422, "Invalid settings",
+                              f"win.exact_finish must be one of "
+                              f"{list(BOARD_EXACT_FINISH_MODES)}.")
+            w["exact_finish"] = win["exact_finish"]
         if "rule" in win:
             if win["rule"] not in _WIN_RULES:
                 abort_problem(422, "Invalid settings",
@@ -329,11 +350,38 @@ def _validate_settings_patch(body: dict) -> dict:
 # --------------------------------------------------------------------------- #
 # Serialization
 # --------------------------------------------------------------------------- #
+def _normalize_tile_kind(raw) -> str:
+    """Stored kind → current vocabulary (the pre-2026-09 ``special`` rows read
+    as ``required`` until web115a rewrites them)."""
+    kind = raw or "normal"
+    return LEGACY_BOARD_TILE_KIND_ALIASES.get(kind, kind)
+
+
+def _tile_link(t: EventBoardTile) -> tuple:
+    """``(jump_to, jump_when)`` from the tile's config JSON, or ``(None, None)``."""
+    raw = getattr(t, "config", None)
+    if not raw:
+        return None, None
+    try:
+        cfg = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, None
+    if not isinstance(cfg, dict) or cfg.get("jump_to") is None:
+        return None, None
+    try:
+        target = int(cfg["jump_to"])
+    except (TypeError, ValueError):
+        return None, None
+    when = cfg.get("jump_when") if cfg.get("jump_when") in BOARD_JUMP_TRIGGERS else "land"
+    return target, when
+
+
 def _tile_row(t: EventBoardTile, task_labels: dict, *, conceal: bool = False) -> dict:
-    """One tile of the track. ``conceal`` (web112a) keeps the geometry and
-    kind — the track still draws and the pieces still move — but says nothing
-    about what the tile asks for: a team learns a tile by landing on it (its
-    task then arrives as the position's ``current_task``)."""
+    """One tile of the track. ``conceal`` (web112a) keeps the geometry, the
+    kind and the links — the track still draws and the pieces still move —
+    but says nothing about what the tile asks for: a team learns a tile by
+    landing on it (its task then arrives as the position's ``current_task``)."""
+    jump_to, jump_when = _tile_link(t)
     if conceal:
         return {
             "idx": int(t.idx),
@@ -343,7 +391,9 @@ def _tile_row(t: EventBoardTile, task_labels: dict, *, conceal: bool = False) ->
             "difficulty": None,
             "task_id": None,
             "task_label": None,
-            "tile_kind": t.tile_kind or "normal",
+            "tile_kind": _normalize_tile_kind(t.tile_kind),
+            "jump_to": jump_to,
+            "jump_when": jump_when,
         }
     return {
         "idx": int(t.idx),
@@ -353,7 +403,9 @@ def _tile_row(t: EventBoardTile, task_labels: dict, *, conceal: bool = False) ->
         "difficulty": t.difficulty or None,
         "task_id": t.task_id,
         "task_label": task_labels.get(t.task_id) if t.task_id else None,
-        "tile_kind": t.tile_kind or "normal",
+        "tile_kind": _normalize_tile_kind(t.tile_kind),
+        "jump_to": jump_to,
+        "jump_when": jump_when,
     }
 
 
@@ -603,13 +655,69 @@ def _validate_tiles_payload(tiles_in) -> None:
                 cell["difficulty"] not in EVENT_TASK_DIFFICULTIES:
             abort_problem(422, "Invalid tile",
                           f"difficulty must be one of {list(EVENT_TASK_DIFFICULTIES)}.")
-        kind = cell.get("tile_kind") or "normal"
+        kind = _normalize_tile_kind(cell.get("tile_kind"))
         if kind not in EVENT_BOARD_TILE_KINDS:
             abort_problem(422, "Invalid tile",
                           f"tile_kind must be one of {list(EVENT_BOARD_TILE_KINDS)}.")
+        jump_to = cell.get("jump_to")
+        if jump_to is not None:
+            if not isinstance(jump_to, int) or isinstance(jump_to, bool) or jump_to < 0:
+                abort_problem(422, "Invalid tile",
+                              f"'jump_to' must be a tile idx (tile {idx}).")
+            if jump_to == idx:
+                abort_problem(422, "Invalid tile", f"Tile {idx} cannot link to itself.")
+            if kind in ("start", "finish"):
+                abort_problem(422, "Invalid tile",
+                              f"Tile {idx} is the {kind} tile — start and finish tiles "
+                              "cannot carry a chute or ladder.")
+        when = cell.get("jump_when")
+        if when is not None and when not in BOARD_JUMP_TRIGGERS:
+            abort_problem(422, "Invalid tile",
+                          f"jump_when must be one of {list(BOARD_JUMP_TRIGGERS)} (tile {idx}).")
+        if when == "complete":
+            if jump_to is None or jump_to < idx:
+                abort_problem(422, "Invalid tile",
+                              f"Tile {idx}: only a ladder (a link to a higher tile) can "
+                              "wait for the task to be completed.")
+            if not bindings:
+                abort_problem(422, "Invalid tile",
+                              f"Tile {idx}: a ladder that climbs on completion needs a "
+                              "task — give the tile a difficulty or pin a task.")
     if seen_idx and seen_idx != set(range(len(tiles_in))):
         abort_problem(422, "Invalid tiles",
                       "Tile idx values must cover 0..N-1 exactly (a contiguous track).")
+    _validate_tile_links(tiles_in)
+
+
+def _validate_tile_links(tiles_in: list) -> None:
+    """Cross-tile rules for chutes & ladders (2026-09), checked once the idx
+    set is known to be contiguous: a link must point at a real tile, links
+    never chain (the landing tile of a link is never itself a link — a piece
+    moves at most once per landing), and a ladder may not carry a team past
+    a required tile it would otherwise have to stop on."""
+    by_idx = {int(c["idx"]): c for c in tiles_in}
+    linked = {int(c["idx"]) for c in tiles_in if c.get("jump_to") is not None}
+    required = {int(c["idx"]) for c in tiles_in
+                if _normalize_tile_kind(c.get("tile_kind")) == "required"}
+    for cell in tiles_in:
+        target = cell.get("jump_to")
+        if target is None:
+            continue
+        idx = int(cell["idx"])
+        if target not in by_idx:
+            abort_problem(422, "Invalid tile",
+                          f"Tile {idx} links to tile {target}, which does not exist.")
+        if target in linked:
+            abort_problem(422, "Invalid tile",
+                          f"Tile {idx} links to tile {target}, which is itself a chute "
+                          "or ladder — links can't chain.")
+        if target > idx:
+            crossed = sorted(r for r in required if idx < r < target)
+            if crossed:
+                abort_problem(422, "Invalid tile",
+                              f"The ladder on tile {idx} would carry teams past "
+                              f"required tile {crossed[0]} — end it at or before "
+                              "that tile.")
 
 
 def _write_board(s, ev, user_id: int, tiles_in: list, body: dict,
@@ -691,6 +799,12 @@ def _write_board(s, ev, user_id: int, tiles_in: list, body: dict,
             task_id = task.id
         if task_id is not None:
             kept_task_ids.add(task_id)
+        config = None
+        if cell.get("jump_to") is not None:
+            link = {"jump_to": int(cell["jump_to"])}
+            if cell.get("jump_when") == "complete":
+                link["jump_when"] = "complete"
+            config = json.dumps(link)
         s.add(EventBoardTile(
             event_id=ev.id,
             idx=cell["idx"],
@@ -699,8 +813,8 @@ def _write_board(s, ev, user_id: int, tiles_in: list, body: dict,
             label=(cell.get("label") or "").strip()[:255] or None,
             difficulty=cell.get("difficulty"),
             task_id=task_id,
-            tile_kind=cell.get("tile_kind") or "normal",
-            config=None,
+            tile_kind=_normalize_tile_kind(cell.get("tile_kind")),
+            config=config,
         ))
 
     # GC designer-created pins the new board dropped (unless the engine already
@@ -778,9 +892,11 @@ async def put_board(event_id: int):
     """Replace the whole tile layout (the designer's autosave). Body:
     { background_url?, bg_width?, bg_height?,
       tiles: [{idx, x, y, label?, difficulty?, task_id?, library_item_id?,
-               tile_kind?}] }
+               tile_kind?, jump_to?, jump_when?}] }
     Exactly one of difficulty / task_id / library_item_id per tile (or none =
-    rest tile). idx must cover 0..N-1 uniquely."""
+    rest tile). idx must cover 0..N-1 uniquely. ``jump_to`` makes the tile a
+    chute (lower target) or ladder (higher target); ``jump_when`` "complete"
+    (ladders only) fires after the tile's task instead of on landing."""
     user_id = current_user_id()
     body = await json_body()
     tiles_in = body.get("tiles")
@@ -1007,22 +1123,16 @@ async def roll_board(event_id: int):
 
                 rep = _lc._representative_player_id(s, ev.id)
                 if rep is not None:
+                    from services.boardgame_engine import turn_notification_data
+
                     team_row = (s.query(EventTeam)
                                 .filter(EventTeam.id == team_id).first())
-                    dice = summary.get("dice") or []
                     event_engine._enqueue_notification(
                         s, "event_board_turn", event_engine._event_to_dict(ev),
-                        rep, {
-                            "team_id": team_id,
-                            "team_name": getattr(team_row, "name", None),
-                            "dice": dice,
-                            "dice_str": " + ".join(str(d) for d in dice) or "?",
-                            "tile_from": summary.get("from"),
-                            "tile_to": summary.get("to"),
-                            "turn": summary.get("turn"),
-                            "won": bool(summary.get("won")),
-                            "next_task_label": summary.get("task_label"),
-                        })
+                        rep, turn_notification_data(
+                            team_id=team_id,
+                            team_name=getattr(team_row, "name", None),
+                            roll=summary))
             except Exception:
                 pass
             won = bool(summary.get("won"))

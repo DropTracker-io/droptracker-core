@@ -958,3 +958,66 @@ class TestEditorMeta:
                 b.get("type") == "standings" for b in ml.DEFAULT_LAYOUTS[key]["blocks"])
             if has_block:
                 assert meta.get("standings") is True, key
+
+
+class TestBoardTurnTokens:
+    """2026-09: the turn headline, the chute/ladder + required-stop +
+    overshoot + finish-task lines, and how a win names its cause."""
+
+    def _render(self, message_type, data):
+        context = ml.notification_context(message_type, data)
+        spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS[message_type], context)
+        joined = "\n".join(b.get("content", "") for b in spec["blocks"] if "content" in b)
+        assert not ml._TOKEN_RE.search(joined), joined
+        return context, joined
+
+    def test_dice_roll_headline_and_optional_lines_drop_out(self):
+        context, joined = self._render("event_board_turn", {
+            "event_id": 7, "team_name": "Reds", "dice": [3, 4], "dice_str": "3 + 4",
+            "tile_from": 0, "tile_to": 7, "turn": 2, "next_task_label": "Get a whip",
+            "coins_awarded": 5, "coin_balance": 12, "player_name": "Zed"})
+        assert context["turn_headline"] == "\U0001F3B2 Reds rolled `3 + 4`"
+        assert "rolled `3 + 4`" in joined and "Get a whip" in joined
+        assert "ladder" not in joined and "required tile" not in joined
+
+    def test_ladder_climb_and_required_stop_lines(self):
+        _, joined = self._render("event_board_turn", {
+            "event_id": 7, "team_name": "Reds", "dice": [3], "dice_str": "3",
+            "tile_from": 0, "tile_to": 7, "turn": 2, "next_task_label": "Get a whip",
+            "coins_awarded": 5, "coin_balance": 12,
+            "jump": {"kind": "ladder", "from": 3, "to": 7},
+            "jump_line": "\U0001FA9C Climbed a ladder from tile `3` to tile `7`!",
+            "required_line": "⛔ Stopped at required tile `4` — it must be "
+                             "completed before moving on."})
+        assert "Climbed a ladder from tile `3` to tile `7`!" in joined
+        assert "required tile `4`" in joined
+
+    def test_roll_less_turn_headlines(self):
+        climb, joined = self._render("event_board_turn", {
+            "event_id": 7, "team_name": "Reds", "dice": [], "dice_str": "?",
+            "tile_from": 3, "tile_to": 7, "turn": 4, "next_task_label": "—",
+            "coins_awarded": 5, "coin_balance": 12,
+            "jump": {"kind": "ladder", "from": 3, "to": 7},
+            "jump_line": "\U0001FA9C Climbed a ladder from tile `3` to tile `7`!"})
+        assert climb["turn_headline"] == "\U0001FA9C Reds climbed a ladder"
+        assert "rolled" not in joined
+
+    def test_win_line_names_the_cause(self):
+        by_dice = ml.notification_context("event_board_turn", {
+            "event_id": 7, "team_name": "Reds", "dice": [6], "dice_str": "6",
+            "tile_from": 5, "tile_to": 9, "won": True})
+        assert by_dice["board_won"] is True
+        assert by_dice["win_line"].startswith("**Reds** rolled `6`")
+        by_task = ml.notification_context("event_board_turn", {
+            "event_id": 7, "team_name": "Reds", "dice": [], "dice_str": "?",
+            "won": True, "won_by_task": True})
+        assert "completed the final tile's task" in by_task["win_line"]
+        by_ladder = ml.notification_context("event_board_turn", {
+            "event_id": 7, "team_name": "Reds", "dice": [3], "dice_str": "3",
+            "tile_from": 0, "tile_to": 9, "won": True, "won_by_ladder": True,
+            "jump": {"kind": "ladder", "from": 3, "to": 9}})
+        assert "straight onto the finish" in by_ladder["win_line"]
+        spec = ml.render_message_spec(ml.DEFAULT_LAYOUTS["event_board_win"], by_task)
+        joined = " ".join(b.get("content", "") for b in spec["blocks"] if "content" in b)
+        assert not ml._TOKEN_RE.search(joined)
+        assert "completed the final tile's task" in joined

@@ -35,6 +35,11 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 DEFAULT_BOARD_SETTINGS = {
+    # Board style (2026-09): a preset the designer and the player copy key off.
+    # "race" = the original dice track; "chutes_ladders" = the numbered grid
+    # with tile links. The engine reads tiles, not the style — a race board
+    # with a link on it slides just the same.
+    "style": "race",
     "movement": {
         "mode": "dice",          # dice | fixed_step
         "dice_count": 1,
@@ -85,7 +90,11 @@ DEFAULT_BOARD_SETTINGS = {
     # teams that have BOTH finished (or, at a manual end, ranks unfinished teams
     # after the leader): the ordered token list is applied left→right by
     # event_lifecycle.final_standings — "score" = task points, "coins" = wallet.
-    "win": {"rule": "finish_tile", "tiebreak": ["score"]},
+    # ``exact_finish`` (2026-09): what a roll that would carry the piece PAST
+    # the finish does — "off" lands on the finish anyway (the original clamp),
+    # "stay" loses the move (the team rolls again from where it stood),
+    # "bounce" walks the excess back from the finish.
+    "win": {"rule": "finish_tile", "tiebreak": ["score"], "exact_finish": "off"},
 }
 
 # Tiles a rolled task may come from must be auto-evaluable — a rolled custom
@@ -231,6 +240,62 @@ def finish_idx(tiles: list) -> Optional[int]:
     return int(tiles[-1].idx)
 
 
+# Tile kinds + per-tile config (EventBoardTile.config, JSON).
+# Mirrors db.models.events (kept literal so this module stays importable in
+# the unit tests, which stub the db package).
+_TILE_KIND_ALIASES = {"special": "required"}
+_JUMP_TRIGGERS = ("land", "complete")
+
+
+def tile_kind(tile) -> str:
+    """The tile's role with the legacy ``special`` rows read as ``required``
+    (the rename shipped with the checkpoint semantics; web115a rewrites the
+    stored rows, this keeps an unmigrated board playable meanwhile)."""
+    raw = (getattr(tile, "tile_kind", None) or "normal") if tile is not None else "normal"
+    return _TILE_KIND_ALIASES.get(raw, raw)
+
+
+def tile_config(tile) -> dict:
+    raw = getattr(tile, "config", None) if tile is not None else None
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def tile_jump(tile) -> Optional[tuple[int, str]]:
+    """``(target_idx, trigger)`` for a linked tile (a chute or a ladder), or
+    None. ``trigger`` is "land" (fires the moment a piece lands — the classic
+    rule) or "complete" (a ladder the team must earn by finishing the tile's
+    task; never valid on a chute, the validator refuses it)."""
+    cfg = tile_config(tile)
+    target = cfg.get("jump_to")
+    if target is None or isinstance(target, bool):
+        return None
+    try:
+        target = int(target)
+    except (TypeError, ValueError):
+        return None
+    if target < 0 or target == int(getattr(tile, "idx", -1)):
+        return None
+    when = cfg.get("jump_when") or "land"
+    if when not in _JUMP_TRIGGERS or (when == "complete" and target < int(tile.idx)):
+        when = "land"
+    return target, when
+
+
+def tile_has_task(tile) -> bool:
+    """Whether landing here draws or pins a task (vs a rest / plain finish)."""
+    if tile is None:
+        return False
+    return bool(getattr(tile, "task_id", None) or getattr(tile, "difficulty", None))
+
+
 def _is_board_instance(task) -> bool:
     try:
         cfg = json.loads(task.config) if task.config else {}
@@ -257,9 +322,11 @@ def _task_pool(session, event_id: int, difficulty: Optional[str]) -> list:
 
 
 def _materialize_instance(session, event_id: int, team_id: int, source_task,
-                          turn_number: int):
+                          turn_number: int, tile_idx: Optional[int] = None):
     """Clone a pool/pinned task into this team's per-landing instance so its
-    progress rollup is isolated (the bingo_auto pattern). Never library-saved."""
+    progress rollup is isolated (the bingo_auto pattern). Never library-saved.
+    ``tile_idx`` records WHICH tile the instance was drawn for — how the
+    required-tile rule knows a team already cleared a checkpoint."""
     from db.models import EventTask
 
     try:
@@ -274,6 +341,8 @@ def _materialize_instance(session, event_id: int, team_id: int, source_task,
         "team_id": team_id,
         "turn": int(turn_number),
     })
+    if tile_idx is not None:
+        cfg["tile_idx"] = int(tile_idx)
     instance = EventTask(
         event_id=event_id,
         type=source_task.type,
@@ -320,7 +389,8 @@ def assign_tile_task(session, event_id: int, team_id: int, tile, position,
         return None
 
     instance = _materialize_instance(
-        session, event_id, team_id, source, position.turns_completed)
+        session, event_id, team_id, source, position.turns_completed,
+        tile_idx=int(tile.idx) if tile is not None else None)
     position.current_task_id = instance.id
     position.status = "active"
     position.task_assigned_at = datetime.now()
@@ -458,12 +528,59 @@ def handle_board_completion(session, redis_conn, event: dict, task: dict,
             ref_type="task", ref_id=task["id"],
         )
 
-    pos.status = "awaiting_roll"
     pos.mercy_deadline = None
-    session.flush()
+
+    # Where the completion happened decides what it unlocks (2026-09):
+    # an earned ladder lifts the team; the finish tile's own task IS the
+    # win; anywhere else the team is simply ready to roll.
+    tiles = load_tiles(session, event["id"])
+    by_idx = {int(t.idx): t for t in tiles}
+    fin = finish_idx(tiles)
+    here = int(pos.tile_idx or 0)
+    jump = tile_jump(by_idx.get(here))
+    if (jump is not None and jump[1] == "complete" and jump[0] > here
+            and jump[0] in by_idx):
+        # A "climb when completed" ladder: the climb is the reward, so the
+        # team lands at the top awaiting its roll rather than drawing a second
+        # task — unless the top is the finish, which resolves like any finish
+        # landing (a plain finish wins outright, a finish with a task assigns
+        # it).
+        target = jump[0]
+        board["jump"] = {"kind": "ladder", "from": here, "to": target}
+        top = by_idx.get(target)
+        pos.tile_idx = target
+        pos.current_task_id = None
+        pos.task_assigned_at = None
+        if fin is not None and target >= fin:
+            if tile_has_task(top):
+                instance = assign_tile_task(session, event["id"], team_id, top,
+                                            pos, settings, rng=rng)
+                board["finish_task"] = True
+                if instance is not None:
+                    board["task_id"] = instance.id
+                    board["task_label"] = instance.label
+                    board["task_difficulty"] = instance.difficulty
+            else:
+                pos.status = "finished"
+                pos.mercy_deadline = None
+                board["won"] = True
+        else:
+            pos.status = "awaiting_roll"
+        session.flush()
+    elif fin is not None and here >= fin:
+        # The finish tile carried a task (a "required" finish): completing it
+        # is how the team wins. The consumer ends the event off ``won``.
+        pos.status = "finished"
+        pos.current_task_id = None
+        board["won"] = True
+        session.flush()
+        return board
+    else:
+        pos.status = "awaiting_roll"
+        session.flush()
 
     movement = settings.get("movement") or {}
-    if (movement.get("trigger") or "manual") == "auto":
+    if pos.status == "awaiting_roll" and (movement.get("trigger") or "manual") == "auto":
         # auto_advance rolls once and keeps rolling through rest tiles / stalls
         # so the game can't strand itself (P1a); its last summary's ``won`` flag
         # is what the consumer checks to end the event on a finish.
@@ -472,6 +589,80 @@ def handle_board_completion(session, redis_conn, event: dict, task: dict,
         if roll:
             board["roll"] = roll
     return board
+
+
+def _line_for_jump(jump: Optional[dict]) -> Optional[str]:
+    if not jump:
+        return None
+    if jump.get("kind") == "chute":
+        return (f"\U0001F573\ufe0f Slid down a chute from tile `{jump.get('from')}` "
+                f"to tile `{jump.get('to')}`!")
+    return (f"\U0001FA9C Climbed a ladder from tile `{jump.get('from')}` "
+            f"to tile `{jump.get('to')}`!")
+
+
+def turn_notification_data(*, team_id: int, team_name=None, player_name=None,
+                           roll: Optional[dict] = None,
+                           board: Optional[dict] = None) -> dict:
+    """The one payload every board-turn announcement is built from — the auto
+    roll after a completion, a manual roll, and the roll-less turns (an earned
+    ladder, a finish-task win). Both renderers (the V2 layout and the legacy
+    embed) read these keys, and the pre-composed ``*_line`` tokens keep them
+    saying the same thing; an absent line drops out of the layout."""
+    roll = roll or {}
+    board = board or {}
+    dice = roll.get("dice") or []
+    jump = roll.get("jump") or board.get("jump")
+    required = roll.get("required_stop")
+    overshoot = roll.get("overshoot")
+    won = bool(roll.get("won") or board.get("won"))
+    finish_task = bool(roll.get("finish_task") or board.get("finish_task"))
+    tile_from = roll.get("from") if roll else (jump or {}).get("from")
+    tile_to = roll.get("to") if roll else (jump or {}).get("to")
+    turn = roll.get("turn") if roll.get("turn") is not None else board.get("turn")
+    data = {
+        "team_id": team_id,
+        "team_name": team_name,
+        "player_name": player_name,
+        "dice": dice,
+        "dice_str": " + ".join(str(d) for d in dice) or "?",
+        "tile_from": tile_from,
+        "tile_to": tile_to,
+        "turn": turn,
+        "won": won,
+        # A win the dice did not deliver: the finish tile's task, or a ladder
+        # straight onto a plain finish.
+        "won_by_task": bool(board.get("won") and not roll.get("won") and not jump),
+        "won_by_ladder": bool(won and jump and int(jump.get("to", -1)) == int(tile_to or -2)),
+        "next_task_label": roll.get("task_label") or board.get("task_label") or "—",
+        "coins_awarded": board.get("coins_awarded") or 0,
+        "coin_balance": board.get("coin_balance") or 0,
+        "jump": jump,
+        "required_stop": required,
+        "overshoot": overshoot,
+        "finish_task": finish_task,
+    }
+    lines = {
+        "jump_line": _line_for_jump(jump),
+        "required_line": (
+            f"\u26d4 Stopped at required tile `{required.get('tile_idx')}` — "
+            "it must be completed before moving on."
+            if required else None),
+        "overshoot_line": None,
+        "finish_line": ("\U0001F3C1 On the finish tile — complete its task to win!"
+                        if finish_task and not won else None),
+    }
+    if overshoot:
+        if overshoot.get("mode") == "stay":
+            lines["overshoot_line"] = (
+                f"\u21a9\ufe0f Overshot the finish by {overshoot.get('by')} — "
+                "the move is lost, roll again.")
+        else:
+            lines["overshoot_line"] = (
+                f"\u21a9\ufe0f Overshot the finish by {overshoot.get('by')} and "
+                f"bounced back to tile `{overshoot.get('to')}`.")
+    data.update({k: v for k, v in lines.items() if v})
+    return data
 
 
 def perform_roll(session, redis_conn, event_id: int, team_id: int,
@@ -566,6 +757,8 @@ def perform_roll(session, redis_conn, event_id: int, team_id: int,
             "dice": faces, "from": start, "to": summary["to"],
             "won": summary["won"], "task_label": summary.get("task_label"),
             "blocked": bool(summary.get("blocked")),
+            "jump": summary.get("jump"),
+            "required_stop": summary.get("required_stop"),
         })
     except Exception:
         pass
@@ -840,18 +1033,134 @@ def _serve_blocked_turn(session, redis_conn, event_id: int, team_id: int,
     return summary
 
 
+def _cleared_tiles(session, event_id: int, team_id: int) -> set:
+    """Tile indexes this team has completed a task ON — every board instance
+    task records the tile it was drawn for (``config.tile_idx``), and a
+    completed progress row on one clears that tile. The required-tile rule
+    reads this: a checkpoint the team already cleared no longer stops it
+    (so a knockback or a chute past it is not a second toll)."""
+    from db.models import EventProgress, EventTask
+
+    done = (session.query(EventProgress)
+            .filter(EventProgress.event_id == event_id,
+                    EventProgress.team_id == team_id,
+                    EventProgress.completed.is_(True))
+            .all())
+    task_ids = [p.task_id for p in done if getattr(p, "task_id", None)]
+    if not task_ids:
+        return set()
+    cleared: set = set()
+    for task in session.query(EventTask).filter(EventTask.id.in_(task_ids)).all():
+        try:
+            cfg = json.loads(task.config) if task.config else {}
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(cfg, dict) or not cfg.get("board_instance"):
+            continue
+        if cfg.get("tile_idx") is None:
+            continue
+        try:
+            cleared.add(int(cfg["tile_idx"]))
+        except (TypeError, ValueError):
+            pass
+    return cleared
+
+
+def _required_stop(session, event_id: int, team_id: int, by_idx: dict,
+                   start: int, dest: int) -> Optional[int]:
+    """The nearest required tile strictly between ``start`` and ``dest`` this
+    team has not cleared — where a move that would pass it must stop instead.
+    None when the path crosses no live checkpoint. (Landing exactly on a
+    required tile needs no interception: it is a normal landing.)"""
+    candidates = [i for i in range(start + 1, dest)
+                  if by_idx.get(i) is not None and tile_kind(by_idx[i]) == "required"]
+    if not candidates:
+        return None
+    cleared = _cleared_tiles(session, event_id, team_id)
+    for i in candidates:
+        if i not in cleared:
+            return i
+    return None
+
+
+def _resolve_landing(session, event_id: int, team_id: int, pos, by_idx: dict,
+                     fin: Optional[int], dest: int, settings: dict, summary: dict,
+                     rng: Optional[random.Random] = None) -> dict:
+    """Shared landing resolution — every way a piece comes to rest (a roll, a
+    teleport, a knockback, a bounce) ends here so tile rules hold for all of
+    them: follow a landing-triggered link ONCE (a chute or a ladder; the
+    target's own link never chains), then either finish or draw the tile's
+    task. A finish tile that carries a task is not a win on arrival — the
+    team must complete it (``finish_task``); a plain finish wins outright.
+
+    Mutates ``pos`` and ``summary`` (``to``, ``jump``, ``won``, task keys)."""
+    tile = by_idx.get(dest)
+    jump = tile_jump(tile)
+    if jump is not None and jump[1] == "land" and jump[0] in by_idx:
+        target = jump[0]
+        summary["jump"] = {"kind": "ladder" if target > dest else "chute",
+                           "from": dest, "to": target}
+        dest = target
+        tile = by_idx.get(dest)
+    pos.tile_idx = dest
+    pos.blocked_until_turn = None
+    summary["to"] = dest
+    if fin is not None and dest >= fin and not tile_has_task(tile):
+        pos.status = "finished"
+        pos.current_task_id = None
+        pos.mercy_deadline = None
+        summary["won"] = True
+        return summary
+    instance = assign_tile_task(session, event_id, team_id, tile, pos, settings, rng=rng)
+    if instance is not None:
+        summary["task_id"] = instance.id
+        summary["task_label"] = instance.label
+        summary["task_difficulty"] = instance.difficulty
+    if fin is not None and dest >= fin:
+        summary["finish_task"] = True
+    return summary
+
+
 def _move_piece(session, event_id: int, team_id: int, pos, tiles: list,
                 start: int, steps: int, settings: dict,
                 rng: Optional[random.Random] = None) -> dict:
-    """Shared movement/landing core (rolls AND the advance power-up):
-    tile-effect resolution (roadblocks & future traps), finish clamp, landing
-    task resolution. Mutates ``pos``; caller stamps turn counters/last_roll
-    and flushes."""
+    """Shared movement core (rolls AND the advance power-up): required-tile
+    checkpoints, the exact-finish rule, tile-effect resolution (roadblocks &
+    future traps), then the landing (links, finish, task). Mutates ``pos``;
+    caller stamps turn counters/last_roll and flushes."""
     fin = finish_idx(tiles)
     by_idx = {int(t.idx): t for t in tiles}
-    dest = min(start + max(0, steps), fin)
+    steps = max(0, int(steps or 0))
+    raw = start + steps
+    dest = min(raw, fin)
 
     summary: dict = {"from": start, "to": dest, "won": False}
+
+    # Required checkpoints (2026-09): a move that would carry the team past a
+    # required tile it has not cleared stops ON that tile instead — the
+    # nearest one wins, and anything beyond it (a roadblock, the finish) is
+    # simply not reached this turn.
+    if dest > start:
+        stop = _required_stop(session, event_id, team_id, by_idx, start, dest)
+        if stop is not None:
+            summary["required_stop"] = {"tile_idx": stop, "short_by": dest - stop}
+            dest = stop
+            summary["to"] = dest
+
+    # Exact finish (settings.win.exact_finish): an overshoot either loses the
+    # move ("stay" — nothing about the position changes, not even a live
+    # task, so a fizzled teleport can't double as a free skip) or walks the
+    # excess back from the finish ("bounce"). "off" keeps the original clamp.
+    if "required_stop" not in summary and steps > 0 and raw > fin:
+        mode = ((settings.get("win") or {}).get("exact_finish")) or "off"
+        if mode == "stay":
+            summary["to"] = start
+            summary["overshoot"] = {"mode": "stay", "by": raw - fin}
+            return summary
+        if mode == "bounce":
+            dest = max(0, fin - (raw - fin))
+            summary["to"] = dest
+            summary["overshoot"] = {"mode": "bounce", "by": raw - fin, "to": dest}
 
     # Tile-bound effects (roadblock is the first consumer): the nearest
     # triggering one on the path may stop the piece, be consumed, and/or
@@ -882,6 +1191,9 @@ def _move_piece(session, event_id: int, team_id: int, pos, tiles: list,
                 }
             if hit["stopped"] and int(hit["stall_turns"] or 0) > 0:
                 blocked_stall = int(hit["stall_turns"])
+            if hit["stopped"] and "required_stop" in summary:
+                # Cut short before the checkpoint — it is still ahead.
+                summary.pop("required_stop", None)
 
     # Movement-triggered economics + self-trap expiry (web50a). On any real
     # advance (rolls AND teleports), over the SAME (start, dest] passed range
@@ -909,20 +1221,8 @@ def _move_piece(session, event_id: int, team_id: int, pos, tiles: list,
         summary["blocked_until_turn"] = pos.blocked_until_turn
         return summary
 
-    pos.tile_idx = dest
-    if dest >= fin:
-        pos.status = "finished"
-        pos.current_task_id = None
-        pos.mercy_deadline = None
-        summary["won"] = True
-    else:
-        instance = assign_tile_task(
-            session, event_id, team_id, by_idx.get(dest), pos, settings, rng=rng)
-        if instance is not None:
-            summary["task_id"] = instance.id
-            summary["task_label"] = instance.label
-            summary["task_difficulty"] = instance.difficulty
-    return summary
+    return _resolve_landing(session, event_id, team_id, pos, by_idx, fin, dest,
+                            settings, summary, rng=rng)
 
 
 def can_trigger_roll(settings: dict, *, is_team_member: bool, is_admin: bool) -> bool:

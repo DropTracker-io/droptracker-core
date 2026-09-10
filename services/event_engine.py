@@ -4522,24 +4522,19 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
                 "board-game completion side-effects failed")
     if board is not None:
         result["board"] = board
-        if board.get("roll"):
-            # Auto-trigger mode rolled immediately: announce the move + the
-            # freshly drawn task alongside the completion message.
-            roll = board["roll"]
-            dice = roll.get("dice") or []
-            _enqueue_notification(session, "event_board_turn", event, player_id, {
-                "team_id": team_id,
-                "player_name": player_name,
-                "dice": dice,
-                "dice_str": " + ".join(str(d) for d in dice) or "?",
-                "tile_from": roll.get("from"),
-                "tile_to": roll.get("to"),
-                "turn": roll.get("turn"),
-                "won": bool(roll.get("won")),
-                "next_task_label": roll.get("task_label") or "—",
-                "coins_awarded": board.get("coins_awarded") or 0,
-                "coin_balance": board.get("coin_balance") or 0,
-            })
+        if board.get("roll") or board.get("won") or board.get("jump"):
+            # Auto-trigger mode rolled immediately — or the completion itself
+            # moved the team (an earned ladder) or won the game (the finish
+            # tile's task): announce the move + the freshly drawn task
+            # alongside the completion message. One payload shape for all
+            # (boardgame_engine.turn_notification_data).
+            from services.boardgame_engine import turn_notification_data
+
+            _enqueue_notification(
+                session, "event_board_turn", event, player_id,
+                turn_notification_data(
+                    team_id=team_id, player_name=player_name,
+                    roll=board.get("roll"), board=board))
         else:
             # Manual-trigger mode: the team is now awaiting_roll — nudge them
             # to roll (web53a). Main-channel default is OFF; this primarily
