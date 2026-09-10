@@ -192,6 +192,8 @@ DEFAULT_LAYOUTS = {
             {"type": "standings", "limit": 5, "title": "**Final standings**"},
             # Prize pot result (web52a) — "🏆 {winner} takes the {pot} pot" etc.
             {"type": "text", "content": "{pot_result_line}"},
+            # Clan points paid at the end (web114a) — drops when none were.
+            {"type": "text", "content": "{clan_points_line}"},
             {"type": "separator"},
             {
                 "type": "buttons",
@@ -684,6 +686,11 @@ TOKEN_DOCS = {
                          "sample": "\U0001F4B0 **250M GP** prize pot on the line!"},
     "pot_result_line": {"help": "Prize-pot result line on the end announcement",
                         "sample": "\U0001F3C6 **Team Bandos** takes the **250M GP** pot!"},
+    "clan_points_line": {"help": "Clan points the event paid out as it ended (drops when "
+                                 "none were — e.g. awards that wait for an admin's review)",
+                         "sample": "\U0001FA99 Clan points: \U0001F947 **Team Bandos** `+100` each"
+                                   " · \U0001F948 **Team Zamorak** `+50` each"
+                                   " · participation `+412` across 34 members"},
     "pot_announce_line": {"help": "The pot advertisement line",
                           "sample": "The pot stands at **250M GP** — buy-ins open until the start."},
     "pot_contributors_block": {"help": "Pot contributor list",
@@ -769,7 +776,7 @@ TYPE_META = {
     "event_ended": {
         "label": "Event ended", "group": "Lifecycle",
         "description": "The wrap-up announcement with final standings.",
-        "tokens": ("pot_result_line", "competition_metric_line"),
+        "tokens": ("pot_result_line", "clan_points_line", "competition_metric_line"),
         "standings": True,
     },
     "event_activation_failed": {
@@ -1427,6 +1434,9 @@ def notification_context(notification_type: str, data: dict) -> dict:
     # {pot_started_line}/{pot_result_line} blocks drop out otherwise.
     put("pot_started_line", data.get("pot_started_line"))
     put("pot_result_line", data.get("pot_result_line"))
+    # Clan points (web114a): pre-composed by end_event only when an auto
+    # payout landed, so the {clan_points_line} block drops otherwise.
+    put("clan_points_line", data.get("clan_points_line"))
     put("pot_announce_line", data.get("pot_announce_line"))
     put("pot_contributors_block", data.get("pot_contributors_block"))
     # Task-tile icon (the item/NPC/skill the task targets) for completion /

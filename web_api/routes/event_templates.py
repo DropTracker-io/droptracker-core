@@ -148,6 +148,21 @@ def snapshot_event(s, ev: Event) -> dict:
             ],
         }
 
+    # The owning clan's clan-point payout (web114a) — config only, never the
+    # award state. Other clans' payouts on a clan-vs-clan event stay behind:
+    # instantiation always produces a standard event for the owning group.
+    clan_points = None
+    if ev.group_id:
+        from db.models import EventPointConfig
+
+        cfg_row = (
+            s.query(EventPointConfig)
+            .filter(EventPointConfig.event_id == ev.id,
+                    EventPointConfig.group_id == ev.group_id)
+            .first()
+        )
+        clan_points = _parse_json_col(cfg_row.config) if cfg_row is not None else None
+
     return {
         "version": EVENT_TEMPLATE_SCHEMA_VERSION,
         "event": {
@@ -177,6 +192,8 @@ def snapshot_event(s, ev: Event) -> dict:
             # new run's dates, which is the whole point of "run our weekend
             # event again next month".
             "schedule": _parse_json_col(getattr(ev, "schedule_config", None)),
+            # Clan-point payout (web114a) — see above; None when unset.
+            "clan_points": clan_points,
         },
         "tasks": tasks_out,
         "teams": teams_out,
@@ -304,6 +321,16 @@ def instantiate_template(
             setattr(ev, json_key, json.dumps(value))
     s.add(ev)
     s.flush()
+
+    # Clan-point payout (web114a), for the owning group only. Stored as
+    # captured: every read re-validates it (effective_points_config), and a
+    # clan whose points system has since lapsed simply can't pay out.
+    clan_points = spec.get("clan_points")
+    if group_id and isinstance(clan_points, dict):
+        from db.models import EventPointConfig
+
+        s.add(EventPointConfig(event_id=ev.id, group_id=group_id, status="pending",
+                               config=json.dumps(clan_points)))
 
     # Recurring schedule (web82a) — recompiled against THIS run's dates. A
     # template whose schedule no longer fits (dates too short for a single

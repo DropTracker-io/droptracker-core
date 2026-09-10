@@ -5018,6 +5018,14 @@ def _cascade_delete_event(s, ev: Event) -> None:
     _wipe(EventCompletion, EventCompletion.event_id == event_id)
     _wipe(EventBuyin, EventBuyin.event_id == event_id)
 
+    # Clan-point payout config + award ledger (web114a). The clan points the
+    # event already paid (player_points rows) deliberately STAY — they are the
+    # clan's economy, not event state; revoke them from the manager first if
+    # they should go too. Only the ledger linking them to this event goes.
+    from db.models import EventPointAward, EventPointConfig
+    _wipe(EventPointAward, EventPointAward.event_id == event_id)
+    _wipe(EventPointConfig, EventPointConfig.event_id == event_id)
+
     # SOTW/BOTW linkage row (web105a). Any DT-created WOM competition is NOT
     # deleted here — phase 3's delete-mirroring handles it before this runs.
     from db import EventCompetition

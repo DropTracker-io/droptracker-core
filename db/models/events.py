@@ -1648,3 +1648,92 @@ class EventCompetition(Base):
     finalized_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+# Clan-point awards (web114a): an event paying out a clan's custom points
+# (``player_points``) for placement and EHE participation. Scoring rules and
+# the award/re-sync/revoke flow live in services/event_point_awards.py.
+#
+# web_event_point_configs.award_mode (inside the config JSON):
+# - "auto"   — end_event's wrap-up awards and the ended announcement says so.
+# - "review" — nothing lands until an admin confirms the preview.
+EVENT_POINT_AWARD_MODES = ("auto", "review")
+# web_event_point_awards.kind — one ledger row per (player, kind).
+EVENT_POINT_AWARD_KINDS = ("placement", "participation")
+# web_event_point_configs.status:
+# - "pending"  — nothing awarded yet (review mode waits here once the event
+#                ends; auto mode passes straight through at the end).
+# - "deferred" — an auto award could not run at the end (EHE pricing was
+#                unavailable); the lifecycle sweep retries it.
+# - "awarded"  — the ledger holds this clan's awards; an admin may re-sync.
+# - "revoked"  — an admin removed every award for this clan.
+EVENT_POINT_STATUSES = ("pending", "deferred", "awarded", "revoked")
+
+
+class EventPointConfig(Base):
+    """One clan's clan-point payout for one event (web114a).
+
+    A row per (event, clan) rather than a column on ``web_events`` because a
+    clan-vs-clan event involves several point economies: each participating
+    clan decides what — if anything — its own members earn, in its own
+    ``player_points`` ledger. A standard event has at most one row (its own
+    group's). ``config`` is merged through
+    ``services.event_point_awards.effective_points_config``; ``status`` is the
+    award state machine above."""
+
+    __tablename__ = "web_event_point_configs"
+    __table_args__ = (
+        Index("uq_web_evt_point_cfg", "event_id", "group_id", unique=True),
+        # The lifecycle sweep's retry pass reads deferred rows every tick.
+        Index("idx_web_evt_point_cfg_status", "status"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=False)
+    config = Column(Text, nullable=True)
+    status = Column(String(16), nullable=False, default="pending",
+                    server_default="pending")  # EVENT_POINT_STATUSES
+    awarded_at = Column(DateTime, nullable=True)
+    awarded_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    # Why the last award attempt did not land (deferred / skipped), shown to
+    # the clan's admins next to the Award button.
+    last_error = Column(String(255), nullable=True)
+    updated_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class EventPointAward(Base):
+    """One clan-point award an event paid a player (web114a).
+
+    The ledger that makes awarding re-runnable: each row names the
+    ``player_points`` row it wrote, so a re-sync after a post-event revoke
+    adjusts that row in place instead of stacking a second award, and a
+    revoke deletes exactly what the event paid. ``player_points_id`` carries
+    no FK — a group's points reset deletes those rows, and a re-sync then
+    leaves them deleted rather than resurrecting points the clan wiped."""
+
+    __tablename__ = "web_event_point_awards"
+    __table_args__ = (
+        Index("uq_web_evt_point_award", "event_id", "group_id", "player_id", "kind",
+              unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id"), nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=False)
+    player_id = Column(Integer, ForeignKey("players.player_id"), nullable=False)
+    kind = Column(String(16), nullable=False)  # EVENT_POINT_AWARD_KINDS
+    amount = Column(Integer, nullable=False, default=0)
+    # Snapshot of what earned it: the team (or, on SOTW/BOTW, nobody) and its
+    # place for placement rows; the EHE hours priced at award time for
+    # participation rows. Display only — the amount is the record.
+    team_id = Column(Integer, nullable=True)
+    place = Column(Integer, nullable=True)
+    hours = Column(Float, nullable=True)
+    player_points_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

@@ -697,6 +697,13 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         spec["title"] = f"\U0001F3C6 {event_name} has ended!"
         spec["description"] = f"[Full results]({url})" if url else None
         field("Final standings", _standings_lines(standings, 5), inline=False)
+        # Clan points paid at the end (web114a); the field name already says
+        # what the line's own "🪙 Clan points:" lead-in does.
+        if data.get("clan_points_line"):
+            paid = (str(data["clan_points_line"])
+                    .replace("\U0001FA99 Clan points: ", "")
+                    .replace("\U0001FA99 ", ""))
+            field("\U0001FA99 Clan points", paid, inline=False)
 
     elif notification_type == "event_window_opened":
         spec["title"] = f"\U0001F7E2 {event_name} — scoring is live!"

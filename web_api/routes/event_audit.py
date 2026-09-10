@@ -56,6 +56,7 @@ _LEDGER_CATEGORIES = {"auto_credit", "pending_submission"}
 _AUDIT_CATEGORIES = {
     "approval", "manual_award", "revoke", "task", "settings",
     "team", "participant", "signup", "board", "prize", "discord",
+    "clan_points",
 }
 _ALL_CATEGORIES = _LEDGER_CATEGORIES | _AUDIT_CATEGORIES
 
@@ -86,6 +87,8 @@ def _category_for(action: str) -> str:
         return "prize"
     if action.startswith("event.discord.") or action.startswith("event.team_discord."):
         return "discord"
+    if action.startswith("event.points."):
+        return "clan_points"
     return "other"
 
 
@@ -123,6 +126,8 @@ def _audit_action_clause(categories: set):
     if "discord" in categories:
         clauses.append(or_(AuditLog.action.like("event.discord.%"),
                            AuditLog.action.like("event.team_discord.%")))
+    if "clan_points" in categories:
+        clauses.append(AuditLog.action.like("event.points.%"))
     return or_(*clauses) if clauses else None
 
 
@@ -483,4 +488,9 @@ _ACTION_VERB = {
     "event.discord.update": "updated Discord settings",
     "event.team_discord.update": "updated team-Discord settings",
     "event.team_discord.notifications": "changed team-Discord notifications",
+    # Clan points (web114a). Auto awards carry no actor ("System").
+    "event.points.config": "changed the clan-point awards",
+    "event.points.award": "awarded clan points",
+    "event.points.sync": "re-synced clan points",
+    "event.points.revoke": "revoked clan points",
 }

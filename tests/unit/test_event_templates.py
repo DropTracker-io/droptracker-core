@@ -310,7 +310,7 @@ class TestSnapshot:
         teams = [_team(3, "Red")]
         cells = [_cell(0, "Whip", task_id=11), _cell(1, "Zulrah x50", task_id=12),
                  _cell(2, "Free space", task_id=None)]
-        s = _S(tasks, teams, cells)
+        s = _S(tasks, teams, cells, [])  # last: no clan-point payout row
         payload = etr.snapshot_event(s, _event())
 
         assert payload["version"] == 1
@@ -327,6 +327,8 @@ class TestSnapshot:
             # Recurring schedule rule (web82a) — recompiled against the new
             # run's dates on instantiate; None for a continuous event.
             "schedule": None,
+            # The owning clan's clan-point payout (web114a); none configured.
+            "clan_points": None,
         }
         assert [t["label"] for t in payload["tasks"]] == ["Whip", "Zulrah x50"]
         assert payload["teams"] == [{"name": "Red"}]
@@ -339,7 +341,7 @@ class TestSnapshot:
         assert "discord_guild_id" not in flat and "score" not in flat
 
     def test_no_bingo_skips_cell_query(self):
-        s = _S([_task(11, "Whip")], [])
+        s = _S([_task(11, "Whip")], [], [])  # tasks, teams, clan points
         payload = etr.snapshot_event(s, _event(has_bingo=False))
         assert payload["bingo"] is None
 
@@ -349,7 +351,7 @@ class TestSnapshot:
             _task(12, "B", config='{"bingo_auto": true}'),
             _task(13, "C", config='{"kind": "all_of"}'),
         ]
-        s = _S(tasks, [], [])
+        s = _S(tasks, [], [], [])
         payload = etr.snapshot_event(s, _event())
         configs = [t["config"] for t in payload["tasks"]]
         assert json.loads(configs[0]) == {"kind": "any_of"}
@@ -363,7 +365,7 @@ class TestSaveTemplate:
     async def test_save_creates_template_row(self, client, monkeypatch):
         tasks = [_task(11, "Whip"), _task(12, "Zulrah x50")]
         s = _S([_event()], tasks, [_team(3, "Red")],
-               [_cell(0, "Whip", 11)], [])  # last: no existing template
+               [_cell(0, "Whip", 11)], [], [])  # no clan points, no existing template
         _wire(monkeypatch, s)
         r = await client.post("/api/v1/events/1/save-template",
                               json={"name": "Winter Bingo", "visibility": "public"})
@@ -381,7 +383,7 @@ class TestSaveTemplate:
 
     async def test_save_upserts_same_name(self, client, monkeypatch):
         existing = _template(id=33, visibility="public")
-        s = _S([_event()], [], [], [], [existing])
+        s = _S([_event()], [], [], [], [], [existing])
         _wire(monkeypatch, s)
         r = await client.post("/api/v1/events/1/save-template",
                               json={"name": "winter BINGO"})
@@ -393,7 +395,7 @@ class TestSaveTemplate:
         assert existing.name == "winter BINGO"
 
     async def test_save_can_exclude_teams(self, client, monkeypatch):
-        s = _S([_event(has_bingo=False)], [_task(11, "Whip")], [_team(3, "Red")], [])
+        s = _S([_event(has_bingo=False)], [_task(11, "Whip")], [_team(3, "Red")], [], [])
         _wire(monkeypatch, s)
         r = await client.post("/api/v1/events/1/save-template",
                               json={"name": "T", "include_teams": False})

@@ -1197,9 +1197,32 @@ def end_event(session, event, *, actor_user_id=None,
             log.error("end_event(%s): competition finalize failed",
                       event.id, exc_info=True)
 
+    # Clan points (web114a): "auto" payouts land now — after the competition
+    # freeze (SOTW/BOTW placements read the frozen result) and before the
+    # announcement, so it can say what was paid. Best-effort like every
+    # wrap-up step: a payout that didn't land stays awardable from the
+    # manager, and a deferred one (EHE unpriceable) is retried by the sweep.
+    clan_points_results: list = []
+    try:
+        from services.event_point_awards import award_auto
+
+        results = award_auto(session, event, now=now)
+        clan_points_results = results if isinstance(results, list) else []
+    except Exception:
+        session.rollback()
+        failed_steps.append("clan points")
+        log.error("end_event(%s): clan-point awards failed",
+                  event.id, exc_info=True)
+
     try:
         ev_dict = event_engine._event_to_dict(event)
         ended_extra = {"standings": standings, "ended_at": _ts(event.ended_at)}
+        if clan_points_results:
+            from services.event_point_awards import clan_points_line
+
+            _cp_line = clan_points_line(clan_points_results)
+            if isinstance(_cp_line, str) and _cp_line:
+                ended_extra["clan_points_line"] = _cp_line
         # Prize pot (web52a): "🏆 {winner} takes the {pot} pot" (or a split line).
         winner_name = standings[0].get("name") if standings else None
         _pot_line = _pot_advertise_line(session, event, None, ended=True,
@@ -1703,5 +1726,16 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
     except Exception:
         session.rollback()
         log.error("Sweep: reminder sweep failed", exc_info=True)
+
+    # Clan points (web114a): retry "auto" payouts an end had to defer because
+    # EHE couldn't be priced (cold WOM rate cache). One indexed query when
+    # nothing is deferred.
+    try:
+        from services.event_point_awards import retry_deferred
+
+        retry_deferred(session, now=now)
+    except Exception:
+        session.rollback()
+        log.error("Sweep: clan-point retry failed", exc_info=True)
 
     return summary

@@ -105,6 +105,10 @@ BEHAVIOR_DEFAULTS = {
 }
 
 ADMIN_MANUAL_ENTRY_TYPE = 99  # mirrors commands/group_admin.py
+# Event clan-point awards (web114a) — entry_id is the paying event. Mirrors
+# services/event_point_awards.PLACEMENT_ENTRY_TYPE / PARTICIPATION_ENTRY_TYPE
+# (not imported: the unit-test conftest stubs the services package).
+EVENT_AWARD_ENTRY_TYPES = {10: "placement", 11: "participation"}
 MAX_ADJUST = 1_000_000
 
 
@@ -1204,6 +1208,10 @@ async def points_history(group_id: int):
                     "amount": int(pp.amount),
                     "reason": pp.reason or "",
                     "manual": pp.entry_type == ADMIN_MANUAL_ENTRY_TYPE,
+                    # Paid by an event (web114a): which one, and for what.
+                    "event_id": (pp.entry_id if pp.entry_type in EVENT_AWARD_ENTRY_TYPES
+                                 else None),
+                    "event_award": EVENT_AWARD_ENTRY_TYPES.get(pp.entry_type),
                     "date": pp.date_added.isoformat() if pp.date_added else None,
                 }
                 for pp, name in rows
