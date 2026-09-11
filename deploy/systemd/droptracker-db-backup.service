@@ -25,6 +25,14 @@ Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 # Tune retention/behavior here if needed (defaults shown; see scripts/db_backup.sh):
-#Environment=LOCAL_RETENTION_DAYS=7
-#Environment=REMOTE_RETENTION_DAYS=30
-#Environment=MIN_FREE_GB=25
+# Local retention is 1 day, not the script default of 7: the local set exists
+# only as the staging directory for the B2 upload, and B2 keeps 30 days. Seven
+# local sets is ~34 GB of a 410G disk that is chronically near-full. Keeping
+# one means the box needs ~5 GB of headroom for a backup instead of ~34 GB,
+# and today's set is still on disk for a fast restore.
+Environment=LOCAL_RETENTION_DAYS=1
+Environment=REMOTE_RETENTION_DAYS=30
+# Sized to match: one set is ~5 GB, so this floor leaves ~5 GB of margin during
+# the dump, and the set is deleted again as soon as B2 has it. The old 25 GiB
+# floor was sized for seven retained local sets.
+Environment=MIN_FREE_GB=10
