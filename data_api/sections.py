@@ -257,31 +257,106 @@ def _load_clog_slots(session, player_ids: List[int], ctx) -> Dict[int, dict]:
 
 
 def _load_combat_achievements(session, player_ids: List[int], ctx) -> Dict[int, dict]:
-    # tasks_completed/points are denormalised precisely so a summary never has
-    # to decode the raw varps; the full per-tier breakdown stays on the site.
+    """Points, the tier they reach and the distance to the next, per player.
+
+    ``points`` is kept current by every combat achievement completion (the
+    game's own total) as well as by the account sync (``db/ca_points.py``);
+    ``tasks_completed`` comes from the sync alone, so it is null for a player
+    who has completed tasks since installing the plugin but never synced. Both
+    are denormalised so a summary never decodes the raw varps; the per-tier
+    breakdown stays on the site.
+
+    The tier is derived here rather than stored because the thresholds move
+    with every batch of new tasks. ``ctx["ca_thresholds"]`` is set by the
+    request (``data_api.serving``) without waiting on the wiki.
+    """
+    from services.ca_tiers import ca_tier_summary, current_tier_thresholds
+
+    thresholds = ctx.get("ca_thresholds") or current_tier_thresholds()
     rows = session.execute(text("""
         SELECT player_id, tasks_completed, points, updated_at
         FROM player_ca_varps WHERE player_id IN :ids
     """).bindparams(ids=tuple(player_ids)))
     return {int(r[0]): {"tasks_completed": r[1], "points": r[2],
+                        **ca_tier_summary(r[2], thresholds),
                         "updated_at": _iso(r[3])}
             for r in rows}
 
 
+#: Grandmaster quests, from the wiki's quest list (difficulty column), 2026-09-10.
+#: Names as the plugin reports them in quest-completion notifications.
+GRANDMASTER_QUESTS = (
+    "While Guthix Sleeps",
+    "Monkey Madness II",
+    "Dragon Slayer II",
+    "Song of the Elves",
+    "Desert Treasure II - The Fallen Empire",
+    "The Blood Moon Rises",
+)
+
+
 def _load_quests(session, player_ids: List[int], ctx) -> Dict[int, dict]:
+    """Quest counts by state, plus quest points and grandmaster completions.
+
+    The counts come from account sync. Quest points do not: the snapshot does
+    not carry the game's quest-point varp, so they are read from the quest
+    completion notifications, each of which records the player's quest points
+    and the game's total at that moment. The *highest* recorded value is used,
+    not the latest, because quest points only go up and a replayed or reordered
+    notification must not lower them.
+
+    So ``quest_points`` is null for a player who has not completed a quest since
+    installing the plugin, and can lag for one who completes quests without it.
+    ``quest_cape`` is true when that highest record equalled the game's total.
+    ``grandmaster_quests`` likewise lists only those completed with the plugin
+    running (and every one of them is implied by ``quest_cape``).
+    """
+    ids = tuple(player_ids)
     rows = session.execute(text("""
         SELECT player_id, state, COUNT(*) FROM player_quest_states
         WHERE player_id IN :ids GROUP BY player_id, state
-    """).bindparams(ids=tuple(player_ids)))
+    """).bindparams(ids=ids))
+
+    def blank():
+        return {"not_started": 0, "in_progress": 0, "finished": 0,
+                "quest_points": None, "total_quest_points": None,
+                "quest_points_at": None, "quest_cape": False, "grandmaster_quests": []}
 
     out: Dict[int, dict] = {}
     labels = {0: "not_started", 1: "in_progress", 2: "finished"}
     for player_id, state, count in rows:
-        entry = out.setdefault(int(player_id),
-                               {"not_started": 0, "in_progress": 0, "finished": 0})
+        entry = out.setdefault(int(player_id), blank())
         label = labels.get(int(state))
         if label:
             entry[label] = int(count)
+
+    # Highest quest points per player, and the total recorded alongside it.
+    best = session.execute(text("""
+        SELECT q.player_id, q.quest_points, q.total_quest_points, q.date_added
+        FROM quest_completions q
+        JOIN (SELECT player_id, MAX(quest_points) AS qp FROM quest_completions
+              WHERE player_id IN :ids AND quest_points > 0 GROUP BY player_id) m
+          ON m.player_id = q.player_id AND m.qp = q.quest_points
+        WHERE q.player_id IN :ids
+        ORDER BY q.player_id, q.date_added DESC
+    """).bindparams(ids=ids))
+    for player_id, qp, total, at in best:
+        entry = out.setdefault(int(player_id), blank())
+        if entry["quest_points"] is not None:
+            continue  # ties on quest_points: the newest row came first
+        entry["quest_points"] = int(qp)
+        entry["total_quest_points"] = int(total) if total else None
+        entry["quest_points_at"] = _iso(at)
+        entry["quest_cape"] = bool(total) and int(qp) >= int(total)
+
+    gm = session.execute(text("""
+        SELECT DISTINCT player_id, quest_name FROM quest_completions
+        WHERE player_id IN :ids AND quest_name IN :names
+    """).bindparams(ids=ids, names=GRANDMASTER_QUESTS))
+    for player_id, name in gm:
+        out.setdefault(int(player_id), blank())["grandmaster_quests"].append(name)
+    for entry in out.values():
+        entry["grandmaster_quests"].sort()
     return out
 
 
@@ -739,9 +814,15 @@ _SECTIONS = (
     Section("clog_slots", 161, _load_clog_slots,
             "Every recorded collection log slot with its quantity (~1.5k rows/player)."),
     Section("combat_achievements", 1, _load_combat_achievements,
-            "Combat achievement tasks completed and points."),
+            "Combat achievement points, the tier they reach, and the next tier "
+            "with the points still needed and progress through the current "
+            "tier (%). Points refresh on every task completion; "
+            "tasks_completed comes from account sync."),
     Section("quests", 4, _load_quests,
-            "Quest counts by state."),
+            "Quest counts by state (account sync), plus quest_points and "
+            "total_quest_points from quest-completion notifications — null until "
+            "the player completes a quest with the plugin — quest_cape, and the "
+            "grandmaster quests completed with the plugin running."),
     Section("diaries", 8, _load_diaries,
             "Achievement diary completion counts per area and tier."),
     Section("personal_bests", 8, _load_personal_bests,

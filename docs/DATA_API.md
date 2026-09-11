@@ -213,8 +213,8 @@ members — the two are different answers and are reported differently.
 | `discord` | 1 | The Discord account that has claimed the player. **Not part of `all`** — ask for it by name |
 | `stats` | 2 | Experience in all 24 skills, and the total |
 | `clog` | 2 | Collection log progress (obtained / total) |
-| `combat_achievements` | 2 | Tasks completed and points |
-| `quests` | 2 | Counts by state |
+| `combat_achievements` | 1 | Points, the tier they reach, and the next tier with the points still needed — see below |
+| `quests` | 2 | Counts by state; `quest_points`, `total_quest_points` and `quest_cape` from quest-completion notifications (null until the player completes a quest with the plugin); `grandmaster_quests` completed with the plugin running |
 | `diaries` | 2 | Completion counts per area and tier |
 | `points` | 2 | Lifetime points earned |
 | `badges` | 2 | Currently held badges |
@@ -262,6 +262,44 @@ enumerate by name.
 **`all` does not include it.** Ask for it by name, so an integration already
 calling `include=all` does not begin receiving personal identifiers it never
 asked for.
+
+### `combat_achievements` — points and tier
+
+```
+GET /v2/players/{id}?include=combat_achievements
+```
+
+```json
+"combat_achievements": {
+  "tasks_completed": 231, "points": 656,
+  "tier": "Hard", "next_tier": "Elite", "next_tier_points": 1100,
+  "points_to_next": 444, "progress": 33.13,
+  "updated_at": "2026-09-10T12:00:00"
+}
+```
+
+(Illustrative numbers, with the thresholds as of September 2026.)
+
+| Field | Meaning |
+|---|---|
+| `points` | Combat achievement points. Refreshed from the game's own total every time the player completes a task, and from their account sync |
+| `tier` | The highest tier those points reach — `Easy` to `Grandmaster` — or `null` below Easy |
+| `next_tier` | The next tier up, or `null` once Grandmaster is reached |
+| `next_tier_points` | What that tier needs, or `null` at Grandmaster |
+| `points_to_next` | Points still needed; `0` at Grandmaster |
+| `progress` | How far the player is from the current tier's threshold to the next one's, as a percentage; `100` at Grandmaster |
+| `tasks_completed` | Tasks completed, from the account sync alone: `null` for a player who has never synced, even when `points` is known |
+| `updated_at` | When any of the above last changed |
+
+The tier thresholds come from the OSRS Wiki and move whenever Jagex adds
+tasks, so the tier is worked out when you ask rather than stored — the same
+total can move to a lower tier after a batch of new tasks raises the bar.
+
+The whole section is `null` for a player we have no combat achievement data
+for: never synced with plugin 6.0 or later, and no task completed since.
+`points` itself is only `null` in the rare window where we hold a player's
+synced tasks but have not yet been able to count them; the tier fields are
+then `null` too, rather than a guess.
 
 ### `drops` — the individual-drop feed
 

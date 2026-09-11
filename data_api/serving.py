@@ -198,6 +198,13 @@ async def serve(endpoint: str, resolve: Callable, build: Callable,
                               "(e.g. barrows_chests).",
                 }, 400)
             ctx["drops_npc"] = raw_npc.strip()
+    if "combat_achievements" in requested:
+        # Taken here, on the event loop, because that is where a stale table
+        # can be refreshed in the background; the loader runs in a worker
+        # thread. Never waits on the wiki (see services.ca_tiers).
+        from services.ca_tiers import tier_thresholds_nowait
+
+        ctx["ca_thresholds"] = tier_thresholds_nowait()
 
     def _work():
         session = SessionLocal()
