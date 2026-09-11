@@ -43,6 +43,7 @@ from services.state_sync import (
     MAX_ITEMS,
     MAX_QUESTS,
     MAX_VARPS,
+    combat_achievement_points,
     count_completed_combat_achievements,
     deserialize_varps,
     improved_diary_tiers,
@@ -451,7 +452,8 @@ def _upsert_diaries(db_session, player_id, previous, incoming):
 
 
 def _upsert_combat_achievements(db_session, player_id, varps, completed_tasks=None):
-    """Stores the raw completion bits plus a task count.
+    """Stores the raw completion bits plus a task count, and offers what the
+    bits are worth to the player's point total.
 
     Skipped entirely when the client sent no varps — that means it had no
     manifest, not that the player completed nothing, and overwriting real data
@@ -481,3 +483,26 @@ def _upsert_combat_achievements(db_session, player_id, varps, completed_tasks=No
     # not "not seen". Merging would make an un-completed task impossible.
     if completed_tasks is not None and completed_tasks:
         row.completed_tasks = json.dumps(sorted(set(completed_tasks)), separators=(",", ":"))
+
+    if varps:
+        _record_synced_points(db_session, player_id, merged)
+
+
+def _record_synced_points(db_session, player_id, varps):
+    """What the stored bits are worth, as a ``sync`` reading of the total.
+
+    The merged bits, not just this snapshot's: a client on an older manifest
+    reads fewer varps, and the ones it did not read are still known. The
+    shared rule (``db/ca_points.py``) lets this raise the stored total but
+    never lower it, so a registry that lags a game update, or a login read
+    taken before the game sent the varps, cannot take points away.
+    """
+    from db.ca_points import SOURCE_SYNC, load_task_registry, record_ca_points
+
+    points = combat_achievement_points(varps, load_task_registry(db_session))
+    if points is None:
+        # No registry to count against: "cannot count", not "zero points".
+        return
+    # The row may still be pending; the UPDATE below has to find it.
+    db_session.flush()
+    record_ca_points(db_session, player_id, points, SOURCE_SYNC, datetime.now())

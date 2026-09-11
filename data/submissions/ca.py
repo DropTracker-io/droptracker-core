@@ -18,11 +18,47 @@ from .common import (
     debug_print,
     get_config_prefix,
     envelope_from_plugin,
+    received_at,
+    reraise_if_session_broken,
     SEASONAL_WORLD_TYPE,
     SeasonalCombatAchievementEntry,
     redis_client,
 )
 from utils.ca_tasks import note_unverified, resolve_task_name
+
+
+def _record_game_total(session, player_id, points_total, ca_data):
+    """Keep the player's stored combat achievement points current from the
+    game's own total.
+
+    Every plugin completion carries varbit 14815 — the total *after* the task
+    just completed, read at tick end — so this is the freshest reading there
+    is, and it arrives far more often than an account sync. Plugin traffic
+    only: manual submissions send 0 because they have no varbit to read. (The
+    caller also skips League worlds, whose totals belong to another account.)
+
+    Dated by when the server accepted the submission, with no lag cap, so a
+    replayed old submission sorts as old and cannot lower a newer total.
+
+    Must not be followed by an await before the caller's commit: the row lock
+    it takes lasts until that commit (see db/ca_points.py).
+    """
+    from db.ca_points import SOURCE_GAME, record_ca_points, valid_points
+
+    points = valid_points(points_total)
+    if not points or not envelope_from_plugin(ca_data):
+        return
+    try:
+        record_ca_points(
+            session, player_id, points, SOURCE_GAME,
+            received_at(ca_data, max_lag=None),
+        )
+    except Exception as exc:
+        # A fault here must not cost the completion itself — unless the
+        # session is broken, in which case the row was never going to commit
+        # and the consumer's retry is the only thing that can save it.
+        reraise_if_session_broken(exc)
+        debug_print(f"Couldn't record the CA points total for player {player_id}: {exc}")
 
 
 async def ca_processor(ca_data, external_session=None, world_type="main"):
@@ -188,6 +224,10 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
             ca_entry.image_url = image_url
         if video_url:
             ca_entry.video_url = video_url
+    if not is_seasonal:
+        # Immediately before the commit, with no await between: the points
+        # row lock is held until the commit releases it.
+        _record_game_total(session, player_id, points_total, ca_data)
     session.commit()
     debug_print("Committed a new CA entry")
 

@@ -7,8 +7,10 @@ apart from "we are seeing this account for the first time".
 import pytest
 
 from services.state_sync import (
+    CA_TASK_POINTS,
     LATE_INIT_KNOWN_ITEMS_MAX,
     MAX_ITEMS,
+    combat_achievement_points,
     count_completed_combat_achievements,
     deserialize_varps,
     improved_diary_tiers,
@@ -77,6 +79,61 @@ class TestCombatAchievementCounting:
         a = count_completed_combat_achievements({3116: 0b101, 5673: 0b11})
         b = count_completed_combat_achievements({5673: 0b11, 3116: 0b101})
         assert a == b
+
+
+def _task(varp, bit, tier):
+    return {"varp": varp, "bit": bit, "tier": tier, "name": f"{tier} {varp}/{bit}"}
+
+
+class TestCombatAchievementPoints:
+    REGISTRY = [
+        _task(3116, 0, "Easy"),
+        _task(3116, 1, "Medium"),
+        _task(3116, 2, "Hard"),
+        _task(3117, 0, "Elite"),
+        _task(3117, 1, "Master"),
+        _task(3117, 31, "Grandmaster"),
+    ]
+
+    def test_completed_tasks_are_worth_their_tier(self):
+        # Easy (1) + Hard (3) + Master (5).
+        assert combat_achievement_points({3116: 0b101, 3117: 0b10}, self.REGISTRY) == 9
+
+    def test_the_top_bit_of_a_signed_varp_is_a_real_task(self):
+        # 3117 = -2147483648 is bit 31 alone: the Grandmaster task.
+        assert combat_achievement_points({3117: -(2 ** 31)}, self.REGISTRY) == 6
+
+    def test_every_task_done_is_the_registry_total(self):
+        full = {3116: -1, 3117: -1}
+        assert combat_achievement_points(full, self.REGISTRY) == sum(CA_TASK_POINTS.values())
+
+    def test_nothing_done_is_zero_not_unknown(self):
+        assert combat_achievement_points({3116: 0}, self.REGISTRY) == 0
+        assert combat_achievement_points({}, self.REGISTRY) == 0
+
+    def test_bits_the_registry_does_not_name_are_worth_nothing(self):
+        # A registry that lags a game update undercounts; it never invents.
+        assert combat_achievement_points({3116: 0b11111000, 9999: -1}, self.REGISTRY) == 0
+
+    def test_no_registry_is_unknown_rather_than_zero(self):
+        # None tells the caller not to store a total at all; 0 would be a
+        # claim that the player has done nothing.
+        assert combat_achievement_points({3116: -1}, []) is None
+        assert combat_achievement_points({3116: -1}, None) is None
+
+    def test_unusable_entries_are_skipped(self):
+        registry = [
+            {"varp": "3116", "bit": 0, "tier": "Easy"},
+            {"varp": 3116, "bit": True, "tier": "Easy"},
+            {"varp": 3116, "bit": 32, "tier": "Easy"},
+            {"varp": 3116, "tier": "Easy"},
+        ]
+        assert combat_achievement_points({3116: -1}, registry) is None
+        registry.append(_task(3116, 3, "Elite"))
+        assert combat_achievement_points({3116: -1}, registry) == 4
+
+    def test_an_unknown_tier_counts_as_a_task_worth_nothing(self):
+        assert combat_achievement_points({3116: 1}, [_task(3116, 0, "Mythic")]) == 0
 
 
 class TestVarpSerialization:

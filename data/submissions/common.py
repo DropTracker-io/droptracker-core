@@ -136,7 +136,8 @@ def envelope_from_plugin(submission_data: dict) -> bool:
 _RECEIVED_AT_MAX_LAG = timedelta(hours=6)
 
 
-def received_at(submission_data: dict) -> datetime:
+def received_at(submission_data: dict, *,
+                max_lag: timedelta | None = _RECEIVED_AT_MAX_LAG) -> datetime:
     """When the server ACCEPTED this submission, for stamping the row.
 
     Falls back to now() when the stamp is missing, unparseable, in the future,
@@ -148,6 +149,10 @@ def received_at(submission_data: dict) -> datetime:
     Deliberately the SERVER's accept time (``enqueued_at``, set in
     api/routes/webhook.py), not the client's ``timestamp``: a player's clock is
     neither accurate nor trustworthy, and a spoofed one could rewrite history.
+
+    ``max_lag=None`` believes a stamp of any age. That is for *ordering*
+    readings rather than dating rows: a replayed day-old submission must sort
+    as a day old (db/ca_points.py), not as though the game were read just now.
     """
     raw = (submission_data or {}).get("_received_at")
     if not raw:
@@ -159,7 +164,7 @@ def received_at(submission_data: dict) -> datetime:
     if stamped.tzinfo is not None:
         stamped = stamped.astimezone(timezone.utc).replace(tzinfo=None)
     now = datetime.now()
-    if stamped > now or (now - stamped) > _RECEIVED_AT_MAX_LAG:
+    if stamped > now or (max_lag is not None and (now - stamped) > max_lag):
         return now
     return stamped
 

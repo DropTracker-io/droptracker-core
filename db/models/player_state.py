@@ -100,12 +100,19 @@ class PlayerCollectionLogItem(Base):
 
 
 class PlayerCombatAchievementVarps(Base):
-    """Raw combat achievement completion bits, exactly as the client read them.
+    """Raw combat achievement completion bits, exactly as the client read them,
+    and the player's point total.
 
     Stored raw and decoded on read, deliberately. The varp list comes from the
     manifest and grows as Jagex appends varps, so decoding at write time would
     bake whatever task registry we had that day into the stored data — and a
     later registry fix could not be applied retroactively. Raw bits stay true.
+
+    ``points`` is the exception, and has two writers: the sync (what its bits
+    are worth) and every combat achievement completion (the game's own total).
+    ``db/ca_points.py`` is the only thing that writes it and owns the rule for
+    which reading wins. A completion can create the row for a player who has
+    never synced, so ``varps`` is NULL there — "no bits", not "none completed".
     """
 
     __tablename__ = "player_ca_varps"
@@ -113,8 +120,9 @@ class PlayerCombatAchievementVarps(Base):
 
     player_id = Column(Integer, ForeignKey("players.player_id"), primary_key=True)
     # JSON object: {"3116": 123456, "3117": 0, ...}. Text for the same reason as
-    # the rest of the codebase's JSON columns — we never query into it.
-    varps = Column(Text, nullable=False)
+    # the rest of the codebase's JSON columns — we never query into it. NULL on
+    # a row created by a completion before any sync.
+    varps = Column(Text, nullable=True)
     # Denormalised so leaderboards and profile headers do not decode every row.
     tasks_completed = Column(Integer, nullable=True)
     # JSON array of the task varbits reported complete, when the client had a
@@ -122,7 +130,14 @@ class PlayerCombatAchievementVarps(Base):
     # interface shows; the raw varps above remain the complete truth, including
     # tasks the registry has no entry for.
     completed_tasks = Column(Text, nullable=True)
+    # Total combat achievement points (what the tier is derived from), and
+    # which reading set it: "game" (the total sent with a completion) or
+    # "sync" (the bits above, counted). Written only through db/ca_points.py.
     points = Column(Integer, nullable=True)
+    points_source = Column(String(16), nullable=True)
+    # When that reading was taken — what stops a late in-game total from
+    # overwriting a newer one.
+    points_observed_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 

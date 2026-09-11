@@ -127,7 +127,9 @@ def _combat_achievements_for(s, player_id: int):
         .filter(PlayerCombatAchievementVarps.player_id == player_id)
         .first()
     )
-    if row is None:
+    # No bits at all: a row a completion created to hold the player's point
+    # total before any sync. Decoding it would read every task as undone.
+    if row is None or row.varps is None:
         return None
 
     from services.state_sync import deserialize_varps

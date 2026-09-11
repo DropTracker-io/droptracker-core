@@ -145,6 +145,51 @@ def count_completed_combat_achievements(varps: Dict[int, int]) -> int:
     return total
 
 
+# What one completed task is worth, by tier. Fixed by the game: the tier
+# thresholds move with every batch of new tasks, these never have.
+CA_TASK_POINTS = {
+    "Easy": 1,
+    "Medium": 2,
+    "Hard": 3,
+    "Elite": 4,
+    "Master": 5,
+    "Grandmaster": 6,
+}
+
+
+def combat_achievement_points(varps: Dict[int, int],
+                              tasks: Iterable[Dict[str, Any]]) -> Optional[int]:
+    """Points the completed tasks in ``varps`` are worth, or None.
+
+    ``tasks`` is the task registry: each entry's (varp, bit) records one task's
+    completion and its tier sets the value. Checked against the total the game
+    itself reports with every completion, this reproduced it exactly for 996
+    of 1,075 players; the rest were the two readings being taken at different
+    moments.
+
+    None without a registry, which is not the same answer as 0: it means
+    "cannot count", and a caller must not store it as a total.
+
+    A registry that lags a game update only ever *under*counts — a task it has
+    no entry for is simply not added — which is why a counted total may raise
+    a stored one but never lower it (see ``db/ca_points.py``).
+    """
+    points = 0
+    usable = False
+    for task in tasks or ():
+        varp = task.get("varp")
+        bit = task.get("bit")
+        if (not isinstance(varp, int) or isinstance(varp, bool)
+                or not isinstance(bit, int) or isinstance(bit, bool)
+                or not 0 <= bit < 32):
+            continue
+        usable = True
+        # Masked for the same reason as the count above: signed 32-bit varps.
+        if (varps.get(varp, 0) & 0xFFFFFFFF) & (1 << bit):
+            points += CA_TASK_POINTS.get(task.get("tier"), 0)
+    return points if usable else None
+
+
 def new_collection_log_items(previous: Dict[int, int],
                              incoming: Dict[int, int]) -> List[int]:
     """Item ids present in the snapshot that we had no record of before."""

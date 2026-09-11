@@ -24,6 +24,11 @@ they were "-2,412 pts" from **Easy**. So:
   one game update instead of being nonsense;
 * the maths is a pure function, so the edge cases (below Easy, Grandmaster
   already done, total unknown) are testable without touching the network.
+
+The Data API's ``combat_achievements`` section serves the same maths over each
+player's stored total (``player_ca_varps.points``, see ``db/ca_points.py``) as
+typed fields — `ca_tier_summary` — and reads the thresholds through
+`tier_thresholds_nowait`, so an API request never waits on the wiki.
 """
 
 from __future__ import annotations
@@ -44,16 +49,18 @@ WIKI_GLOBALS = {
     "Grandmaster": "ca gm points",
 }
 
-# Read off the wiki on 2026-08-23. Only reached when the live lookup fails, and
-# only needs to be close enough that the displayed tier is right — refresh it
-# whenever a CA batch ships if you want the "points to go" exact too.
+# Read off the wiki on 2026-09-10, after the 2026-08-26 batch (4 Medium, 3
+# Hard and 2 Elite tasks) moved every threshold above Easy. Only reached when
+# the live lookup fails, or before it has answered once in this process (the
+# Data API serves these rather than wait on the wiki) — refresh it whenever a
+# CA batch ships.
 FALLBACK_TIER_POINTS: Dict[str, int] = {
     "Easy": 41,
-    "Medium": 161,
-    "Hard": 419,
-    "Elite": 1075,
-    "Master": 1940,
-    "Grandmaster": 2672,
+    "Medium": 169,
+    "Hard": 436,
+    "Elite": 1100,
+    "Master": 1965,
+    "Grandmaster": 2697,
 }
 
 # Shown wherever a number would otherwise be invented. Web/Discord manual CA
@@ -75,6 +82,7 @@ _FETCH_TIMEOUT = 15
 _cache: Optional[Dict[str, int]] = None
 _cached_at: float = 0.0
 _last_attempt: Optional[float] = None
+_refresh_task: Optional["asyncio.Task"] = None
 
 
 def parse_threshold(raw: Any) -> Optional[int]:
@@ -129,6 +137,16 @@ async def _fetch_from_wiki(semantic=None) -> Optional[Dict[str, int]]:
             await client.close()
 
 
+def _needs_fetch(now: float) -> bool:
+    """Whether the wiki should be asked: the cache is stale and no recent
+    failure has backed us off."""
+    if _cache is not None and now - _cached_at < _TTL_SECONDS:
+        return False
+    if _last_attempt is not None and now - _last_attempt < _RETRY_SECONDS:
+        return False
+    return True
+
+
 async def get_tier_thresholds(semantic=None) -> Dict[str, int]:
     """Cumulative points per tier, cached process-wide.
 
@@ -138,10 +156,9 @@ async def get_tier_thresholds(semantic=None) -> Dict[str, int]:
     global _cache, _cached_at, _last_attempt
 
     now = time.monotonic()
-    if _cache is not None and now - _cached_at < _TTL_SECONDS:
-        return _cache
-    if _last_attempt is not None and now - _last_attempt < _RETRY_SECONDS:
-        # A failure just backed us off; don't re-hammer the wiki per notification.
+    if not _needs_fetch(now):
+        # Either fresh, or a failure just backed us off; don't re-hammer the
+        # wiki per notification.
         return _cache if _cache is not None else dict(FALLBACK_TIER_POINTS)
 
     _last_attempt = now
@@ -159,12 +176,41 @@ async def get_tier_thresholds(semantic=None) -> Dict[str, int]:
     return table
 
 
+def current_tier_thresholds() -> Dict[str, int]:
+    """The best table this process holds right now, without asking the wiki."""
+    return dict(_cache) if _cache is not None else dict(FALLBACK_TIER_POINTS)
+
+
+def tier_thresholds_nowait() -> Dict[str, int]:
+    """`current_tier_thresholds`, refreshing a stale cache in the background.
+
+    For request paths that must answer now. Awaiting `get_tier_thresholds`
+    would make one Data API request every six hours wait on six wiki lookups,
+    and every request for up to `_FETCH_TIMEOUT` while the wiki is down; the
+    pinned table is right about the tier in the meantime. The refresh needs a
+    running event loop, so called from anywhere else this only returns what the
+    process already has.
+    """
+    global _refresh_task
+    if _needs_fetch(time.monotonic()) and (_refresh_task is None or _refresh_task.done()):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            # Held so the task is not collected mid-flight; get_tier_thresholds
+            # never raises, so nothing is left unobserved.
+            _refresh_task = loop.create_task(get_tier_thresholds())
+    return current_tier_thresholds()
+
+
 def reset_cache() -> None:
     """Drop the cached thresholds (tests, and anything that wants a refetch)."""
-    global _cache, _cached_at, _last_attempt
+    global _cache, _cached_at, _last_attempt, _refresh_task
     _cache = None
     _cached_at = 0.0
     _last_attempt = None
+    _refresh_task = None
 
 
 def _format_percent(value: float) -> str:
@@ -197,20 +243,7 @@ def ca_progress(points_total: Any, thresholds: Optional[Mapping[str, int]] = Non
             "total_points": UNKNOWN_VALUE,
         }
 
-    current_tier = None
-    current_tier_points = 0
-    next_tier = None
-    next_tier_points = 0
-    for tier in CA_TIER_ORDER:
-        tier_points = table.get(tier)
-        if not tier_points:
-            continue
-        if points >= tier_points:
-            current_tier = tier
-            current_tier_points = tier_points
-        elif next_tier is None:
-            next_tier = tier
-            next_tier_points = tier_points
+    current_tier, current_tier_points, next_tier, next_tier_points = _tier_position(points, table)
 
     if next_tier is None:
         # Grandmaster is done. The old code reached for tier_order[index - 1] on
@@ -227,16 +260,95 @@ def ca_progress(points_total: Any, thresholds: Optional[Mapping[str, int]] = Non
             "total_points": points,
         }
 
-    span = next_tier_points - current_tier_points
-    progress = 100.0 if span <= 0 else ((points - current_tier_points) / span) * 100
-    progress = max(0.0, min(100.0, progress))
-
     return {
         "known": True,
         "current_tier": current_tier or NO_TIER,
         "next_tier": next_tier,
         "next_tier_points": next_tier_points,
         "points_left": max(0, next_tier_points - points),
-        "progress": _format_percent(progress),
+        "progress": _format_percent(
+            _span_progress(points, current_tier_points, next_tier_points)
+        ),
         "total_points": points,
     }
+
+
+def ca_tier_summary(points_total: Any,
+                    thresholds: Optional[Mapping[str, int]] = None) -> Dict[str, Any]:
+    """The tier fields of an API response: typed, and None where unknown.
+
+    The same maths as `ca_progress`, shaped for programs rather than a Discord
+    template — numbers where that returns display strings, None where it
+    returns "?". One difference is deliberate: a total of 0 is a real answer
+    here. The notification only ever sees 0 from a manual submission that
+    could not read the varbit, but a stored 0 is an account with no tasks done,
+    which has no tier yet and is `Easy` points from its first.
+
+    ``progress`` is the percentage of the way from the current tier's
+    threshold to the next one's, as the notification shows it.
+    """
+    unknown = {
+        "tier": None,
+        "next_tier": None,
+        "next_tier_points": None,
+        "points_to_next": None,
+        "progress": None,
+    }
+    if points_total is None or isinstance(points_total, bool):
+        return unknown
+    try:
+        points = int(points_total)
+    except (TypeError, ValueError):
+        return unknown
+    if points < 0:
+        return unknown
+
+    table = dict(thresholds) if thresholds else dict(FALLBACK_TIER_POINTS)
+    current_tier, current_tier_points, next_tier, next_tier_points = _tier_position(points, table)
+
+    if next_tier is None:
+        return {
+            "tier": current_tier or CA_TIER_ORDER[-1],
+            "next_tier": None,
+            "next_tier_points": None,
+            "points_to_next": 0,
+            "progress": 100.0,
+        }
+
+    return {
+        "tier": current_tier,
+        "next_tier": next_tier,
+        "next_tier_points": next_tier_points,
+        "points_to_next": max(0, next_tier_points - points),
+        "progress": round(_span_progress(points, current_tier_points, next_tier_points), 2),
+    }
+
+
+def _tier_position(points: int, table: Mapping[str, int]):
+    """``(current tier, its threshold, next tier, its threshold)``.
+
+    The current tier is None below Easy (threshold 0); the next tier is None
+    once Grandmaster is reached.
+    """
+    current_tier = None
+    current_tier_points = 0
+    next_tier = None
+    next_tier_points = 0
+    for tier in CA_TIER_ORDER:
+        tier_points = table.get(tier)
+        if not tier_points:
+            continue
+        if points >= tier_points:
+            current_tier = tier
+            current_tier_points = tier_points
+        elif next_tier is None:
+            next_tier = tier
+            next_tier_points = tier_points
+    return current_tier, current_tier_points, next_tier, next_tier_points
+
+
+def _span_progress(points: int, current_tier_points: int, next_tier_points: int) -> float:
+    """How far through the current tier's span, as a percentage in 0..100."""
+    span = next_tier_points - current_tier_points
+    progress = 100.0 if span <= 0 else ((points - current_tier_points) / span) * 100
+    return max(0.0, min(100.0, progress))

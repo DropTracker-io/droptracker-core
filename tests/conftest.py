@@ -215,6 +215,17 @@ if "db.group_rename" not in sys.modules:
     sys.modules["db.group_rename"] = _mod
     _spec.loader.exec_module(_mod)
 
+# db/ca_points.py — the one writer of a player's combat achievement total, and
+# the rule for which reading wins. SQLAlchemy-core only with the session passed
+# in, so the real module runs here: tests/unit/test_ca_points.py drives its
+# UPDATE against SQLite, and the CA processor and sync route import it.
+_CA_POINTS_PATH = _Path(__file__).resolve().parent.parent / "db" / "ca_points.py"
+if "db.ca_points" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.ca_points", _CA_POINTS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.ca_points"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/event_effort.py — the Bingo EHB scoring core. Pure by design
 # (stdlib-only module imports, injected lookups), so load the real module: the
 # effort tests assert on its relevance/EHB decisions directly.
