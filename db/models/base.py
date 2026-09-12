@@ -1,5 +1,7 @@
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
+from contextlib import contextmanager
+
 from sqlalchemy.orm import sessionmaker, scoped_session
 import os
 from dotenv import load_dotenv
@@ -103,6 +105,27 @@ def _rollback_on_checkin(dbapi_connection, connection_record):
 # Create session factory and scoped session (hot-swappable parity with legacy)
 Session = sessionmaker(bind=engine)
 session = scoped_session(Session)
+
+
+@contextmanager
+def db_session():
+    """A private Session for one unit of work, always closed.
+
+    Use this instead of the module-global scoped `session` in any long-lived
+    background loop. `scoped_session` is THREAD-local, not task-local: every
+    coroutine in a bot process shares one Session, so a loop that ends its
+    iteration with `session.remove()`/`session.close()` also tears down the
+    Session that other in-flight coroutines are using. Objects they are holding
+    across an `await` go detached, and a detached `lazy='dynamic'` collection
+    yields NOTHING rather than raising — which is how the hourly WOM sync came
+    to read an empty roster and re-announce every existing member as a new join
+    (2026-09-12). A loop with its own Session can clean up freely.
+    """
+    s = Session()
+    try:
+        yield s
+    finally:
+        s.close()
 
 # Secondary XenForo connection (parity with legacy models)
 XENFORO_POOL_SIZE = int(os.getenv("XENFORO_DB_POOL_SIZE", "4"))

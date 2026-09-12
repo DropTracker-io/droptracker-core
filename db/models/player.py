@@ -143,7 +143,14 @@ class Player(Base):
         
         Args:
             group (Group): The Group object to associate with this player
-            
+
+        Returns:
+            bool: True when a membership row was created, False when the player
+            was already a member. Callers that announce a join MUST gate on
+            this — the WOM sync used to decide "is this a new member?" from a
+            roster read that could come back empty, and every already-present
+            member got a "Member Added" embed with no write behind it.
+
         Note:
             This method commits the session automatically if a new association is created.
             The session used is the one THIS INSTANCE is attached to — reading and
@@ -165,6 +172,8 @@ class Player(Base):
             # Only add the group if no association exists
             self.groups.append(group)
             sess.commit()
+            return True
+        return False
 
     def remove_group(self, group):
         """
@@ -175,16 +184,26 @@ class Player(Base):
         
         Args:
             group (Group): The Group object to disassociate from this player
-            
+
+        Returns:
+            bool: True when a membership row was deleted, False when the player
+            was not a member (see ``add_group`` — callers gate announcements on
+            this so a leave embed always has a write behind it).
+
         Note:
             This method commits the session automatically if an association is removed.
         """
+        from sqlalchemy.orm import object_session
+
+        sess = object_session(self) or session
         # Check if the association already exists by querying the user_group_association table
-        existing_association = session.query(user_group_association).filter_by(
+        existing_association = sess.query(user_group_association).filter_by(
             player_id=self.player_id, group_id=group.group_id).first()
         if existing_association:
             self.groups.remove(group)
-            session.commit()
+            sess.commit()
+            return True
+        return False
 
     def get_groups(self, session_to_use: None) -> List:
         """

@@ -155,8 +155,14 @@ class SubmissionCommands(Extension):
         self.bot = bot
 
     def _refresh_session(self):
-        """Reset scoped session state before handling a new interaction."""
-        session.remove()
+        """Drop stale ORM state before handling a new interaction.
+
+        ``expire_all()``, never ``session.remove()`` — the scoped session is
+        shared by every coroutine in this bot, and tearing it down detaches
+        objects other tasks hold across an await (see
+        ``commands/user.py._refresh_session`` for the incident this caused).
+        """
+        session.expire_all()
 
     # ------------------------------------------------------------------
     # Shared plumbing

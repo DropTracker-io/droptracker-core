@@ -1,4 +1,4 @@
-from .base import Base, session, xenforo_engine, XenforoSession, Session
+from .base import Base, session, xenforo_engine, XenforoSession, Session, db_session
 from .associations import user_group_association
 from .user import User
 from .npc import NpcList
@@ -231,6 +231,7 @@ __all__ = [
     "Base",
     "session",
     "Session",
+    "db_session",
     "xenforo_engine",
     "XenforoSession",
     "user_group_association",

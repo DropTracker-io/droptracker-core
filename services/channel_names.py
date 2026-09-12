@@ -3,7 +3,7 @@
 """
 import interactions
 from interactions import Extension, Task, IntervalTrigger, ChannelType
-from db.models import Group, GroupConfiguration, session, Player
+from db.models import Group, GroupConfiguration, Session, Player
 from datetime import datetime, timedelta
 from sqlalchemy import text
 from utils.format import format_number, get_current_partition
@@ -33,8 +33,19 @@ class ChannelNames(Extension):
             # it, so a single unexpected error (bad query, None group, WOM/Discord
             # hiccup) must never escape the while loop. Log it and fall through to
             # the finally block so the updater keeps running and doesn't busy-spin.
+            session = None
             try:
                 bot: interactions.Client = self.bot
+                # A PRIVATE Session per iteration, not the module-global scoped
+                # one. This loop used to read through the shared session and end
+                # with `session.remove()` — thread-local, not task-local, so it
+                # tore down the Session every OTHER coroutine in this process was
+                # using. The hourly WOM membership sync holds a Group across its
+                # awaits; the teardown detached it, `group.players` then yielded
+                # nothing rather than raising, and the sync re-announced every
+                # existing member as a new join (42 bursts / 38 groups,
+                # 2026-09-04..12).
+                session = Session()
                 loot_channel_id_configs = session.query(GroupConfiguration).filter(GroupConfiguration.config_key == 'vc_to_display_monthly_loot').all()
                 for channel_setting in loot_channel_id_configs:
                     group_id = channel_setting.group_id
@@ -136,15 +147,18 @@ class ChannelNames(Extension):
                 # group, etc.) can ever kill the while-True updater loop.
                 print("channel_names update loop iteration failed. e:", e)
             finally:
-                # Release the scoped session before sleeping so this thread does not
-                # hold an idle read transaction for the full interval — the config
-                # and member-count reads above otherwise leave the shared scoped
-                # session's connection checked out (2026-07-15 idle-transaction
-                # leak family). Nothing is held across iterations, so remove() is safe.
-                # In finally so cleanup + sleep run even when the iteration raised,
-                # preventing a tight busy-spin on a persistent error.
+                # Close before sleeping so this loop does not hold an idle read
+                # transaction for the full interval — the config and member-count
+                # reads above otherwise leave a connection checked out
+                # (2026-07-15 idle-transaction leak family). Closing our OWN
+                # Session is safe for other coroutines; `session.remove()` on the
+                # shared scoped session was not (see the note at the top of the
+                # iteration). In finally so cleanup + sleep run even when the
+                # iteration raised, preventing a tight busy-spin on a persistent
+                # error.
                 try:
-                    session.remove()
+                    if session is not None:
+                        session.close()
                 except Exception:
                     pass
                 await asyncio.sleep(600)

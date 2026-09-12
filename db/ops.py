@@ -882,10 +882,8 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
             embed = Embed(title=f"{app_emoji('leave')} Member Removed",
                           description=f"{member.player_name} ({uid}) has been removed from your group during to a WiseOldMan refresh.",
                           color=0x00ff00)
-            query = """SELECT COUNT(*) FROM user_group_association WHERE group_id = :group_id"""
-            total_players = session.execute(text(query), {"group_id": group.group_id}).fetchone()
-            total_players = total_players[0] if total_players else 0
-            embed.add_field(name="Total members:", value=f"{total_players}", inline=True)
+            embed.add_field(name="Total members:",
+                            value=f"{group.get_player_count(session)}", inline=True)
             embed.set_footer(global_footer)
             await channel.send(embed=embed)
         else:
@@ -899,10 +897,12 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
             embed = Embed(title=f"{app_emoji('join')} Member Added",
                           description=f"{member.player_name} ({uid}) has been added to your group during a WiseOldMan refresh.",
                           color=0x00ff00)
-            query = """SELECT COUNT(*) FROM user_group_association WHERE group_id = :group_id"""
-            total_members = session.execute(text(query), {"group_id": group.group_id}).fetchone()
-            total_members = total_members[0] if total_members else 0
-            embed.add_field(name="Total members:", value=f"{total_members}", inline=True)
+            # COUNT(*) over user_group_association counted the group's linked
+            # Discord users as extra members (the table holds a row per player
+            # AND a row per user), overstating 299 groups. get_player_count
+            # filters to player rows.
+            embed.add_field(name="Total members:",
+                            value=f"{group.get_player_count(session)}", inline=True)
             embed.set_footer(global_footer)
             await channel.send(embed=embed)
         else:
@@ -925,8 +925,62 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
         removed (int): number of players removed
         skipped_removals (bool): True when removal pass was skipped due to incomplete WOM response
     """
+    # The core bot shares ONE thread-local scoped session across every
+    # coroutine, so any task that ends its unit of work with
+    # session.remove()/close() detaches the ORM objects every OTHER in-flight
+    # coroutine is holding. This function holds `group` across the WOM call and
+    # across every Discord send, and a detached lazy='dynamic' collection
+    # yields NOTHING instead of raising (SAWarning only) — `group.players` came
+    # back empty mid-sync and every existing member was re-announced as a new
+    # join (42 bursts across 38 groups, 2026-09-04..12). The callers that did
+    # that are fixed, but this function must not depend on it: work from the
+    # plain int id and re-resolve the ORM object at each use.
+    group_db_id = int(group.group_id)
+    group_name = group.group_name
+
+    live = {"group": group}
+
+    def _live_group() -> Group:
+        """The Group bound to the CURRENT scoped session (see above).
+
+        Cached, because the add pass can run hundreds of times and the handle
+        only goes stale when a teardown actually happens.
+        """
+        from sqlalchemy.orm import object_session
+
+        held = live["group"]
+        if object_session(held) is not None:
+            return held
+        fresh = session.query(Group).filter(Group.group_id == group_db_id).first()
+        if fresh is not None:
+            live["group"] = fresh
+            return fresh
+        return held
+
+    def _member_player_ids() -> set:
+        """player_ids currently associated with this group.
+
+        Read straight from the association table rather than through
+        `group.players`, so a detached instance can never make the roster look
+        empty. Also skips the user rows the table carries alongside players.
+        """
+        return {
+            row[0] for row in session.query(user_group_association.c.player_id)
+            .filter(user_group_association.c.group_id == group_db_id,
+                    user_group_association.c.player_id != None)
+            .all()
+        }
+
+    def _member_players() -> list:
+        """The group's Player rows, in one query (see `_member_player_ids`)."""
+        return (session.query(Player)
+                .join(user_group_association,
+                      user_group_association.c.player_id == Player.player_id)
+                .filter(user_group_association.c.group_id == group_db_id)
+                .all())
+
     provision_cfg = session.query(GroupConfiguration).filter(
-        GroupConfiguration.group_id == group.group_id,
+        GroupConfiguration.group_id == group_db_id,
         GroupConfiguration.config_key == "auto_provision_members",
     ).first()
     # Boolean configs are stored as "1"/"0" (web_api/config_registry.coerce_to_storage),
@@ -935,7 +989,7 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
 
     group_wom_ids = await fetch_group_members(wom_id, force_refresh=True, provision_missing=provision_missing)
     if not group_wom_ids:
-        print(f"Failed to fetch member list for group {group.group_name} (WOM ID: {wom_id})")
+        print(f"Failed to fetch member list for group {group_name} (WOM ID: {wom_id})")
         return {"added": 0, "removed": 0, "skipped_removals": False}
 
     # Safety check: if WOM's own reported member_count differs from the number of
@@ -951,7 +1005,7 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
         app_logger.log(
             log_type="warning",
             data=(
-                f"WOM returned {returned_count} members for {group.group_name} "
+                f"WOM returned {returned_count} members for {group_name} "
                 f"(wom_id={wom_id}) but member_count in the response was {wom_expected_count}. "
                 f"Skipping removal pass to avoid evicting valid members from an incomplete list."
             ),
@@ -964,12 +1018,12 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
         try:
             stored = session.query(GroupWomAssociation).filter(
                 GroupWomAssociation.player_wom_id == player_wom_id,
-                GroupWomAssociation.group_dt_id == group.group_id
+                GroupWomAssociation.group_dt_id == group_db_id
             ).first()
             if not stored:
-                session.add(GroupWomAssociation(player_wom_id=player_wom_id, group_dt_id=group.group_id))
+                session.add(GroupWomAssociation(player_wom_id=player_wom_id, group_dt_id=group_db_id))
         except Exception as e:
-            print(f"Couldn't add GroupWomAssociation for {player_wom_id} to {group.group_name}")
+            print(f"Couldn't add GroupWomAssociation for {player_wom_id} to {group_name}")
 
     group_wom_id_set = set(group_wom_ids)
     group_members = session.query(Player).filter(Player.wom_id.in_(group_wom_ids)).all()
@@ -980,13 +1034,14 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
     # Remove members no longer in the WOM group (skipped when the API returned a
     # partial/incomplete member list — see skip_removals flag above).
     if not skip_removals:
-        for member in list(group.players):
+        for member in _member_players():
             if member.wom_id and member.wom_id not in group_wom_id_set:
-                member = session.query(Player).filter(Player.player_id == member.player_id).first()
+                if not member.remove_group(_live_group()):
+                    continue
                 app_logger.log(
                     log_type="access",
                     data=(
-                        f"{member.player_name} has been removed from {group.group_name}\n"
+                        f"{member.player_name} has been removed from {group_name}\n"
                         f"Their DropTracker WOM ID is {member.wom_id}\n"
                         f"WOM group {wom_id} returned {returned_count} of {wom_expected_count or '?'} "
                         f"expected members; wom_id {member.wom_id} was not present in the returned list."
@@ -994,24 +1049,32 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
                     app_name="core",
                     description="sync_group_from_wom",
                 )
-                member.remove_group(group)
                 removed_count += 1
                 if on_remove:
                     await on_remove(member)
 
     # Add new members to the group
-    current_player_ids = {p.player_id for p in group.players}
+    current_player_ids = _member_player_ids()
     for member in group_members:
         if member.player_id not in current_player_ids:
+            live_group = _live_group()
             if member.user:
-                member.user.add_group(group)
-            member.add_group(group)
+                member.user.add_group(live_group)
+            # Only announce a join that actually created a membership row.
+            # add_group re-checks the association itself, so a stale
+            # `current_player_ids` used to produce a "Member Added" embed with
+            # no write behind it — the spam the clans saw. Belt and braces
+            # with the detachment fix above.
+            joined = member.add_group(live_group)
             member = session.query(Player).filter(Player.player_id == member.player_id).first()
+            if not joined:
+                continue
+            current_player_ids.add(member.player_id)
             added_count += 1
             if on_add:
                 await on_add(member)
 
-    group.date_updated = func.now()
+    _live_group().date_updated = func.now()
     # Stamp when the roster was last reconciled with WOM. Deliberately NOT the
     # `last_wom_sync` cooldown key: this runs on the hourly pass for every
     # group, so writing that one would keep the manual "Sync from WOM" button
@@ -1020,7 +1083,7 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
     # group reported "Members synced: never".
     try:
         stamp = session.query(GroupConfiguration).filter(
-            GroupConfiguration.group_id == group.group_id,
+            GroupConfiguration.group_id == group_db_id,
             GroupConfiguration.config_key == WOM_MEMBER_SYNC_STAMP_KEY,
         ).order_by(GroupConfiguration.id).first()
         now_iso = datetime.now().isoformat()
@@ -1028,7 +1091,7 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
             stamp.config_value = now_iso
         else:
             session.add(GroupConfiguration(
-                group_id=group.group_id,
+                group_id=group_db_id,
                 config_key=WOM_MEMBER_SYNC_STAMP_KEY,
                 config_value=now_iso,
             ))
@@ -1040,7 +1103,7 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
         app_logger.log(
             log_type="error",
             data=(
-                f"Failed final commit while syncing group {group.group_name} "
+                f"Failed final commit while syncing group {group_name} "
                 f"(wom_id={wom_id}): {e}"
             ),
             app_name="core",
@@ -1096,13 +1159,18 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
         if not group:
             print("Group not found for wom_id", wom_id)
             continue
+        # Read the name now: `group` is held across the sync's awaits, and a
+        # concurrent session teardown leaves it detached — reading a lazy
+        # attribute off it inside an `except` would then raise over the top of
+        # the error we were trying to report.
+        group_name = group.group_name
 
         async def _on_remove(member):
             try:
                 await notify_group(bot, "player_removed", group, member)
             except Exception as e:
                 app_logger.log(log_type="error",
-                               data=f"Couldn't notify {group.group_name} that {member.player_name} has been removed: {e}",
+                               data=f"Couldn't notify {group_name} that {member.player_name} has been removed: {e}",
                                app_name="core", description="update_group_members")
 
         async def _on_add(member):
@@ -1118,7 +1186,7 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
             app_logger.log(
                 log_type="error",
                 data=(
-                    f"Group membership sync failed for {group.group_name} "
+                    f"Group membership sync failed for {group_name} "
                     f"(wom_id={wom_id}): {e}"
                 ),
                 app_name="core",
@@ -1210,6 +1278,7 @@ async def update_group_members_silent(forced_id: int = None):
         if not group:
             print("Group not found for wom_id", wom_id)
             continue
+        group_name = group.group_name  # see update_group_members
         try:
             await _sync_group_from_wom(group, wom_id)
         except Exception as e:
@@ -1217,7 +1286,7 @@ async def update_group_members_silent(forced_id: int = None):
             app_logger.log(
                 log_type="error",
                 data=(
-                    f"Silent group membership sync failed for {group.group_name} "
+                    f"Silent group membership sync failed for {group_name} "
                     f"(wom_id={wom_id}): {e}"
                 ),
                 app_name="core",
@@ -1261,10 +1330,11 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
     group: Group = session.query(Group).filter(Group.wom_id == wom_id).first()
     if not group:
         raise ValueError(f"No DropTracker group found with WOM ID {wom_id}")
+    group_db_id = int(group.group_id)
 
     # --- Cooldown check ---
     cooldown_cfg = session.query(GroupConfiguration).filter(
-        GroupConfiguration.group_id == group.group_id,
+        GroupConfiguration.group_id == group_db_id,
         GroupConfiguration.config_key == "last_wom_sync",
     ).first()
 
@@ -1285,7 +1355,7 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
                     "wom_id": wom_id,
                     "added": [],
                     "removed": [],
-                    "total_members": group.get_player_count(),
+                    "total_members": group.get_player_count(session),
                     "skipped_removals": False,
                 }
                 # Pure-read early exit — end the transaction the lookups above
@@ -1321,7 +1391,7 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
         cooldown_cfg.config_value = now_iso
     else:
         session.add(GroupConfiguration(
-            group_id=group.group_id,
+            group_id=group_db_id,
             config_key="last_wom_sync",
             config_value=now_iso,
         ))
@@ -1330,13 +1400,21 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
     except Exception:
         session.rollback()
 
-    session.refresh(group)
-    total_members = group.get_player_count()
+    # Re-resolve before refreshing: `group` was held across the sync's awaits,
+    # and a concurrent session teardown leaves it detached — session.refresh()
+    # on a detached instance raises. See _sync_group_from_wom's header note.
+    from sqlalchemy.orm import object_session
+
+    if object_session(group) is None:
+        group = session.query(Group).filter(Group.group_id == group_db_id).first() or group
+    if object_session(group) is not None:
+        session.refresh(group)
+    total_members = group.get_player_count(session)
 
     result = {
         "on_cooldown": False,
         "group_name": group.group_name,
-        "group_id": group.group_id,
+        "group_id": group_db_id,
         "wom_id": wom_id,
         "added": added_names,
         "removed": removed_names,

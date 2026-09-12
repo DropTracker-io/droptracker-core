@@ -117,41 +117,65 @@ class Group(Base):
             self.players.append(player)
             session.commit()
 
+    def _session(self, session_to_use=None):
+        """Resolve a usable Session for a read about this group.
+
+        Falls back to the module-global scoped session when this instance has
+        been detached — see ``get_player_count`` for why that matters.
+        """
+        from sqlalchemy.orm import object_session
+
+        return session_to_use or object_session(self) or session
+
     def get_player_count(self, session_to_use=None):
         """
         Return the number of players in this group.
 
-        With lazy='dynamic' the `players` relationship returns an
-        `AppenderQuery`, so we must use `.count()` instead of `len()`.
-        If an explicit session is supplied we count via the association
-        table to stay within that session's context.
-        
+        Always counts through the association table rather than
+        ``self.players.count()``. Two reasons, both bugs we have shipped:
+
+        1. ``user_group_association`` carries BOTH player rows (``player_id``
+           set) and Discord-user rows (``user_id`` set, ``player_id`` NULL).
+           Anything that counts the table without the ``player_id`` filter
+           reports players + linked users as one number — that overstated 299
+           groups' member counts (Frontier: 462 shown for 365 players).
+        2. ``players`` is ``lazy='dynamic'``, and on a DETACHED instance an
+           AppenderQuery silently yields nothing — ``count()`` returns 0 with
+           only a SAWarning. The core bot shares one scoped session across
+           every coroutine, so any concurrent ``session.remove()`` detaches a
+           group another task is holding across an await.
+
         Args:
             session_to_use (Session, optional): Specific database session to use for the query
-            
+
         Returns:
             int: Number of players in this group
         """
-        if session_to_use is not None:
-            return (session_to_use
-                    .query(user_group_association)
-                    .filter(user_group_association.c.group_id == self.group_id,
-                            user_group_association.c.player_id != None)
-                    .count())
+        return (self._session(session_to_use)
+                .query(user_group_association)
+                .filter(user_group_association.c.group_id == self.group_id,
+                        user_group_association.c.player_id != None)
+                .count())
 
-        return self.players.count()
-
-    def get_players(self):
+    def get_players(self, session_to_use=None):
         """
         Return a concrete list of all players in the group.
-        
-        Since `self.players` is an AppenderQuery due to lazy='dynamic',
-        we need to call `.all()` to get the actual list of players.
-        
+
+        Queries by ``group_id`` rather than walking ``self.players``: the
+        dynamic relationship returns an empty list on a detached instance
+        instead of raising (see ``get_player_count``).
+
         Returns:
             List[Player]: List of all Player objects in this group
         """
-        return self.players.all()
+        from .player import Player
+
+        return (self._session(session_to_use)
+                .query(Player)
+                .join(user_group_association,
+                      user_group_association.c.player_id == Player.player_id)
+                .filter(user_group_association.c.group_id == self.group_id)
+                .all())
 
     def get_current_total(self):
         """

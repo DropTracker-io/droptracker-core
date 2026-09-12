@@ -58,12 +58,23 @@ class UserCommands(Extension):
 
     def _refresh_session(self):
         """
-        Reset scoped session state before handling a new interaction.
+        Drop stale ORM state before handling a new interaction.
 
-        This prevents long-lived transaction snapshots from returning stale
-        reads when underlying data was changed by another process.
+        This used to call ``session.remove()``. The scoped session is
+        THREAD-local, not task-local, so that tore down the Session every other
+        coroutine in this bot shared — detaching objects they were holding
+        across an await. A detached ``lazy='dynamic'`` collection yields NOTHING
+        rather than raising, which is how one slash command mid-sync could make
+        the hourly WOM roster read come back empty and re-announce every
+        existing clan member as a new join (2026-09-12).
+
+        ``expire_all()`` achieves the same goal safely: every loaded attribute
+        is re-read on next access, nothing is detached, and no other task's
+        pending work is discarded. The engine runs READ COMMITTED (see
+        ``db/models/base.py``), so a re-read genuinely sees other processes'
+        commits — an open snapshot cannot hold it stale.
         """
-        session.remove()
+        session.expire_all()
 
 
     def _get_group_for_guild(self, guild_id):
