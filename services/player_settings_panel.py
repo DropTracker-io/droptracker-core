@@ -10,6 +10,9 @@ mirrors it so a player never *has* to open the site for the common toggles:
   plugin-inbox delivery time).
 - Pings & visibility (submission pings in the global/clan servers, and the
   global-listing hide switch).
+- Death message (members' own death messages, per account — the same
+  ``player_custom_messages`` rows the website and the plugin write, with the
+  rules in :mod:`db.member_messages`). Also reachable as ``/death-message``.
 
 Design follows :mod:`services.recap_buttons` / :mod:`services.entry_modifier`:
 every component is persistent (state travels in the ``custom_id``), handlers
@@ -39,6 +42,16 @@ from interactions import (
 from interactions.api.events import Component, ModalCompletion
 
 from db.app_logger import AppLogger
+from db.member_messages import (
+    DEATH_TOKENS,
+    MAX_MESSAGE_LENGTH,
+    MAX_MESSAGES,
+    VIA_DISCORD,
+    MemberMessageError,
+    death_message_group_status,
+    load_member_messages,
+    store_member_messages,
+)
 from db.models import (
     Player,
     PlayerNotificationPrefs,
@@ -111,6 +124,41 @@ def event_prefs_from_selection(selected: set, types) -> str:
     Only explicit ``false`` is persisted (absent = enabled, so future types
     default on) — mirrors PUT /me/players/{id}/notification-prefs."""
     return json.dumps({t: False for t in types if t not in selected})
+
+
+def death_messages_from_modal(responses: dict) -> list:
+    """The death message modal's five boxes, in order. Blank boxes stay in —
+    db.member_messages.normalize_messages drops them when saving, the same way
+    it drops an empty row from the website's editor."""
+    return [str((responses or {}).get(f"m{i}") or "") for i in range(1, MAX_MESSAGES + 1)]
+
+
+def display_death_message(text: str) -> str:
+    """A stored message shown in Discord: as a code span, so it reads exactly
+    as written, with backticks swapped out so it cannot close the span."""
+    return "`" + str(text).replace("`", "'") + "`"
+
+
+_MAX_LISTED_GROUPS = 15
+
+
+def describe_death_message_groups(groups) -> str:
+    """Where an account's message is posted, and why not everywhere."""
+    if not groups:
+        return "no clans yet"
+    parts = []
+    for group in list(groups)[:_MAX_LISTED_GROUPS]:
+        name = group.get("name") or f"Group {group.get('id')}"
+        if group.get("blocked"):
+            parts.append(f"{name} (blocked by its leaders)")
+        elif group.get("allowed"):
+            parts.append(f"**{name}**")
+        else:
+            parts.append(f"{name} (not switched on)")
+    extra = len(groups) - _MAX_LISTED_GROUPS
+    if extra > 0:
+        parts.append(f"and {extra} more")
+    return " · ".join(parts)
 
 
 # ── DB helpers (one short-lived session per interaction) ─────────────────────
@@ -258,6 +306,46 @@ def _save_ping_state(user_id: int, selected: set) -> None:
         s.close()
 
 
+def _death_message_state(user_id: int, player_id: int):
+    """{name, messages, groups} for one owned account, or None when the
+    account isn't the user's."""
+    s = Session()
+    try:
+        player = (s.query(Player)
+                  .filter(Player.player_id == player_id,
+                          Player.user_id == user_id).first())
+        if not player:
+            return None
+        return {
+            "name": player.player_name,
+            "messages": load_member_messages(s, player_id),
+            "groups": death_message_group_status(s, player_id),
+        }
+    finally:
+        s.close()
+
+
+def _save_death_messages(user_id: int, player_id: int, messages: list):
+    """(saved list, None) or (None, reason to show the member)."""
+    s = Session()
+    try:
+        player = (s.query(Player)
+                  .filter(Player.player_id == player_id,
+                          Player.user_id == user_id).first())
+        if not player:
+            return None, "That account isn't linked to you."
+        try:
+            saved = store_member_messages(
+                s, player_id, messages, via=VIA_DISCORD, user_id=user_id)
+        except MemberMessageError as exc:
+            s.rollback()
+            return None, str(exc)
+        s.commit()
+        return saved, None
+    finally:
+        s.close()
+
+
 # ── Panel builders ───────────────────────────────────────────────────────────
 
 def _back_button() -> Button:
@@ -278,6 +366,8 @@ def build_main_panel(saved: str = "") -> tuple[str, list]:
                emoji="🎮", custom_id=f"{PREFIX}ig"),
         Button(style=ButtonStyle.PRIMARY, label="Pings & visibility",
                emoji="👁️", custom_id=f"{PREFIX}pings"),
+        Button(style=ButtonStyle.PRIMARY, label="Death message",
+               emoji="💀", custom_id=f"{PREFIX}dmsg"),
     )
     return content, [row]
 
@@ -387,7 +477,121 @@ def build_pings_panel(user_id: int, saved: str = "") -> tuple[str, list]:
     return content, [ActionRow(select), ActionRow(_back_button())]
 
 
+# The modal's custom_id carries the account it edits, like the component ids do.
+DEATH_MESSAGE_MODAL_PREFIX = f"{PREFIX}dmsgsave:"
+
+
+def build_death_message_panel(user_id: int, player_id=None, saved: str = "") -> tuple[str, list]:
+    players = _players(user_id)
+    if not players:
+        content = (
+            "## 💀 Death message\n"
+            "You haven't claimed a RuneScape account yet — use `/claim-rsn` "
+            "first, then come back here."
+        )
+        return content, [ActionRow(_back_button())]
+
+    if player_id is None and len(players) > 1:
+        content = (
+            f"{saved}## 💀 Death message\n"
+            "Which account's death message do you want to change?"
+        )
+        select = StringSelectMenu(
+            *[StringSelectOption(label=p["name"], value=str(p["id"]))
+              for p in players[:25]],
+            placeholder="Pick an account…",
+            custom_id=f"{PREFIX}dmsg:acct",
+        )
+        return content, [ActionRow(select), ActionRow(_back_button())]
+
+    target = next((p for p in players if p["id"] == player_id), players[0])
+    state = _death_message_state(user_id, target["id"]) or {
+        "messages": [], "groups": [],
+    }
+    lines = [
+        f"{saved}## 💀 Death message — `{target['name']}`",
+        "What your clans see when you die. One of your messages is picked at "
+        "random for each death, in every clan whose leaders let members write "
+        "their own.",
+    ]
+    if state["messages"]:
+        lines.append("**Your messages**")
+        lines.extend(
+            f"{i}. {display_death_message(message)}"
+            for i, message in enumerate(state["messages"], start=1)
+        )
+    else:
+        lines.append("*No messages yet — your clans use their own death message.*")
+    lines.append(f"**Posted in:** {describe_death_message_groups(state['groups'])}")
+    lines.append(
+        "-# Placeholders: "
+        + " ".join(f"`{doc['token']}`" for doc in DEATH_TOKENS)
+        + f". Up to {MAX_MESSAGES} messages, {MAX_MESSAGE_LENGTH} characters "
+        "each, no links or mentions. Also on the website and in the RuneLite plugin."
+    )
+    buttons = [
+        Button(style=ButtonStyle.PRIMARY, label="Edit messages…", emoji="✏️",
+               custom_id=f"{PREFIX}dmsg:edit:{target['id']}"),
+        Button(style=ButtonStyle.DANGER, label="Clear",
+               custom_id=f"{PREFIX}dmsg:clear:{target['id']}",
+               disabled=not state["messages"]),
+    ]
+    if len(players) > 1:
+        buttons.append(Button(style=ButtonStyle.SECONDARY, label="Other account",
+                              custom_id=f"{PREFIX}dmsg"))
+    buttons.append(_back_button())
+    return "\n".join(lines), [ActionRow(*buttons)]
+
+
+def build_death_message_modal(player_id: int, messages: list) -> Modal:
+    """Five boxes, one message each, filled with what is saved now."""
+    boxes = []
+    for i in range(MAX_MESSAGES):
+        kwargs = {
+            "label": f"Message {i + 1}",
+            "custom_id": f"m{i + 1}",
+            "placeholder": "{player_name} forgot to pray against {killer}",
+            "required": False,
+            "max_length": MAX_MESSAGE_LENGTH,
+        }
+        if i < len(messages) and messages[i]:
+            kwargs["value"] = messages[i]
+        boxes.append(ShortText(**kwargs))
+    return Modal(*boxes, title="Your death messages",
+                 custom_id=f"{DEATH_MESSAGE_MODAL_PREFIX}{player_id}")
+
+
 SAVED = "✅ **Saved.**\n"
+
+
+async def handle_death_message_modal(ctx) -> None:
+    """Saves the death message modal's five boxes and answers with the
+    updated panel, or with the rule the messages broke. Module-level so it
+    is testable without the interactions Extension machinery."""
+    try:
+        player_id = int(ctx.custom_id[len(DEATH_MESSAGE_MODAL_PREFIX):])
+    except ValueError:
+        return
+    user_id = _resolve_user_id(str(ctx.author.id))
+    if user_id is None:
+        await ctx.send("I couldn't find your DropTracker account.", ephemeral=True)
+        return
+    try:
+        saved, error = _save_death_messages(
+            user_id, player_id, death_messages_from_modal(ctx.responses))
+        if error:
+            await ctx.send(
+                f"⚠️ **Not saved:** {error}\nPress **Edit messages…** to try again.",
+                ephemeral=True)
+            return
+        note = SAVED if saved else "✅ **Cleared.** Your clans will use their own death message.\n"
+        content, components = build_death_message_panel(user_id, player_id=player_id, saved=note)
+        await ctx.send(content, components=components, ephemeral=True)
+    except Exception as e:
+        app_logger.log(log_type="error",
+                       data=f"/settings death message save failed: {e}",
+                       app_name="core", description="player_settings_panel")
+        await ctx.send("Something went wrong saving that — try again.", ephemeral=True)
 
 
 class PlayerSettingsPanel(Extension):
@@ -406,6 +610,23 @@ class PlayerSettingsPanel(Extension):
             )
             return
         content, components = build_main_panel()
+        await ctx.send(content, components=components, ephemeral=True)
+
+    @slash_command(
+        name="death-message",
+        description="Write what your clan sees when you die",
+    )
+    async def death_message_cmd(self, ctx: SlashContext):
+        user_id = _resolve_user_id(str(ctx.author.id))
+        if user_id is None:
+            await ctx.send(
+                "I couldn't find a DropTracker account for you yet — claim an "
+                "account with `/claim-rsn` (or sign in once at "
+                f"{SETTINGS_URL}) and try again.",
+                ephemeral=True,
+            )
+            return
+        content, components = build_death_message_panel(user_id)
         await ctx.send(content, components=components, ephemeral=True)
 
     @listen(Component)
@@ -479,6 +700,34 @@ class PlayerSettingsPanel(Extension):
         elif action == "pings:set":
             _save_ping_state(user_id, set(ctx.values))
             content, components = build_pings_panel(user_id, saved=SAVED)
+        elif action == "dmsg":
+            content, components = build_death_message_panel(user_id)
+        elif action == "dmsg:acct":
+            try:
+                player_id = int(ctx.values[0])
+            except (ValueError, IndexError):
+                return
+            content, components = build_death_message_panel(user_id, player_id=player_id)
+        elif action.startswith("dmsg:edit:"):
+            try:
+                player_id = int(action.rsplit(":", 1)[1])
+            except ValueError:
+                return
+            state = _death_message_state(user_id, player_id)
+            if state is None:
+                await ctx.send("That account isn't linked to you.", ephemeral=True)
+                return
+            await ctx.send_modal(build_death_message_modal(player_id, state["messages"]))
+            return
+        elif action.startswith("dmsg:clear:"):
+            try:
+                player_id = int(action.rsplit(":", 1)[1])
+            except ValueError:
+                return
+            _saved, error = _save_death_messages(user_id, player_id, [])
+            content, components = build_death_message_panel(
+                user_id, player_id=player_id,
+                saved=f"⚠️ **{error}**\n" if error else "✅ **Cleared.** Your clans will use their own death message.\n")
         else:
             return
         await ctx.edit_origin(content=content, components=components)
@@ -486,6 +735,9 @@ class PlayerSettingsPanel(Extension):
     @listen(ModalCompletion)
     async def on_modal(self, event: ModalCompletion):
         ctx = event.ctx
+        if (ctx.custom_id or "").startswith(DEATH_MESSAGE_MODAL_PREFIX):
+            await handle_death_message_modal(ctx)
+            return
         if ctx.custom_id != f"{PREFIX}minval":
             return
         user_id = _resolve_user_id(str(ctx.author.id))

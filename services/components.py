@@ -90,6 +90,7 @@ async def build_help_components(bot=None):
     claim_rsn_id       = await _cid("claim-rsn")
     unclaim_rsn_id     = await _cid("unclaim-rsn")
     dm_settings_id     = await _cid("dm-settings")
+    death_message_id   = await _cid("death-message")
     hideme_id          = await _cid("hideme")
     pingme_id          = await _cid("pingme")
     my_points_id       = await _cid("my-points")
@@ -130,6 +131,7 @@ async def build_help_components(bot=None):
                     f"-# </claim-rsn:{claim_rsn_id}> - Claim an in-game character as belonging to your Discord account.\n"
                     f"-# </unclaim-rsn:{unclaim_rsn_id}> - Remove a RuneScape account from your Discord account.\n"
                     f"-# </dm-settings:{dm_settings_id}> - Configure your direct message notification preferences.\n"
+                    f"-# </death-message:{death_message_id}> - Write what your clan sees when you die (if your clan allows members' own messages).\n"
                     f"-# </hideme:{hideme_id}> - Toggle whether your character(s) appear on public leaderboards/global channels.\n"
                     f"-# </pingme:{pingme_id}> - Toggle whether you get pinged when your submissions are sent to Discord.\n"
                     f"-# </my-points:{my_points_id}> - View your earned points across all groups.\n"
