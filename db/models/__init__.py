@@ -41,6 +41,7 @@ from .notified_submission import NotifiedSubmission
 from .notification_queue import NotificationQueue
 from .player_npc_kc import PlayerNpcKc
 from .player_notification_prefs import PlayerNotificationPrefs
+from .member_message import PlayerCustomMessage, GroupMemberMessageBlock
 from .embed import GroupEmbed, Field
 from .site import GroupSite, GroupSitePage
 from .guild_meta import Guild, GroupWomAssociation, GroupPersonalBestMessage, LBUpdate
@@ -269,6 +270,8 @@ __all__ = [
     "NotificationQueue",
     "PlayerNpcKc",
     "PlayerNotificationPrefs",
+    "PlayerCustomMessage",
+    "GroupMemberMessageBlock",
     "GroupEmbed",
     "GroupSite",
     "GroupSitePage",

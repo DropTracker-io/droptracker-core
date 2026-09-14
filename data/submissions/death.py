@@ -99,6 +99,9 @@ async def death_processor(death_data, external_session=None, world_type="main"):
     region_type = _safe_str(death_data.get("region_type"), 32)
     killer_type = _safe_str(death_data.get("killer_type"), 16)
     is_pvp = parse_flag(death_data.get("is_pvp"))
+    # Sent by the plugin since the killer-attribution rework (6.0.3); only the
+    # {killer_combat_level} message placeholder reads it. Not stored on the row.
+    killer_combat_level = _safe_int(death_data.get("killer_combat_level"))
 
     # `is_safe_death` is the client's own verdict (6.0+); it is authoritative
     # because only the client can see account type and Pest Control state. When
@@ -224,6 +227,7 @@ async def death_processor(death_data, external_session=None, world_type="main"):
             "region_name": region_name,
             "region_type": region_type,
             "killer_type": killer_type,
+            "killer_combat_level": killer_combat_level,
             "is_pvp": is_pvp,
             "is_safe_death": is_safe_death,
             "value_lost": value_lost,
@@ -265,6 +269,10 @@ async def death_processor(death_data, external_session=None, world_type="main"):
                     "region_name": region_name,
                     "is_safe_death": is_safe_death,
                     "value_lost": value_lost,
+                    # The member's own death message is used in their DM too,
+                    # and may name either of these.
+                    "value_kept": value_kept,
+                    "killer_combat_level": killer_combat_level,
                 },
                 existing_session=session if use_external_session else None,
             )

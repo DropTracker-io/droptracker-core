@@ -315,9 +315,13 @@ class TestALineWithNoValueDisappears:
     def test_the_death_default_drops_an_unknown_location(self):
         payload = render_layout(
             default_layout("death"),
-            {"{player_name}": "Ron", "{source}": "Vet'ion", "{location}": "", "{image_url}": ""},
+            {
+                "{death_message}": "**Ron** has died!",
+                "{player_name}": "Ron", "{source}": "Vet'ion", "{location}": "", "{image_url}": "",
+            },
         )
         text = "\n".join(c.get("content", "") for c in blocks_of(payload) if c["type"] == 10)
+        assert text.startswith("**Ron** has died!")
         assert "**Killed By** Vet'ion" in text
         assert "Location" not in text
 
@@ -339,7 +343,6 @@ class TestDefaultsMirrorTheEmbeds:
             "pet": "has acquired a new pet!",
             "level_up": "levelled-up:",
             "quest": "completed a quest!",
-            "death": "has died!",
             "diary": "completed an achievement diary!",
         }
         for notification_type, headline in expected.items():
@@ -347,6 +350,14 @@ class TestDefaultsMirrorTheEmbeds:
             assert first["type"] == "text"
             assert headline in first["content"], notification_type
             assert "{player_name}" in first["content"], notification_type
+
+    def test_the_death_headline_is_the_resolved_death_message(self):
+        # A death's content line is not fixed wording: it is the member's own
+        # message, or one of the group's, or "… has died!". The sender resolves
+        # that line once and hands it to the layout as {death_message}, so the
+        # default carries exactly what the embed path would have sent.
+        first = default_layout("death")["blocks"][0]
+        assert first == {"type": "text", "content": "{death_message}"}
 
     def test_personal_best_shows_the_character_render(self):
         """The one thing components can do that the personal-best embed

@@ -24,6 +24,7 @@ from api.routes.manifest import manifest_bp
 from api.routes.edge_config import edge_config_bp
 from api.routes.state_sync import state_sync_bp
 from api.routes.player_model import player_model_bp
+from api.routes.member_messages import member_messages_bp
 from api.worker import create_blueprint as create_worker_blueprint
 
 
@@ -114,6 +115,7 @@ def create_app() -> Quart:
     app.register_blueprint(edge_config_bp, url_prefix='/')
     app.register_blueprint(state_sync_bp, url_prefix='/')
     app.register_blueprint(player_model_bp, url_prefix='/')
+    app.register_blueprint(member_messages_bp, url_prefix='/')
 
     @app.before_serving
     async def _start_monitor():

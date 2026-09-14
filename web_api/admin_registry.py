@@ -36,10 +36,12 @@ from db import (
     DiscordOutbox,
     Group,
     GroupConfiguration,
+    GroupMemberMessageBlock,
     GroupSubscription,
     Log,
     NotificationQueue,
     Player,
+    PlayerCustomMessage,
     SubscriptionTier,
     User,
     UserSubscription,
@@ -224,6 +226,31 @@ ENTITY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "search_text": ["item_name", "source_hint"],
         "search_int": ["id", "section_id", "item_id"],
         "developer_readable": True,
+    },
+    # Members' own death messages (db/member_messages.py). Staff clear an
+    # abusive one by setting ``messages`` to [] — the reader drops anything
+    # that is not a valid message, so a hand edit cannot get past the rules.
+    # Member-written text, so not developer-readable.
+    "player_custom_messages": {
+        "model": PlayerCustomMessage,
+        "pk": "id",
+        "columns": [
+            "id", "player_id", "message_type", "messages", "updated_via",
+            "updated_by_user_id", "updated_at",
+        ],
+        "editable": ["messages"],
+        "search_text": ["messages", "message_type"],
+        "search_int": ["id", "player_id"],
+    },
+    # Which groups have blocked which members' own messages. Leaders manage
+    # these on the group settings page; read-only here.
+    "group_member_message_blocks": {
+        "model": GroupMemberMessageBlock,
+        "pk": "id",
+        "columns": ["id", "group_id", "player_id", "created_by_user_id", "created_at"],
+        "editable": [],
+        "search_text": [],
+        "search_int": ["id", "group_id", "player_id"],
     },
 }
 

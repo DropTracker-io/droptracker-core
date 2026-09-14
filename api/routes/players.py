@@ -440,6 +440,11 @@ def _group_configs_for(player_name, acc_hash, db_session):
                             "send_cas": get_config_value(current_group_configs, "notify_cas"),
                             "send_pets": get_config_value(current_group_configs, "notify_pets"),
                             "send_deaths": get_config_value(current_group_configs, "notify_deaths"),
+                            # Whether this group posts members' own death messages
+                            # (db/member_messages.py); a real boolean, unlike the
+                            # "" an unset key above would give.
+                            "allow_member_death_messages": get_config_value(
+                                current_group_configs, "allow_member_death_messages") is True,
                             "send_diaries": get_config_value(current_group_configs, "notify_diaries"),
                             "send_xp": get_config_value(current_group_configs, "notify_levels"),
                             "minimum_level": get_config_value(current_group_configs, "level_minimum_for_notifications"),

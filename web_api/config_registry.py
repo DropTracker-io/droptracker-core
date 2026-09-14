@@ -325,7 +325,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Death messages",
         "category": "deaths",
         "type": "messagelist",
-        "help": "Custom death messages, one picked at random per death — like the in-game clan broadcasts. Placeholders like {player_name}, {source}, {region_name} and {value_lost} are filled in. {value_lost} is blank for members on a plugin older than 6.0.4, which sends no value. Leave empty for the default message. Groups using a Components layout for deaths keep their layout; these messages don't apply there.",
+        "help": "Custom death messages, one picked at random per death — like the in-game clan broadcasts. Placeholders like {player_name}, {source}, {region_name} and {value_lost} are filled in. A message is skipped for a death that leaves one of its placeholders blank — no known killer, say, or no {value_lost} from a plugin older than 6.0.4. Leave empty for the default message. In a custom embed or a Components layout, put the picked message wherever you like with {death_message}.",
         "default": "",
     },
     {
@@ -334,6 +334,17 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "category": "deaths",
         "type": "boolean",
         "help": "On: the picked message replaces the embed description (including a custom embed's). Off: it's sent as the plain message text above the embed.",
+        "default": False,
+    },
+    # Members' own death messages (db/member_messages.py). Off by default: it
+    # hands every member a line in the group's channel, which is the group's
+    # call. Individual members are blocked with group_member_message_blocks.
+    {
+        "key": "allow_member_death_messages",
+        "label": "Let members write their own death message",
+        "category": "deaths",
+        "type": "boolean",
+        "help": "Members set their own message on the website, with /settings in Discord, or in the RuneLite plugin. A member's message is posted instead of your death messages, and members without one get yours. It appears wherever your messages do. Review what members wrote, and block anyone, in Members' death messages below.",
         "default": False,
     },
 

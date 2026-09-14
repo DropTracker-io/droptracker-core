@@ -3,8 +3,6 @@ import contextvars
 import hashlib
 import json
 import os
-import random
-import re
 import shutil
 import time
 from datetime import datetime, timedelta
@@ -86,11 +84,9 @@ SUBMISSION_DM_TYPES = frozenset({
 # Group-configured death message variants: config key `death_message_variants`
 # holds a JSON string array (write-side validation and limits live in
 # web_api/config_registry.py; keep DEATH_MESSAGE_MAX_ENTRY_LENGTH in sync).
-# Helpers are module-level and pure so they unit-test without the service.
+# Which message gets posted, and how it renders — pings stripped again at send
+# time so a legacy or hand-edited row can never ping — is db/member_messages.py.
 DEATH_MESSAGE_MAX_ENTRY_LENGTH = 200
-# Message content pings for real (embed text doesn't). Saves are validated,
-# but strip again at send time so legacy/hand-edited rows can never ping.
-_DEATH_MENTION_RE = re.compile(r"@everyone|@here|<@[&!]?\d+>")
 
 
 def parse_death_variants(raw: str | None) -> list[str]:
@@ -108,16 +104,6 @@ def parse_death_variants(raw: str | None) -> list[str]:
         e for e in parsed
         if isinstance(e, str) and e.strip() and len(e) <= DEATH_MESSAGE_MAX_ENTRY_LENGTH
     ]
-
-
-def pick_death_variant(variants: list[str], rng=None) -> str | None:
-    if not variants:
-        return None
-    return (rng or random).choice(variants)
-
-
-def strip_death_message_pings(text: str) -> str:
-    return _DEATH_MENTION_RE.sub("", text)
 
 
 # Removed global tracking dictionaries - now using database-based tracking via NotifiedSubmission table
@@ -339,6 +325,62 @@ class NotificationService:
             elif row.config_key == "death_message_as_embed_description":
                 as_embed_description = str(row.config_value or "").lower() in ("true", "1")
         return parse_death_variants(raw_variants), as_embed_description
+
+    def _death_line(self, db_session, group_id, player_id, replacements: dict):
+        """``(template, source, as_embed_description)`` for one death in one group.
+
+        ``source`` says whose line it is — "member", "group" or "default" (no
+        template). The member's messages only count when the group allows them
+        and has not blocked this member; db.member_messages owns that rule and
+        the order.
+        """
+        from db.member_messages import choose_death_template, member_death_templates_for_group
+
+        variants, as_embed_description = self._death_message_config(db_session, group_id)
+        member_templates = member_death_templates_for_group(db_session, group_id, player_id)
+        template, source = choose_death_template(member_templates, variants, replacements)
+        return template, source, as_embed_description
+
+    @staticmethod
+    def _embed_mentions(embed, token: str) -> bool:
+        """Whether an embed template uses ``token`` anywhere it substitutes text."""
+        try:
+            texts = [embed.title, embed.description]
+            if embed.footer is not None:
+                texts.append(embed.footer.text)
+            for field in embed.fields or []:
+                texts.extend((field.name, field.value))
+            return any(isinstance(text, str) and token in text for text in texts)
+        except Exception:
+            return False
+
+    def _member_death_dm_line(self, db_session, data: dict) -> str:
+        """The member's own death message, filled in for their personal DM, or "".
+
+        No group decides anything here — it is the member's own DM — so this
+        reads their messages directly rather than through a group's opt-in.
+        """
+        player_id = data.get("player_id")
+        if player_id is None:
+            return ""
+        try:
+            from db.member_messages import load_member_messages, pick_template, render_template
+
+            location = str(data.get("region_name") or data.get("location") or "")
+            values = {
+                "{player_name}": f"**{data.get('player_name') or ''}**",
+                "{killer}": str(data.get("source") or ""),
+                "{source}": str(data.get("source") or ""),
+                "{location}": location,
+                "{region_name}": location,
+                "{value_lost}": self._death_value_text(data.get("value_lost")),
+                "{value_kept}": self._death_value_text(data.get("value_kept")),
+                "{killer_combat_level}": str(data.get("killer_combat_level") or ""),
+            }
+            template = pick_template(load_member_messages(db_session, player_id), values)
+            return render_template(template, values, member=True) if template else ""
+        except Exception:
+            return ""
 
     def _build_default_quest_embed(self, data: dict, player_name: str, player_id: int, video_url: str = "") -> interactions.Embed:
         """
@@ -2290,8 +2332,39 @@ class NotificationService:
                 "{video_link}": f"[Video]({video_url})" if video_url else "",
                 # Prefer video for display; keep screenshot in data["image_url"] for attachments
                 "{image_url}": video_url or image_url or "",
+                "{killer_combat_level}": str(data.get("killer_combat_level") or ""),
             }
             replacements.update(self._plugin_version_placeholder_map(data))
+
+            # The message line, picked before the layout and the embed are built
+            # so either can place it with {death_message}: the member's own death
+            # message when this group allows it, else one of the group's
+            # messages, else the default (order in db/member_messages.py).
+            from db.member_messages import render_template
+
+            # Message content renders no markdown links, so the link-form
+            # tokens become their plain values there.
+            content_replacements = {
+                **replacements,
+                "{player_name}": formatted_name,
+                "{video_link}": video_url or "",
+            }
+            line_template, line_source, as_embed_description = self._death_line(
+                db_session, group_id, player_id, replacements
+            )
+            embed_line = content_line = ""
+            if line_template:
+                from_member = line_source == "member"
+                embed_line = render_template(line_template, replacements, member=from_member)
+                content_line = render_template(line_template, content_replacements, member=from_member)
+            if not (embed_line and content_line):
+                # No template, or one that sanitized down to nothing. Bold, as
+                # the default components layout's headline always was.
+                line_template = None
+                embed_line = f"**{replacements['{player_name}']}** has died!"
+                content_line = f"{formatted_name} has died!"
+            # Added last, so no later substitution can reach into the rendered line.
+            replacements["{death_message}"] = embed_line
 
             if await self._try_send_component_layout(
                 db_session, notification, channel, group_id, "death", replacements
@@ -2300,10 +2373,14 @@ class NotificationService:
                 return
 
             if embed_template:
+                # Read before substitution: a template that places the line
+                # itself must not also get it as the message content.
+                embed_places_line = self._embed_mentions(embed_template, "{death_message}")
                 embed = replace_placeholders(embed_template, replacements)
                 if group_id == 2:
                     embed = await self.remove_group_field(embed)
             else:
+                embed_places_line = False
                 embed = self._build_default_death_embed(
                     data=data,
                     player_name=player_name,
@@ -2312,26 +2389,14 @@ class NotificationService:
                 )
 
             content = f"{formatted_name} has died!"
-
-            variants, as_embed_description = self._death_message_config(db_session, group_id)
-            variant = pick_death_variant(variants)
-            if variant:
+            if line_template:
                 if as_embed_description:
                     # The picked message wins over the template's description:
                     # it is the more specific setting (documented in the
                     # config field help). The content line stays the default.
-                    embed.description = replace_placeholders_in_text(variant, replacements)
-                else:
-                    # Message content renders no markdown links, so swap the
-                    # link-form tokens for their plain values.
-                    content_replacements = {
-                        **replacements,
-                        "{player_name}": formatted_name,
-                        "{video_link}": video_url or "",
-                    }
-                    content = strip_death_message_pings(
-                        replace_placeholders_in_text(variant, content_replacements)
-                    )
+                    embed.description = embed_line
+                elif not embed_places_line:
+                    content = content_line
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.
             video_attachment, video_local_path = (None, None)
@@ -4070,7 +4135,11 @@ class NotificationService:
             loc_text = f" at **{location}**" if location else ""
             embed = interactions.Embed(
                 title="You died...",
-                description=f"**{player_name}** died to **{source}**{loc_text}",
+                # The member's own death message, when they have written one.
+                description=(
+                    self._member_death_dm_line(db_session, data)
+                    or f"**{player_name}** died to **{source}**{loc_text}"
+                ),
                 color="#E74C3C",
             )
         elif ntype == 'dm_diary':

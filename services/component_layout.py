@@ -581,7 +581,15 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     "qp_percentage": {"help": "Quest point completion", "sample": "94%"},
     "timestamp": {"help": "When it happened", "sample": "today", "optional": True},
     # Deaths
+    # Resolved by the sender (db/member_messages.py): the member's own message
+    # when the group allows those, else one of the group's death messages, else
+    # "{player_name} has died!" — so it is never blank.
+    "death_message": {
+        "help": "The death message: the member's own if your group allows those, else one of your death messages, else \"… has died!\"",
+        "sample": "**RuneLite Ron** has died!",
+    },
     "killer": {"help": "What killed the player", "sample": "Vorkath"},
+    "killer_combat_level": {"help": "The killer's combat level", "sample": "392", "optional": True},
     "location": {"help": "Where they died", "sample": "Ungael"},
     "region_name": {"help": "The area they died in", "sample": "Ungael", "optional": True},
     "region_id": {"help": "OSRS region id", "sample": "9023", "optional": True},
@@ -660,8 +668,9 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Death",
         "group": "Progress",
         "description": "Posted when a member dies.",
-        "tokens": ("source", "killer", "location", "region_name", "region_id",
-                   "value_lost", "value_kept", "timestamp") + _MEDIA_TOKENS,
+        "tokens": ("death_message", "source", "killer", "killer_combat_level", "location",
+                   "region_name", "region_id", "value_lost", "value_kept",
+                   "timestamp") + _MEDIA_TOKENS,
     },
     "diary": {
         "label": "Achievement diary",
@@ -906,7 +915,9 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
     "death": {
         "accent_color": "#B23B3B",
         "blocks": [
-            {"type": "text", "content": "**{player_name}** has died!"},
+            # The embed path's content line, whichever message it turned out to
+            # be; with none configured it reads "**{player_name}** has died!".
+            {"type": "text", "content": "{death_message}"},
             {"type": "separator", "divider": True},
             {"type": "text", "content": "**Killed By** {source}\n**Location** {location}"},
             {"type": "media", "urls": ["{image_url}"]},

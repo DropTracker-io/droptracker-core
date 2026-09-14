@@ -204,6 +204,17 @@ if "db.death_filter" not in sys.modules:
     sys.modules["db.death_filter"] = _mod
     _spec.loader.exec_module(_mod)
 
+# db/member_messages.py — members' own death messages: validation, which line
+# wins and how it renders. Stdlib-only at module level (models and group_config
+# lazy-imported in the storage helpers), and the sender, both APIs and the
+# Discord panel all read this one rule, so tests must exercise the real one.
+_MEMBER_MESSAGES_PATH = _Path(__file__).resolve().parent.parent / "db" / "member_messages.py"
+if "db.member_messages" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.member_messages", _MEMBER_MESSAGES_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.member_messages"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # db/group_rename.py — the shared "rename a group everywhere" service. Same
 # shape again (SQLAlchemy-only module imports, sessions passed in), and the
 # config + admin-data routes import it at module level, so it must resolve
