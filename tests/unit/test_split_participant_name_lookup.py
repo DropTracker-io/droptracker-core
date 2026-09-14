@@ -219,3 +219,60 @@ def test_manual_split_drops_a_hyphenated_receiver_from_their_own_list(listed_sel
     it inflates the divisor and shrinks everyone's share."""
     assert parse_split_players(f"{listed_self}, puzzled life", "X-tra") == ["puzzled life"]
     assert parse_split_players(f"{listed_self}, puzzled life", "x tra") == ["puzzled life"]
+
+
+# ── _resolve_group_split_members: the plugin path and Discord "Modify Splits" ─
+
+GROUP_ID = 7
+
+
+@pytest.fixture
+def group_env(resolver_env, monkeypatch):
+    """resolver_env plus a sqlite user_group_association for group 7.
+
+    Members: the receiver, x tra (1), Itz_Baal (4) and player 0. Not members:
+    tzuk kal lag (2), NoX EvilAce (3).
+    """
+    from sqlalchemy import MetaData, Table, insert
+
+    metadata = MetaData()
+    association = Table(
+        "user_group_association", metadata,
+        Column("player_id", Integer), Column("group_id", Integer),
+    )
+    metadata.create_all(resolver_env.get_bind())
+    resolver_env.execute(insert(association), [
+        {"player_id": pid, "group_id": GROUP_ID} for pid in (RECEIVER_ID, 1, 4, 0)
+    ])
+    resolver_env.commit()
+    # drop.py imports the table inside the function, off the (stubbed) module.
+    monkeypatch.setattr(sys.modules["db.models"], "user_group_association",
+                        association, raising=False)
+    return resolver_env
+
+
+def test_group_members_fold_spellings_and_skip_outsiders(group_env):
+    resolved = drop_module._resolve_group_split_members(
+        group_env, ["X-tra", "Tzuk-Kal-Lag", "itz-baal", "NoX-EvilAce"], RECEIVER_ID, GROUP_ID)
+    assert [p.player_id for p in resolved] == [1, 4]
+
+
+@pytest.mark.parametrize("typed_receiver", ["wi-beer-guy", "Wi_Beer_Guy", "wi beer guy"])
+def test_modify_splits_cannot_credit_the_receiver_a_share(group_env, typed_receiver):
+    """The Discord edit never removed the receiver from the typed list; a strict
+    lookup hid that for hyphenated names, a folded one must not expose it."""
+    resolved = drop_module._resolve_group_split_members(
+        group_env, [typed_receiver, "X-tra"], RECEIVER_ID, GROUP_ID)
+    assert [p.player_id for p in resolved] == [1]
+
+
+def test_one_member_typed_twice_is_credited_once(group_env):
+    resolved = drop_module._resolve_group_split_members(
+        group_env, ["X-tra", "x tra", "X_tra"], RECEIVER_ID, GROUP_ID)
+    assert [p.player_id for p in resolved] == [1]
+
+
+def test_player_zero_is_a_member_not_a_missing_id(group_env):
+    resolved = drop_module._resolve_group_split_members(
+        group_env, ["zero-acc"], RECEIVER_ID, GROUP_ID)
+    assert [p.player_id for p in resolved] == [0]

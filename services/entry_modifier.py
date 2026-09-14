@@ -1137,23 +1137,12 @@ class EntryModifier(Extension):
 
             # 4. Apply new split GP credits for the new participant list
             if _group_has_split_tracking(group_id, db) and new_split_names:
-                from db.models import Player, user_group_association
+                from data.submissions.drop import _resolve_group_split_members
                 from services.redis_updates import loot_tracker
-                valid_new = []
-                for name in new_split_names:
-                    p = db.query(Player).filter(Player.player_name == name).first()
-                    if p is None:
-                        continue
-                    is_member = (
-                        db.query(user_group_association)
-                        .filter(
-                            user_group_association.c.player_id == p.player_id,
-                            user_group_association.c.group_id == group_id,
-                        )
-                        .first()
-                    )
-                    if is_member:
-                        valid_new.append(p)
+                # The plugin path's resolver: typed names fold '-'/'_'/' ' as
+                # the game does, and the receiver is dropped by id.
+                valid_new = _resolve_group_split_members(
+                    db, new_split_names, drop.player_id, group_id)
                 if valid_new:
                     total_count = 1 + len(valid_new)
                     new_split_value = drop_value // total_count

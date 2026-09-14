@@ -304,8 +304,7 @@ def _plan_targets_db(state) -> list[ReconcileTarget]:
             if p.wom_id:
                 target.participants_by_wom[int(p.wom_id)] = entry
             if p.player_name:
-                target.participants_by_name[
-                    " ".join(str(p.player_name).strip().lower().split())] = entry
+                _index_participant_name(target.participants_by_name, p.player_name, entry)
         if target.participants_by_wom or target.participants_by_name:
             targets.append(target)
     return targets
@@ -355,13 +354,34 @@ def scoring_bounds(target: ReconcileTarget, now: datetime, *,
 # Envelope emission
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _participant_name_key(name) -> str:
+    """Name-fallback key: OSRS name equivalence, where '-', '_' and ' ' are
+    one character. WOM reports folded names ("itz baal") while a roster row can
+    keep a display spelling ("Itz_Baal"), and folding only whitespace and case
+    left those players' gains uncredited."""
+    from utils.format import normalize_player_display_equivalence
+
+    return normalize_player_display_equivalence(str(name or ""))
+
+
+def _index_participant_name(index: dict, name, entry) -> None:
+    """File ``entry`` under its name key. A stub and a real row that fold to
+    the same key are one account split in two; the real row keeps the key."""
+    key = _participant_name_key(name)
+    if not key:
+        return
+    held = index.get(key)
+    if held is None or (held[3] and not entry[3]):
+        index[key] = entry
+
+
 def _match_participant(target: ReconcileTarget, player_obj: dict):
     wom_id = player_obj.get("id")
     entry = target.participants_by_wom.get(int(wom_id)) if wom_id else None
     if entry is None:
-        name = " ".join(str(player_obj.get("displayName")
-                            or player_obj.get("username") or "").strip().lower().split())
-        entry = target.participants_by_name.get(name)
+        key = _participant_name_key(player_obj.get("displayName")
+                                    or player_obj.get("username"))
+        entry = target.participants_by_name.get(key) if key else None
     return entry
 
 

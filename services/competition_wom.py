@@ -179,7 +179,7 @@ def _plan_targets_db(state) -> list:
     the matcher state, player identities from one bulk query."""
     from api.core import get_db_session, reset_db_connections
     from db.models import COMPETITION_EVENT_KINDS, EventCompetition, Player
-    from services.event_wom_reconciler import ReconcileTarget
+    from services.event_wom_reconciler import ReconcileTarget, _index_participant_name
 
     candidates = {}
     for event_id, event in state.events.items():
@@ -266,8 +266,7 @@ def _plan_targets_db(state) -> list:
             if p.wom_id:
                 recon.participants_by_wom[int(p.wom_id)] = entry
             if p.player_name:
-                recon.participants_by_name[
-                    " ".join(str(p.player_name).strip().lower().split())] = entry
+                _index_participant_name(recon.participants_by_name, p.player_name, entry)
         targets.append(CompetitionTarget(
             event_id=event_id,
             competition_id=int(comp_row.wom_competition_id),

@@ -19,6 +19,7 @@ from data.submissions.dispatch import (
 )
 from db import Player, Drop
 from db.ops import resolve_upload_player
+from utils.format import find_player_by_rsn
 from db.models.video_upload import VideoUpload
 from services.seasonal_state import is_seasonal_active
 from services.submission_status import mark_submission_processed, mark_submission_rejected
@@ -1037,8 +1038,10 @@ async def _process_manual_submission(req_start):
         db_session = get_db_session()
         log_phase("session_acquired")
         
-        # Look up the player to set the correct account hash for auth
-        player = db_session.query(Player).filter(Player.player_name.ilike(player_name)).first()
+        # Look up the player to set the correct account hash for auth. Exact
+        # first: ``ilike`` read '_' as a wildcard, so "Itz_Baal" could land on
+        # a same-shaped twin row and borrow its account hash.
+        player = find_player_by_rsn(db_session, Player, player_name)
         log_phase("player_lookup")
         
         if not player:

@@ -42,6 +42,7 @@ import json
 import math
 import re
 from datetime import datetime
+from types import SimpleNamespace
 
 from quart import Blueprint, jsonify, request
 from sqlalchemy import func
@@ -83,6 +84,8 @@ from db import (
     Player,
     user_group_association,
 )
+from utils.format import (normalize_player_display_equivalence, pick_player_by_rsn,
+                          rsn_contains)
 from web_api.common import (abort_problem, db_session, hidden_player_ids, money,
                             parse_page, player_month_totals, private_no_store,
                             score_num, with_cache_headers)
@@ -3263,10 +3266,9 @@ async def get_completion_history(event_id: int):
                 entries = [e for e in entries
                            if (e.get("task_type") or "") in type_filter]
             if player_q:
-                needle = player_q.lower()
                 entries = [e for e in entries
                            if e.get("player_name")
-                           and needle in e["player_name"].lower()]
+                           and rsn_contains(e["player_name"], player_q)]
 
             # Counted before `mode` narrows, so the UI can label its toggle
             # ("N progress updates hidden") without a second request.
@@ -7085,8 +7087,9 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
         name = raw.strip()
         if not name:
             continue
-        key = name.lower()
-        if key in seen_keys:
+        # One account under two spellings ("1-19", "1 19") is one name.
+        key = normalize_player_display_equivalence(name)
+        if not key or key in seen_keys:
             continue
         seen_keys.add(key)
         cleaned.append(name)
@@ -7106,17 +7109,26 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
 
-            # Resolve the whole list in one query; keep the DB's canonical
-            # capitalization for the response.
+            # Resolve the whole list in one query on the indexed folded name;
+            # keep the DB's canonical capitalization for the response. OSRS
+            # treats '-', '_' and ' ' as one character and stored names usually
+            # carry WOM's space, so a pasted "1-19" used to miss its "1 19" row.
             rows = (
                 s.query(Player.player_id, Player.player_name)
-                .filter(func.lower(Player.player_name).in_(list(seen_keys)))
+                .filter(Player.player_name_norm.in_(list(seen_keys)))
+                .order_by(Player.player_id)
                 .all()
             )
-            by_key: dict[str, tuple[int, str]] = {}
+            by_key: dict[str, list] = {}
             for pid, pname in rows:
-                by_key.setdefault((pname or "").lower(), (pid, pname))
-            resolved_ids = [pid for pid, _ in by_key.values()]
+                by_key.setdefault(normalize_player_display_equivalence(pname), []).append(
+                    SimpleNamespace(player_id=pid, player_name=pname))
+            hits = {
+                name: pick_player_by_rsn(
+                    by_key.get(normalize_player_display_equivalence(name), ()), name)
+                for name in cleaned
+            }
+            resolved_ids = list({h.player_id for h in hits.values() if h is not None})
 
             # Eligibility mirrors admin_add_member: membership of the team's
             # own clan when the team is clan-bound, else any participating
@@ -7154,11 +7166,11 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
             added: list[dict] = []
             skipped: list[dict] = []
             for name in cleaned:
-                hit = by_key.get(name.lower())
+                hit = hits.get(name)
                 if not hit:
                     skipped.append({"name": name, "reason": "No tracked player by that name."})
                     continue
-                pid, canonical = hit
+                pid, canonical = hit.player_id, hit.player_name
                 if pid not in eligible_ids:
                     skipped.append({
                         "name": canonical,

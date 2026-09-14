@@ -135,6 +135,32 @@ def _resolve_split_participants(session, players_included, receiver_player_id):
     return participants
 
 
+def _resolve_group_split_members(session, players_included, receiver_player_id, group_id):
+    """``_resolve_split_participants``, narrowed to members of ``group_id``.
+
+    Split credit is a per-group statement, so an outsider's share is
+    uncreditable there. Shared by the plugin path and the Discord "Modify
+    Splits" edit, which used to resolve typed names with a strict ``==``:
+    hyphenated participants got no GP share, and nothing removed the receiver,
+    who could be credited a share on top of their own drop.
+    """
+    from db.models import user_group_association
+
+    members = []
+    for p in _resolve_split_participants(session, players_included, receiver_player_id):
+        is_member = (
+            session.query(user_group_association)
+            .filter(
+                user_group_association.c.player_id == p.player_id,
+                user_group_association.c.group_id == group_id,
+            )
+            .first()
+        )
+        if is_member:
+            members.append(p)
+    return members
+
+
 async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
                                    players_included: list, drop_value: int,
                                    world_type: str = "main",
@@ -169,26 +195,14 @@ async def _award_split_gp_credits(session, drop, group, receiver_player_id: int,
     Returns the number of non-receiver participants credited.
     """
     from db.models.drop_split import DropSplit
-    from db.models import user_group_association
 
     group_id = group.group_id
     partition = drop.partition
 
-    # Keep only the resolved participants who are members of this group — split
-    # credit is a per-group statement, so an outsider's share is uncreditable
-    # here (it still shrinks everyone's cut, via the divisor below).
-    valid_participants = []
-    for p in _resolve_split_participants(session, players_included, receiver_player_id):
-        is_member = (
-            session.query(user_group_association)
-            .filter(
-                user_group_association.c.player_id == p.player_id,
-                user_group_association.c.group_id == group_id,
-            )
-            .first()
-        )
-        if is_member:
-            valid_participants.append(p)
+    # Keep only the resolved participants who are members of this group; an
+    # outsider's share still shrinks everyone's cut, via the divisor below.
+    valid_participants = _resolve_group_split_members(
+        session, players_included, receiver_player_id, group_id)
 
     # Total participants = receiver + everyone else who took a share. Prefer the
     # submitted party size, but never let it go below the people we resolved

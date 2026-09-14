@@ -129,6 +129,26 @@ class TestBulkAddOutcomes:
         assert body["skipped"] == []
         assert len(s.added) == 2  # one member + one audit — not three
 
+    async def test_game_spelling_resolves_the_stored_wom_spelling(self, client, monkeypatch):
+        # OSRS treats '-', '_' and ' ' as one character; the row carries WOM's
+        # space. "1-19" used to be skipped as untracked, and its two spellings
+        # counted as two names.
+        s = _script_standard(
+            players=[(5766416, "1 19"), (5755902, "tzuk kal lag")],
+            eligible=[(5766416,), (5755902,)],
+            placed=[],
+        )
+        _wire(monkeypatch, s)
+        r = await client.post(
+            BULK, json={"names": ["1-19", "1 19", "1_19", "Tzuk-Kal-Lag"]})
+        assert r.status_code == 200
+        body = await r.get_json()
+        assert body["added"] == [
+            {"id": 5766416, "name": "1 19"},
+            {"id": 5755902, "name": "tzuk kal lag"},
+        ]
+        assert body["skipped"] == []
+
     async def test_nothing_added_means_no_commit_or_audit(self, client, monkeypatch):
         s = _script_standard(players=[])  # nobody resolves
         _wire(monkeypatch, s)

@@ -13,7 +13,8 @@ from sqlalchemy import bindparam, or_, text
 
 from api.core import get_db_session, redis_client, redis_tracker
 from api.routes.helpers import assemble_submission_data
-from utils.format import format_number
+from utils.format import (find_player_by_rsn, format_number,
+                          normalize_player_display_equivalence, player_name_search_expr)
 from utils import value_overrides
 from services.redis_updates import get_player_current_month_total
 from data.TOP_NPCS import TOP_NPCS
@@ -133,9 +134,17 @@ async def player_search():
 
     db_session = get_db_session()
     try:
-        player = db_session.query(Player).filter(Player.player_name == player_name).first()
-        if not player:
-            player = db_session.query(Player).filter(Player.player_name.ilike(f"%{player_name}%")).first()
+        # Exact, then OSRS name equivalence ('-', '_' and ' ' are one character,
+        # and stored names usually carry WOM's space), then a partial name.
+        player = find_player_by_rsn(db_session, Player, player_name)
+        needle = normalize_player_display_equivalence(player_name)
+        if not player and needle:
+            player = (
+                db_session.query(Player)
+                .filter(player_name_search_expr(Player.player_name).contains(needle, autoescape=True))
+                .order_by(Player.player_id)
+                .first()
+            )
 
         if not player:
             return jsonify({"error": f"Player '{player_name}' not found"}), 404
@@ -303,15 +312,14 @@ async def get_player():
 
     db_session = get_db_session()
     try:
-        query = db_session.query(Player)
         if player_id:
             try:
-                query = query.filter(Player.player_id == int(player_id))
+                pid = int(player_id)
             except (TypeError, ValueError):
                 return jsonify({"error": "Invalid player id"}), 400
+            player = db_session.query(Player).filter(Player.player_id == pid).first()
         else:
-            query = query.filter(Player.player_name == player_name)
-        player = query.first()
+            player = find_player_by_rsn(db_session, Player, player_name)
         # Hidden players are excluded from public lookups (privacy setting).
         if not player or player.hidden:
             return jsonify({"error": "Player not found"}), 404

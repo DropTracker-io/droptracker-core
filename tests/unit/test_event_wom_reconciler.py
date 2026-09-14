@@ -14,6 +14,8 @@ import sys
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
+import pytest
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
@@ -494,3 +496,51 @@ class TestClosingEdges:
             ("w1", datetime(2026, 8, 10)),
             ("end", datetime(2026, 9, 1)),
         ]
+
+
+class TestParticipantNameFallback:
+    """Roster rows without a wom_id match WOM by name, under OSRS name
+    equivalence: WOM reports folded names ("itz baal") while a roster row can
+    keep a display spelling ("Itz_Baal" from a WOM group import)."""
+
+    @staticmethod
+    def _indexed(*rows):
+        index = {}
+        for player_id, name, is_stub in rows:
+            recon._index_participant_name(index, name, (player_id, name, None, is_stub))
+        return index
+
+    @pytest.mark.parametrize("stored, reported", [
+        ("Itz_Baal", "itz baal"),
+        ("X-tra", "x tra"),
+        ("tzuk kal lag", "Tzuk-Kal-Lag"),
+        ("Btw Fe  Male", "btw fe male"),
+    ])
+    def test_matches_across_separators(self, stored, reported):
+        target = _target(participants_by_wom={},
+                         participants_by_name=self._indexed((77, stored, False)))
+        entry = recon._match_participant(target, {"id": 999, "displayName": reported})
+        assert entry is not None and entry[0] == 77
+
+    def test_username_is_used_when_display_name_is_missing(self):
+        target = _target(participants_by_wom={},
+                         participants_by_name=self._indexed((77, "Itz_Baal", False)))
+        assert recon._match_participant(target, {"username": "itz baal"})[0] == 77
+
+    def test_wom_id_still_wins_over_a_name(self):
+        target = _target(participants_by_name=self._indexed((77, "btw fe male", False)))
+        assert recon._match_participant(target, ROW_RANKED["player"])[0] == 901
+
+    @pytest.mark.parametrize("order", ["stub_first", "real_first"])
+    def test_a_real_row_keeps_the_key_over_its_stub(self, order):
+        real, stub = (5, "Itz Baal", False), (6, "itz_baal", True)
+        rows = (stub, real) if order == "stub_first" else (real, stub)
+        target = _target(participants_by_wom={}, participants_by_name=self._indexed(*rows))
+        assert recon._match_participant(target, {"displayName": "itz baal"})[0] == 5
+
+    @pytest.mark.parametrize("name", ["", "-", None])
+    def test_a_name_that_folds_to_nothing_matches_nothing(self, name):
+        target = _target(participants_by_wom={},
+                         participants_by_name=self._indexed((77, name, False)))
+        assert target.participants_by_name == {}
+        assert recon._match_participant(target, {"displayName": name}) is None

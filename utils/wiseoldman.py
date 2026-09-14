@@ -143,6 +143,13 @@ client = wom.Client(
 PLAYER_CACHE_TTL = int(os.getenv("WOM_PLAYER_CACHE_TTL", "900"))
 PLAYER_FAIL_CACHE_TTL = int(os.getenv("WOM_PLAYER_FAIL_CACHE_TTL", "300"))
 GROUP_CACHE_TTL = int(os.getenv("WOM_GROUP_CACHE_TTL", "900"))
+# How long a lookup waits on update_player. WOM saves the scrape within a second
+# or two but can take minutes to answer: 125s and then a non-JSON error page for
+# "Le Baronator" (2026-09-13), with a webhook-consumer worker held the whole time
+# (the wom client sets no timeout, so aiohttp's 5-minute default applies). The
+# scrape still lands when we stop waiting, so the next lookup after the fail
+# cache finds a real record through get_details.
+WOM_UPDATE_TIMEOUT_SECONDS = float(os.getenv("WOM_UPDATE_TIMEOUT_SECONDS", "20"))
 
 # Player/group lookup caches also live in Redis (see _SharedRateLimiter docstring above)
 # so a cache hit in one API worker is a cache hit for all of them.
@@ -292,9 +299,10 @@ def _is_degenerate_wom_player(player) -> bool:
     A real tracked account always has exp > 0 (starting stats alone are ~1154),
     so the exp-and-never-changed conjunction cannot misfire on a live account.
     A genuinely new account that WOM has registered but not yet scraped also
-    lands here, and that is correct: it is not yet usable as an identity anchor,
-    and the caller falls back to local account-hash resolution rather than
-    binding a name to an empty record.
+    lands here. The record itself is still not usable as an identity anchor,
+    but the account may well be real, so ``check_user_by_username`` asks WOM to
+    scrape it (``update_player``) and only gives up if that fails or comes back
+    empty too. Refusing without asking locked such players out indefinitely.
     """
     # Fail OPEN: only a positively confirmed placeholder is rejected. An
     # unreadable or unexpected shape (WOM library rename, partial payload) must
@@ -348,48 +356,69 @@ async def check_user_by_username(username: str, *, force_refresh: bool = False) 
                 payload = (None, None, None, -1)
                 await _store_player_cache(username, payload, success=False)
                 return payload
-            if _is_degenerate_wom_player(player):
-                # Never let an empty placeholder record overwrite a real row's
-                # name or wom_id — see _is_degenerate_wom_player.
-                logger.warning(
-                    "WOM returned a placeholder record for %r (id=%s, displayName=%r, exp=%s); "
-                    "treating as a failed lookup so it cannot become authoritative identity",
-                    username, getattr(player, "id", None),
-                    getattr(player, "display_name", None), getattr(player, "exp", None),
-                )
+            if not _is_degenerate_wom_player(player):
+                log_slots = _extract_log_slots(player)
+                identity = _identity_shim(player)
+                payload = (identity, player.username, player.id, log_slots)
+                await _store_player_cache(username, payload, success=True)
+                return payload
+            # An empty placeholder must never become identity (see
+            # _is_degenerate_wom_player), but refusing it outright stranded real
+            # players: nothing ever asked WOM to scrape the name again. Our own
+            # update_player below mints exactly these records whenever a new
+            # account's first scrape fails, so a new player with no local row
+            # had every submission discarded until someone refreshed the name
+            # on wiseoldman.net by hand (1-19, ticket #434, lost 73; Le
+            # Baronator ~950 in five days). Ask WOM to scrape it, as a 404 does;
+            # that path refuses a record that still comes back empty, and
+            # "unknown" (796802) is not on the hiscores, so it can only fail.
+            logger.warning(
+                "WOM returned a placeholder record for %r (id=%s, displayName=%r, exp=%s); "
+                "requesting a WOM update before trusting it",
+                username, getattr(player, "id", None),
+                getattr(player, "display_name", None), getattr(player, "exp", None),
+            )
+        else:
+            error = result.unwrap_err()
+            status = getattr(error, "status", None)
+            if status != 404:
+                # Only a genuine "player not found" (or an unscraped placeholder,
+                # above) warrants the heavier update_player call, which asks WOM
+                # to re-scrape hiscores. Falling back to it on *any* failure --
+                # including 429/5xx -- used to double our call volume during
+                # exactly the moments WOM was already struggling to keep up with us.
+                logger.info("WOM get_details failed for %s (status=%s); not retrying via update_player", username, status)
                 payload = (None, None, None, -1)
                 await _store_player_cache(username, payload, success=False)
                 return payload
-            log_slots = _extract_log_slots(player)
-            identity = _identity_shim(player)
-            payload = (identity, player.username, player.id, log_slots)
-            await _store_player_cache(username, payload, success=True)
-            return payload
-
-        error = result.unwrap_err()
-        status = getattr(error, "status", None)
-        if status != 404:
-            # Only a genuine "player not found" warrants the heavier update_player
-            # call (which asks WOM to re-scrape hiscores for a brand new account).
-            # Falling back to it on *any* failure -- including 429/5xx -- used to
-            # double our call volume during exactly the moments WOM was already
-            # struggling to keep up with us.
-            logger.info("WOM get_details failed for %s (status=%s); not retrying via update_player", username, status)
-            payload = (None, None, None, -1)
-            await _store_player_cache(username, payload, success=False)
-            return payload
 
         try:
             _log_wom_call("players.update_player", username=username)
-            result = await client.players.update_player(username=username)
+            result = await asyncio.wait_for(
+                client.players.update_player(username=username),
+                timeout=WOM_UPDATE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "WOM update_player for %r did not answer within %.0fs; treating as a failed lookup "
+                "(WOM usually still saves the scrape, so a later lookup can succeed)",
+                username, WOM_UPDATE_TIMEOUT_SECONDS,
+            )
+            payload = (None, None, None, -1)
+            await _store_player_cache(username, payload, success=False)
+            return payload
         except Exception as e:
-            print("Error updating player:", e)
+            logger.warning("WOM update_player for %r raised: %s", username, e)
             payload = (None, None, None, -1)
             await _store_player_cache(username, payload, success=False)
             return payload
 
         if not result.is_ok:
-            print(f"Update player failed for {username}.")
+            error = result.unwrap_err()
+            logger.warning(
+                "WOM update_player failed for %r (status=%s, message=%r); treating as a failed lookup",
+                username, getattr(error, "status", None), getattr(error, "message", None),
+            )
             payload = (None, None, None, -1)
             await _store_player_cache(username, payload, success=False)
             return payload

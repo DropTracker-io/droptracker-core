@@ -27,6 +27,8 @@ from sqlalchemy import desc
 from db.models import (
     session, User, Group, Guild, Player, PlayerPoints, Log,
 )
+from utils.format import find_player_by_rsn, pick_player_by_rsn, rsn_contains
+
 from .utils import is_admin, is_user_authorized
 
 # entry_type sentinel that marks a PlayerPoints row as an admin manual adjustment
@@ -57,6 +59,20 @@ class GroupAdminCommands(Extension):
 
     def _player_in_group(self, player: Player, group: Group) -> bool:
         return group in player.groups
+
+    def _resolve_target(self, group: Group, typed: str):
+        """(player, in_group) for an RSN an admin typed.
+
+        The group's own member wins, so a wom_temp stub on the roster is picked
+        over a same-named account outside it; otherwise any tracked player, so
+        the reply can say "not a member" rather than "not found". Both steps
+        treat '-', '_' and ' ' as one character, as the game does.
+        """
+        member = pick_player_by_rsn(group.get_players(), typed)
+        if member is not None:
+            return member, True
+        target = find_player_by_rsn(session, Player, typed)
+        return target, bool(target is not None and self._player_in_group(target, group))
 
     def _write_audit_log(
         self,
@@ -154,16 +170,14 @@ class GroupAdminCommands(Extension):
                 ephemeral=True,
             )
 
-        target = session.query(Player).filter(
-            Player.player_name.ilike(player.strip())
-        ).first()
+        target, in_group = self._resolve_target(group, player)
         if not target:
             return await ctx.send(
                 f"No player named `{player}` was found in the database.",
                 ephemeral=True,
             )
 
-        if not self._player_in_group(target, group):
+        if not in_group:
             return await ctx.send(
                 f"`{target.player_name}` is not a member of **{group.group_name}**.",
                 ephemeral=True,
@@ -219,10 +233,10 @@ class GroupAdminCommands(Extension):
         if not group:
             return await ctx.send(choices=[])
 
-        query = (ctx.input_text or "").strip().lower()
+        query = (ctx.input_text or "").strip()
         players = group.get_players()
         if query:
-            players = [p for p in players if query in p.player_name.lower()]
+            players = [p for p in players if rsn_contains(p.player_name, query)]
 
         await ctx.send(choices=[
             {"name": p.player_name, "value": p.player_name}
@@ -287,16 +301,14 @@ class GroupAdminCommands(Extension):
                 ephemeral=True,
             )
 
-        target = session.query(Player).filter(
-            Player.player_name.ilike(player.strip())
-        ).first()
+        target, in_group = self._resolve_target(group, player)
         if not target:
             return await ctx.send(
                 f"No player named `{player}` was found in the database.",
                 ephemeral=True,
             )
 
-        if not self._player_in_group(target, group):
+        if not in_group:
             return await ctx.send(
                 f"`{target.player_name}` is not a member of **{group.group_name}**.",
                 ephemeral=True,
@@ -352,10 +364,10 @@ class GroupAdminCommands(Extension):
         if not group:
             return await ctx.send(choices=[])
 
-        query = (ctx.input_text or "").strip().lower()
+        query = (ctx.input_text or "").strip()
         players = group.get_players()
         if query:
-            players = [p for p in players if query in p.player_name.lower()]
+            players = [p for p in players if rsn_contains(p.player_name, query)]
 
         await ctx.send(choices=[
             {"name": p.player_name, "value": p.player_name}
@@ -413,11 +425,15 @@ class GroupAdminCommands(Extension):
         )
 
         if player:
-            target = session.query(Player).filter(
-                Player.player_name.ilike(player.strip())
-            ).first()
-            if target:
-                query = query.filter(PlayerPoints.player_id == target.player_id)
+            target, _in_group = self._resolve_target(group, player)
+            if not target:
+                # Used to fall through unfiltered: every adjustment in the
+                # group, under a title naming the player that was asked for.
+                return await ctx.send(
+                    f"No player named `{player}` was found in the database.",
+                    ephemeral=True,
+                )
+            query = query.filter(PlayerPoints.player_id == target.player_id)
 
         rows = query.order_by(desc(PlayerPoints.date_added)).limit(15).all()
 
@@ -458,10 +474,10 @@ class GroupAdminCommands(Extension):
         if not group:
             return await ctx.send(choices=[])
 
-        query = (ctx.input_text or "").strip().lower()
+        query = (ctx.input_text or "").strip()
         players = group.get_players()
         if query:
-            players = [p for p in players if query in p.player_name.lower()]
+            players = [p for p in players if rsn_contains(p.player_name, query)]
 
         await ctx.send(choices=[
             {"name": p.player_name, "value": p.player_name}

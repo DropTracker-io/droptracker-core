@@ -12,6 +12,7 @@ from quart import Blueprint, jsonify, request
 from sqlalchemy import text
 
 from db import Player, Group, User
+from utils.format import normalize_player_display_equivalence, player_name_search_expr
 from utils.npc_names import npc_match_key, npc_match_variants, npc_slug_sql_expr
 from web_api.common import (
     db_session,
@@ -30,12 +31,18 @@ IMG_BASE = "https://www.droptracker.io/img"
 
 
 def _search_players(s, q, partition):
+    # OSRS treats '-', '_' and ' ' as one character, and stored names usually
+    # carry WOM's space ("tzuk kal lag"), so both sides are folded: "Tzuk-Kal"
+    # and "1-19" found nothing, and '_' was a LIKE wildcard.
+    needle = normalize_player_display_equivalence(q)
+    if not needle:
+        return []
     # Privacy: skip hidden accounts and accounts of hidden users. IS NOT TRUE
     # keeps rows with NULL flags / no owning user.
     rows = (
         s.query(Player.player_id, Player.player_name)
         .outerjoin(User, User.user_id == Player.user_id)
-        .filter(Player.player_name.ilike(f"%{q}%"))
+        .filter(player_name_search_expr(Player.player_name).contains(needle, autoescape=True))
         .filter(Player.hidden.isnot(True))
         .filter(User.hidden.isnot(True))
         .order_by(Player.player_name.asc())

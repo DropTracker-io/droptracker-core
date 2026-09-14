@@ -23,13 +23,13 @@ from db.models import (
     Group,
     GroupConfiguration,
 )
-from db.ops import DatabaseOperations, associate_player_ids, get_formatted_name
+from db.ops import DatabaseOperations, associate_player_ids, get_formatted_name, resolve_player_for_display
 from db.entitlements import has_custom_embeds
 from utils.app_emojis import emoji as app_emoji
 from utils.game_emojis import emoji_for_item, emoji_for_item_id
 from utils.redis import redis_client
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
-from utils.format import format_number, replace_placeholders, replace_placeholders_in_text, convert_from_ms
+from utils.format import format_number, replace_placeholders, replace_placeholders_in_text, convert_from_ms, normalize_player_display_equivalence
 from utils.site_urls import PREMIUM_URL, WEBSITE_URL, group_link, player_link
 from db.app_logger import AppLogger
 import osrs_api
@@ -210,8 +210,9 @@ class NotificationService:
             except (TypeError, ValueError):
                 pass
 
-        member_name = str(member.get("player_name") or "").strip().lower()
-        target_name = str(target_player_name or "").strip().lower()
+        # '-', '_' and ' ' are one character in an OSRS name.
+        member_name = normalize_player_display_equivalence(member.get("player_name") or "")
+        target_name = normalize_player_display_equivalence(target_player_name or "")
         return bool(member_name and target_name and member_name == target_name)
 
     @staticmethod
@@ -3731,7 +3732,7 @@ class NotificationService:
             # Replace placeholders in embed
             player = None
             if not player_id:
-                player = db_session.query(Player).filter(Player.player_name == player_name).first()
+                player = resolve_player_for_display(db_session, player_name)
                 if player:
                     player_id = player.player_id
             

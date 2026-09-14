@@ -78,7 +78,7 @@ from data.submissions.manual_proof import (
 )
 from db.models import Player, User, session
 from utils.download import download_player_image
-from utils.format import get_command_id
+from utils.format import get_command_id, pick_player_by_rsn
 from utils.npc_names import npc_match_key
 from utils.redis import redis_client
 from utils.submission_messages import friendly_rejection
@@ -200,10 +200,9 @@ class SubmissionCommands(Extension):
         if err:
             return None, err
         if account:
-            wanted = account.strip().lower()
-            for p in players:
-                if (p.player_name or "").strip().lower() == wanted:
-                    return p, None
+            player = pick_player_by_rsn(players, account)
+            if player is not None:
+                return player, None
             names = ", ".join(f"`{p.player_name}`" for p in players[:10])
             return None, (
                 f"`{account}` isn't one of your claimed accounts. Yours: {names}."

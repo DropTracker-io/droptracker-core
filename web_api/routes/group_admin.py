@@ -39,6 +39,7 @@ from quart import Blueprint, jsonify, request
 
 from db import Group, GroupAdmin, GroupConfiguration, Guild, IgnoredPlayer, Player, User
 from db.models import AuditLog, GroupEventManager, NotifiedSubmission
+from utils.format import rsn_contains
 from utils.redis import redis_client
 from web_api.common import (
     abort_problem,
@@ -780,7 +781,7 @@ async def group_members(group_id: int):
                     "hidden": pid in hidden_ids,
                 }
                 for pid, name in rows
-                if not q or q in (name or "").lower()
+                if not q or rsn_contains(name or "", q)
             ]
             members.sort(key=lambda m: m["total_loot"]["value"], reverse=True)
             total = len(members)

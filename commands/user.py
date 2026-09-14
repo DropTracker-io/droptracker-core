@@ -20,7 +20,7 @@ from db.models import Session, User, Group, Guild, Player, UserConfiguration, se
 from db.player_claims import claim_player, unclaim_player
 from services.components import build_help_components
 from services.points import award_points_to_player
-from utils.format import format_time_since_update, get_command_id, get_player_by_claim_rsn
+from utils.format import format_time_since_update, get_command_id, pick_player_by_rsn
 from utils.site_urls import player_url
 from utils.app_emojis import emoji as app_emoji
 from utils.wiseoldman import check_user_by_username
@@ -293,8 +293,10 @@ class UserCommands(Extension):
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         if not user:
             await try_create_user(ctx=ctx)
-            user = session.query(User).filter(User.discord_id == ctx.author.id).first()
-            
+            user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
+        if not user:
+            return await ctx.send("Unable to resolve your DropTracker account. Please try again later.", ephemeral=True)
+
         if account == "all":
             user.hidden = not user.hidden
             session.commit()
@@ -307,7 +309,11 @@ class UserCommands(Extension):
                               description=f"All of your accounts will now **be visible** in our global listings.\nYou can also manage this from the website account settings page.")
                 return await ctx.send(embed=embed, ephemeral=True)
         else:
-            player = session.query(Player).filter_by(player_name=account).first()
+            # Only among the caller's own accounts: autocomplete offers just
+            # those, but Discord accepts any typed value, and a global name
+            # lookup let anyone hide or unhide someone else's account.
+            owned = session.query(Player).filter(Player.user_id == user.user_id).all()
+            player = pick_player_by_rsn(owned, account)
             if not player:
                 return await ctx.send(f"You don't have any accounts by that name.", ephemeral=True)
             player.hidden = not player.hidden

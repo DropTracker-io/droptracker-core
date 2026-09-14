@@ -35,7 +35,7 @@ def _load_real_module(throwaway_name: str, relpath: str):
 
 
 @pytest.fixture
-def is_degenerate():
+def wom_module():
     """Load the real module over the conftest stubs, then put them back.
 
     The conftest replaces ``utils.wiseoldman`` (and the ``db`` / ``utils.redis``
@@ -82,8 +82,7 @@ def is_degenerate():
         sys.path.insert(0, str(REPO_ROOT))
 
     try:
-        mod = _load_real_module("_real_wiseoldman_degenerate", "utils/wiseoldman.py")
-        yield mod._is_degenerate_wom_player
+        yield _load_real_module("_real_wiseoldman_degenerate", "utils/wiseoldman.py")
     finally:
         for name, module in saved.items():
             if module is None:
@@ -91,6 +90,11 @@ def is_degenerate():
             else:
                 sys.modules[name] = module
         sys.modules.pop("_real_wiseoldman_degenerate", None)
+
+
+@pytest.fixture
+def is_degenerate(wom_module):
+    return wom_module._is_degenerate_wom_player
 
 
 def _record(exp, last_changed_at):
@@ -124,3 +128,167 @@ class TestIsDegenerateWomPlayer:
 
     def test_unparseable_exp_is_not_degenerate(self, is_degenerate):
         assert is_degenerate(_record("not-a-number", None)) is False
+
+
+# ── check_user_by_username: a placeholder is a reason to ask WOM, not to refuse ──
+#
+# Refusing a placeholder outright locked real players out indefinitely: nothing
+# ever asked WOM to scrape the name again, and our own update_player mints such
+# records whenever a new account's first scrape fails (SpoonedButy, 2026-09-08:
+# 404 -> update_player fails -> every later get_details returns the empty
+# record). A player with no local row then had every submission discarded until
+# someone refreshed the name on wiseoldman.net by hand -- 1-19 (ticket #434)
+# lost 73 submissions that way, and 46 names hit the guard in nine days.
+
+from wom import Err, Ok
+
+PLACEHOLDER_1_19 = types.SimpleNamespace(
+    id=3305763, username="1 19", display_name="1 19", exp=0, last_changed_at=None,
+)
+SCRAPED_1_19 = types.SimpleNamespace(
+    id=3305763, username="1 19", display_name="1 19", exp=76290175,
+    last_changed_at="2026-09-13T12:20:52.029Z",
+)
+FAILED = (None, None, None, -1)
+
+
+class _FakePlayers:
+    def __init__(self, details, update=None):
+        self._details = details
+        self._update = update
+        self.update_calls = []
+
+    async def get_details(self, username):
+        return self._details
+
+    async def update_player(self, username):
+        self.update_calls.append(username)
+        assert self._update is not None, "update_player must not be called here"
+        if callable(self._update):  # a coroutine function standing in for a slow WOM
+            return await self._update()
+        return self._update
+
+
+@pytest.fixture
+def lookup(wom_module, monkeypatch):
+    """Wire a fake WOM client in; returns (check_user_by_username, install)."""
+
+    class _OpenLimiter:
+        async def wait(self):
+            return True
+
+    class _Client:
+        players = None
+
+        async def start(self):
+            return None
+
+    client = _Client()
+    monkeypatch.setattr(wom_module, "limiter", _OpenLimiter())
+    monkeypatch.setattr(wom_module, "client", client)
+
+    def install(details, update=None):
+        client.players = _FakePlayers(details, update)
+        return client.players
+
+    return wom_module.check_user_by_username, install
+
+
+def _http_error(status, message):
+    return Err(types.SimpleNamespace(status=status, message=message))
+
+
+class TestPlaceholderLookupAsksWomToScrape:
+    async def test_placeholder_that_scrapes_becomes_identity(self, lookup):
+        check, install = lookup
+        players = install(Ok(PLACEHOLDER_1_19), update=Ok(SCRAPED_1_19))
+
+        _identity, name, wom_id, _slots = await check("1-19")
+
+        assert players.update_calls == ["1-19"]
+        assert (name, int(wom_id)) == ("1 19", 3305763)
+
+    async def test_placeholder_that_cannot_scrape_still_fails(self, lookup):
+        # "unknown" (796802) is not on the hiscores, so WOM refuses to update it:
+        # the corruption this guard exists for must stay impossible.
+        check, install = lookup
+        players = install(
+            Ok(types.SimpleNamespace(id=796802, username="unknown", display_name="unknown",
+                                     exp=0, last_changed_at=None)),
+            update=_http_error(400, "Failed to load hiscores: Invalid username."),
+        )
+
+        assert await check("Unknown") == FAILED
+        assert players.update_calls == ["Unknown"]
+
+    async def test_placeholder_that_updates_to_another_placeholder_still_fails(self, lookup):
+        check, install = lookup
+        install(Ok(PLACEHOLDER_1_19), update=Ok(PLACEHOLDER_1_19))
+
+        assert await check("1-19") == FAILED
+
+    async def test_update_that_raises_fails_closed(self, lookup):
+        check, install = lookup
+
+        class _Boom:
+            @property
+            def is_ok(self):
+                raise RuntimeError("connection reset")
+
+        install(Ok(PLACEHOLDER_1_19), update=_Boom())
+
+        assert await check("1-19") == FAILED
+
+    async def test_update_that_hangs_is_abandoned_quickly(self, lookup, wom_module, monkeypatch):
+        # WOM answered Le Baronator's update after 125s with a non-JSON error
+        # page, holding a webhook-consumer worker the whole time. Stop waiting;
+        # WOM still saves the scrape, and the next lookup finds it.
+        import asyncio
+        import time
+
+        check, install = lookup
+        state = {"cancelled": False}
+
+        async def hanging_wom():
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+            return Ok(SCRAPED_1_19)
+
+        players = install(Ok(PLACEHOLDER_1_19), update=hanging_wom)
+        monkeypatch.setattr(wom_module, "WOM_UPDATE_TIMEOUT_SECONDS", 0.05)
+
+        started = time.monotonic()
+        assert await check("Le Baronator") == FAILED
+        assert time.monotonic() - started < 1
+        assert players.update_calls == ["Le Baronator"]
+        assert state["cancelled"]
+
+    async def test_scraped_record_costs_no_update_call(self, lookup):
+        check, install = lookup
+        players = install(Ok(SCRAPED_1_19))  # update_player would assert
+
+        _identity, name, wom_id, _slots = await check("1-19")
+
+        assert players.update_calls == []
+        assert (name, int(wom_id)) == ("1 19", 3305763)
+
+    async def test_rate_limited_lookup_is_not_escalated(self, lookup):
+        # Escalating on any failure doubled WOM traffic exactly when WOM was
+        # already struggling; only 404 and placeholders earn an update call.
+        check, install = lookup
+        players = install(_http_error(429, "Too many requests"))
+
+        assert await check("1-19") == FAILED
+        assert players.update_calls == []
+
+    async def test_not_found_is_still_escalated(self, lookup):
+        check, install = lookup
+        players = install(_http_error(404, "Player not found."), update=Ok(SCRAPED_1_19))
+
+        _identity, name, _wom_id, _slots = await check("1-19")
+
+        assert players.update_calls == ["1-19"]
+        assert name == "1 19"

@@ -8,8 +8,8 @@ the rules.
 Behavioral contract (mirrors ``UserCommands.claim_rsn_command``):
     * A ``Player`` row must already exist (created by plugin submissions,
       WOM-authoritative) — claiming NEVER creates players.
-    * Lookup is case/trim-insensitive with OSRS space<->underscore
-      equivalence (``utils.format.get_player_by_claim_rsn``).
+    * Lookup is case/trim-insensitive with OSRS name equivalence, where
+      '-', '_' and ' ' are one character (``utils.format.find_player_by_rsn``).
     * A player claimed by another Discord account is refused; disputes go
       through support tickets.
     * A successful claim links ``players.user_id`` and attaches the player to
@@ -51,7 +51,7 @@ from db.models import (
     UserConfiguration,
     session,
 )
-from utils.format import get_player_by_claim_rsn, normalize_claim_rsn_input
+from utils.format import find_player_by_rsn, normalize_claim_rsn_input
 
 def _release_scoped_session(fn):
     """``session.remove()`` in a finally, on the calling thread.
@@ -313,7 +313,7 @@ def preview_claim(
     if not norm:
         return ClaimResult(status="not_found", message="No RSN provided.")
 
-    player = get_player_by_claim_rsn(session, Player, norm)
+    player = find_player_by_rsn(session, Player, norm)
     if not player:
         return ClaimResult(
             status="not_found",
@@ -354,7 +354,7 @@ def claim_player(
             message="Unable to resolve your DropTracker account. Please try again later.",
         )
 
-    player = get_player_by_claim_rsn(session, Player, rsn)
+    player = find_player_by_rsn(session, Player, rsn)
     if not player:
         return ClaimResult(
             status="not_found",
@@ -413,7 +413,7 @@ def unclaim_player(
     if player_id is not None:
         player = session.query(Player).filter(Player.player_id == player_id).first()
     elif rsn:
-        player = get_player_by_claim_rsn(session, Player, rsn)
+        player = find_player_by_rsn(session, Player, rsn)
 
     if not player:
         return UnclaimResult(status="not_found", message="Player not found.")

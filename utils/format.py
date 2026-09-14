@@ -3,14 +3,22 @@ import json
 import os
 import re
 import time
-import unicodedata
 from datetime import datetime
 import aiohttp
 import interactions
 from dateutil.relativedelta import relativedelta
-from sqlalchemy import func
 from PIL import Image, ImageFont, ImageDraw
 from db import NpcList, session, models
+# OSRS player-name equivalence lives in utils/rsn.py, which has no db imports
+# (the Data API cannot import this module first -- see its docstring).
+from utils.rsn import (  # noqa: F401  (re-exported)
+    find_player_by_rsn,
+    normalize_claim_rsn_input,
+    normalize_player_display_equivalence,
+    pick_player_by_rsn,
+    player_name_search_expr,
+    rsn_contains,
+)
 
 DOCS_FOLDER = os.path.join(os.getcwd(), 'templates/docs')
 
@@ -59,60 +67,6 @@ def get_current_partition() -> int:
 
 def normalize_npc_name(npc_name: str):
     return npc_name.replace(" ", "_").strip()
-
-def normalize_player_display_equivalence(name: str) -> str:
-    """
-    Normalize a player name for equivalence comparison where the external
-    library replaces hyphens/underscores with spaces. This keeps alphanumerics
-    and converts '-', '_' to a single space, then collapses whitespace and
-    lowercases for robust comparison.
-    """
-    if name is None:
-        return ""
-    # Replace '-' and '_' with spaces, collapse whitespace, and lowercase
-    name = str(name).replace('-', ' ').replace('_', ' ')
-    name = " ".join(name.split())
-    return name.lower()
-
-
-def normalize_claim_rsn_input(name: str) -> str:
-    """
-    Normalize an RSN from Discord or other UI before DB lookup: NFKC, common
-    unicode space characters to ASCII space, collapse runs of whitespace, strip.
-    """
-    if name is None:
-        return ""
-    s = unicodedata.normalize("NFKC", str(name).strip())
-    s = re.sub(r"[\u00a0\u2000-\u200b\u202f\u205f\u3000]", " ", s)
-    s = " ".join(s.split())
-    return s
-
-
-def get_player_by_claim_rsn(sess, player_model, rsn: str):
-    """
-    Resolve a Player for /claim-rsn using equality on lower(trim(name)) so we
-    do not rely on SQL LIKE (wildcards) and we tolerate Discord unicode quirks.
-    Also tries OSRS space vs underscore display equivalence (see point_awards).
-    """
-    norm = normalize_claim_rsn_input(rsn)
-    if not norm:
-        return None
-    nm = norm.lower()
-    p = sess.query(player_model).filter(
-        func.lower(func.trim(player_model.player_name)) == nm
-    ).first()
-    if p:
-        return p
-    if " " in norm or "_" in norm:
-        alt = norm.replace(" ", "_") if " " in norm else norm.replace("_", " ")
-        alt_l = alt.lower()
-        p = sess.query(player_model).filter(
-            func.lower(func.trim(player_model.player_name)) == alt_l
-        ).first()
-        if p:
-            return p
-    return sess.query(player_model).filter(player_model.player_name.ilike(norm)).first()
-
 
 def get_true_boss_name(npc_name: str):
     """

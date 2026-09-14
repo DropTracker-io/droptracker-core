@@ -92,6 +92,7 @@ from db.entitlements import (
     paid_group_tiers_desc,
     subscription_is_live,
 )
+from utils.format import normalize_player_display_equivalence, player_name_search_expr
 from web_api import admin_registry as registry
 from web_api import billing
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
@@ -1229,10 +1230,12 @@ async def admin_lookup():
     def _search():
         results = []
         like = f"%{q}%"
+        needle = normalize_player_display_equivalence(q)
         with db_session() as s:
             for pid, name in (
                 s.query(Player.player_id, Player.player_name)
-                .filter(Player.player_name.ilike(like)).limit(10).all()
+                .filter(player_name_search_expr(Player.player_name).contains(needle, autoescape=True))
+                .limit(10).all() if needle else ()
             ):
                 results.append({
                     "category": "player", "id": str(pid), "label": name,
