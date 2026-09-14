@@ -1,9 +1,19 @@
-"""``POST /player/model`` — accept the plugin's character model upload.
+"""``POST /player/model`` — accept the plugin's character model upload, and
+``POST /player/model/check`` — answer whether we already hold one.
 
 Stores one binary glTF per outfit fingerprint. Repeat uploads of an outfit we
-already hold are answered without touching the disk, which is the common case:
-the plugin only re-uploads when it cannot tell whether we have a model, and a
-player's outfit changes far less often than they play.
+already hold are answered without touching the disk, which used to be the
+common case: the plugin remembered a single fingerprint, so a player
+alternating between two outfits re-sent one of them on every switch.
+
+Measured 2026-09-14: ~264k uploads a day, of which only ~16-24% were outfits we
+did not have. The other four in five arrived as a 53 KB (median) model we
+already had, read off the player's connection and thrown away — and each one
+cost the client a mesh export on its game thread. The check endpoint is the fix:
+the plugin asks first with a ~200-byte request and only exports and uploads on a
+miss. Answering it also tells us which outfit the player is *wearing*, which is
+the one thing the wasteful re-upload did usefully — so the profile still follows
+a player switching back into gear we already hold.
 
 The uploaded bytes are attacker-controlled and are later handed to a browser to
 render, so they are validated structurally before anything is written — see
@@ -83,6 +93,78 @@ async def upload_player_model():
         )
 
     return jsonify({"accepted": True, **result}), 200
+
+
+@player_model_bp.post("/player/model/check")
+async def check_player_model():
+    """Do we already hold this outfit? Answered before the client exports one.
+
+    Cheap by construction: a Redis-cached existence check and, at most, one
+    ``player_state`` write. It is deliberately not an upload — a client that
+    gets anything other than a clear yes should fall back to sending the model,
+    because a wrong "yes" would silently cost us the outfit.
+    """
+    data = await request.get_json(silent=True) or {}
+    acc_hash = str(data.get("acc_hash") or "").strip()
+    fingerprint = str(data.get("fingerprint") or "").strip().lower()
+    if not acc_hash or not fingerprint:
+        return jsonify({"error": "acc_hash and fingerprint are required"}), 422
+
+    try:
+        result = await asyncio.to_thread(_check, acc_hash, fingerprint)
+    except Exception as exc:
+        print(f"/player/model/check failed: {exc}")
+        # Not an error the client can act on: answering "we have nothing" makes
+        # it upload, which is the behaviour it had before this endpoint existed.
+        return jsonify({"accepted": True, "has_model": False, "has_pet": False}), 200
+
+    if result is None:
+        return jsonify({"accepted": False, "reason": "unknown_player"}), 202
+    return jsonify({"accepted": True, **result}), 200
+
+
+def _check(acc_hash, fingerprint):
+    from services.player_model import is_valid_fingerprint, model_exists
+
+    if not is_valid_fingerprint(fingerprint):
+        return {"has_model": False, "has_pet": False}
+
+    db_session = get_db_session()
+    try:
+        player = (
+            db_session.query(Player).filter(Player.account_hash == acc_hash).first()
+        )
+        if player is None:
+            return None
+        player_id = player.player_id
+
+        has_model = model_exists(player_id, fingerprint)
+        # Only worth asking when we hold the outfit at all; a pet model cannot
+        # exist without one, and this is the hot path.
+        has_pet = model_exists(player_id, fingerprint, pet=True) if has_model else False
+
+        if has_model:
+            state = (
+                db_session.query(PlayerState)
+                .filter(PlayerState.player_id == player_id)
+                .first()
+            )
+            if state is None:
+                state = PlayerState(player_id=player_id)
+                db_session.add(state)
+            # Written only on a change: a player standing in the same gear asks
+            # this repeatedly, and an unconditional commit would turn every one
+            # of those into a write.
+            if state.model_fingerprint != fingerprint:
+                state.model_fingerprint = fingerprint
+                db_session.commit()
+
+        return {"has_model": has_model, "has_pet": has_pet}
+    except Exception:
+        db_session.rollback()
+        raise
+    finally:
+        db_session.close()
 
 
 async def _finish_in_background(player_id: int, fingerprint: str,

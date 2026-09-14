@@ -208,12 +208,21 @@ def model_exists(player_id: int, fingerprint: str, *, pet: bool = False) -> bool
     return os.path.exists(model_path(player_id, fingerprint, pet=pet))
 
 
-def prune_old_models(player_id: int, keep: int = 5,
+def prune_old_models(player_id: int, keep: int = 12,
                      protect: frozenset = frozenset()) -> int:
     """Keeps only the most recently modified models for a player.
 
     Without this the directory grows forever: a player who changes gear often
     would leave a model behind for every outfit they have ever worn.
+
+    ``keep`` is also what bounds re-uploads. Since the client asks before
+    sending (``POST /player/model/check``), an outfit we pruned is one the
+    client will export and send again the next time it is worn — so a player who
+    rotates through more outfits than we keep pays for that rotation forever. At
+    keep=5 a quarter of players cycled their whole stored set within an hour
+    (measured 2026-09-14), which is why this is 12: a model averages 60 KB, so
+    the extra outfits cost a few GB across all players, against renders that
+    already hold 81 GB.
 
     ``protect`` is a set of fingerprints that must survive regardless of age —
     the pinned profile model, chiefly. A pin is a promise ("your profile shows
