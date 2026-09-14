@@ -6,7 +6,7 @@ import signal
 import sys
 from datetime import datetime
 from dotenv import load_dotenv
-from interactions.api.events import MemberUpdate, MessageCreate, MessageReactionAdd, Startup
+from interactions.api.events import MemberAdd, MemberUpdate, MessageCreate, MessageReactionAdd, Startup
 from interactions import Embed, Intents, Message, ChannelType, OptionType, SlashContext, listen, slash_command, Permissions, slash_option
 from interactions.models import Member
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, UserConfiguration
@@ -23,6 +23,7 @@ from data.submissions.dispatch import (
 )
 from api.services.metrics import MetricsTracker
 from services.points import award_points_to_player
+from services import discord_roles
 from services import nitro_attribution
 from services import nitro_notifications
 from utils.format import convert_to_ms, get_true_boss_name
@@ -418,6 +419,100 @@ async def _nitro_scheduler():
             _nitro_dirty.clear()
 
 
+# --- Tier + Bug Tester Discord roles (services/discord_roles.py) ------------------
+# Every minute the wanted role set is re-read from the database, which is cheap.
+# The member list is fetched and diffed when that set changes, when someone
+# joins the main server, on a Redis request (/bug-tester), and at least every
+# _ROLE_SYNC_FULL_SECONDS, so an edit made by hand in Discord is also undone.
+_role_sync_dirty = asyncio.Event()
+_role_sync_started = False
+_ROLE_SYNC_CHECK_SECONDS = 60
+_ROLE_SYNC_FULL_SECONDS = 900
+_ROLE_SYNC_DEBOUNCE_SECONDS = 10
+
+
+@listen(MemberAdd)
+async def on_member_add(event: MemberAdd):
+    """Someone joining the main server may already be owed a role."""
+    try:
+        if str(event.guild_id) == str(discord_roles.MAIN_GUILD_ID):
+            _role_sync_dirty.set()
+    except Exception as e:
+        print(f"[roles] member join handling failed: {e}")
+
+
+def _load_desired_roles():
+    with Session() as s:
+        return discord_roles.desired_role_keys(discord_roles.load_role_inputs(s))
+
+
+async def run_role_sync(desired, dry_run: bool) -> dict:
+    role_map = discord_roles.load_role_map()
+    if not role_map:
+        return {"skipped": "no role map"}
+    members = await discord_roles.fetch_guild_members(bot.http)
+    plan = discord_roles.plan_role_changes(
+        desired, members, role_map, max_removals=discord_roles.max_removals_per_pass()
+    )
+    if plan.held_back:
+        print(
+            f"[roles] WARNING: {len(plan.held_back)} removals exceed the per-pass limit and were held "
+            f"back; review with scripts/sync_discord_roles.py"
+        )
+    if dry_run:
+        stats = {"would_add": len(plan.adds), "would_remove": len(plan.removes)}
+        for discord_id, key in plan.adds:
+            print(f"[roles] dry-run: + {key} {discord_id}")
+        for discord_id, key in plan.removes:
+            print(f"[roles] dry-run: - {key} {discord_id}")
+    else:
+        stats = await discord_roles.apply_role_plan(bot.http, plan, role_map)
+    stats["held_back"] = len(plan.held_back)
+    if plan.adds or plan.removes or plan.held_back:
+        print(f"[roles] sync {'dry-run ' if dry_run else ''}complete: {stats}")
+    return stats
+
+
+async def _role_sync_scheduler():
+    mode = discord_roles.sync_mode()
+    if mode == "off":
+        print("[roles] DISCORD_ROLE_SYNC=off — role sync not started.")
+        return
+    await asyncio.sleep(90)  # let the gateway settle first
+    last_desired = None
+    last_full = 0.0
+    while not shutdown_event.is_set():
+        try:
+            desired = await asyncio.to_thread(_load_desired_roles)
+            requested = await asyncio.to_thread(discord_roles.consume_sync_request)
+            due = (
+                requested
+                or _role_sync_dirty.is_set()
+                or desired != last_desired
+                or time.monotonic() - last_full >= _ROLE_SYNC_FULL_SECONDS
+            )
+            if due:
+                _role_sync_dirty.clear()
+                stats = await run_role_sync(desired, dry_run=(mode == "dry-run"))
+                last_full = time.monotonic()
+                # A pass with transient failures runs again at the next check.
+                clean = not (stats.get("errors") or stats.get("deferred"))
+                last_desired = desired if clean else None
+        except Exception as e:
+            # A failed database read raises before any plan exists, so no
+            # role is ever removed on the strength of a partial read. The next
+            # successful read differs from last_desired (None), so a join that
+            # arrived meanwhile is still covered.
+            print(f"[roles] sync failed: {e}")
+            last_desired = None
+            _role_sync_dirty.clear()
+        try:
+            await asyncio.wait_for(_role_sync_dirty.wait(), timeout=_ROLE_SYNC_CHECK_SECONDS)
+            await asyncio.sleep(_ROLE_SYNC_DEBOUNCE_SECONDS)  # coalesce a burst of joins
+        except asyncio.TimeoutError:
+            pass
+
+
 # Add retry decorator for database operations
 def retry_on_database_error(max_retries=3, delay=1):
     """Decorator to retry database operations on connection failures"""
@@ -738,6 +833,10 @@ async def on_startup(event: Startup):
     if not _nitro_scheduler_started:
         _nitro_scheduler_started = True
         asyncio.create_task(_nitro_scheduler())
+    global _role_sync_started
+    if not _role_sync_started:
+        _role_sync_started = True
+        asyncio.create_task(_role_sync_scheduler())
     global _status_heartbeat_started
     if not _status_heartbeat_started:
         _status_heartbeat_started = True

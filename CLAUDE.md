@@ -432,6 +432,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Event Discord surfaces | `services/event_notifications.py`, `event_board.py`, `event_team_discord.py`, `event_signup_discord.py` |
 | Discord Activity backend | `services/activity_launch*.py` (frontend lives in the web repo) |
 | Badges | `services/badges.py`, `db/models/badge.py`, `web_api/routes/badges.py` |
+| Discord roles for tiers + Bug Testers (main server) | `services/discord_roles.py` (rules, role specs); synced by the webhook bot; `/bug-tester` in `commands/bug_tester.py`; `scripts/seed_discord_roles.py` / `sync_discord_roles.py` (dry-run by default) |
 | Website API endpoint (`/api/v1/...`) | `web_api/routes/<area>.py`; auth/roles in `web_api/deps.py` |
 | Website auth/session | `web_api/session.py` (JWT), `web_api/routes/auth.py` (Discord OAuth) |
 | Live drop feed / SSE | `services/realtime.py` (publish), `web_api/routes/realtime.py` (stream) |
