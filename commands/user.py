@@ -434,10 +434,10 @@ class UserCommands(Extension):
         joined_time = _time_since_iso(result.get("claimed_at"))
         if status == "claimed_by_other":
             owner_discord_id = result.get("owner_discord_id")
-            await ctx.send(f"Uh-oh!\\n" +
-                        f"It looks like somebody else may have claimed your account {joined_time}!\\n" +
-                        f"<@{owner_discord_id}> (discord id: {owner_discord_id}) currently owns it in our database.\\n" +
-                        "If this is some type of mistake, please reach out in our discord server:\\n" +
+            await ctx.send(f"Uh-oh!\n" +
+                        f"It looks like somebody else may have claimed your account {joined_time}!\n" +
+                        f"<@{owner_discord_id}> (discord id: {owner_discord_id}) currently owns it in our database.\n" +
+                        "If this is some type of mistake, please reach out in our discord server:\n" +
                         "https://discord.gg/droptracker",
                         ephemeral=True)
         elif status == "already_yours":
@@ -510,7 +510,7 @@ class UserCommands(Extension):
 			                f"> Upload all (un)locked Collection Log slots instantly--just open the interface with our plugin enabled, then visit [your profile]({player_url(result.get('player_id'))})!", inline=False)
             embed.set_thumbnail(url="https://www.droptracker.io/img/droptracker-small.gif")
             embed.set_footer(text="Powered by the DropTracker | https://www.droptracker.io/")
-            await ctx.send(embed=embed)
+            await ctx.send(embed=embed, ephemeral=True)
         else:
             await ctx.send(f"An error occurred claiming your account.\n" +
                            "Try again later, or reach out in our Discord server",
