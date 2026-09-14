@@ -1243,11 +1243,53 @@ def get_player_current_month_total(player_id: int) -> int:
     except Exception:
         return 0
     
-def get_player_list_loot_sum(player_ids: List[int]):
+# Players per MGET / ZMSCORE in get_player_list_loot_sum.
+_LOOT_SUM_BATCH = 1000
+
+
+def _redis_number_as_int(raw) -> int:
     try:
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode()
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_player_list_loot_sum(player_ids: List[int]):
+    """Sum of ``get_player_current_month_total`` over the players, read in batches.
+
+    This used to call that function per player — a GET, plus a ZSCORE for
+    every player without a total key — and its main caller, the drop
+    notification, runs on the core bot's event loop. For the global group
+    (~26k members) that is ~50k blocking round trips per global drop, each one
+    re-taking the GIL from the bot's other threads; those notifications froze
+    the loop for 7s on median and 24s at worst, long enough for Discord to drop
+    the bot's connections mid-send (duplicate notifications, 2026-09-10 to -13).
+    Batched, it is two round trips per thousand players.
+    """
+    try:
+        now = datetime.now()
+        partition = now.year * 100 + now.month
+        ids = [player_id for player_id in player_ids if player_id is not None]
         group_total = 0
-        for player_id in player_ids:
-            group_total += get_player_current_month_total(player_id)
+        for start in range(0, len(ids), _LOOT_SUM_BATCH):
+            batch = ids[start:start + _LOOT_SUM_BATCH]
+            totals = redis_client.client.mget(
+                [f"player:{player_id}:{partition}:total_loot" for player_id in batch]
+            )
+            missing = []
+            for player_id, total in zip(batch, totals):
+                if total is None:
+                    missing.append(player_id)
+                else:
+                    group_total += _redis_number_as_int(total)
+            if missing:
+                # The same fallback as the single-player read: the global board.
+                scores = redis_client.client.zmscore(f"leaderboard:{partition}", missing)
+                group_total += sum(
+                    _redis_number_as_int(score) for score in scores if score is not None
+                )
         return group_total
     except Exception:
         return 0
