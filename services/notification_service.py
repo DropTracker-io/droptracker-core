@@ -1,9 +1,12 @@
 import asyncio
+import contextvars
+import hashlib
 import json
 import os
 import random
 import re
 import shutil
+import time
 from datetime import datetime, timedelta
 import interactions
 import aiohttp
@@ -125,6 +128,41 @@ class SendRateLimited(Exception):
     Distinct type so the queue's transient classifier can requeue it rather
     than dead-lettering a message that was never delivered.
     """
+
+
+class _SendScope:
+    """Names every message one queue row posts, identically on each attempt.
+
+    A send can fail AFTER Discord has created the message: the connection
+    drops while the reply is being read ("APPLICATION_DATA_AFTER_CLOSE_NOTIFY"),
+    the error is transient, the row is requeued, and the retry posted a second
+    copy. That happened on 2026-09-10, -12 and -13, each time in two channels.
+    The name becomes a Discord nonce with ``enforce_nonce``, so a retry within
+    Discord's window gets the message that already landed instead.
+
+    The name is "the Nth send this row makes to this channel". Keying on the
+    channel keeps a row that posts to several channels correct even if a retry
+    reaches them in a different order; 24 hex chars fits Discord's 25-char cap.
+    """
+
+    def __init__(self, notification_id):
+        self.notification_id = notification_id
+        self._sends_per_channel = {}
+
+    def nonce_for(self, channel_id) -> str:
+        n = self._sends_per_channel.get(channel_id, 0)
+        self._sends_per_channel[channel_id] = n + 1
+        key = f"{self.notification_id}:{channel_id}:{n}".encode()
+        return hashlib.blake2b(key, digest_size=12).hexdigest()
+
+
+# Set by _process_one_notification around one row's send path. Unset (None)
+# for any other caller, whose sends go out exactly as before.
+_send_scope: contextvars.ContextVar = contextvars.ContextVar(
+    "notification_send_scope", default=None
+)
+
+_DISCORD_EPOCH_MS = 1420070400000
 
 
 class NotificationService:
@@ -595,14 +633,41 @@ class NotificationService:
         ``SendRateLimited`` (which ``_is_transient_send_error`` classes as
         transient) hands it to the existing bounded requeue instead.
 
+        Inside a queue row every send also carries an enforced nonce (see
+        ``_SendScope``), which makes that requeue safe for a send that did land.
+
         This is the ONE place allowed to call ``channel.send`` directly.
         """
+        scope = _send_scope.get()
+        if scope is not None and "nonce" not in kwargs:
+            kwargs["nonce"] = scope.nonce_for(getattr(channel, "id", None))
+            kwargs["enforce_nonce"] = True
+        started_ms = time.time() * 1000
         result = await channel.send(*args, **kwargs)
         if result is None:
             raise SendRateLimited(
                 "channel.send returned None — the library exhausted its 429 retries"
             )
+        if scope is not None and self._created_before(result, started_ms):
+            # The log line that proves the nonce doing its job in production.
+            app_logger.log(
+                log_type="info",
+                data=f"Notification {scope.notification_id}: Discord returned message "
+                     f"{result.id}, posted by an earlier attempt — not sent twice",
+                app_name="notification_service",
+                description="send",
+            )
         return result
+
+    @staticmethod
+    def _created_before(message, started_ms, slack_ms=2000) -> bool:
+        """True when the message's snowflake says Discord created it before
+        this send began, i.e. the enforced nonce matched an earlier attempt."""
+        try:
+            created_ms = (int(message.id) >> 22) + _DISCORD_EPOCH_MS
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return created_ms < started_ms - slack_ms
 
     async def _try_send_component_layout(
         self, db_session, notification, channel, group_id, notification_type, replacements
@@ -1340,7 +1405,11 @@ class NotificationService:
                 db_session.commit()
 
                 try:
-                    await self.process_notification_with_session(locked_notification, db_session)
+                    scope_token = _send_scope.set(_SendScope(notification_id))
+                    try:
+                        await self.process_notification_with_session(locked_notification, db_session)
+                    finally:
+                        _send_scope.reset(scope_token)
                     return 1
                 except Exception as e:
                     # Transient Discord/network faults go back to pending for
