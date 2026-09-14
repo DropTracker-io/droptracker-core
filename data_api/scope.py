@@ -181,13 +181,27 @@ def group_roster_page(session, group_id: int, after_id: int,
 
 
 def resolve_player_ref(session, ref: str) -> Optional[int]:
-    """A path segment that is either a player id or an exact name."""
+    """A path segment that is either a player id or a name.
+
+    A name matches exactly first, then under OSRS name equivalence: the game
+    treats '-', '_' and ' ' as one character and stored names usually carry
+    WOM's space, so ``1-19`` has to find ``1 19``. Ties go to the lowest id.
+    """
+    from utils.rsn import normalize_player_display_equivalence
+
     ref = (ref or "").strip()
     if not ref:
         return None
     if ref.isdigit():
         return int(ref)
     row = session.execute(text("""
-        SELECT player_id FROM players WHERE player_name = :name LIMIT 1
+        SELECT player_id FROM players WHERE player_name = :name
+        ORDER BY player_id LIMIT 1
     """).bindparams(name=ref)).first()
+    folded = normalize_player_display_equivalence(ref)
+    if row is None and folded:
+        row = session.execute(text("""
+            SELECT player_id FROM players WHERE player_name_norm = :folded
+            ORDER BY player_id LIMIT 1
+        """).bindparams(folded=folded)).first()
     return int(row[0]) if row else None

@@ -937,7 +937,16 @@ def _run_loader(session, section: Section, player_ids: List[int],
 
     A statement timeout is re-raised either way: that is the server saying the
     work is too heavy, and retrying it per player is exactly the wrong move.
+
+    An empty page never reaches a loader. A roster with no visible members, or
+    a cursor past the last player, resolves to no ids at all, and every loader
+    filters on ``player_id IN :ids``: an empty tuple renders as ``IN ()``,
+    which MariaDB rejects as a syntax error instead of matching nothing. Every
+    such page used to log one traceback per section and "retry" for no one.
     """
+    if not player_ids:
+        return {}, []
+
     from data_api.core import is_statement_timeout
 
     try:
