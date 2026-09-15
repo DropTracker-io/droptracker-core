@@ -27,9 +27,10 @@ def encrypt_webhook(webhook_url: str, encryption_key: str = None) -> str:
     except Exception as e:
         raise Exception(f"Encryption failed: {str(e)}")
 
-def decrypt_webhook(webhook_hash: str) -> str:
+def decrypt_webhook(webhook_hash: str, encryption_key: str = None) -> str:
     try:
-        encryption_key = get_encryption_key()
+        if encryption_key is None:
+            encryption_key = get_encryption_key()
         f = Fernet(encryption_key)
         # Decode from base64 string back to bytes
         encrypted_data = b64decode(webhook_hash)

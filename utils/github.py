@@ -1,10 +1,12 @@
 import asyncio
+import bisect
 import hashlib
 import os
 import re
 import aiohttp
 import github
 import time
+from collections import Counter, namedtuple
 from github import Github
 # NOTE: never import the module-global scoped session here. This module runs in
 # long-lived processes (player-updates' github loop, in both the asyncio main
@@ -12,10 +14,11 @@ from github import Github
 # transaction that nothing ever commits, which held an idle InnoDB transaction
 # (and its metadata locks) open for the entire service lifetime — 20h+ in the
 # 2026-07-16 incident. Use short-lived `with Session()` blocks instead.
-from db.models import GroupConfiguration, Webhook, NewWebhook, Session, WebhookPendingDeletion
+from db.models import GroupConfiguration, Webhook, NewWebhook, Session
 from dotenv import load_dotenv
 import json
 from utils.encrypter import encrypt_webhook, decrypt_webhook
+from utils.plugin_urls import webhook_credentials
 from datetime import datetime, timedelta
 from db.app_logger import AppLogger
 load_dotenv()
@@ -55,10 +58,19 @@ def summarize_publish(files_to_update, deletions, webhook_files_changed, webhook
         changes.append(f"{webhook_files_changed} webhook file(s) rotated")
     if deletions:
         changes.append(f"Pruned {len(deletions)} stale dated file(s)")
-    deleted = (webhook_check or {}).get("deleted", 0)
+    check = webhook_check or {}
+    if check.get("degraded"):
+        changes.append(
+            f"Webhook check untrusted: {check.get('inconclusive', 0)} of {check.get('tested', 0)} probes "
+            "inconclusive (Discord or network trouble) — nothing deleted, webhook files unchanged")
+    deleted = check.get("deleted", 0)
     if deleted:
-        tested = (webhook_check or {}).get("tested", 0)
-        changes.append(f"Deleted {deleted} dead webhook(s) (of {tested} tested)")
+        changes.append(f"Deleted {deleted} confirmed-dead webhook(s) (of {check.get('tested', 0)} tested)")
+    struck = check.get("struck", 0)
+    if struck:
+        changes.append(
+            f"Flagged {struck} webhook(s) answering Unknown Webhook: unpublished, "
+            f"deleted if still dead after {DEAD_CONFIRM_SECONDS // 3600}h")
     return changes
 
 
@@ -100,35 +112,41 @@ class GithubPagesUpdater:
         # Log the repo and file path for verification
         # print(f"Repo: {repo_name}")
 
-    def fetch_webhooks_from_database(self, limit=120):
+    def fetch_webhooks_from_database(self, limit=120, urls=None):
         """
         Fetch the webhook URLs from the database and format them as a list of URLs.
 
         Args:
             limit: Maximum number of webhooks to fetch
+            urls: The exact webhook urls to publish, in order — the liveness
+                check's publishable set. Skips the table read.
 
         Returns:
             list of encrypted webhooks
         """
         try:
-            with Session() as s:
-                # Deterministic order: an unordered LIMIT can shuffle which
-                # rows are picked between runs, which would read as a webhook
-                # "change" and trigger a pointless publish.
-                main_urls = [
-                    w.webhook_url
-                    for w in s.query(Webhook).order_by(Webhook.webhook_id.asc()).limit(limit).all()
-                    if w.webhook_url
-                ]
+            if urls is not None:
+                main_urls = list(urls)
+            else:
+                with Session() as s:
+                    # Deterministic order: an unordered LIMIT can shuffle which
+                    # rows are picked between runs, which would read as a webhook
+                    # "change" and trigger a pointless publish.
+                    main_urls = [
+                        w.webhook_url
+                        for w in s.query(Webhook).order_by(Webhook.webhook_id.asc()).limit(limit).all()
+                        if w.webhook_url
+                    ]
             main_encrypted = []
-            
+
             # Try to encrypt each webhook, skipping any that fail
             for url in main_urls:
                 try:
                     encrypted = encrypt_webhook(url)
                     main_encrypted.append(encrypted)
                 except Exception as e:
-                    print(f"Failed to encrypt webhook {url}: {e}")
+                    # Never log the url: it carries the webhook's token.
+                    print(f"Failed to encrypt a webhook url: {e}")
             
             if not main_encrypted:
                 raise ValueError("No webhooks could be encrypted. Check encryption key configuration.")
@@ -174,10 +192,16 @@ class GithubPagesUpdater:
         with Session() as s:
             total_hooks = s.query(Webhook).count()
 
-        # Liveness-check the webhooks we are about to publish (dead ones are
-        # deleted from the DB, so the fetch below only sees working hooks).
-        webhook_check = await check_limited_webhooks(120, watchdog)
-        changes = await asyncio.to_thread(self._update_github_pages)
+        # The liveness check decides which webhooks get published and deletes
+        # only confirmed-dead rows (see check_pool_webhooks). If it fails or
+        # can't be trusted, the published webhook files are left as they are.
+        try:
+            webhook_check = await check_pool_webhooks()
+        except Exception as e:
+            print(f"Error checking webhooks: {e}")
+            webhook_check = None
+        publish_urls = webhook_check.get("publish_urls") if webhook_check else None
+        changes = await asyncio.to_thread(self._update_github_pages, publish_urls)
         return (changes or []) + summarize_publish([], [], 0, webhook_check)
 
     def _webhook_set_changed(self, content_file, new_chunk) -> bool:
@@ -244,7 +268,7 @@ class GithubPagesUpdater:
             print(f"Failed to build server_loot_npc_ids.txt content: {e}")
         return out
 
-    def _update_github_pages(self):
+    def _update_github_pages(self, publish_urls=None):
         """
         Publish the latest webhook/news/key/item-list content, committing ONLY
         when something actually changed. One ``content/`` listing replaces the
@@ -253,6 +277,10 @@ class GithubPagesUpdater:
         compare for deterministic text) so a no-change cycle makes zero commits
         and triggers zero GitHub Pages builds. Stale dated files are pruned in
         the same commit.
+
+        ``publish_urls`` is the liveness check's ordered publishable set. None
+        (no trusted check this run) leaves the webhook files untouched; the
+        other files still publish.
 
         Returns the ``summarize_publish`` change lines for the run (empty list
         when nothing was committed).
@@ -273,51 +301,55 @@ class GithubPagesUpdater:
         if encryption_key_file:
             files_to_update.append(encryption_key_file)
 
-        try:
-            encrypted_webhooks = self.fetch_webhooks_from_database(limit=120)
-        except Exception as e:
-            print(f"Error fetching webhook URLs from the database: {e}")
-            return []
-
-        if len(encrypted_webhooks) < 30:
-            print("Generated list is too short:", len(encrypted_webhooks))
-            return []
-
-        chunk_size = 40
-        webhook_chunks = [encrypted_webhooks[i:i + chunk_size]
-                          for i in range(0, len(encrypted_webhooks), chunk_size)]
+        encrypted_webhooks = []
+        if publish_urls is None:
+            print("No trusted webhook check this run; leaving webhook files unchanged.")
+        else:
+            if publish_urls:
+                try:
+                    encrypted_webhooks = self.fetch_webhooks_from_database(urls=publish_urls)
+                except Exception as e:
+                    print(f"Error encrypting webhook URLs: {e}")
+            if len(encrypted_webhooks) < 30:
+                print("Generated list is too short:", len(encrypted_webhooks), "- leaving webhook files unchanged.")
+                encrypted_webhooks = []
 
         now = datetime.now()
         today_str = now.strftime("%Y%m%d")
         tomorrow_str = (now + timedelta(days=1)).strftime("%Y%m%d")
 
-        # {date}.json is what UrlManager.loadEndpoints reads; tomorrow's copy
-        # covers the midnight rollover. {date}-1.json is the replenishment set
-        # fetchNewList falls back to when the primary set is failing — it was
-        # never published before this rewrite, so that path 404'd.
-        primary_chunk = webhook_chunks[1] if len(webhook_chunks) > 1 else webhook_chunks[0]
-        targets = {
-            "content/core.json": webhook_chunks[0],
-            f"content/{today_str}.json": primary_chunk,
-            f"content/{tomorrow_str}.json": primary_chunk,
-        }
-        if len(webhook_chunks) > 2:
-            targets[f"content/{today_str}-1.json"] = webhook_chunks[2]
-            targets[f"content/{tomorrow_str}-1.json"] = webhook_chunks[2]
-
         webhook_files_changed = 0
-        for file_path, chunk in targets.items():
-            if self._webhook_set_changed(listing.get(file_path), chunk):
-                files_to_update.append((file_path, json.dumps(chunk, indent=4)))
-                webhook_files_changed += 1
+        if encrypted_webhooks:
+            chunk_size = 40
+            webhook_chunks = [encrypted_webhooks[i:i + chunk_size]
+                              for i in range(0, len(encrypted_webhooks), chunk_size)]
 
-        # Mirror the published set in the database, but only when it moved.
-        if webhook_files_changed:
-            with Session() as s:
-                s.query(NewWebhook).delete()
-                for webhook_hash in encrypted_webhooks:
-                    s.add(NewWebhook(webhook_hash=webhook_hash))
-                s.commit()
+            # {date}.json is what UrlManager.loadEndpoints reads; tomorrow's copy
+            # covers the midnight rollover. {date}-1.json is the replenishment set
+            # fetchNewList falls back to when the primary set is failing — it was
+            # never published before this rewrite, so that path 404'd.
+            primary_chunk = webhook_chunks[1] if len(webhook_chunks) > 1 else webhook_chunks[0]
+            targets = {
+                "content/core.json": webhook_chunks[0],
+                f"content/{today_str}.json": primary_chunk,
+                f"content/{tomorrow_str}.json": primary_chunk,
+            }
+            if len(webhook_chunks) > 2:
+                targets[f"content/{today_str}-1.json"] = webhook_chunks[2]
+                targets[f"content/{tomorrow_str}-1.json"] = webhook_chunks[2]
+
+            for file_path, chunk in targets.items():
+                if self._webhook_set_changed(listing.get(file_path), chunk):
+                    files_to_update.append((file_path, json.dumps(chunk, indent=4)))
+                    webhook_files_changed += 1
+
+            # Mirror the published set in the database, but only when it moved.
+            if webhook_files_changed:
+                with Session() as s:
+                    s.query(NewWebhook).delete()
+                    for webhook_hash in encrypted_webhooks:
+                        s.add(NewWebhook(webhook_hash=webhook_hash))
+                    s.commit()
 
         for file_path, content in self._item_list_contents():
             existing = listing.get(file_path)
@@ -573,130 +605,263 @@ class GithubPagesUpdater:
         ref.edit(new_commit.sha)
 
 
-async def test_webhook(webhook, session):
-    """Test a single webhook and return its status"""
+# --- Webhook liveness ---------------------------------------------------------
+# Every plugin on the Discord-webhook transport posts to the published set, so a
+# wrongly deleted row takes a working webhook out of circulation. The check that
+# lived here deleted on ANY non-2xx/3xx answer or aiohttp error, and only ever
+# probed the first 120 rows. On 2026-09-15 it ran inside Discord's "Session
+# Unavailability" incident and deleted all 120 published webhooks — every one
+# still answered 200 afterwards — while 599 long-dead rows sat untested behind
+# them. The rules now:
+#   * Only Discord's own "Unknown Webhook" answer (404, JSON code 10015) means
+#     dead. 429s, 5xx, timeouts, connection errors and anything else are
+#     inconclusive.
+#   * A run with too many inconclusive probes is Discord or network trouble, not
+#     dead webhooks: it deletes nothing, records nothing and leaves the published
+#     webhook files alone.
+#   * A dead answer strikes the row, which stops it being published. The row is
+#     deleted only when a probe at least DEAD_CONFIRM_SECONDS later is still
+#     dead, so an incident answering 10015 for live webhooks can't delete them
+#     unless it outlasts that window. A live answer clears the strike.
+#   * Besides the rows being published, every run probes the next
+#     ROTATION_BATCH rows of the table, so dead rows can't hide behind live ones.
+
+UNKNOWN_WEBHOOK_CODE = 10015
+PUBLISH_COUNT = 120
+MAX_PUBLISH_PROBES = 360
+ROTATION_BATCH = 60
+DEAD_CONFIRM_SECONDS = 6 * 60 * 60
+INCONCLUSIVE_MIN = 5
+INCONCLUSIVE_RATIO = 0.10
+PROBE_DELAY_SECONDS = 0.25
+PROBE_TIMEOUT_SECONDS = 10
+DEAD_STRIKES_KEY = "github_pages:webhook_dead_strikes"  # hash: row id -> unix time of first dead answer
+ROTATION_CURSOR_KEY = "github_pages:webhook_rotation_cursor"  # json [webhook_id, row id] last probed
+
+ALIVE = "alive"
+DEAD = "dead"
+INCONCLUSIVE = "inconclusive"
+
+PoolRow = namedtuple("PoolRow", "id webhook_id url")
+
+
+def pool_sort_key(row):
+    """Publish order: webhook snowflake, then row id."""
+    return (row.webhook_id or "", row.id)
+
+
+def _url_webhook_id(url):
+    credentials = webhook_credentials(url)
+    return credentials.split("/", 1)[0] if credentials else None
+
+
+def classify_probe(status, payload, expected_id=None):
+    """ALIVE, DEAD or INCONCLUSIVE for one webhook GET.
+
+    ``payload`` is the decoded JSON body, or None when there wasn't one. A 2xx
+    only counts as alive when the body is the webhook itself, so an edge or
+    proxy answering 200 with an error page can't vouch for it."""
+    if status is not None and 200 <= status < 300:
+        if isinstance(payload, dict) and (expected_id is None or str(payload.get("id")) == str(expected_id)):
+            return ALIVE
+        return INCONCLUSIVE
+    if status == 404 and isinstance(payload, dict) and payload.get("code") == UNKNOWN_WEBHOOK_CODE:
+        return DEAD
+    return INCONCLUSIVE
+
+
+async def probe_webhook(http_session, url):
+    """GET one webhook URL. Returns ``(verdict, detail)``, detail being the HTTP
+    status or the exception name. Never raises — a timeout is
+    asyncio.TimeoutError, not aiohttp.ClientError."""
     try:
-        start_time = time.time()
-        if len(str(webhook.webhook_url)) < 5:
-            return {
-                'webhook_id': webhook.webhook_id if hasattr(webhook, 'webhook_id') else 'pending_deletion',
-                'url': webhook.webhook_url,
-                'status': 'Error',
-                'elapsed': 0,
-                'ok': False
-            }
-        async with session.get(webhook.webhook_url, timeout=10) as response:
-            elapsed = time.time() - start_time
-            status = response.status
-            return {
-                'webhook_id': webhook.webhook_id if hasattr(webhook, 'webhook_id') else 'pending_deletion',
-                'url': webhook.webhook_url,
-                'status': status,
-                'elapsed': elapsed,
-                'ok': 200 <= status < 400
-            }
-    except aiohttp.ClientError as e:
-        return {
-            'webhook_id': webhook.webhook_id if hasattr(webhook, 'webhook_id') else 'pending_deletion',
-            'url': webhook.webhook_url,
-            'status': 'Error',
-            'error': str(e),
-            'ok': False
-        }
-
-
-async def test_all_webhooks():
-    with Session() as session:
-        """Test all webhooks with a delay between requests"""
-        webhooks = session.query(Webhook).all()
-        secondary = session.query(WebhookPendingDeletion).all()
-        all_webhooks = secondary + webhooks
-        
-        print(f"Testing {len(all_webhooks)} webhooks...")
-        
-        results = []
-        passed = 0
-        failed = 0
-        async with aiohttp.ClientSession() as http_session:
-            for i, webhook in enumerate(all_webhooks):
-                #print(f"Testing webhook {i+1}/{len(all_webhooks)}: {webhook.webhook_url}...")
-                result = await test_webhook(webhook, http_session)
-                results.append(result)
-                
-                # Print result immediately
-                if result['ok']:
-                    passed += 1
-                else:
-                    failed += 1
-                    ## Remove it from the database
-                    session.delete(webhook)
-                    session.commit()
-                
-                # Add delay between requests (2 seconds)
-                if i < len(all_webhooks) - 1:  # Don't delay after the last request
-                    await asyncio.sleep(0.25)
-        
-        #print(f"Checked {len(all_webhooks)} webhooks: {passed} passed, {failed} failed")
-
-async def check_limited_webhooks(limit=80, watchdog=None):
-    """
-    Check only a limited number of webhooks to ensure they're working before updating GitHub Pages.
-    This removes non-working webhooks from the database.
-    
-    Args:
-        limit: Maximum number of webhooks to check
-        watchdog: SystemdWatchdog instance to notify during long operations
-
-    Returns:
-        ``{"tested": n, "deleted": n}`` — or ``None`` when the check itself
-        errored out.
-    """
-    print(f"Checking up to {limit} webhooks before GitHub update...")
-    try:
-        with Session() as session:
-            webhooks = session.query(Webhook).limit(limit).all()
-            
-            print(f"Testing {len(webhooks)} webhooks...")
-            
-            results = []
-            passed = 0
-            failed = 0
-            async with aiohttp.ClientSession() as http_session:
-                for i, webhook in enumerate(webhooks):
-                    #print(f"Testing webhook {i+1}/{len(webhooks)}: {webhook.webhook_url}...")
-                    result = await test_webhook(webhook, http_session)
-                    results.append(result)
-                    
-                    # Print result immediatelyif i % 10 == 0:
-                    #print(f"Checked {i+1}/{len(webhooks)} webhooks: so far, {passed} passed, {failed} failed")
-                        
-                    if result['ok']:
-                        passed += 1
-                    else:
-                        failed += 1
-                        ## Remove it from the database
-                        session.delete(webhook)
-                        session.commit()
-                    
-                    # The watchdog is automatically notified by the SystemdWatchdog heartbeat loop
-                    # No manual notification needed
-                    
-                    # Add delay between requests
-                    if i < len(webhooks) - 1:  # Don't delay after the last request
-                        await asyncio.sleep(0.25)
-            
-            #print(f"Checked {len(webhooks)} webhooks: {passed} passed, {failed} failed")
-        print("Limited webhook check completed")
-        return {"tested": len(webhooks), "deleted": failed}
+        async with http_session.get(url, timeout=aiohttp.ClientTimeout(total=PROBE_TIMEOUT_SECONDS)) as response:
+            try:
+                payload = await response.json(content_type=None)
+            except Exception:
+                payload = None
+            return classify_probe(response.status, payload, _url_webhook_id(url)), str(response.status)
     except Exception as e:
-        print(f"Error checking webhooks: {e}")
+        return INCONCLUSIVE, type(e).__name__
+
+
+def run_is_degraded(probed, inconclusive):
+    """Too many inconclusive probes to trust anything this run concluded."""
+    return inconclusive > max(INCONCLUSIVE_MIN, INCONCLUSIVE_RATIO * probed)
+
+
+def plan_strikes(verdicts, strikes, now, confirm_seconds=DEAD_CONFIRM_SECONDS):
+    """What a trusted run does with its verdicts.
+
+    ``verdicts`` maps row id -> verdict; ``strikes`` maps row id -> unix time of
+    that row's first dead answer. Returns ``(delete_ids, new_strikes,
+    cleared_ids)``: dead with a strike at least ``confirm_seconds`` old ->
+    delete; dead without a strike -> strike now; alive -> clear any strike.
+    Inconclusive changes nothing."""
+    delete_ids, new_strikes, cleared_ids = [], {}, []
+    for row_id, verdict in verdicts.items():
+        struck_at = strikes.get(row_id)
+        if verdict == DEAD:
+            if struck_at is None:
+                new_strikes[row_id] = now
+            elif now - struck_at >= confirm_seconds:
+                delete_ids.append(row_id)
+        elif verdict == ALIVE and struck_at is not None:
+            cleared_ids.append(row_id)
+    return delete_ids, new_strikes, cleared_ids
+
+
+def rotation_slice(rows, cursor, exclude_ids, batch=ROTATION_BATCH):
+    """The next ``batch`` rows after ``cursor`` in publish order, wrapping around
+    and skipping ``exclude_ids``. ``rows`` must be sorted by pool_sort_key and
+    ``cursor`` is the sort key of the last row an earlier run probed (None to
+    start at the top). Returns ``(rows, new_cursor)``."""
+    if not rows or batch <= 0:
+        return [], cursor
+    start = bisect.bisect_right([pool_sort_key(row) for row in rows], tuple(cursor)) if cursor else 0
+    picked = []
+    for row in rows[start:] + rows[:start]:
+        if len(picked) >= batch:
+            break
+        if row.id not in exclude_ids:
+            picked.append(row)
+    return picked, (pool_sort_key(picked[-1]) if picked else cursor)
+
+
+def _load_pool_rows():
+    """Every webhooks row with a usable URL, as plain tuples in publish order
+    (short session: nothing is held open while probing)."""
+    with Session() as s:
+        rows = [
+            PoolRow(r.id, str(r.webhook_id) if r.webhook_id else None, r.webhook_url)
+            for r in s.query(Webhook.id, Webhook.webhook_id, Webhook.webhook_url).all()
+        ]
+    return sorted((row for row in rows if webhook_credentials(row.url)), key=pool_sort_key)
+
+
+def _redis_conn():
+    try:
+        from utils.redis import redis_client
+
+        return redis_client.client
+    except Exception as e:
+        print(f"Webhook check: Redis unavailable ({e})")
         return None
 
-async def check_webhooks():
-    """
-    Check all webhooks to ensure they're working before updating GitHub Pages.
-    This removes non-working webhooks from the database.
-    """
-    print("Checking webhooks before GitHub update...")
-    await test_all_webhooks()
-    print("Webhook check completed")
+
+def _read_strikes(conn):
+    strikes = {}
+    for key, value in (conn.hgetall(DEAD_STRIKES_KEY) or {}).items():
+        try:
+            strikes[int(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return strikes
+
+
+def _read_cursor(conn):
+    try:
+        webhook_id, row_id = json.loads(conn.get(ROTATION_CURSOR_KEY))
+        return (str(webhook_id), int(row_id))
+    except Exception:
+        return None
+
+
+def _delete_rows(rows):
+    """Delete confirmed-dead rows, matched on id AND url so a row that changed
+    since it was probed survives. Returns how many went."""
+    deleted = 0
+    with Session() as s:
+        for row in rows:
+            deleted += s.query(Webhook).filter(
+                Webhook.id == row.id, Webhook.webhook_url == row.url
+            ).delete(synchronize_session=False)
+        s.commit()
+    return deleted
+
+
+async def check_pool_webhooks():
+    """Probe the webhooks about to be published plus a rotating slice of the
+    rest, and apply the rules above. Returns the run report read by
+    summarize_publish; ``publish_urls`` is the ordered list to publish, or None
+    when the webhook files must stay as they are."""
+    rows = _load_pool_rows()
+    conn = _redis_conn()
+    strikes = {}
+    if conn is not None:
+        try:
+            strikes = _read_strikes(conn)
+        except Exception as e:
+            print(f"Webhook check: couldn't read strikes ({e}); nothing will be deleted this run")
+            conn = None
+
+    verdicts, answers, publishable, rotation, new_cursor = {}, Counter(), [], [], None
+    async with aiohttp.ClientSession() as http_session:
+        async def probe(row):
+            if verdicts:
+                await asyncio.sleep(PROBE_DELAY_SECONDS)
+            verdict, detail = await probe_webhook(http_session, row.url)
+            verdicts[row.id] = verdict
+            answers[detail] += 1
+            return verdict
+
+        for row in rows:
+            if len(publishable) >= PUBLISH_COUNT or len(verdicts) >= MAX_PUBLISH_PROBES:
+                break
+            verdict = await probe(row)
+            # A struck row stays unpublished until a probe says it's alive.
+            if verdict == ALIVE or (verdict == INCONCLUSIVE and row.id not in strikes):
+                publishable.append(row)
+
+        if conn is not None:
+            rotation, new_cursor = rotation_slice(rows, _read_cursor(conn), set(verdicts), ROTATION_BATCH)
+            for row in rotation:
+                await probe(row)
+
+    probed = len(verdicts)
+    inconclusive = sum(1 for verdict in verdicts.values() if verdict == INCONCLUSIVE)
+    report = {
+        "tested": probed,
+        "alive": sum(1 for verdict in verdicts.values() if verdict == ALIVE),
+        "dead": sum(1 for verdict in verdicts.values() if verdict == DEAD),
+        "inconclusive": inconclusive,
+        "degraded": run_is_degraded(probed, inconclusive),
+        "struck": 0,
+        "deleted": 0,
+        "publish_urls": [row.url for row in publishable],
+    }
+
+    if report["degraded"]:
+        report["publish_urls"] = None
+    elif conn is not None:
+        delete_ids, new_strikes, cleared_ids = plan_strikes(verdicts, strikes, time.time(), DEAD_CONFIRM_SECONDS)
+        by_id = {row.id: row for row in rows}
+        if delete_ids:
+            try:
+                report["deleted"] = _delete_rows([by_id[row_id] for row_id in delete_ids])
+                for row_id in delete_ids:
+                    print(f"Deleted dead webhook {by_id[row_id].webhook_id} (row {row_id}): "
+                          f"Unknown Webhook since {datetime.fromtimestamp(strikes[row_id]):%Y-%m-%d %H:%M}")
+            except Exception as e:
+                print(f"Webhook check: deleting confirmed-dead rows failed ({e}); will retry next run")
+                delete_ids = []
+        try:
+            if new_strikes:
+                conn.hset(DEAD_STRIKES_KEY, mapping={str(k): str(v) for k, v in new_strikes.items()})
+            stale_ids = [row_id for row_id in strikes if row_id not in by_id]
+            dropped = [str(row_id) for row_id in (*cleared_ids, *delete_ids, *stale_ids)]
+            if dropped:
+                conn.hdel(DEAD_STRIKES_KEY, *dropped)
+            if new_cursor is not None:
+                conn.set(ROTATION_CURSOR_KEY, json.dumps(list(new_cursor)))
+            report["struck"] = len(new_strikes)
+        except Exception as e:
+            print(f"Webhook check: couldn't save strikes ({e})")
+
+    print(
+        f"Webhook check: probed {probed} ({report['alive']} alive, {report['dead']} dead, "
+        f"{inconclusive} inconclusive; answers {dict(answers)}), {len(rotation)} of them from rotation; "
+        f"publishable {len(publishable)}, struck {report['struck']}, deleted {report['deleted']}"
+        + (" — UNTRUSTED: nothing deleted, webhook files left unchanged" if report["degraded"] else "")
+    )
+    return report
