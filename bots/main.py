@@ -1542,8 +1542,13 @@ async def main():
     # Setup signal handlers on the running loop (see setup_signal_handlers docs)
     setup_signal_handlers(asyncio.get_running_loop())
     
-    # Initialize systemd watchdog
-    watchdog = SystemdWatchdog()
+    # Initialize systemd watchdog. It restarts the bot only when the event loop
+    # stalls, never because health_check() returned False: bot.is_ready was
+    # False through the whole 2026-09-15 gateway outage (14:16-14:56) while
+    # notifications and lootboards kept going out over REST, and a fresh
+    # process does none of that until Startup fires. The longest stall on
+    # record ran ~7.5 min (2026-09-15 17:32); 40 stalled checks take 15 min.
+    watchdog = SystemdWatchdog(restart_after_stalls=40)
     watchdog.set_health_check(health_check)
     
     try:

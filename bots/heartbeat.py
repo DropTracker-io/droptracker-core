@@ -54,8 +54,9 @@ shutdown_event = asyncio.Event()
 # 2026-09-07 -> 09-11 and again from 2026-09-15 14:16 while systemd showed it
 # running. Now main() exits when the client stops or the gateway stays down for
 # NOT_READY_EXIT_SECONDS, and systemd (Restart=always) starts a fresh process.
-# SystemdWatchdog keeps pinging even when the health check fails, so that exit
-# is what actually restarts the bot.
+# SystemdWatchdog keeps pinging when the health check fails, so that exit is
+# what actually restarts the bot; the watchdog only withholds for an event loop
+# too stalled to run the exit (restart_after_stalls in main()).
 NOT_READY_UNHEALTHY_SECONDS = 120
 NOT_READY_EXIT_SECONDS = 600
 # Restarts are at least this far apart, so a hard failure can't burn through
@@ -707,8 +708,9 @@ async def main():
     # Setup signal handlers
     setup_signal_handlers()
 
-    # Initialize systemd watchdog
-    watchdog = SystemdWatchdog()
+    # Initialize systemd watchdog. A stalled loop can't reach the exit below, so
+    # the watchdog restarts the bot after 20 stalled checks (7.5 min).
+    watchdog = SystemdWatchdog(restart_after_stalls=20)
     watchdog.set_health_check(health_check)
     exit_for_restart = False
 

@@ -149,8 +149,11 @@ async def main():
     # Setup signal handlers
     setup_signal_handlers()
     
-    # Initialize systemd watchdog
-    watchdog = SystemdWatchdog()
+    # Initialize systemd watchdog. It restarts the bot only when the event loop
+    # stalls, not for a gateway that isn't ready: the Hall of Fame sweep keeps
+    # posting over REST through a gateway outage, and a fresh process doesn't
+    # load it until Startup fires. 20 stalled checks take 7.5 min.
+    watchdog = SystemdWatchdog(restart_after_stalls=20)
     watchdog.set_health_check(health_check)
     
     try:

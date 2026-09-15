@@ -38,6 +38,8 @@ init_sentry("droptracker-webhooks")
 
 # Provide a no-op watchdog in dev to avoid systemd usage on Windows
 class _DummyWatchdog:
+    def __init__(self, *args, **kwargs):
+        pass
     def set_health_check(self, fn):
         return None
     async def __aenter__(self):
@@ -881,8 +883,12 @@ async def main():
     # Setup signal handlers
     setup_signal_handlers()
     
-    # Initialize systemd watchdog
-    watchdog = SystemdWatchdog()
+    # Initialize systemd watchdog. It restarts the bot only when the event loop
+    # stalls: health_check() is False during every start, gateway reconnect
+    # and in-process client rebuild below, and a stopped client is already
+    # rebuilt here. No stall has lasted past one check (2026-09-07 to
+    # 09-15); 20 stalled checks take 7.5 min.
+    watchdog = SystemdWatchdog(restart_after_stalls=20)
     watchdog.set_health_check(health_check)
     
     try:
