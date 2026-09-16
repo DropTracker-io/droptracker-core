@@ -749,6 +749,9 @@ async def lootboard_updates():
                         #print(f"Channel with id {group['channel']} not found on discord for group {group_id} ({group_obj.group_name}).")
                         continue
                     message_to_update = None
+                    # Every branch below must leave this set or `continue`;
+                    # it used to be unbound on the "no saved message" path.
+                    message = None
                     group_obj = session.query(Group).filter(Group.group_id == group_id).first()
                     
                     # Check if we should repost (create new message) or edit existing
@@ -790,6 +793,7 @@ async def lootboard_updates():
                             print(f"No message ID found for group {group_id} ({group_obj.group_name}). We would have sent a new one right now...")
                             try:
                                 new_board = await channel.send(f"This loot leaderboard is being initialized.... Please wait a few moments.")
+                                message = new_board
                                 new_board_msg_id = new_board.id
                                 configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
                                                                                             GroupConfiguration.config_key == 'lootboard_message_id').first()
