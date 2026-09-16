@@ -415,6 +415,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Change notification embed format | `utils/embeds.py` + `db/models/embed.py` (GroupEmbed) |
 | Put an item or NPC icon inside a message | `utils/game_emojis.py` (`emoji_for_item`/`emoji_for_npc`, name **or** id); regenerate the set with `scripts/rank_game_emojis.py --report` then `--write`, upload with `scripts/seed_game_emojis.py` |
 | Notifications sent as Components V2 instead of an embed | `services/component_layout.py` (DSL, defaults, token docs, pilot allowlist) + `web_api/routes/notification_layouts.py`; the send-path branch is `NotificationService._try_send_component_layout` |
+| Site-wide default notification designs (template group 1: embeds, event layouts, component starting layouts) | `web_api/routes/notification_defaults.py` (staff editor behind the web's `/admin/embeds`); quest/death/diary have no stored default and use `NotificationService._build_default_*_embed` |
 | Change event message wording/layout | `services/event_message_layouts.py` (DB-seeded — reseed on default change) |
 | Change leaderboard ranking logic | `services/redis_updates.py` |
 | Change lootboard image layout | `lootboard/generator.py` or `lootboard/flexible_generator.py` |
