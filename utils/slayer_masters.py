@@ -1,18 +1,24 @@
 """Slayer master registry and slayer assignment catalog.
 
 Why this exists: the plugin reports a completed slayer task with the RAW value
-of the ``SLAYER_MASTER`` varbit (4067). The game has no table mapping that id
-to a name (``DBTableID.SlayerMasterTask`` carries only the id), so the name is
-resolved here, on the server, and so is the question that actually matters —
-whether a completion counts toward an event goal ("10 tasks from Duradel",
-"25 tasks, no Turael skipping"). The plugin never filters.
+of the ``SLAYER_MASTER`` varbit (4067). The game has no table of master display
+names, so the name is resolved here, on the server, and so is the question that
+actually matters — whether a completion counts toward an event goal ("10 tasks
+from Duradel", "25 tasks, no Turael skipping"). The plugin never filters.
 
-**Master ids.** Only two values are confirmed, from RuneLite's own slayer
-plugin (``KRYSTILIA_SLAYER_MASTER = 7``, ``MORTIMER_SLAYER_MASTER = 10``). The
-rest follow the masters' release order, which those two anchor; each carries
-``verified=False`` until a live completion has been checked against the
-points-per-task in its completion message (tracker t188). Rows store the raw
-id, so correcting this table corrects history.
+**Master ids.** All ten are confirmed from the game cache (2026-09-16). The
+``slayer_master_task`` dbtable (114) holds one row per assignment a master can
+give, with the master id in column 0, and each row's gameval name starts with
+that master's name: 1 ``turael_rats``, 2 ``mazchna_crabs``, 3
+``vannaka_crabs``, 4 ``chaeldar_wyrms``, 5 ``duradel_drakes``, 6
+``nieve_drakes``, 7 ``krystillia_pirates``, 8 ``konar_brinerats``, 9
+``spria_sourhogs``, 10 ``mortimer_banshees``. The assignment lists agree (1 and
+9 hand out Turael's low-level list, only 8's rows carry areas), and 7 and 10
+match RuneLite's own ``KRYSTILIA_SLAYER_MASTER``/``MORTIMER_SLAYER_MASTER``, so
+the table's ids are the varbit's. Id 11 exists too (``leagues_cows``,
+``leagues_birds``): a Leagues-only master, deliberately unnamed here, whose
+completions arrive with the seasonal world type and never reach an event. Rows
+store the raw id, so correcting this table would correct history.
 
 **Alternates share a slot.** Aya replaces Turael after While Guthix Sleeps,
 Achtryn replaces Mazchna, Kuradal replaces Duradel, Steve replaces Nieve. The
@@ -64,7 +70,7 @@ class SlayerMaster:
     awards_points: bool = True
     #: True for the masters whose tasks reset the streak (Turael skipping).
     resets_streak: bool = False
-    #: True once the id has been confirmed against live data / RuneLite.
+    #: True once the id has been confirmed (game cache, RuneLite, live data).
     verified: bool = False
 
     @property
@@ -73,15 +79,15 @@ class SlayerMaster:
 
 
 SLAYER_MASTERS: tuple = (
-    SlayerMaster(1, "Turael", ("Aya",), awards_points=False, resets_streak=True),
-    SlayerMaster(2, "Mazchna", ("Achtryn",)),
-    SlayerMaster(3, "Vannaka"),
-    SlayerMaster(4, "Chaeldar"),
-    SlayerMaster(5, "Duradel", ("Kuradal",)),
-    SlayerMaster(6, "Nieve", ("Steve",)),
+    SlayerMaster(1, "Turael", ("Aya",), awards_points=False, resets_streak=True, verified=True),
+    SlayerMaster(2, "Mazchna", ("Achtryn",), verified=True),
+    SlayerMaster(3, "Vannaka", verified=True),
+    SlayerMaster(4, "Chaeldar", verified=True),
+    SlayerMaster(5, "Duradel", ("Kuradal",), verified=True),
+    SlayerMaster(6, "Nieve", ("Steve",), verified=True),
     SlayerMaster(7, "Krystilia", verified=True),
-    SlayerMaster(8, "Konar", ("Konar quo Maten",)),
-    SlayerMaster(9, "Spria", awards_points=False, resets_streak=True),
+    SlayerMaster(8, "Konar", ("Konar quo Maten",), verified=True),
+    SlayerMaster(9, "Spria", awards_points=False, resets_streak=True, verified=True),
     SlayerMaster(10, "Mortimer", verified=True),
 )
 

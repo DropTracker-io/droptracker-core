@@ -1,8 +1,8 @@
 """Registry invariants for utils/slayer_masters.py.
 
 The ids are what event tasks store and what the matcher compares, so the
-anchors RuneLite confirms (Krystilia 7, Mortimer 10) and the reset-master set
-the default exclusion is built from are pinned here.
+mapping the game cache confirms (slayer_master_task row names) and the
+reset-master set the default exclusion is built from are pinned here.
 """
 import pytest
 
@@ -13,10 +13,14 @@ def test_ids_are_unique_and_contiguous():
     assert [m.id for m in sm.SLAYER_MASTERS] == list(range(1, 11))
 
 
-def test_runelite_anchors_are_verified():
-    assert sm.master_name(7) == "Krystilia"
-    assert sm.master_name(10) == "Mortimer"
-    assert sm.master_by_id(7).verified and sm.master_by_id(10).verified
+def test_ids_match_the_game_cache():
+    # slayer_master_task (dbtable 114): turael_*, mazchna_*, ... mortimer_*.
+    assert [sm.master_name(i) for i in range(1, 11)] == [
+        "Turael", "Mazchna", "Vannaka", "Chaeldar", "Duradel",
+        "Nieve", "Krystilia", "Konar", "Spria", "Mortimer",
+    ]
+    assert all(m.verified for m in sm.SLAYER_MASTERS)
+    # 11 is the Leagues-only master; seasonal completions never reach events.
     assert sm.master_name(11) is None
     assert sm.master_name("garbage") is None
 
