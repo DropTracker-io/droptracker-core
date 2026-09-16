@@ -86,3 +86,50 @@ def test_link_helpers_are_not_shadowed_in_the_module(service):
     assert callable(ns.player_link)
     assert callable(ns.group_link)
     assert ns.player_link(PLAYER_NAME, PLAYER_ID) == EXPECTED_LINK
+
+
+# The staff editor (web_api/routes/notification_defaults.py) shows these three
+# builders as templates, so an admin can see and start from what groups are
+# sent. A template cannot branch, so only what it CAN say is held equal here:
+# title, colour, the description with its values filled in, and the field
+# names when every value is present.
+FULL_DATA = {
+    "quest": {
+        "quest_name": "Dragon Slayer", "quests_completed": 12, "total_quests": 170,
+        "completion_percentage": "7%", "quest_points": 2, "total_quest_points": 40,
+        "qp_percentage": "12%",
+    },
+    "death": {"source": "Vorkath", "region_name": "Ungael", "value_lost": 4_200_000},
+    "diary": {"diary_name": "Karamja", "diary_tier": "Elite"},
+}
+
+
+@pytest.mark.parametrize("embed_type", ["quest", "death", "diary"])
+def test_staff_editor_builtins_follow_the_builders(service, monkeypatch, embed_type):
+    from web_api.routes.notification_defaults import BUILTIN_EMBEDS
+
+    built = []
+
+    def record(*args, **kwargs):
+        embed = MagicMock()
+        built.append((kwargs, embed))
+        return embed
+
+    monkeypatch.setattr(ns.interactions, "Embed", record)
+    builder = getattr(service, f"_build_default_{embed_type}_embed")
+    builder(FULL_DATA[embed_type], PLAYER_NAME, PLAYER_ID, video_url="https://x.test/v.mp4")
+
+    ((kwargs, embed),) = built
+    template = BUILTIN_EMBEDS[embed_type]
+    assert template["title"] == kwargs["title"]
+    assert template["color"].lower() == kwargs["color"].lower()
+
+    values = {"{player_name}": EXPECTED_LINK}
+    values.update({f"{{{k}}}": str(v) for k, v in FULL_DATA[embed_type].items()})
+    description = template["description"]
+    for token, value in values.items():
+        description = description.replace(token, value)
+    assert description == kwargs["description"]
+
+    names = [c.kwargs["name"] for c in embed.add_field.call_args_list]
+    assert [f["name"] for f in template["fields"]] == names

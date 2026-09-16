@@ -17,6 +17,12 @@ group receives, so it is authored and previewed first and only goes live when
 its type is switched over. DELETE removes the row entirely and the type is back
 on the embed path.
 
+Group 1 (the template group) holds the site-wide starting layouts: a row there
+replaces the code default as the ``default`` every group's editor copies. Those
+rows are written only by the staff editor (routes/notification_defaults.py) and
+are never live — group 1 sends nothing — so the group routes refuse to write
+them and list no ``custom`` layouts for group 1.
+
 Writes are gated on ``component_layout.components_enabled_for_group`` — the
 same check the send path makes, so the editor can never save something the bot
 will not honour. GET reports that gate as ``enabled`` instead of refusing, so
@@ -45,6 +51,9 @@ from web_api.deps import (
 )
 
 notification_layouts_bp = Blueprint("v1_notification_layouts", __name__)
+
+# The template group: its rows are the site-wide starting layouts.
+TEMPLATE_GROUP_ID = 1
 
 # Hard cap on the stored JSON document — well above anything the block limits
 # allow, purely an anti-abuse backstop.
@@ -110,6 +119,60 @@ def _load_row(s, group_id: int, notification_type: str):
         )
         .first()
     )
+
+
+def _assert_not_template_group(group_id: int) -> None:
+    if group_id == TEMPLATE_GROUP_ID:
+        abort_problem(
+            422,
+            "Edit defaults in the admin panel",
+            "The template group's layouts are the site-wide starting points; "
+            "edit them under Default embeds in the admin panel.",
+        )
+
+
+def template_layouts(s, cl) -> dict:
+    """The staff-edited starting layouts, ``{notification_type: layout}``.
+
+    Only rows that still parse and pass the current limits: a default a group
+    could not save is no default at all, so such a type falls back to the code
+    default instead.
+    """
+    rows = (
+        s.query(GroupComponentLayout)
+        .filter(GroupComponentLayout.group_id == TEMPLATE_GROUP_ID)
+        .all()
+    )
+    out = {}
+    for row in rows:
+        layout = _serialize_row(row)
+        if layout is not None and cl.validate_layout(layout)[0]:
+            out[row.notification_type] = layout
+    return out
+
+
+def default_for(cl, templates: dict, notification_type: str) -> dict:
+    """What a group's editor starts from: the staff default, else the code's."""
+    return (
+        templates.get(notification_type)
+        or _serialize_layout(cl.default_layout(notification_type))
+        or {"accent_color": None, "blocks": []}
+    )
+
+
+def store_row(s, group_id: int, notification_type: str, data: dict):
+    """Upsert one layout row from validated ``data``; returns
+    ``(before, was_active, row)``. The caller audits and commits."""
+    row = _load_row(s, group_id, notification_type)
+    before = _serialize_row(row) if row is not None else None
+    was_active = bool(row is not None and row.active)
+    if row is None:
+        row = GroupComponentLayout(group_id=group_id, notification_type=notification_type)
+        s.add(row)
+    row.layout = json.dumps({"accent_color": data["accent_color"], "blocks": data["blocks"]})
+    row.active = data["active"]
+    s.flush()
+    return before, was_active, row
 
 
 def _validate_body(body: dict, cl) -> dict:
@@ -179,9 +242,15 @@ async def list_group_notification_layouts(group_id: int):
             user = load_user(s, user_id)
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
 
+            templates = template_layouts(s, cl)
             out = []
             for notification_type in cl.NOTIFICATION_TYPES:
-                row = _load_row(s, group_id, notification_type)
+                # Group 1's rows are the defaults themselves, not its own layouts.
+                row = (
+                    _load_row(s, group_id, notification_type)
+                    if group_id != TEMPLATE_GROUP_ID
+                    else None
+                )
                 custom = _serialize_row(row) if row is not None else None
                 # "Live" must mean what load_active_layout means, or the editor
                 # says a type is sending components while it quietly sends its
@@ -195,8 +264,7 @@ async def list_group_notification_layouts(group_id: int):
                     "notification_type": notification_type,
                     "custom": custom,
                     "active": live,
-                    "default": _serialize_layout(cl.default_layout(notification_type)) or {
-                        "accent_color": None, "blocks": []},
+                    "default": default_for(cl, templates, notification_type),
                     "updated_at": row.updated_at.isoformat() if row is not None and row.updated_at else None,
                 })
             return {"enabled": cl.components_enabled_for_group(group_id), "layouts": out}
@@ -210,6 +278,7 @@ async def put_group_notification_layout(group_id: int, notification_type: str):
     user_id = current_user_id()
     cl = _layouts_module()
     _validate_notification_type(cl, notification_type)
+    _assert_not_template_group(group_id)
     body = await json_body()
     data = _validate_body(body, cl)
 
@@ -221,17 +290,7 @@ async def put_group_notification_layout(group_id: int, notification_type: str):
             # something a non-admin needs to learn by probing.
             _assert_entitled(cl, group_id)
 
-            row = _load_row(s, group_id, notification_type)
-            before = _serialize_row(row) if row is not None else None
-            was_active = bool(row is not None and row.active)
-            if row is None:
-                row = GroupComponentLayout(
-                    group_id=group_id, notification_type=notification_type)
-                s.add(row)
-            row.layout = json.dumps({
-                "accent_color": data["accent_color"], "blocks": data["blocks"]})
-            row.active = data["active"]
-            s.flush()
+            before, was_active, row = store_row(s, group_id, notification_type, data)
             after = _serialize_row(row)
             s.add(
                 AuditLog(
@@ -259,6 +318,7 @@ async def delete_group_notification_layout(group_id: int, notification_type: str
     user_id = current_user_id()
     cl = _layouts_module()
     _validate_notification_type(cl, notification_type)
+    _assert_not_template_group(group_id)
 
     def _apply():
         with db_session() as s:

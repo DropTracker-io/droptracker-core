@@ -79,6 +79,12 @@ def _wire(monkeypatch, session, *, admin=True, user_id=7, entitled_groups=(2,)):
     monkeypatch.setattr(nl, "AuditLog", lambda **kw: SimpleNamespace(**kw))
 
 
+def _list_batches(per_type, templates=()):
+    """Scripted queries for the group listing: group 1's starting layouts
+    first, then one lookup per notification type."""
+    return [list(templates)] + [list(per_type) for _ in NOTIFICATION_TYPES]
+
+
 @pytest.fixture()
 def client():
     import web_api
@@ -134,8 +140,7 @@ async def test_list_requires_group_admin(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_list_reports_entitlement_gate_rather_than_refusing(client, monkeypatch):
-    batches = [[] for _ in NOTIFICATION_TYPES]
-    _wire(monkeypatch, _S(*batches))
+    _wire(monkeypatch, _S(*_list_batches([])))
     resp = await client.get("/api/v1/groups/9999/notification-layouts")
     assert resp.status_code == 200
     body = await resp.get_json()
@@ -149,8 +154,7 @@ async def test_list_reports_entitlement_gate_rather_than_refusing(client, monkey
 @pytest.mark.asyncio
 async def test_list_returns_saved_layout(client, monkeypatch):
     row = FakeRow(active=True)
-    batches = [[row] for _ in NOTIFICATION_TYPES]
-    _wire(monkeypatch, _S(*batches))
+    _wire(monkeypatch, _S(*_list_batches([row])))
     resp = await client.get("/api/v1/groups/2/notification-layouts")
     body = await resp.get_json()
     assert body["enabled"] is True
@@ -166,8 +170,7 @@ async def test_unparseable_row_reads_as_inactive(client, monkeypatch):
     """The send path ignores a row it cannot parse; the editor must agree, or
     it would show "live" for a type that is quietly sending embeds."""
     row = FakeRow(layout="{not json", active=True)
-    batches = [[row] for _ in NOTIFICATION_TYPES]
-    _wire(monkeypatch, _S(*batches))
+    _wire(monkeypatch, _S(*_list_batches([row])))
     resp = await client.get("/api/v1/groups/2/notification-layouts")
     body = await resp.get_json()
     assert body["layouts"][0]["custom"] is None
@@ -291,11 +294,75 @@ async def test_a_layout_that_no_longer_validates_reads_as_inactive(client, monke
         layout=json.dumps({"blocks": [{"type": "text", "content": "x" * 100_000}]}),
         active=True,
     )
-    batches = [[row] for _ in NOTIFICATION_TYPES]
-    _wire(monkeypatch, _S(*batches))
+    _wire(monkeypatch, _S(*_list_batches([row])))
     resp = await client.get("/api/v1/groups/2/notification-layouts")
     body = await resp.get_json()
     first = body["layouts"][0]
     # Still returned, so the admin can see and fix it — just not called live.
     assert first["custom"] is not None
     assert first["active"] is False
+
+
+# ── Staff starting layouts (group 1) ────────────────────────────────────────
+
+STAFF_BLOCKS = [{"type": "text", "content": "## {player_name} — staff default"}]
+
+
+@pytest.mark.asyncio
+async def test_list_seeds_from_the_staff_default_when_there_is_one(client, monkeypatch):
+    """A group-1 row replaces the code default as what every editor copies."""
+    template = FakeRow(
+        group_id=1, notification_type="pb",
+        layout=json.dumps({"accent_color": "#123456", "blocks": STAFF_BLOCKS}),
+    )
+    _wire(monkeypatch, _S(*_list_batches([], templates=[template])))
+    resp = await client.get("/api/v1/groups/2/notification-layouts")
+    body = await resp.get_json()
+    by_type = {l["notification_type"]: l for l in body["layouts"]}
+    assert by_type["pb"]["default"] == {"accent_color": "#123456", "blocks": STAFF_BLOCKS}
+    # Types without one keep the shipped default.
+    import importlib
+
+    cl = importlib.import_module("services.component_layout")
+    assert by_type["drop"]["default"]["blocks"] == cl.default_layout("drop")["blocks"]
+
+
+@pytest.mark.asyncio
+async def test_a_staff_default_that_no_longer_validates_is_not_handed_out(client, monkeypatch):
+    template = FakeRow(
+        group_id=1, notification_type="pb",
+        layout=json.dumps({"blocks": [{"type": "text", "content": "x" * 100_000}]}),
+    )
+    _wire(monkeypatch, _S(*_list_batches([], templates=[template])))
+    resp = await client.get("/api/v1/groups/2/notification-layouts")
+    body = await resp.get_json()
+    pb = next(l for l in body["layouts"] if l["notification_type"] == "pb")
+    import importlib
+
+    cl = importlib.import_module("services.component_layout")
+    assert pb["default"]["blocks"] == cl.default_layout("pb")["blocks"]
+
+
+@pytest.mark.asyncio
+async def test_template_group_lists_no_layouts_of_its_own(client, monkeypatch):
+    """Group 1's rows are the defaults; showing them as its own custom layouts
+    would invite editing them through the group screen."""
+    template = FakeRow(group_id=1, notification_type="pb")
+    # Only the template query runs: no per-type lookups for group 1.
+    _wire(monkeypatch, _S([template]))
+    resp = await client.get("/api/v1/groups/1/notification-layouts")
+    assert resp.status_code == 200
+    body = await resp.get_json()
+    assert all(l["custom"] is None and l["active"] is False for l in body["layouts"])
+
+
+@pytest.mark.asyncio
+async def test_group_routes_refuse_to_write_the_template_group(client, monkeypatch):
+    s = _S([FakeRow(group_id=1)])
+    _wire(monkeypatch, s, entitled_groups=(1,))
+    put = await client.put(
+        "/api/v1/groups/1/notification-layouts/pb", json={"blocks": GOOD_BLOCKS, "active": True})
+    assert put.status_code == 422
+    delete = await client.delete("/api/v1/groups/1/notification-layouts/pb")
+    assert delete.status_code == 422
+    assert not s.committed and not s.added

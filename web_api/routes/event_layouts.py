@@ -120,7 +120,8 @@ def _validate_body(body: dict, ml) -> dict:
 
 
 def _upsert(s, user_id: int, group_id: int, message_type: str, event_id: int,
-            data: dict, ml, audit_group_id=None) -> dict:
+            data: dict, ml, audit_group_id=None,
+            action: str = "event_layouts.update") -> dict:
     row = _load_row(s, group_id, message_type, event_id)
     before = _serialize_row(row) if row is not None else None
     if row is None:
@@ -139,7 +140,7 @@ def _upsert(s, user_id: int, group_id: int, message_type: str, event_id: int,
             actor_user_id=user_id,
             group_id=audit_group_id,
             event_id=event_id or None,
-            action="event_layouts.update",
+            action=action,
             target=f"web_event_message_layouts.{message_type}",
             before=json.dumps(before) if before else None,
             after=json.dumps(after),

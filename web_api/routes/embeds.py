@@ -116,8 +116,10 @@ def _optional_url(body: dict, key: str) -> str | None:
 def _validate_body(body: dict) -> dict:
     """Validate + normalize a PUT body into the stored shape."""
     title = body.get("title")
-    if not isinstance(title, str) or not title.strip():
-        abort_problem(422, "Invalid embed", "A non-empty 'title' is required.")
+    if title is None:
+        title = ""
+    if not isinstance(title, str):
+        abort_problem(422, "Invalid embed", "'title' must be a string.")
     title = title.strip()
     if len(title) > _MAX_TITLE:
         abort_problem(422, "Invalid embed", f"'title' must be at most {_MAX_TITLE} characters.")
@@ -170,6 +172,14 @@ def _validate_body(body: dict) -> dict:
             abort_problem(422, "Invalid embed", f"Field #{i + 1} 'inline' must be a boolean.")
         fields.append({"name": name.strip(), "value": value, "inline": inline})
 
+    # Discord sends an embed without a title — the shipped combat achievement
+    # default has none — but not one with nothing to say.
+    if not title and not description.strip() and not fields:
+        abort_problem(
+            422, "Invalid embed",
+            "An embed needs a title, a description or at least one field.",
+        )
+
     return {
         "title": title,
         # Discord renders titles as plain text; `url` is the only way to make
@@ -191,6 +201,43 @@ def _load_rows(s, group_id: int, embed_type: str) -> list[GroupEmbed]:
         .order_by(GroupEmbed.embed_id)
         .all()
     )
+
+
+def _store_embed(s, group_id: int, embed_type: str, data: dict):
+    """Write validated ``data`` as the group's one template for ``embed_type``.
+
+    Returns ``(before, row)``: the serialized template it replaced (None when
+    there was none) and the stored row, flushed so its fields have ids. The
+    caller audits and commits. Shared with the staff defaults editor
+    (routes/notification_defaults.py), which writes group 1's rows.
+    """
+    rows = _load_rows(s, group_id, embed_type)
+    before = _serialize_embed(rows[0]) if rows else None
+
+    # One template per (group, type): keep the first row, drop strays
+    # (legacy XF editor bug left duplicates for some groups).
+    for stray in rows[1:]:
+        s.delete(stray)
+    row = rows[0] if rows else None
+    if row is None:
+        row = GroupEmbed(group_id=group_id, embed_type=embed_type)
+        s.add(row)
+
+    row.title = data["title"]
+    row.url = data["url"]
+    row.description = data["description"]
+    row.color = data["color"]
+    row.thumbnail = data["thumbnail"]
+    row.image = data["image"]
+    row.timestamp = data["timestamp"]
+    row.fields.clear()
+    for f in data["fields"]:
+        row.fields.append(
+            EmbedField(field_name=f["name"], field_value=f["value"], inline=f["inline"])
+        )
+    # Assign PKs to the new field rows; _serialize_embed sorts on field_id.
+    s.flush()
+    return before, row
 
 
 def _assert_can_edit_templates(s, user_id: int, group_id: int, user) -> None:
@@ -256,32 +303,7 @@ async def put_group_embed(group_id: int, embed_type: str):
                     user=user,
                 )
 
-            rows = _load_rows(s, group_id, embed_type)
-            before = _serialize_embed(rows[0]) if rows else None
-
-            # One template per (group, type): keep the first row, drop strays
-            # (legacy XF editor bug left duplicates for some groups).
-            for stray in rows[1:]:
-                s.delete(stray)
-            row = rows[0] if rows else None
-            if row is None:
-                row = GroupEmbed(group_id=group_id, embed_type=embed_type)
-                s.add(row)
-
-            row.title = data["title"]
-            row.url = data["url"]
-            row.description = data["description"]
-            row.color = data["color"]
-            row.thumbnail = data["thumbnail"]
-            row.image = data["image"]
-            row.timestamp = data["timestamp"]
-            row.fields.clear()
-            for f in data["fields"]:
-                row.fields.append(
-                    EmbedField(field_name=f["name"], field_value=f["value"], inline=f["inline"])
-                )
-            # Assign PKs to the new field rows; _serialize_embed sorts on field_id.
-            s.flush()
+            before, row = _store_embed(s, group_id, embed_type, data)
 
             s.add(
                 AuditLog(
