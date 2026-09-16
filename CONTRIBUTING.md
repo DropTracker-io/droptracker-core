@@ -19,7 +19,7 @@ cp .env.example .env   # fill in DB, Redis, and a dev Discord bot token
 
 You only need to run the process you're working on — the system is deliberately multi-process, and each entry point boots independently (see the [runtime process table](README.md#runtime-processes)).
 
-**A real MySQL database is the main setup hurdle.** Migration files (`alembic/versions/`) are not committed to the repo, so a fresh clone can't build the schema from scratch — ask a maintainer (Discord is fastest) for a schema dump to import. After that, Alembic works normally for your own changes.
+**A real MySQL database is the main setup hurdle.** The migrations in `alembic/versions/` are committed, but the oldest of them assume tables that predate Alembic, so a fresh clone still can't build the schema from nothing — ask a maintainer (Discord is fastest) for a schema dump to import, then `alembic upgrade head`. After that, Alembic works normally for your own changes.
 
 You'll also want a **dev Discord bot**: create an application at the Discord developer portal, put its token in `DEV_TOKEN`, and set `STATE=dev` so the bots use it instead of the production token.
 
@@ -32,7 +32,7 @@ pytest tests/integration -q   # needs live MySQL + Redis
 
 `tests/conftest.py` stubs the environment and heavy modules, so unit tests run without any services or secrets. Please add unit coverage for new logic in `data/submissions/`, `services/`, or `web_api/routes/` — those areas already have test patterns you can copy.
 
-**`tests/unit` has to pass on a clean checkout**, because that is all CI gets: no `.env`, no gitignored asset trees (`static/assets/img`, `alembic/versions`, `lootboard/themes`), and no sibling `web` repo. It is easy to write a test that passes only on a machine that has been developed on for a year, and the failure lands on whoever pushes next rather than on you. If a check needs something a fresh clone lacks, use `tests/local_artifacts.py`: split off the part that is answerable anywhere and let only the remainder skip. Never pin a path to one machine — `web_repo_root()` finds the web repo beside this one (or `DROPTRACKER_WEB_ROOT`).
+**`tests/unit` has to pass on a clean checkout**, because that is all CI gets: no `.env`, no gitignored asset trees (`static/assets/img`, `lootboard/themes`), and no sibling `web` repo. It is easy to write a test that passes only on a machine that has been developed on for a year, and the failure lands on whoever pushes next rather than on you. If a check needs something a fresh clone lacks, use `tests/local_artifacts.py`: split off the part that is answerable anywhere and let only the remainder skip. Never pin a path to one machine — `web_repo_root()` finds the web repo beside this one (or `DROPTRACKER_WEB_ROOT`).
 
 To check before pushing, run the suite the way CI will — against a clean clone rather than your working tree:
 
@@ -45,8 +45,9 @@ git clone --branch new-api . /tmp/ci-check && (cd /tmp/ci-check && pytest tests/
 1. Add/modify the model in `db/models/` (and export it from `db/models/__init__.py`).
 2. Generate a migration: `alembic revision --autogenerate -m "describe the change"`.
 3. Review the generated file carefully — autogenerate is noisy with this schema.
-4. Include the migration file contents in your PR description (since `alembic/versions/` is gitignored, reviewers can't see it in the diff).
-5. Check `alembic heads` — it must print exactly one. Because the version files aren't shared, it's easy to author a migration off a head that has since moved and split the graph in two; `alembic upgrade head` then refuses to run at all. Merge the split immediately with `alembic merge -m "why these lines diverged" heads` (no DDL — it just rejoins the graph). `tests/unit/test_alembic_single_head.py` guards this locally.
+4. Commit the migration with the model change. Revisions are tracked (since 2026-09-16), so they reach the dev instance and production with the code, and `deploy/deploy.sh` applies them.
+5. Check `alembic heads` — it must print exactly one. Two branches that each add a migration off the same head split the graph, and `alembic upgrade head` then refuses to run at all. Merge the split immediately with `alembic merge -m "why these lines diverged" heads` (no DDL — it just rejoins the graph). `tests/unit/test_alembic_single_head.py` fails CI when this happens.
+6. Never put data that belongs to a person (ids, names, tokens) in a migration: this repository is public.
 
 Two things to keep in mind: the ORM spans **two MySQL schemas** (`data` and `xenforo`), and several submission tables have `seasonal_*` mirrors that usually need the same change.
 

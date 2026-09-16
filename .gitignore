@@ -28,9 +28,10 @@ player_board.py
 # templates
 /templates/*
 
-# schema migration configuration
+# schema migration configuration. alembic.ini holds the database URL and stays
+# local. The revisions in alembic/versions/ ARE tracked (since 2026-09-16): a
+# deploy and the dev instance take them from git like any other code.
 alembic.ini 
-alembic/versions/*
 
 # General project excludes
 __pycache__/

@@ -21,7 +21,7 @@ DropTracker is an Old School RuneScape (OSRS) loot and achievement tracking plat
 | Discord | discord-py-interactions 5.16 |
 | Database | MySQL/MariaDB (two schemas: `data` + `xenforo`) via SQLAlchemy 2.0 + PyMySQL |
 | Cache / Leaderboards / queues | Redis (sorted sets, key-value, lists, pub/sub) |
-| Migrations | Alembic 1.13 (`alembic/versions/` is **gitignored**) |
+| Migrations | Alembic 1.13 (`alembic/versions/` is tracked since 2026-09-16; `alembic.ini` is not) |
 | Image generation | Pillow 12 (+ `services/boardgen/` SVG canvas for board-game maps) |
 | External APIs | Wise Old Man (WOM), OSRS Wiki/GE, OpenAI (semantic NPC checks) |
 | Billing | **Stripe** (primary) + legacy PayPal IPN (see Billing below) |
@@ -213,7 +213,7 @@ droptracker/
 ├── osrs_api/               # External clients: WOM, GE pricing, semantic drop verification
 ├── monitor/                # systemd watchdog integration (sdnotifier)
 ├── games/events/task_store/# Seed data for the events task library (only default.json is tracked)
-├── alembic/                # DB migration env (versions/ NOT committed — see CONTRIBUTING.md)
+├── alembic/                # DB migration env + versions/ (committed; see CONTRIBUTING.md)
 ├── docs/                   # ARCHITECTURE, SUBMISSION_PIPELINE, GROUP_EXPORT_API, LOOT_SWEEP,
 │                           #   REFACTOR_PLAN + event plans; archive/ holds legacy-events backup
 ├── scripts/                # Maintenance + backfill + seed scripts (dry-run by default,
@@ -375,9 +375,9 @@ cp .env.example .env
 # 3. Database
 cp alembic.ini.template alembic.ini
 # Edit alembic.ini sqlalchemy.url with DB credentials
-# NOTE: alembic/versions/ is gitignored — a fresh clone cannot
-# `alembic upgrade head` from zero. Get a schema dump from a maintainer,
-# then use Alembic for incremental changes.
+# NOTE: the oldest revisions assume tables that predate Alembic, so a
+# fresh clone cannot `alembic upgrade head` from zero. Get a schema dump
+# from a maintainer, then `alembic upgrade head`.
 
 # 4. Start individual processes (dev)
 python -m api.app                     # intake API :31323
@@ -419,7 +419,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Change event message wording/layout | `services/event_message_layouts.py` (DB-seeded — reseed on default change) |
 | Change leaderboard ranking logic | `services/redis_updates.py` |
 | Change lootboard image layout | `lootboard/generator.py` or `lootboard/flexible_generator.py` |
-| Add/change DB schema | Alembic migration in `alembic/versions/` (gitignored) |
+| Add/change DB schema | Alembic migration in `alembic/versions/` (commit it with the model; `alembic heads` must print one) |
 | NPC name matching / aliases | `utils/npc_names.py` |
 | Item valuation | `utils/ge_value.py`, `utils/value_overrides.py`, `web_api/routes/item_values.py` |
 | Change group configuration options | `web_api/config_registry.py` (+ frontend `packages/api-types`) |

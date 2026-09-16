@@ -13,16 +13,14 @@ The fix when this fails is one command, from the repo root::
 
     ./venv/bin/alembic merge -m "<why these two lines diverged>" heads
 
-``alembic/versions/`` is **gitignored** (see CONTRIBUTING.md), so a fresh clone
-and CI have no migration files at all — the test skips there rather than
-failing on an empty graph. It is a guard for the boxes that actually hold the
-migrations, which is where the mistake gets made.
+``alembic/versions/`` has been tracked since 2026-09-16, so CI sees the whole
+graph and this runs everywhere. (Before that the directory was gitignored and
+only a handful of revisions were force-added, so CI skipped it.)
 
-A checkout can also hold *some* of them: individual revisions get force-added
-when a branch would otherwise ship models with no migration (6cdc86d). Alembic
-cannot build a graph whose ancestors are missing — it raises ``KeyError`` on the
-absent revision before it can count heads — so a partial checkout skips for the
-same reason an empty one does. Only a complete graph is worth asserting on.
+A commit can still carry an incomplete graph — a revision whose parent was
+never committed. Alembic cannot build a graph whose ancestors are missing (it
+raises ``KeyError`` on the absent revision before it can count heads), so that
+is checked first and fails with the names of the missing revisions.
 """
 from __future__ import annotations
 
@@ -56,7 +54,7 @@ def _missing_ancestors() -> set:
     """Revisions referenced as a ``down_revision`` but absent from the checkout.
 
     Parsed rather than loaded through alembic: alembic raises on the first gap,
-    and we want to report every one of them in the skip message.
+    and we want to report every one of them in the failure message.
     """
     present, referenced = set(), set()
     for name in _migration_files():
@@ -74,15 +72,16 @@ def test_migration_graph_has_a_single_head():
     from alembic.script import ScriptDirectory
 
     if not _migration_files():
-        pytest.skip("alembic/versions/ is gitignored — no migrations in this checkout")
+        pytest.skip("no migrations in this checkout")
 
+    # The revisions are tracked, so a gap is a real mistake: a migration was
+    # committed while its parent stayed on someone's machine, and every deploy
+    # of this commit would fail to upgrade.
     missing = _missing_ancestors()
-    if missing:
-        pytest.skip(
-            "alembic/versions/ holds only part of the graph (gitignored; some "
-            "revisions are force-added). Missing ancestors: "
-            f"{', '.join(sorted(missing))}"
-        )
+    assert not missing, (
+        "These revisions are named as a down_revision but are not in "
+        f"alembic/versions/: {', '.join(sorted(missing))}. Commit them."
+    )
 
     # Built from the script directory alone, never alembic.ini: the ini carries
     # DB credentials and is itself untracked (alembic.ini.template is what ships),
