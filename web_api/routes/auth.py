@@ -99,6 +99,41 @@ def get_cached_profile(user_id: int) -> dict:
         return {}
 
 
+def dev_login_refusal(discord_id: str):
+    """On the dev instance, whether this Discord account may sign in.
+
+    Returns None when it may, else a short reason. The dev site runs on a copy of
+    production and is for testing, so by default only staff (superadmins and
+    developers already on this instance, WEB_SUPERADMIN_DISCORD_IDS,
+    DEV_ALLOWED_USERS) and current Bug Testers — pushed from production, see
+    services/tester_roster.py — may sign in. ``DEV_SITE_LOGIN=open`` lifts it.
+    Production never refuses anyone here.
+
+    Checked before the users row is found or created, so a refused visitor
+    leaves nothing behind.
+    """
+    from utils.dev_guild_guard import allowed_user_ids, is_dev_mode, tester_user_ids
+
+    if not is_dev_mode():
+        return None
+    mode = (os.getenv("DEV_SITE_LOGIN") or "testers").strip().strip('"').strip("'").lower()
+    if mode == "open":
+        return None
+    try:
+        uid = int(discord_id)
+    except (TypeError, ValueError):
+        return "invalid_id"
+    if str(discord_id) in _SUPERADMIN_DISCORD_IDS or uid in allowed_user_ids() \
+            or uid in tester_user_ids():
+        return None
+    with db_session() as s:
+        row = (s.query(User.is_superadmin, User.is_developer)
+               .filter(User.discord_id == str(discord_id)).first())
+    if row is not None and (row[0] or row[1]):
+        return None
+    return "not_a_tester"
+
+
 def _find_or_create_user(discord_id: str, display_name: str) -> int:
     """Find-or-create the ``users`` row keyed on ``discord_id``; return user_id.
 
@@ -172,6 +207,15 @@ async def auth_discord():
         or f"User {discord_id}"
     )
     avatar = profile.get("avatar")
+
+    if await asyncio.to_thread(dev_login_refusal, discord_id):
+        abort_problem(
+            403,
+            "Test instance",
+            "This is DropTracker's test site. Signing in here is limited to the team "
+            "and Bug Testers.",
+            extra={"code": "dev_access_denied"},
+        )
 
     user_id = await asyncio.to_thread(_find_or_create_user, discord_id, display_name)
 
