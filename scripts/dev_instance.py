@@ -249,6 +249,38 @@ def _overwrite(target_id, kind: int, allow: int = 0, deny: int = 0) -> dict:
     return {"id": str(target_id), "type": kind, "allow": str(allow), "deny": str(deny)}
 
 
+ADMINISTRATOR = 1 << 3
+PERMISSION_NAMES = {
+    ADD_REACTIONS: "Add Reactions", VIEW: "View Channel", SEND: "Send Messages",
+    MANAGE_MESSAGES: "Manage Messages", EMBED: "Embed Links", ATTACH: "Attach Files",
+    HISTORY: "Read Message History", MANAGE_THREADS: "Manage Threads",
+    PUBLIC_THREADS: "Create Public Threads", THREAD_SEND: "Send Messages in Threads",
+}
+
+
+def guild_permissions(roles, member_role_ids, guild_id: str) -> int:
+    """A member's guild-level permissions: @everyone plus their roles."""
+    by_id = {str(r["id"]): int(r.get("permissions") or 0) for r in roles}
+    perms = by_id.get(str(guild_id), 0)
+    for role_id in member_role_ids or ():
+        perms |= by_id.get(str(role_id), 0)
+    if perms & ADMINISTRATOR:
+        return (1 << 53) - 1
+    return perms
+
+
+def mask_overwrites(overwrites, held: int):
+    """Discord refuses an overwrite that allows or denies a permission the bot
+    does not hold itself; keep only the bits it can set."""
+    dropped = 0
+    out = []
+    for ow in overwrites:
+        allow, deny = int(ow["allow"]), int(ow["deny"])
+        dropped |= (allow | deny) & ~held
+        out.append({**ow, "allow": str(allow & held), "deny": str(deny & held)})
+    return out, dropped
+
+
 def _overwrite_set(overwrites) -> set:
     return {(str(o["id"]), int(o["type"]), str(o["allow"]), str(o["deny"])) for o in overwrites or ()}
 
@@ -465,12 +497,27 @@ def step_layout(apply: bool) -> int:
     staff_roles = [by_name[n.lower()]["id"] for n in STAFF_ROLE_NAMES if n.lower() in by_name]
 
     bots = []
+    held = 0
     for bot_id in dict.fromkeys((str(me["id"]),) + KNOWN_DEV_BOT_IDS):
         try:
-            api.call("GET", f"/guilds/{guild}/members/{bot_id}")
+            member = api.call("GET", f"/guilds/{guild}/members/{bot_id}")
             bots.append(bot_id)
+            if bot_id == str(me["id"]):
+                held = guild_permissions(roles, member.get("roles"), guild)
         except DiscordError:
             print(f"  note: bot {bot_id} is not in the guild; no overwrite for it")
+    missing_names = sorted(name for bit, name in PERMISSION_NAMES.items() if not held & bit)
+    if missing_names:
+        print("  note: this bot lacks " + ", ".join(missing_names)
+              + " in the guild, so no overwrite here can grant them; give its role those "
+                "permissions and re-run to add them")
+    all_dropped = 0
+
+    def masked(overwrites):
+        nonlocal all_dropped
+        out, dropped = mask_overwrites(overwrites, held)
+        all_dropped |= dropped
+        return out
 
     channels = api.call("GET", f"/guilds/{guild}/channels")
     category = next((c for c in channels if c["type"] == CATEGORY
@@ -480,6 +527,7 @@ def step_layout(apply: bool) -> int:
         category_overwrites.append(_overwrite(tester_id, 0, allow=VIEW))
     category_overwrites += [_overwrite(r, 0, allow=STAFF) for r in staff_roles]
     category_overwrites += [_overwrite(b, 1, allow=BOT) for b in bots]
+    category_overwrites = masked(category_overwrites)
     if category is None:
         _say(apply, f"create category {CATEGORY_NAME!r}")
         if apply:
@@ -500,7 +548,7 @@ def step_layout(apply: bool) -> int:
         if category is not None:
             existing = next((c for c in channels if c.get("parent_id") == category["id"]
                              and c["name"] == name), None)
-        overwrites = _channel_overwrites(access, guild, tester_id, staff_roles, bots)
+        overwrites = masked(_channel_overwrites(access, guild, tester_id, staff_roles, bots))
         wanted = {"name": name, "topic": topic, "permission_overwrites": overwrites}
         if kind == FORUM:
             current_tags = {t["name"].lower(): t for t in (existing or {}).get("available_tags") or ()}

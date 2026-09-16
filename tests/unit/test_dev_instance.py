@@ -100,3 +100,27 @@ class TestGroupSpecs:
     def test_group_names_fit_the_column(self):
         for spec in di.GROUP_SPECS:
             assert len(spec["name"]) <= 30
+
+
+class TestBotPermissions:
+    GUILD = "100"
+
+    def test_everyone_plus_own_roles(self):
+        roles = [{"id": self.GUILD, "permissions": str(di.VIEW)},
+                 {"id": "7", "permissions": str(di.SEND)},
+                 {"id": "8", "permissions": str(di.MANAGE_THREADS)}]
+        assert di.guild_permissions(roles, ["7"], self.GUILD) == di.VIEW | di.SEND
+
+    def test_administrator_holds_everything(self):
+        roles = [{"id": self.GUILD, "permissions": "0"},
+                 {"id": "7", "permissions": str(di.ADMINISTRATOR)}]
+        held = di.guild_permissions(roles, ["7"], self.GUILD)
+        assert held & di.MANAGE_THREADS and held & di.THREAD_SEND
+
+    def test_overwrites_keep_only_what_the_bot_holds(self):
+        held = di.VIEW | di.SEND
+        rows = [di._overwrite("1", 0, allow=di.VIEW | di.MANAGE_THREADS, deny=di.SEND | di.ATTACH)]
+        out, dropped = di.mask_overwrites(rows, held)
+        assert int(out[0]["allow"]) == di.VIEW
+        assert int(out[0]["deny"]) == di.SEND
+        assert dropped == di.MANAGE_THREADS | di.ATTACH
