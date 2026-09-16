@@ -9,9 +9,9 @@ dump never silently undoes it:
 
   check      read-only: is this box set up as the dev instance? Prints facts
              and flags, never a secret.
-  id-offset  move the users/players/groups id counters to 10,000,000, so rows
-             created on dev never share an id with rows production creates
-             later (the tester roster push relies on that).
+  id-offset  move the users/players/groups id counters well above
+             production's (at least 10,000,000), so rows created on dev do not
+             share ids with rows production creates later.
   layout     the dev guild's BUG TESTING category, its channels and the
              Bug Tester role. Writes the ids to data/dev/ (untracked).
   groups     the reserved Bug Testers (10000001) and Mirror firehose
@@ -383,6 +383,17 @@ def _auto_increment(session, table: str):
     ), {"t": table}).scalar()
 
 
+def offset_target(current: int) -> int:
+    """Where a table's ids should continue from on dev.
+
+    At least ID_OFFSET, and at least twice production's counter rounded up to
+    the next ten million — player ids are sparse and already in the millions,
+    so a flat offset would leave them little headroom.
+    """
+    doubled = -(-(int(current) * 2) // ID_OFFSET) * ID_OFFSET
+    return max(ID_OFFSET, doubled)
+
+
 def step_id_offset(apply: bool) -> int:
     from sqlalchemy import text
 
@@ -398,9 +409,10 @@ def step_id_offset(apply: bool) -> int:
             if current >= ID_OFFSET:
                 print(f"  {table}: already at {current}")
                 continue
-            _say(apply, f"{table}: {current} -> {ID_OFFSET}")
+            target = offset_target(current)
+            _say(apply, f"{table}: {current} -> {target}")
             if apply:
-                s.execute(text(f"ALTER TABLE `{table}` AUTO_INCREMENT = {ID_OFFSET}"))
+                s.execute(text(f"ALTER TABLE `{table}` AUTO_INCREMENT = {target}"))
         s.commit()
     return 0
 
