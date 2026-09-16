@@ -424,13 +424,15 @@ async def _nitro_scheduler():
 # --- Tier + Bug Tester Discord roles (services/discord_roles.py) ------------------
 # Every minute the wanted role set is re-read from the database, which is cheap.
 # The member list is fetched and diffed when that set changes, when someone
-# joins the main server, on a Redis request (/bug-tester), and at least every
+# joins the main server, on a Redis request (/bug-tester, or a tester roster
+# applied on a dev instance — polled every few seconds), and at least every
 # _ROLE_SYNC_FULL_SECONDS, so an edit made by hand in Discord is also undone.
 _role_sync_dirty = asyncio.Event()
 _role_sync_started = False
 _ROLE_SYNC_CHECK_SECONDS = 60
 _ROLE_SYNC_FULL_SECONDS = 900
 _ROLE_SYNC_DEBOUNCE_SECONDS = 10
+_ROLE_SYNC_REQUEST_POLL_SECONDS = 5
 
 
 @listen(MemberAdd)
@@ -508,11 +510,29 @@ async def _role_sync_scheduler():
             print(f"[roles] sync failed: {e}")
             last_desired = None
             _role_sync_dirty.clear()
+        await _wait_for_role_sync_trigger()
+
+
+async def _wait_for_role_sync_trigger():
+    """Sleep until the next check is due: a member join, a sync request, or the minute.
+
+    A request is only peeked here (every few seconds, instead of once a minute)
+    so the role follows the badge almost at once; the pass itself consumes it.
+    """
+    deadline = time.monotonic() + _ROLE_SYNC_CHECK_SECONDS
+    while not shutdown_event.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
         try:
-            await asyncio.wait_for(_role_sync_dirty.wait(), timeout=_ROLE_SYNC_CHECK_SECONDS)
+            await asyncio.wait_for(_role_sync_dirty.wait(),
+                                   timeout=min(_ROLE_SYNC_REQUEST_POLL_SECONDS, remaining))
             await asyncio.sleep(_ROLE_SYNC_DEBOUNCE_SECONDS)  # coalesce a burst of joins
+            return
         except asyncio.TimeoutError:
             pass
+        if await asyncio.to_thread(discord_roles.sync_requested):
+            return
 
 
 # Add retry decorator for database operations

@@ -31,6 +31,8 @@ player_avatar = sys.modules["services.player_avatar"]
 @pytest.fixture(autouse=True)
 def _b2_mode(monkeypatch):
     monkeypatch.setenv("IMG_B2_OFFLOAD", "true")
+    # The suite runs as STATE=dev, where B2 also needs the explicit opt-in.
+    monkeypatch.setenv("DEV_ALLOW_B2", "true")
     monkeypatch.setenv("B2_CDN_BASE_URL", "https://video.droptracker.io")
     monkeypatch.delenv("B2_IMG_CDN_BASE_URL", raising=False)
 

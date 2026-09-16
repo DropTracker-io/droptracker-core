@@ -26,6 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.fixture
 def download(tmp_path, monkeypatch):
     monkeypatch.setenv("IMG_B2_OFFLOAD", "true")
+    # The suite runs as STATE=dev, where B2 also needs the explicit opt-in.
+    monkeypatch.setenv("DEV_ALLOW_B2", "true")
     monkeypatch.setenv("B2_CDN_BASE_URL", "https://video.droptracker.io")
     spec = importlib.util.spec_from_file_location(
         "_download_under_test", REPO_ROOT / "utils" / "download.py")

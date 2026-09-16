@@ -199,15 +199,57 @@ def _resolve_mirror_sink():
     return value
 
 
-async def _process_entry(entry_bytes: bytes) -> None:
-    """Process one queue entry, rerouting it first if it is mirrored traffic."""
+#: Logged once: tester traffic arrived but this instance cannot confine it.
+_tester_refusal_logged = {"done": False}
+
+
+def _tester_traffic_allowed() -> bool:
+    """A tester's copy is processed natively, so the instance must be confined.
+
+    What keeps native processing inside dev is the dev guild guard — the
+    notification choke point skips every group outside DEV_ALLOWED_GUILDS
+    (data/submissions/common.create_notification). Without the guard armed
+    there is nothing between a mirrored submission and a real clan's Discord.
+    """
+    from utils.dev_guild_guard import is_active
+
+    if is_active():
+        return True
+    if not _tester_refusal_logged["done"]:
+        _tester_refusal_logged["done"] = True
+        log.error("Refusing Bug Tester submissions: this is not a dev instance with "
+                  "DEV_ALLOWED_GUILDS set, so their notifications could reach real clans")
+    return False
+
+
+def _discard_stashed_image(entry_bytes: bytes) -> None:
+    """Remove the screenshot an entry we are not processing brought with it."""
     try:
-        mirrored = bool(json.loads(entry_bytes).get("mirrored"))
+        path = json.loads(entry_bytes).get("image_tmp_path")
+        if path:
+            os.unlink(path)
     except Exception:
-        mirrored = False
+        pass
+
+
+async def _process_entry(entry_bytes: bytes) -> None:
+    """Process one queue entry, rerouting it first if it is firehose traffic."""
+    try:
+        mirrored = json.loads(entry_bytes).get("mirrored")
+    except Exception:
+        mirrored = None
 
     if not mirrored:
         await _process_submission(entry_bytes)
+        return
+
+    if mirrored == "tester":
+        # A Bug Tester's own submission: their groups, events and points, as if
+        # they had sent it straight here. No sink.
+        if _tester_traffic_allowed():
+            await _process_submission(entry_bytes)
+        else:
+            _discard_stashed_image(entry_bytes)
         return
 
     sink = _resolve_mirror_sink()

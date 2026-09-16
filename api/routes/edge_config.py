@@ -22,16 +22,19 @@ from werkzeug.http import parse_etags
 
 edge_config_bp = Blueprint("edge_config", __name__)
 
-#: Matches the Worker's own config TTL. Propagation after a toggle is this plus
-#: the Worker's memo, so ~60s worst case — which is what the admin panel says.
-_CACHE_TTL_SECONDS = 30
+#: Matches the Worker's own config TTL. Propagation after a toggle — or after a
+#: new Bug Tester is added — is this plus the Worker's memo, so ~30s worst case,
+#: which is what the admin panel says.
+_CACHE_TTL_SECONDS = 15
 
 
 @edge_config_bp.get("/edge-config")
 async def get_edge_config():
     # Lazy import: tests/conftest.py stubs `services` in sys.modules, so a
     # module-level import breaks collection for everything that imports `api`.
-    from services.edge_config import DISABLED, edge_payload, mirror_config
+    from services.edge_config import (
+        DISABLED, MODE_OFF, edge_payload, mirror_config, tester_digests,
+    )
 
     try:
         mirror = await asyncio.to_thread(mirror_config)
@@ -42,7 +45,16 @@ async def get_edge_config():
         print(f"/edge-config read failed, serving disabled: {exc}")
         mirror = dict(DISABLED)
 
-    return _respond(edge_payload(mirror))
+    testers = []
+    if mirror.get("mode") != MODE_OFF:
+        try:
+            # Cached in Redis; a database read at most every few minutes.
+            testers = await asyncio.to_thread(tester_digests)
+        except Exception as exc:
+            print(f"/edge-config tester list failed, serving none: {exc}")
+            testers = []
+
+    return _respond(edge_payload(mirror, testers))
 
 
 def _etag_matches(if_none_match: str, version: str) -> bool:

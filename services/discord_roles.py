@@ -49,8 +49,23 @@ MAIN_GUILD_ID = os.getenv("PRIMARY_GUILD_ID", "1172737525069135962").strip()
 #: The badge that makes someone a Bug Tester (and grants comp supporter perks).
 BUG_TESTER_BADGE_KEY = "bug_tester_helper"
 
-#: role key -> Discord role id, plus the guild the ids belong to.
-ROLE_MAP_PATH = Path(__file__).resolve().parents[1] / "data" / "discord_roles.json"
+def _role_map_path() -> Path:
+    """The tracked map is the main server's. A dev instance syncs its own guild,
+    so it points ``DISCORD_ROLE_MAP_PATH`` at a map written for that guild
+    (``scripts/seed_discord_roles.py --only bug_tester``). Relative paths are
+    taken from the repo root."""
+    root = Path(__file__).resolve().parents[1]
+    override = os.getenv("DISCORD_ROLE_MAP_PATH", "").strip().strip('"').strip("'")
+    if not override:
+        return root / "data" / "discord_roles.json"
+    path = Path(override)
+    return path if path.is_absolute() else root / path
+
+
+#: role key -> Discord role id, plus the guild the ids belong to. Only the roles
+#: named in the map are ever touched, so a map holding just ``bug_tester``
+#: confines the sync to that one role.
+ROLE_MAP_PATH = _role_map_path()
 
 #: Set by anything that wants a pass sooner than the next scheduled one.
 SYNC_REQUEST_KEY = "discord_roles:sync_requested"
@@ -448,6 +463,17 @@ def request_sync() -> bool:
 
         RedisClient().set(SYNC_REQUEST_KEY, "1")
         return True
+    except Exception:
+        return False
+
+
+def sync_requested() -> bool:
+    """Whether a pass has been requested, without consuming the request."""
+    try:
+        from utils.redis import RedisClient
+
+        client = RedisClient().client
+        return bool(client and client.exists(SYNC_REQUEST_KEY))
     except Exception:
         return False
 

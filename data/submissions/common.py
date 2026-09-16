@@ -1585,6 +1585,46 @@ def suppress_notifications(*notification_types):
 from utils.mirror_context import mirror_sink, sink_group_id  # noqa: E402
 
 
+#: group_id -> (expires_at monotonic, guild_id), for dev_instance_skips_group().
+_dev_group_guild_cache: dict = {}
+_DEV_GROUP_GUILD_TTL = 300
+
+
+def dev_instance_skips_group(db_session, group_id) -> bool:
+    """On a dev instance, whether ``group_id`` belongs to nobody we may post to.
+
+    Dev runs on a production dump, so most of its groups are real clans whose
+    guilds the dev bots are not in. The dev guild guard already refuses to
+    *send* there; this stops the notification being queued in the first place,
+    which is what lets a Bug Tester's mirrored submission be processed normally
+    — only the groups in DEV_ALLOWED_GUILDS (the Bug Testers group) hear of it.
+
+    Always False in production: the guard is only armed with STATE=dev and
+    DEV_ALLOWED_GUILDS set. A lookup error answers False, like the other gates;
+    the send-time guard still stands behind it.
+    """
+    from utils.dev_guild_guard import allowed_guild_ids, is_active
+
+    if not group_id or not is_active():
+        return False
+    now = time.monotonic()
+    cached = _dev_group_guild_cache.get(group_id)
+    if cached is not None and cached[0] > now:
+        guild_id = cached[1]
+    else:
+        try:
+            guild_id = (
+                db_session.query(Group.guild_id).filter(Group.group_id == group_id).scalar()
+            )
+        except Exception:
+            return False
+        _dev_group_guild_cache[group_id] = (now + _DEV_GROUP_GUILD_TTL, guild_id)
+    try:
+        return int(guild_id) not in allowed_guild_ids()
+    except (TypeError, ValueError):
+        return True  # no guild at all: nowhere on this instance to post it
+
+
 async def create_notification(notification_type, player_id, data, group_id=None, existing_session=None):
     """Create a notification queue entry."""
 
@@ -1631,6 +1671,10 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         db_session = existing_session
     else:
         db_session = session
+    # A dev instance only speaks in the guilds it serves; the rest of its
+    # groups are real clans copied from production.
+    if group_id and dev_instance_skips_group(db_session, group_id):
+        return None
     # Don't enqueue group-channel notifications the send side can never
     # deliver (group has no relevant channel configured) — they'd fail with
     # "No channel configured for group X" on every send attempt.

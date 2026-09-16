@@ -72,7 +72,7 @@ class TestFailsClosed:
     """Anything other than a well-formed "on" must read as off."""
 
     def test_missing_key_is_disabled(self, redis):
-        assert ec.mirror_config() == {"enabled": False, "sample": 1.0}
+        assert ec.mirror_config() == {"mode": "off", "enabled": False, "sample": 1.0}
 
     def test_unreachable_redis_is_disabled_and_does_not_raise(self, redis):
         redis.raise_on_get = True
@@ -98,7 +98,7 @@ class TestFailsClosed:
 class TestToggle:
     def test_enable_then_read_back(self, redis):
         ec.set_mirror(True)
-        assert ec.mirror_config() == {"enabled": True, "sample": 1.0}
+        assert ec.mirror_config() == {"mode": "all", "enabled": True, "sample": 1.0}
 
     def test_disable_deletes_the_key(self, redis):
         ec.set_mirror(True)
@@ -150,7 +150,8 @@ class TestMirrorState:
         assert ec.mirror_state()["expires_at"] is None
 
     def test_missing_key_has_no_expiry(self, redis):
-        assert ec.mirror_state() == {"enabled": False, "sample": 1.0, "expires_at": None}
+        assert ec.mirror_state() == {"mode": "off", "enabled": False, "sample": 1.0,
+                                     "expires_at": None}
 
     def test_propagates_redis_failure(self, redis):
         redis.raise_on_get = True
@@ -182,6 +183,132 @@ class TestEdgePayload:
         assert "host" not in blob.lower()
 
     def test_shape_matches_what_the_worker_reads(self):
-        payload = ec.edge_payload({"enabled": True, "sample": 0.25})
-        assert payload["mirror"] == {"enabled": True, "sample": 0.25}
+        payload = ec.edge_payload({"enabled": True, "sample": 0.25}, ["ab" * 8])
+        assert payload["mirror"] == {"mode": "all", "enabled": True, "sample": 0.25,
+                                     "testers": ["ab" * 8]}
         assert isinstance(payload["version"], str)
+
+    def test_off_carries_no_tester_list(self):
+        payload = ec.edge_payload({"mode": "off"}, ["ab" * 8])
+        assert "testers" not in payload["mirror"]
+
+    def test_testers_mode_never_reads_as_everyone(self):
+        """A Worker deployed before modes existed reads only `enabled`."""
+        payload = ec.edge_payload({"mode": "testers", "enabled": True, "sample": 1.0}, [])
+        assert payload["mirror"]["enabled"] is False
+        assert payload["mirror"]["mode"] == "testers"
+
+    def test_a_new_tester_changes_the_version(self):
+        before = ec.edge_payload({"mode": "testers"}, ["aa" * 8])
+        after = ec.edge_payload({"mode": "testers"}, ["aa" * 8, "bb" * 8])
+        assert before["version"] != after["version"]
+
+    def test_tester_order_does_not_change_the_version(self):
+        a = ec.edge_payload({"mode": "testers"}, ["aa" * 8, "bb" * 8])
+        b = ec.edge_payload({"mode": "testers"}, ["bb" * 8, "aa" * 8])
+        assert a["version"] == b["version"]
+
+
+class TestModes:
+    def test_testers_mode_round_trips(self, redis):
+        ec.set_mirror("testers")
+        assert ec.mirror_config() == {"mode": "testers", "enabled": False, "sample": 1.0}
+
+    def test_all_mode_round_trips(self, redis):
+        ec.set_mirror("all", ttl_seconds=3600)
+        assert ec.mirror_config()["mode"] == "all"
+        assert redis.ttls[ec.MIRROR_KEY] == 3600
+
+    def test_off_deletes_the_key(self, redis):
+        ec.set_mirror("testers")
+        ec.set_mirror("off")
+        assert ec.MIRROR_KEY not in redis.store
+
+    def test_an_unknown_mode_is_refused_on_write(self, redis):
+        with pytest.raises(ValueError):
+            ec.set_mirror("everyone")
+
+    def test_an_unknown_stored_mode_reads_as_off(self, redis):
+        redis.store[ec.MIRROR_KEY] = json.dumps({"mode": "banana", "enabled": True})
+        assert ec.mirror_config()["mode"] == "off"
+        assert ec.mirror_config()["enabled"] is False
+
+    def test_a_value_from_before_modes_still_reads(self, redis):
+        redis.store[ec.MIRROR_KEY] = json.dumps({"enabled": True, "sample": 0.5})
+        assert ec.mirror_config() == {"mode": "all", "enabled": True, "sample": 0.5}
+
+    def test_stored_enabled_is_never_trusted_for_testers(self, redis):
+        redis.store[ec.MIRROR_KEY] = json.dumps({"mode": "testers", "enabled": True})
+        assert ec.mirror_config()["enabled"] is False
+
+
+class TestTesterDigests:
+    """The Worker computes HMAC-SHA256(key, acc_hash)[:8 bytes] too; the vector
+    below is pinned in edge/intake-capture/test/worker.test.mjs as well."""
+
+    KEY = "test-tester-key"
+
+    @pytest.fixture()
+    def roster(self, monkeypatch):
+        import sys
+        import types
+
+        hashes = {"value": ["4146262546365686368", "-1234567890123456789"]}
+        calls = {"n": 0}
+
+        def current_account_hashes():
+            calls["n"] += 1
+            return list(hashes["value"])
+
+        module = types.ModuleType("services.tester_roster")
+        module.current_account_hashes = current_account_hashes
+        monkeypatch.setitem(sys.modules, "services.tester_roster", module)
+        return hashes, calls
+
+    def test_matches_the_worker(self):
+        assert ec.digest("4146262546365686368", self.KEY.encode()) == "9fab6bbee92e0072"
+        assert ec.digest("-1234567890123456789", self.KEY.encode()) == "e7bea00d71a794c4"
+
+    def test_surrounding_whitespace_is_ignored_like_the_worker(self):
+        assert ec.digest(" 4146262546365686368 ", self.KEY.encode()) == "9fab6bbee92e0072"
+
+    def test_no_key_means_no_testers(self, redis, roster, monkeypatch):
+        monkeypatch.delenv("EDGE_TESTER_KEY", raising=False)
+        assert ec.tester_digests() == []
+
+    def test_digests_every_tester_account(self, redis, roster, monkeypatch):
+        monkeypatch.setenv("EDGE_TESTER_KEY", self.KEY)
+        assert ec.tester_digests() == sorted(["9fab6bbee92e0072", "e7bea00d71a794c4"])
+
+    def test_the_hashes_themselves_are_never_served(self, redis, roster, monkeypatch):
+        monkeypatch.setenv("EDGE_TESTER_KEY", self.KEY)
+        blob = json.dumps(ec.edge_payload({"mode": "testers"}, ec.tester_digests()))
+        assert "4146262546365686368" not in blob
+
+    def test_the_list_is_cached(self, redis, roster, monkeypatch):
+        monkeypatch.setenv("EDGE_TESTER_KEY", self.KEY)
+        _, calls = roster
+        ec.tester_digests()
+        ec.tester_digests()
+        assert calls["n"] == 1
+        assert redis.ttls[ec.DIGEST_CACHE_KEY] == ec.DIGEST_CACHE_SECONDS
+
+    def test_a_rotated_key_ignores_the_old_cache(self, redis, roster, monkeypatch):
+        monkeypatch.setenv("EDGE_TESTER_KEY", self.KEY)
+        first = ec.tester_digests()
+        monkeypatch.setenv("EDGE_TESTER_KEY", "another-key")
+        assert ec.tester_digests() != first
+
+    def test_an_unreadable_roster_means_no_testers(self, redis, monkeypatch):
+        import sys
+        import types
+
+        def broken():
+            raise RuntimeError("database is down")
+
+        module = types.ModuleType("services.tester_roster")
+        module.current_account_hashes = broken
+        monkeypatch.setitem(sys.modules, "services.tester_roster", module)
+        monkeypatch.setenv("EDGE_TESTER_KEY", self.KEY)
+        assert ec.tester_digests() == []
+        assert ec.DIGEST_CACHE_KEY not in redis.store, "a failure is not cached"

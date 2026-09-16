@@ -26,6 +26,7 @@ sudo systemctl restart <unit>
 | `droptracker-video-worker` | `services/video_worker.py` | — |
 | `droptracker-events` | `workers/event_consumer.py` | — |
 | `droptracker-webhook-consumer` | `workers/webhook_consumer.py` | — |
+| `droptracker-dev-sync` | `workers/dev_sync.py` — production only; pushes the Bug Tester roster to the dev instance (needs `DEV_SYNC_URL` + `DEV_SYNC_KEY`) | — |
 | `droptracker-prune-images` | `scripts/prune_drop_images.py` (timer-driven oneshot) | — |
 
 Notes:

@@ -1,10 +1,16 @@
 """Whether the current task is processing mirrored production traffic.
 
 When the admin panel switches on mirroring (see edge/intake-capture and
-services/edge_config.py), the Cloudflare Worker sends a second copy of every
-live submission to the dev instance, marked ``X-DT-Mirror: 1``. The consumer
-enters :func:`mirror_sink` for the life of such a submission, and everything
-downstream can ask whether it is looking at mirrored traffic.
+services/edge_config.py), the Cloudflare Worker sends a second copy of live
+submissions to the dev instance, marked with an ``X-DT-Mirror`` header. The
+header says which kind of copy it is (:func:`mirror_kind`):
+
+* ``1`` — the firehose ("Everyone" mode): a sample of all production traffic.
+  The consumer enters :func:`mirror_sink` for the life of such a submission,
+  and everything downstream can ask whether it is looking at mirrored traffic.
+* ``tester`` — a Bug Tester's own submission. It is processed like one sent
+  straight to dev (groups, events, points and all), so it never enters the
+  sink; what keeps it inside dev is the instance's own guild guard.
 
 This lives in ``utils`` — with no imports beyond the standard library — because
 the things that need to ask are spread across ``data/submissions``,
@@ -24,6 +30,28 @@ import os
 _mirror_sink_group: contextvars.ContextVar = contextvars.ContextVar(
     "mirror_sink_group", default=None
 )
+
+#: A sampled copy of everyone's production traffic (header value ``1``).
+KIND_ALL = "all"
+#: A Bug Tester's own submission (header value ``tester``).
+KIND_TESTER = "tester"
+
+
+def mirror_kind(header_value):
+    """Classify an ``X-DT-Mirror`` header value: None, KIND_TESTER or KIND_ALL.
+
+    Anything present but unrecognised is treated as the firehose, because the
+    firehose is the path with the sink: an unknown kind of mirrored traffic
+    must never get the tester path's freedom by accident.
+    """
+    if header_value is None:
+        return None
+    value = str(header_value).strip().lower()
+    if not value:
+        return None
+    if value == KIND_TESTER:
+        return KIND_TESTER
+    return KIND_ALL
 
 
 @contextlib.contextmanager

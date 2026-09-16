@@ -24,6 +24,9 @@ def _env(monkeypatch):
     monkeypatch.setenv("B2_CDN_BASE_URL", "https://video.droptracker.io")
     monkeypatch.delenv("B2_IMG_CDN_BASE_URL", raising=False)
     monkeypatch.delenv("IMG_B2_OFFLOAD", raising=False)
+    # The suite runs as STATE=dev, where B2 also needs the explicit opt-in;
+    # TestDevInstance below takes it away again.
+    monkeypatch.setenv("DEV_ALLOW_B2", "true")
 
 
 class FakeRedis:
@@ -191,3 +194,28 @@ class TestGetAndHead:
         items = list(image_storage.list_keys("dt_img/models/"))
         assert items == [{"key": "dt_img/models/1/a.glb", "size": 7,
                           "etag": "e", "last_modified": "LM"}]
+
+
+
+class TestDevInstance:
+    """A dev box's .env began as production's; an inherited IMG_B2_OFFLOAD must
+    not send test screenshots into the production bucket."""
+
+    def test_dev_stays_local_without_the_opt_in(self, monkeypatch):
+        monkeypatch.setenv("STATE", "dev")
+        monkeypatch.setenv("IMG_B2_OFFLOAD", "true")
+        monkeypatch.delenv("DEV_ALLOW_B2", raising=False)
+        assert not image_storage.offload_enabled()
+
+    def test_dev_can_opt_in(self, monkeypatch):
+        monkeypatch.setenv("STATE", "dev")
+        monkeypatch.setenv("IMG_B2_OFFLOAD", "true")
+        monkeypatch.setenv("DEV_ALLOW_B2", "true")
+        assert image_storage.offload_enabled()
+
+    def test_production_needs_no_opt_in(self, monkeypatch):
+        monkeypatch.setenv("STATE", "live")
+        monkeypatch.delenv("STATUS", raising=False)
+        monkeypatch.setenv("IMG_B2_OFFLOAD", "true")
+        monkeypatch.delenv("DEV_ALLOW_B2", raising=False)
+        assert image_storage.offload_enabled()

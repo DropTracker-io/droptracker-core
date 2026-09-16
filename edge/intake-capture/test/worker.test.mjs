@@ -478,6 +478,26 @@ describe("the dev mirror", () => {
     assert.equal(callsTo(MIRROR)[0].url, `https://${MIRROR}/submit?x=1`);
   });
 
+  test("a config from before modes still means everyone when enabled", async () => {
+    configSays({ enabled: true, sample: 1 }); // no `mode` key at all
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 1);
+  });
+
+  test("an unknown mode is off, whatever `enabled` says", async () => {
+    configSays({ mode: "banana", enabled: true, sample: 1 });
+    const env = mirrorEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
   test("the config is fetched once per TTL, not once per request", async () => {
     configSays({ enabled: true, sample: 1 });
     const env = mirrorEnv();
@@ -486,5 +506,139 @@ describe("the dev mirror", () => {
     for (let i = 0; i < 20; i++) await worker.fetch(postRequest(), env, c);
     await c.flush();
     assert.equal(configFetches().length, 0, "20 requests inside the TTL must not be 20 lookups");
+  });
+});
+
+/**
+ * "Bug testers" mode. The Worker recognises a tester by HMAC-SHA256 of the
+ * submission's acc_hash under EDGE_TESTER_KEY, first 8 bytes as hex -- the
+ * same value services/edge_config.digest() produces. The vector below is
+ * pinned on both sides (tests/unit/test_edge_config.py), so the two
+ * implementations cannot drift apart silently.
+ */
+describe("the tester mirror", () => {
+  const KEY = "test-tester-key";
+  // HMAC-SHA256("test-tester-key", "4146262546365686368")[:8 bytes] -- the
+  // acc_hash in multipartBody().
+  const TESTER = "9fab6bbee92e0072";
+  const SOMEONE_ELSE = "0123456789abcdef";
+
+  function testerEnv(over = {}) {
+    return makeEnv({ MIRROR_HOST: MIRROR, MIRROR_TIMEOUT_MS: "5000", EDGE_TESTER_KEY: KEY, ...over });
+  }
+
+  function configSays(mirrorCfg) {
+    configResponder = async () =>
+      new Response(JSON.stringify({ version: "t", mirror: mirrorCfg }), { status: 200 });
+  }
+
+  async function prime(env, c) {
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    fetchCalls = [];
+  }
+
+  const mirrorHeader = (call) => new Headers(call.init.headers).get("x-dt-mirror");
+
+  test("a tester's submission is mirrored and labelled as theirs", async () => {
+    configSays({ mode: "testers", enabled: false, sample: 1, testers: [TESTER] });
+    const env = testerEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    const calls = callsTo(MIRROR);
+    assert.equal(calls.length, 1);
+    assert.equal(mirrorHeader(calls[0]), "tester");
+  });
+
+  test("anyone else is not mirrored in testers mode", async () => {
+    configSays({ mode: "testers", enabled: false, sample: 1, testers: [SOMEONE_ELSE] });
+    const env = testerEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    for (let i = 0; i < 5; i++) await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
+  test("without the key nobody can be recognised, so nothing is mirrored", async () => {
+    configSays({ mode: "testers", enabled: false, sample: 1, testers: [TESTER] });
+    const env = testerEnv({ EDGE_TESTER_KEY: undefined });
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
+  test("a different key does not match", async () => {
+    configSays({ mode: "testers", enabled: false, sample: 1, testers: [TESTER] });
+    const env = testerEnv({ EDGE_TESTER_KEY: "another-key" });
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
+  test("malformed tester entries are ignored rather than matched", async () => {
+    configSays({ mode: "testers", enabled: false, sample: 1, testers: [TESTER.toUpperCase(), 42, null] });
+    const env = testerEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
+  });
+
+  test("in everyone mode a tester is still labelled, even when the sample is zero", async () => {
+    configSays({ mode: "all", enabled: true, sample: 0, testers: [TESTER] });
+    const env = testerEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    const calls = callsTo(MIRROR);
+    assert.equal(calls.length, 1, "a tester is never sampled away");
+    assert.equal(mirrorHeader(calls[0]), "tester");
+  });
+
+  test("in everyone mode anyone else is sent as the firehose", async () => {
+    configSays({ mode: "all", enabled: true, sample: 1, testers: [SOMEONE_ELSE] });
+    const env = testerEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    await worker.fetch(postRequest(), env, c);
+    await c.flush();
+    const calls = callsTo(MIRROR);
+    assert.equal(calls.length, 1);
+    assert.equal(mirrorHeader(calls[0]), "1");
+  });
+
+  test("a tester mirror that never answers does not hold up the client", async () => {
+    configSays({ mode: "testers", enabled: false, sample: 1, testers: [TESTER] });
+    const env = testerEnv({ MIRROR_TIMEOUT_MS: "50" });
+    const c = makeCtx();
+    await prime(env, c);
+    mirrorResponder = () => new Promise(() => {}); // dev hangs
+    const res = await worker.fetch(postRequest(), env, c);
+    assert.equal(res.status, 200);
+    assert.equal(await res.json().then((j) => j.message), "Queued");
+  });
+
+  test("a body with no acc_hash field is not a tester's", async () => {
+    configSays({ mode: "testers", enabled: false, sample: 1, testers: [TESTER] });
+    const env = testerEnv();
+    const c = makeCtx();
+    await prime(env, c);
+    const req = new Request("https://api.droptracker.io/webhook", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "4146262546365686368",
+    });
+    await worker.fetch(req, env, c);
+    await c.flush();
+    assert.equal(callsTo(MIRROR).length, 0);
   });
 });

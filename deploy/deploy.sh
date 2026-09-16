@@ -12,6 +12,7 @@
 #   --bots      droptracker-core droptracker-webhooks droptracker-hof droptracker-heartbeat
 #   --workers   droptracker-events droptracker-webhook-consumer
 #               droptracker-video-worker droptracker-player-updates
+#               droptracker-dev-sync (skipped where it is not installed)
 #   --boards    droptracker-lootboards          (lootboard image generator)
 #
 # Options:
@@ -36,7 +37,7 @@ cd "$REPO_ROOT"
 UNITS_API=(droptracker-api)
 UNITS_WEBAPI=(droptracker-webapi)
 UNITS_BOTS=(droptracker-core droptracker-webhooks droptracker-hof droptracker-heartbeat)
-UNITS_WORKERS=(droptracker-events droptracker-webhook-consumer droptracker-video-worker droptracker-player-updates)
+UNITS_WORKERS=(droptracker-events droptracker-webhook-consumer droptracker-video-worker droptracker-player-updates droptracker-dev-sync)
 UNITS_BOARDS=(droptracker-lootboards)
 
 # ------------------------------------------------------------------ arg parse
@@ -160,6 +161,18 @@ else
 fi
 
 # ---------------------------------------------------------------- 5. restarts
+# Units a box may legitimately not have (the dev instance has no dev-sync).
+OPTIONAL_UNITS=" droptracker-dev-sync "
+INSTALLED_UNITS=()
+for unit in "${UNITS[@]}"; do
+    if [[ "$OPTIONAL_UNITS" == *" $unit "* ]] && ! systemctl cat "$unit" >/dev/null 2>&1; then
+        echo "  $unit is not installed here; skipping it"
+        continue
+    fi
+    INSTALLED_UNITS+=("$unit")
+done
+UNITS=("${INSTALLED_UNITS[@]}")
+
 step "restarting units: ${UNITS[*]}"
 for unit in "${UNITS[@]}"; do
     run sudo systemctl restart "$unit"

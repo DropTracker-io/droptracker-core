@@ -59,6 +59,13 @@ ALLOWLIST_ENV = "DEV_ALLOWED_GUILDS"
 #: Discord user ids this instance may resolve, and therefore DM. Unlike the
 #: guild allowlist, an unset value here blocks everything — see user_allowed().
 USER_ALLOWLIST_ENV = "DEV_ALLOWED_USERS"
+#: Current Bug Testers' Discord ids, written on dev each time production pushes
+#: the roster (services/tester_roster.DEV_DISCORD_IDS_KEY — a test pins the two).
+TESTER_IDS_KEY = "devsync:testers:discord_ids"
+#: Set to false to stop testers being DMed on dev without removing them.
+TESTER_DMS_ENV = "DEV_ALLOW_TESTER_DMS"
+_TESTER_IDS_TTL = 15.0
+_tester_ids_cache = {"expires": 0.0, "ids": frozenset()}
 
 #: Set when Redis is unreachable, so the guard still works (per-process,
 #: re-learned on restart) rather than falling back to hammering Discord.
@@ -123,6 +130,35 @@ def allowed_user_ids() -> Set[int]:
     return _parse_id_env(USER_ALLOWLIST_ENV)
 
 
+def _tester_dms_enabled() -> bool:
+    return _env_flag(TESTER_DMS_ENV) not in ("0", "false", "no", "off")
+
+
+def tester_user_ids() -> Set[int]:
+    """Current Bug Testers' Discord ids on this dev instance (cached briefly).
+
+    Empty unless production has pushed a roster here; any Redis trouble also
+    reads as empty, which only ever blocks a DM.
+    """
+    now = time.monotonic()
+    if _tester_ids_cache["expires"] > now:
+        return set(_tester_ids_cache["ids"])
+    ids = set()
+    client = _redis()
+    if client is not None:
+        try:
+            for raw in client.smembers(TESTER_IDS_KEY) or ():
+                try:
+                    ids.add(int(raw.decode() if isinstance(raw, bytes) else raw))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+        except Exception:
+            ids = set()
+    _tester_ids_cache["ids"] = frozenset(ids)
+    _tester_ids_cache["expires"] = now + _TESTER_IDS_TTL
+    return ids
+
+
 def user_allowed(user_id) -> bool:
     """Whether this instance may resolve `user_id`.
 
@@ -134,14 +170,18 @@ def user_allowed(user_id) -> bool:
     unlike a channel post, there is no permission error to stop it. The dev core
     bot has been observed sharing a production relay guild with real users, so
     "it will 403 anyway" is not a safety property we have.
+
+    Allowed: the ids in ``DEV_ALLOWED_USERS``, plus the current Bug Testers
+    (pushed from production; they asked to test this) unless
+    ``DEV_ALLOW_TESTER_DMS`` is false.
     """
-    allowed = allowed_user_ids()
-    if not allowed:
-        return False
     try:
-        return int(user_id) in allowed
+        uid = int(user_id)
     except (TypeError, ValueError):
         return False
+    if uid in allowed_user_ids():
+        return True
+    return is_dev_mode() and _tester_dms_enabled() and uid in tester_user_ids()
 
 
 def is_active() -> bool:
@@ -321,8 +361,11 @@ def describe() -> str:
         return (f"dev guild guard: INACTIVE — dev mode but {ALLOWLIST_ENV} is unset, "
                 f"so Discord calls are unconfined")
     users = allowed_user_ids()
+    testers = "and current Bug Testers" if _tester_dms_enabled() else "(tester DMs off)"
     dm_note = (
-        f"DMs limited to {sorted(users)}" if users
+        f"DMs limited to {sorted(users)} {testers}" if users
+        else f"DMs limited to current Bug Testers ({USER_ALLOWLIST_ENV} is unset)"
+        if _tester_dms_enabled()
         else f"DMs BLOCKED ({USER_ALLOWLIST_ENV} is unset)"
     )
     return (f"dev guild guard: active, confined to {sorted(ids)} "

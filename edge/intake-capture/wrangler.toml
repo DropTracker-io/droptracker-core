@@ -83,6 +83,11 @@ MIRROR_HOST = "dev-api.droptracker.io"
 # Well under ORIGIN_TIMEOUT_MS. The mirror is fire-and-forget, so this only
 # bounds how long a stalled dev box can hold an isolate open in waitUntil.
 MIRROR_TIMEOUT_MS = "5000"
+# "Bug testers" mode also needs EDGE_TESTER_KEY, which is a SECRET, not a var.
+# It must equal EDGE_TESTER_KEY in the production backend's .env (both sides
+# compute HMAC-SHA256(key, acc_hash) and compare the first 8 bytes):
+#   npx wrangler secret put EDGE_TESTER_KEY --env production
+# Without it the Worker cannot recognise a tester, so testers mode sends nothing.
 
 [[env.production.r2_buckets]]
 binding = "SPOOL"

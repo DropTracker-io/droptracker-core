@@ -42,13 +42,21 @@ _WEBHOOK_TEMP_DIR = os.getenv("WEBHOOK_TEMP_DIR", "/tmp/webhook_uploads")
 _MIRROR_SHED_DEPTH = int(os.getenv("MIRROR_SHED_DEPTH", "2000") or 2000)
 
 
-def _is_mirrored_request() -> bool:
-    """Whether this is a mirrored copy of production traffic.
+def _mirror_kind():
+    """None, or which kind of mirrored production copy this request is.
 
     Set by the Cloudflare Worker (edge/intake-capture) when the admin panel has
-    mirroring switched on.
+    mirroring switched on: ``tester`` for a Bug Tester's own submission,
+    ``all`` for the firehose. See utils/mirror_context.mirror_kind.
     """
-    return request.headers.get("X-DT-Mirror") == "1"
+    from utils.mirror_context import mirror_kind
+
+    return mirror_kind(request.headers.get("X-DT-Mirror"))
+
+
+def _is_mirrored_request() -> bool:
+    """Whether this is a mirrored copy of production traffic, of either kind."""
+    return _mirror_kind() is not None
 
 
 def _accepts_mirrored() -> bool:
@@ -273,14 +281,15 @@ async def _queue_webhook_request():
         files = await request.files
         image_file = files.get("file") if files else None
 
-        mirrored = _is_mirrored_request()
+        mirror_kind = _mirror_kind()
+        firehose = mirror_kind == "all"
 
         image_tmp_path = image_filename = image_content_type = None
-        # Mirrored submissions keep no screenshot. utils/download.py bakes the
-        # production URL into image_url, so a copy stored on dev would render as
-        # a broken link anyway -- all it would buy is dev's disk filling at
-        # production rates.
-        if image_file and not mirrored:
+        # The firehose keeps no screenshot: at production rates it would only
+        # fill dev's disk. A tester's copy keeps it, because what they are
+        # testing (screenshot gates, event proof, the embed itself) needs it;
+        # dev serves it under its own USER_UPLOAD_BASE_URL.
+        if image_file and not firehose:
             image_tmp_path, image_filename, image_content_type = await _save_upload_to_temp(image_file)
             if image_tmp_path is None:
                 # The stash failed (almost always a full disk) but the payload
@@ -301,8 +310,8 @@ async def _queue_webhook_request():
             "image_content_type": image_content_type,
             "enqueued_at": datetime.utcnow().isoformat(),
         }
-        if mirrored:
-            entry["mirrored"] = True
+        if mirror_kind:
+            entry["mirrored"] = mirror_kind
 
         # A 200 from here means "we have durably taken responsibility for this
         # submission", and the plugin stops retrying on the strength of it. So
@@ -311,7 +320,7 @@ async def _queue_webhook_request():
         # keeps its copy and retries. (2026-08-18: this path silently swallowed
         # the Redis error and answered 200 ~40,800 times.)
         rc = RedisClient()
-        if mirrored:
+        if firehose:
             # Shed rather than buffer. The production copy of this submission is
             # already durably handled, so a dropped mirror costs nothing, while a
             # mirror-driven backlog would delay everything behind it.
@@ -370,12 +379,17 @@ async def submit_data():
 @webhook_bp.post("/webhook")
 @rate_limit(limit=100, period=timedelta(seconds=1))
 async def webhook_data():
-    if _is_mirrored_request() and not _accepts_mirrored():
+    mirror_kind = _mirror_kind()
+    if mirror_kind is not None and not _accepts_mirrored():
         # 200, not 4xx: the Worker fires the mirror and never reads the result,
         # so there is nobody to tell. What matters is that we do not process it.
         return jsonify({"message": "Ignored"}), 200
     if _QUEUE_MODE:
         return await _queue_webhook_request()
+    if mirror_kind == "all":
+        # Only the queue consumer reroutes the firehose to the sink group; the
+        # direct path below has no sink, so it must not see that traffic.
+        return jsonify({"message": "Ignored"}), 200
     import time
     req_start = time.perf_counter()
     return await _process_webhook_request(req_start)

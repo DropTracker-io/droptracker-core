@@ -176,6 +176,9 @@ SERVICE_REGISTRY: list[dict] = [
     {"unit": "droptracker-video-worker", "name": "Video worker", "category": "Processing & workers",
      "description": "MJPEG→MP4 conversion + Backblaze B2 upload", "port": None,
      "kind": "service", "confirm_stop": False},
+    {"unit": "droptracker-dev-sync", "name": "Dev sync", "category": "Processing & workers",
+     "description": "Pushes the Bug Tester roster to the dev instance within seconds of a change",
+     "port": None, "kind": "service", "confirm_stop": False},
     # --- Infrastructure (read-only) ---------------------------------------
     {"unit": "nginx", "name": "nginx", "category": "Infrastructure",
      "description": "Reverse proxy fronting every HTTP service (behind Cloudflare)", "port": 80,
@@ -372,9 +375,9 @@ async def admin_set_seasonal():
 
 @admin_bp.get("/admin/edge-mirror")
 async def admin_get_edge_mirror():
-    """Current state of the edge Worker's dev-mirror switch."""
+    """Current state of the edge Worker's dev-mirror switch, and who counts as a tester."""
     await _require_superadmin()
-    from services.edge_config import mirror_state
+    from services.edge_config import mirror_state, tester_summary
 
     try:
         state = await asyncio.to_thread(mirror_state)
@@ -382,30 +385,39 @@ async def admin_get_edge_mirror():
         # Deliberately not a confident "off": an admin looking at this needs to
         # know the difference between "nobody turned it on" and "we cannot tell".
         abort_problem(502, "Unavailable", "Could not read the mirror switch.")
+    state["testers"] = await asyncio.to_thread(tester_summary)
     return private_no_store(jsonify(state))
 
 
 @admin_bp.post("/admin/edge-mirror")
 async def admin_set_edge_mirror():
-    """Mirror production submissions at the dev instance, or stop.
+    """Mirror production submissions at the dev instance — for testers or everyone — or stop.
 
     The Cloudflare Worker in edge/intake-capture polls GET /edge-config on the
-    intake API and starts sending a second, fire-and-forget copy of every
-    submission to the dev box. Production is untouched either way — the mirror
+    intake API and sends a second, fire-and-forget copy of the chosen
+    submissions to the dev box. Production is untouched either way — the mirror
     runs in waitUntil and its result is never read.
 
-    Always time-boxed unless someone deliberately asks otherwise: this is a
+    Body: ``{"mode": "off" | "testers" | "all", "ttl_seconds": null | 3600 | ...}``.
+    ``{"enabled": bool}`` is still accepted and means off/all, as before modes.
+
+    Everyone is time-boxed unless someone deliberately asks otherwise: it is a
     debugging mode, and one left on over a weekend is how the dev box fills its
     disk. The TTL is the whole mechanism — the Redis key lapsing IS the switch
     turning itself off, so there is no separate flag to get out of sync.
     """
     actor = await _require_superadmin()
     body = await json_body()
-    enabled = body.get("enabled")
-    if not isinstance(enabled, bool):
-        abort_problem(422, "Invalid value", "enabled must be a boolean.")
 
-    from services.edge_config import TTL_CHOICES, mirror_state, set_mirror
+    from services.edge_config import (
+        MODE_ALL, MODE_OFF, MODES, TTL_CHOICES, mirror_state, set_mirror, tester_summary,
+    )
+
+    mode = body.get("mode")
+    if mode is None and isinstance(body.get("enabled"), bool):
+        mode = MODE_ALL if body["enabled"] else MODE_OFF
+    if mode not in MODES:
+        abort_problem(422, "Invalid value", f"mode must be one of {list(MODES)}.")
 
     ttl_seconds = body.get("ttl_seconds")
     # `isinstance(True, int)` is True in Python, so exclude bool explicitly
@@ -420,22 +432,23 @@ async def admin_set_edge_mirror():
         )
 
     try:
-        await asyncio.to_thread(set_mirror, enabled, 1.0, ttl_seconds)
+        await asyncio.to_thread(set_mirror, mode, 1.0, ttl_seconds)
     except Exception:
         abort_problem(502, "Toggle failed", "Could not persist the mirror switch.")
 
-    if not enabled:
+    if mode == MODE_OFF:
         after = "off"
     elif ttl_seconds:
-        after = f"on ({int(ttl_seconds) // 3600}h)"
+        after = f"{mode} ({int(ttl_seconds) // 3600}h)"
     else:
-        after = "on (no expiry)"
+        after = f"{mode} (no expiry)"
     _audit(actor, "edge.mirror.toggle", "global", after=after)
 
     try:
         state = await asyncio.to_thread(mirror_state)
     except Exception:
-        state = {"enabled": enabled, "sample": 1.0, "expires_at": None}
+        state = {"mode": mode, "enabled": mode == MODE_ALL, "sample": 1.0, "expires_at": None}
+    state["testers"] = await asyncio.to_thread(tester_summary)
     return jsonify({"ok": True, **state})
 
 
@@ -3015,6 +3028,7 @@ async def admin_award_badge(player_id: int):
     # Badges can carry entitlement grants (e.g. Bug Tester → supporter perks) —
     # bust the owner's cached entitlements so the change is immediate here.
     _invalidate_badge_user_entitlements(after.pop("_user_id", None))
+    _notify_tester_roster(badge_key)
     _audit(actor, "badge.award", f"player:{player_id}", after=json.dumps(after))
     return jsonify(after)
 
@@ -3055,8 +3069,22 @@ async def admin_revoke_badge(player_id: int, award_id: int):
     # Badge removal may withdraw an entitlement grant (Bug Tester → supporter
     # perks) — bust the owner's cached entitlements so it applies immediately.
     _invalidate_badge_user_entitlements(owner_user_id)
+    _notify_tester_roster(before.get("badge_key"))
     _audit(actor, "badge.revoke", f"player:{player_id}", before=json.dumps(before))
     return jsonify({"ok": True})
+
+
+def _notify_tester_roster(badge_key) -> None:
+    """A Bug Tester badge changed hands: the dev instance should hear now, not in
+    10s, and the edge Worker's tester list should be rebuilt
+    (services/tester_roster.py)."""
+    try:
+        from services import tester_roster
+
+        if badge_key == tester_roster.BUG_TESTER_BADGE_KEY:
+            tester_roster.notify_changed()
+    except Exception:
+        pass
 
 
 def _invalidate_badge_user_entitlements(user_id) -> None:

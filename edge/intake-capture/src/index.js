@@ -35,8 +35,13 @@ const SPOOL_ON_STATUS = (status) =>
 // How long a fetched mirror config is trusted, and how long we keep trusting
 // the last good one when /edge-config stops answering. Past the stale bound we
 // stop mirroring: a toggle nobody can turn off is worse than one that lapses.
-const CFG_TTL_MS = 30_000;
+// With the origin's own 15s cache, a new Bug Tester is mirrored within ~30s.
+const CFG_TTL_MS = 15_000;
 const CFG_MAX_STALE_MS = 600_000;
+
+// A tester digest is the first 8 bytes of HMAC-SHA256(EDGE_TESTER_KEY,
+// acc_hash), as hex. services/edge_config.py computes the same thing.
+const TESTER_DIGEST = /^[0-9a-f]{16}$/;
 
 export default {
   async fetch(request, env, ctx) {
@@ -85,7 +90,10 @@ async function handle(request, body, env, ctx) {
   // call so the two overlap. Nothing below may read its result: a mirror that
   // fails, times out or throws has to be indistinguishable from one that was
   // never switched on. Rule 2 applies to this as much as to the capture path.
-  if (mirrorOn(env, ctx)) ctx.waitUntil(mirror(request, body, env));
+  // Deciding *whether* this submission is mirrored (the tester check) happens
+  // inside waitUntil too, so the origin leg never waits on it.
+  const mode = mirrorMode(env, ctx);
+  if (mode !== "off") ctx.waitUntil(maybeMirror(request, body, env, mode));
 
   let response = null;
   let status = 0;
@@ -178,28 +186,88 @@ const _cfgCache = new WeakMap();
 function cfgFor(env) {
   let c = _cfgCache.get(env);
   if (!c) {
-    c = { enabled: false, sample: 1, exp: 0, ok: 0 };
+    c = { mode: "off", sample: 1, testers: new Set(), exp: 0, ok: 0 };
     _cfgCache.set(env, c);
   }
   return c;
 }
 
 /**
- * Whether to mirror this request. Never blocks: a cold isolate answers "no" and
- * kicks the first refresh into waitUntil, so the hot path never waits on
- * /edge-config and the worst case of an unreachable config is that mirroring
- * quietly stops.
+ * Which mirror mode applies right now: "off", "testers" or "all". Never
+ * blocks: a cold isolate answers "off" and kicks the first refresh into
+ * waitUntil, so the hot path never waits on /edge-config and the worst case of
+ * an unreachable config is that mirroring quietly stops.
+ *
+ *   testers  only Bug Testers' submissions (matched in maybeMirror)
+ *   all      everyone, sampled; testers' copies are still labelled as theirs
  */
-function mirrorOn(env, ctx) {
+function mirrorMode(env, ctx) {
   // Deploy-time hard disable. Checked first so an unset MIRROR_HOST costs not
   // even the config fetch.
-  if (!env.MIRROR_HOST) return false;
+  if (!env.MIRROR_HOST) return "off";
 
   const c = cfgFor(env);
   const now = Date.now();
   if (now >= c.exp) ctx.waitUntil(refreshCfg(env, c));
-  if (now - c.ok > CFG_MAX_STALE_MS) return false;
-  return c.enabled && Math.random() < c.sample;
+  if (now - c.ok > CFG_MAX_STALE_MS) return "off";
+  if (c.mode === "all") return "all";
+  // Without the key there is no way to recognise a tester, so nothing to do.
+  if (c.mode === "testers" && c.testers.size > 0 && env.EDGE_TESTER_KEY) return "testers";
+  return "off";
+}
+
+/**
+ * Decide whether this submission goes to dev, and label it. Runs inside
+ * waitUntil. A tester match is checked first and is never sampled away; the
+ * firehose sample applies only to everyone else.
+ */
+async function maybeMirror(request, body, env, mode) {
+  try {
+    const c = cfgFor(env);
+    let label = null;
+    if (c.testers.size > 0 && env.EDGE_TESTER_KEY) {
+      const hash = extractField(body, "acc_hash");
+      if (hash && c.testers.has(await testerDigest(env, hash))) label = "tester";
+    }
+    if (!label && mode === "all" && Math.random() < c.sample) label = "1";
+    if (!label) return;
+    await mirror(request, body, env, label);
+  } catch {
+    // Rule 2: nothing about the mirror may ever reach the client.
+  }
+}
+
+// The imported HMAC key, per isolate (keyed on env, like the config).
+const _keyCache = new WeakMap();
+
+function testerKey(env) {
+  let entry = _keyCache.get(env);
+  if (!entry || entry.secret !== env.EDGE_TESTER_KEY) {
+    entry = {
+      secret: env.EDGE_TESTER_KEY,
+      key: crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(String(env.EDGE_TESTER_KEY)),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      ),
+    };
+    _keyCache.set(env, entry);
+  }
+  return entry.key;
+}
+
+async function testerDigest(env, value) {
+  const key = await testerKey(env);
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(String(value).trim()),
+  );
+  return Array.from(new Uint8Array(mac).slice(0, 8), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
 }
 
 async function refreshCfg(env, c) {
@@ -213,10 +281,21 @@ async function refreshCfg(env, c) {
     });
     if (!r.ok) return; // keep the last known good until it goes stale
     const cfg = await r.json();
-    c.enabled = cfg?.mirror?.enabled === true;
+    const m = cfg?.mirror ?? {};
+    // An unknown mode is off. A config with no mode at all predates modes,
+    // when `enabled` meant everyone.
+    c.mode =
+      typeof m.mode === "string"
+        ? (m.mode === "testers" || m.mode === "all" ? m.mode : "off")
+        : (m.enabled === true ? "all" : "off");
     // A malformed sample coerces to NaN, and `Math.random() < NaN` is false --
     // garbage in the config turns mirroring off rather than on.
-    c.sample = Number(cfg?.mirror?.sample ?? 1);
+    c.sample = Number(m.sample ?? 1);
+    c.testers = new Set(
+      Array.isArray(m.testers)
+        ? m.testers.filter((t) => typeof t === "string" && TESTER_DIGEST.test(t))
+        : [],
+    );
     c.ok = Date.now();
   } catch {
     // Keep the last known good. A cold isolate has none, so it stays off.
@@ -227,13 +306,17 @@ async function refreshCfg(env, c) {
  * Post a second copy at the dev instance. Deliberately does not touch R2, the
  * ledger, or the response: dev is a soak target, and a submission it drops is
  * already durably handled by the production leg.
+ *
+ * `label` is the X-DT-Mirror value dev keys everything off: "tester" for a Bug
+ * Tester's own submission (processed normally on dev), "1" for the firehose
+ * (rerouted to dev's sink group).
  */
-function mirror(request, body, env) {
+function mirror(request, body, env, label = "1") {
   const url = new URL(request.url);
 
   const headers = new Headers(request.headers);
   headers.delete("host");
-  headers.set("X-DT-Mirror", "1");
+  headers.set("X-DT-Mirror", label);
 
   // Same reason as forward(): the dev acceptor rate-limits on
   // request.access_route[0] with a per-process store, so without the real
@@ -285,6 +368,28 @@ async function spool(body, request, env, status, isSample) {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Best-effort value of one embed field, from the start of the body.
+ *
+ * The plugin writes player_name, acc_hash, p_v and guid as the first embed
+ * fields (BaseEventHandler.addCommonFields), and payload_json precedes the
+ * file part, so they are always inside the first chunk.
+ */
+function extractField(body, name) {
+  try {
+    const head = new TextDecoder("utf-8", { fatal: false }).decode(
+      new Uint8Array(body, 0, Math.min(body.byteLength, 16384)),
+    );
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const field = head.match(
+      new RegExp(`"name"\\s*:\\s*"${escaped}"\\s*,\\s*"value"\\s*:\\s*"([^"]{1,64})"`, "i"),
+    );
+    return field ? field[1] : null;
+  } catch {
+    return null;
   }
 }
 

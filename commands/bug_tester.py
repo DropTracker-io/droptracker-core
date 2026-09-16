@@ -12,7 +12,12 @@ writes anything.
 The badge is the source of truth. It grants the complimentary supporter perks
 (``db/entitlements.py``), and the role sync (``services/discord_roles.py``)
 keeps the role on exactly the people who hold it. These handlers also change
-the role immediately, so the result shows without waiting for the next pass.
+the role immediately, so the result shows without waiting for the next pass,
+and signal ``workers/dev_sync.py`` so the dev instance learns of the change
+within seconds (``services/tester_roster.py``).
+
+On a dev instance the list is read-only: dev takes its testers from
+production, and any change made here would be undone by the next push.
 
 Classes:
     BugTesterCommands: Extension containing the /bug-tester commands
@@ -26,7 +31,8 @@ from interactions import (
 )
 
 from db.app_logger import AppLogger
-from services import discord_roles
+from services import discord_roles, tester_roster
+from utils.dev_guild_guard import is_dev_mode
 
 app_logger = AppLogger()
 
@@ -34,6 +40,8 @@ MAIN_GUILD_ID = int(discord_roles.MAIN_GUILD_ID)
 _DESCRIPTION = "Manage the global Bug Tester badge and role"
 _DENIED = "Only bot owners can use this command, and only in the DropTracker server."
 _CLAIM_HINT = "They need to link an in-game name with `/claim-rsn` first."
+_DEV_READ_ONLY = ("This is the dev instance, which copies its Bug Testers from production. "
+                  "Use `/bug-tester` on the main DropTracker server; dev picks the change up within seconds.")
 
 
 def _actor_user_id(session, discord_id) -> Optional[int]:
@@ -53,6 +61,7 @@ def _grant(author_id, target_id, note: Optional[str]):
         change = discord_roles.grant_bug_tester(session, str(target_id), actor, note=note)
         if change.status == "granted":
             session.commit()
+            tester_roster.notify_changed()
         return change
 
 
@@ -66,6 +75,7 @@ def _revoke(author_id, target_id):
         change = discord_roles.revoke_bug_tester(session, str(target_id), actor)
         if change.status == "revoked":
             session.commit()
+            tester_roster.notify_changed()
         return change
 
 
@@ -134,6 +144,8 @@ class BugTesterCommands(Extension):
     async def bug_tester_add(self, ctx: SlashContext, user, note: str = None):
         if not await self._allowed(ctx):
             return await ctx.send(_DENIED, ephemeral=True)
+        if is_dev_mode():
+            return await ctx.send(_DEV_READ_ONLY, ephemeral=True)
         await ctx.defer(ephemeral=True)
         try:
             change = await asyncio.to_thread(_grant, ctx.author.id, user.id, (note or "").strip() or None)
@@ -178,6 +190,8 @@ class BugTesterCommands(Extension):
     async def bug_tester_remove(self, ctx: SlashContext, user):
         if not await self._allowed(ctx):
             return await ctx.send(_DENIED, ephemeral=True)
+        if is_dev_mode():
+            return await ctx.send(_DEV_READ_ONLY, ephemeral=True)
         await ctx.defer(ephemeral=True)
         try:
             change = await asyncio.to_thread(_revoke, ctx.author.id, user.id)

@@ -57,6 +57,7 @@ Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service
 | `droptracker-heartbeat` | `bots/heartbeat.py` | Uptime heartbeat bot | — |
 | `droptracker-events` | `workers/event_consumer.py` | Events v2: drains `events:submissions`, applies task/bingo/team progress | — |
 | `droptracker-webhook-consumer` | `workers/webhook_consumer.py` | Drains `webhook:queue` — **live** (`WEBHOOK_QUEUE_MODE=true` in prod `.env`) | — |
+| `droptracker-dev-sync` | `workers/dev_sync.py` | Production only: pushes the Bug Tester roster to the dev instance within seconds of a change | — |
 
 **Timers:** `droptracker-db-backup.timer` (08:30 UTC → `scripts/db_backup.sh`, MariaDB + Redis to local + B2) and `droptracker-prune-images.timer` (04:00 UTC → `scripts.prune_drop_images --apply`, low-value screenshots past 30d).
 
@@ -434,6 +435,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Discord Activity backend | `services/activity_launch*.py` (frontend lives in the web repo) |
 | Badges | `services/badges.py`, `db/models/badge.py`, `web_api/routes/badges.py` |
 | Discord roles for tiers + Bug Testers (main server) | `services/discord_roles.py` (rules, role specs); synced by the webhook bot; `/bug-tester` in `commands/bug_tester.py`; `scripts/seed_discord_roles.py` / `sync_discord_roles.py` (dry-run by default) |
+| Dev instance: tester roster, mirror, setup | Production is the only source of Bug Testers. `services/tester_roster.py` (snapshot, seal, apply) → `workers/dev_sync.py` (prod pusher) → `api/routes/dev_sync.py` (dev receiver); `db/badge_groups.py` (`BADGE_GROUPS`: badge-driven group members); `services/edge_config.py` + `edge/intake-capture` (Off / Bug testers / Everyone mirror, `EDGE_TESTER_KEY` digests); dev box setup after every restore: `scripts/dev_instance.py check` / `all --apply` |
 | Website API endpoint (`/api/v1/...`) | `web_api/routes/<area>.py`; auth/roles in `web_api/deps.py` |
 | Website auth/session | `web_api/session.py` (JWT), `web_api/routes/auth.py` (Discord OAuth) |
 | Live drop feed / SSE | `services/realtime.py` (publish), `web_api/routes/realtime.py` (stream) |

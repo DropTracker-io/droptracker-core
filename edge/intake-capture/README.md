@@ -300,6 +300,32 @@ Rollback is `npx wrangler delete droptracker-intake-capture`, or removing the
 route in the dashboard. Traffic returns to the plain proxy path immediately; no
 deploy, no restart, and the origin never knew the difference.
 
+### Mirroring to the dev instance
+
+The Worker can also send a fire-and-forget copy of submissions to
+`MIRROR_HOST` (the dev instance). Superadmins choose the mode on
+`/admin/services`; the Worker polls `GET /edge-config` for it (≤ ~30s to take
+effect):
+
+| Mode | What is copied | `X-DT-Mirror` |
+|---|---|---|
+| Off | nothing | — |
+| Bug testers | submissions whose `acc_hash` is a current Bug Tester's | `tester` |
+| Everyone | everything, times `sample`; testers' copies keep their label | `1` / `tester` |
+
+Testers are recognised by `HMAC-SHA256(EDGE_TESTER_KEY, acc_hash)`, first 8
+bytes as hex; `/edge-config` lists those digests, never the hashes. The key is a
+Worker **secret** and must equal `EDGE_TESTER_KEY` in the production backend's
+`.env`:
+
+```bash
+npx wrangler secret put EDGE_TESTER_KEY --env production
+```
+
+Without it, Bug testers mode mirrors nothing. On the dev side, `tester` copies
+are processed like direct submissions (confined by `DEV_ALLOWED_GUILDS`) and
+`1` copies are rerouted to `MIRROR_SINK_GROUP_ID`.
+
 ## What this does not cover
 
 - **The `useApi=false` cohort — 28% of submissions.** Those POST straight to

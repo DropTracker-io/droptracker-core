@@ -94,6 +94,10 @@ def main() -> int:
             print(f"  {verbs.get(change.status, change.status):<24} {name} ({user.get('id')}){where}")
         if args.apply:
             session.commit()
+    if args.apply and counts.get("granted"):
+        from services.tester_roster import notify_changed
+
+        notify_changed()  # the dev instance and the edge Worker pick the new testers up now
     print(f"summary: {counts}")
     if not args.apply:
         print("[DRY RUN] nothing changed")

@@ -12,9 +12,15 @@ import inspect
 
 
 # The public user-upload tree and the URL it is served at. Module-level so
-# tests (and any future relocation) can point both somewhere else.
+# tests (and any future relocation) can point both somewhere else. A dev
+# instance serves its own copies (Bug Testers' mirrored screenshots), so it sets
+# USER_UPLOAD_BASE_URL to its own /img/user-upload/ address.
 USER_UPLOAD_ROOT = "/store/droptracker/disc/static/assets/img/user-upload/"
-USER_UPLOAD_BASE_URL = "https://www.droptracker.io/img/user-upload/"
+USER_UPLOAD_BASE_URL = (
+    os.getenv("USER_UPLOAD_BASE_URL", "").strip().strip('"').strip("'").rstrip("/") + "/"
+    if os.getenv("USER_UPLOAD_BASE_URL", "").strip().strip('"').strip("'")
+    else "https://www.droptracker.io/img/user-upload/"
+)
 
 
 def _b2_enabled() -> bool:

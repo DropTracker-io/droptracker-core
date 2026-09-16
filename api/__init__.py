@@ -22,6 +22,7 @@ from api.routes.notifications import notifications_bp
 from api.routes.video import video_bp
 from api.routes.manifest import manifest_bp
 from api.routes.edge_config import edge_config_bp
+from api.routes.dev_sync import dev_sync_bp
 from api.routes.state_sync import state_sync_bp
 from api.routes.player_model import player_model_bp
 from api.routes.member_messages import member_messages_bp
@@ -113,6 +114,7 @@ def create_app() -> Quart:
     app.register_blueprint(video_bp, url_prefix='/')
     app.register_blueprint(manifest_bp, url_prefix='/')
     app.register_blueprint(edge_config_bp, url_prefix='/')
+    app.register_blueprint(dev_sync_bp, url_prefix='/')
     app.register_blueprint(state_sync_bp, url_prefix='/')
     app.register_blueprint(player_model_bp, url_prefix='/')
     app.register_blueprint(member_messages_bp, url_prefix='/')

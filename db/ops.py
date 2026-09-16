@@ -1114,6 +1114,31 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
     return {"added": added_count, "removed": removed_count, "skipped_removals": skip_removals}
 
 
+def _sync_badge_groups():
+    """Groups whose members come from a badge, not WOM (db/badge_groups.py).
+
+    Nothing to do unless BADGE_GROUPS is set, which only the dev instance does
+    (its Bug Testers group). Ends its own transaction, like _sync_global_group.
+    """
+    try:
+        from db.badge_groups import configured_badge_groups, sync_configured
+
+        if not configured_badge_groups():
+            return
+        for group_id, (added, removed) in sync_configured(session).items():
+            if added or removed:
+                app_logger.log(
+                    log_type="access",
+                    data=f"Badge group {group_id}: +{added} / -{removed} members",
+                    app_name="core",
+                    description="sync_badge_groups",
+                )
+    except Exception as e:
+        session.rollback()
+        app_logger.log(log_type="error", data=f"Badge group sync failed: {e}",
+                       app_name="core", description="sync_badge_groups")
+
+
 def _sync_global_group():
     """Ensure every player is a member of the global group (group_id=2).
 
@@ -1195,6 +1220,7 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
             continue
 
     _sync_global_group()
+    _sync_badge_groups()
 
 
 async def associate_player_ids(player_wom_ids, before_date: datetime = None, session_to_use = None):
@@ -1295,6 +1321,7 @@ async def update_group_members_silent(forced_id: int = None):
             continue
 
     _sync_global_group()
+    _sync_badge_groups()
 
 
 _WOM_SYNC_COOLDOWN_SECONDS = 3600  # 1 hour

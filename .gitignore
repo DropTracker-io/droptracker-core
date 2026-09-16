@@ -33,6 +33,10 @@ player_board.py
 # deploy and the dev instance take them from git like any other code.
 alembic.ini 
 
+# Dev-instance state written by scripts/dev_instance.py (channel/role ids of
+# the dev guild). Only meaningful on the dev box.
+/data/dev/
+
 # General project excludes
 __pycache__/
 *.cpython*

@@ -82,15 +82,34 @@ class ImageStorageError(Exception):
     should catch this; callers that cannot should let it propagate."""
 
 
+def _truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().strip('"').strip("'").lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def offload_enabled() -> bool:
     """Whether new image writes go to B2 instead of the local tree.
 
     Env-gated (``IMG_B2_OFFLOAD``) rather than hardcoded so a dev box without
     B2 credentials keeps the original local-filesystem behaviour untouched.
+
+    A dev instance stays local even with ``IMG_B2_OFFLOAD`` set, unless
+    ``DEV_ALLOW_B2`` also is: its ``.env`` began as a copy of production's, so
+    an inherited flag would otherwise write test screenshots into the
+    production bucket. Bug Testers' mirrored screenshots are kept on dev and
+    served from ``USER_UPLOAD_BASE_URL``.
     """
-    return os.getenv("IMG_B2_OFFLOAD", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+    if not _truthy("IMG_B2_OFFLOAD"):
+        return False
+    try:
+        from utils.dev_guild_guard import is_dev_mode
+
+        if is_dev_mode() and not _truthy("DEV_ALLOW_B2"):
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def cdn_base() -> str:
