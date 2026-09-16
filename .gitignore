@@ -1,5 +1,7 @@
-# Environmental variables
+# Environmental variables. Backups and variants of .env hold the same secrets.
 .env
+.env.*
+!.env.example
 
 nohup.out
 
