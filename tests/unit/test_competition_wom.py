@@ -247,3 +247,65 @@ class TestPendingFinals:
         assert cw.pending_final_competition_ids(state, r, now=now) == [42]
         r.kv[cw._womcompfinal_key(42)] = "1"
         assert cw.pending_final_competition_ids(state, r, now=now) == []
+
+
+# ── team competitions ────────────────────────────────────────────────────────
+
+def _team_comp():
+    raw = json.loads(json.dumps(COMP_RAW))
+    raw["type"] = "team"
+    names = ["Red Team", "Blue", "red team "]
+    for i, p in enumerate(raw.get("participations") or []):
+        p["teamName"] = names[i % len(names)]
+    return raw
+
+
+class TestTeamCompetitions:
+    def test_parse_keeps_each_players_team(self):
+        comp = cw.parse_competition(_team_comp())
+        assert comp["type"] == "team"
+        assert all(p["team_name"] for p in comp["participations"])
+        classic = cw.parse_competition(COMP_RAW)
+        assert all(p["team_name"] is None for p in classic["participations"])
+
+    def test_team_names_are_distinct_in_first_seen_order(self):
+        comp = cw.parse_competition(_team_comp())
+        # "red team " folds onto "Red Team".
+        assert cw.wom_team_names(comp) == ["Red Team", "Blue"]
+
+    def test_a_team_race_needs_a_team_competition(self):
+        team = cw.parse_competition(_team_comp())
+        classic = cw.parse_competition(COMP_RAW)
+        kind = "sotw" if womutils.wom_metric_kind(classic["metric"]) == "skill" else "botw"
+        future = datetime(2000, 1, 1)
+        assert "team_competition" in cw.competition_link_problems(team, kind, now=future)
+        assert "classic_competition" in cw.competition_link_problems(
+            classic, kind, now=future, race_format="teams")
+        problems = cw.competition_link_problems(team, kind, now=future, race_format="teams")
+        assert "classic_competition" not in problems and "team_competition" not in problems
+
+    def test_the_standings_cache_carries_team_names(self):
+        comp = cw.parse_competition(_team_comp())
+        target = recon.ReconcileTarget(
+            event_id=1, event_name="E", window_start=None, window_end=None,
+            windows=[], wom_groups=[], skills={}, boss_metrics=set(),
+            effort_metrics=set())
+        rows = cw._standings_cache(comp, target)
+        assert {r["team_name"] for r in rows} <= {"Red Team", "Blue", "red team"}
+        assert all(r["team_name"] for r in rows)
+
+
+class TestWomTeamPayload:
+    def test_shape_clipping_and_empty_teams(self):
+        payload = womutils.wom_team_payload([
+            ("A team name that is far longer than thirty characters", ["b", "A", "a", " "]),
+            ("Empty", []),
+            ("  ", ["x"]),
+            ("Blue", ["Zed", "alpha"]),
+        ])
+        assert payload == [
+            {"name": "A team name that is far longer",
+             "participants": ["A", "a", "b"]},
+            {"name": "Blue", "participants": ["alpha", "Zed"]},
+        ]
+        assert len(payload[0]["name"]) == womutils.WOM_TEAM_NAME_MAX

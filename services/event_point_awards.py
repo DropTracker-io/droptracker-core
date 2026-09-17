@@ -521,6 +521,15 @@ def _is_competition(event) -> bool:
     return (getattr(event, "kind", None) or "standard") in COMPETITION_EVENT_KINDS
 
 
+def _is_team_race(session, event) -> bool:
+    """A SOTW/BOTW that races teams: it places TEAMS (the ordinary team-event
+    payout — each member who took part gets the team's place), where an
+    individual race places players."""
+    from services.competition_setup import event_race_format
+
+    return event_race_format(session, event.id) == "teams"
+
+
 def _roster(session, event, group_id: int) -> list:
     """Roster rows in this clan's scope. Standard events: every team (the
     membership check narrows to the clan). Clan-vs-clan: the clan's own teams,
@@ -607,18 +616,15 @@ def _competition_standings(session, event) -> tuple:
     from services.competition import CompetitionConfig
     from services.competition_setup import competition_row, competition_task
 
+    from services.event_lifecycle import (_competition_ranked_rows,
+                                          frozen_competition_standings)
+
     task = competition_task(session, event.id)
     mode = CompetitionConfig(task.config).ranking_mode if task is not None else "gained"
     row = competition_row(session, event.id)
-    if row is not None and row.final_standings:
-        try:
-            ranked = json.loads(row.final_standings)
-            if isinstance(ranked, list):
-                return ranked, mode
-        except (TypeError, ValueError):
-            pass
-    from services.event_lifecycle import _competition_ranked_rows
-
+    frozen = frozen_competition_standings(row.final_standings if row is not None else None)
+    if frozen is not None:
+        return frozen["players"], mode
     ranked, _config, _team = _competition_ranked_rows(session, event)
     return ranked or [], mode
 
@@ -713,8 +719,12 @@ def compute_plan(session, event, group_id: int, config: dict) -> dict:
     """Everything the preview and the award need for one clan: the plan rows,
     the placed entities with their labels, and whether EHE could be priced.
     Read-only."""
-    competition = _is_competition(event)
-    ehe_supported = not competition
+    competition_kind = _is_competition(event)
+    # ``competition`` means PLAYER placement (an individual race). A team race
+    # places teams exactly like any other team event. Neither records EHE —
+    # the race metric is the effort.
+    competition = competition_kind and not _is_team_race(session, event)
+    ehe_supported = not competition_kind
     members = _roster(session, event, group_id)
     pids = [m["player_id"] for m in members]
     clan_ids = _clan_member_ids(session, group_id, pids)

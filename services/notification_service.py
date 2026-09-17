@@ -2908,8 +2908,9 @@ class NotificationService:
                                                     'event_ending_soon') else 5)
                 comp_kinds = ('sotw', 'botw')
                 if (getattr(event, 'kind', None) or 'standard') in comp_kinds:
-                    # SOTW/BOTW: PLAYER standings (one roster team — team rows
-                    # would render a single meaningless line), with score_text
+                    # SOTW/BOTW: PLAYER standings on an individual race (its
+                    # one roster team would render a single meaningless line),
+                    # TEAM standings on a team race — both with the score_text
                     # ("2.48M XP") the line renderers prefer.
                     try:
                         from services.event_lifecycle import (

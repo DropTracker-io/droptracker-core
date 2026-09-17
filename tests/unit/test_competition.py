@@ -465,3 +465,144 @@ class TestRuleWording:
             "task": {"type": "skill_target", "target": "mining",
                      "target_value": 70}}]})
         assert cfg.rules_by_id[1].max_awards == 1
+
+
+# ── team races ───────────────────────────────────────────────────────────────
+
+TEAM_CFG = {**BOTW_CFG, "format": "teams"}
+AVG_CFG = {**BOTW_CFG, "format": "teams", "team_scoring": "average"}
+
+
+class TestTeamRaceConfig:
+    def test_configs_written_before_team_races_are_individual_totals(self):
+        cfg = comp.CompetitionConfig(BOTW_CFG)
+        assert cfg.format == "individual" and cfg.team_scoring == "total"
+        assert cfg.is_team_race is False and cfg.averages_teams is False
+
+    def test_team_format_and_average_scoring_parse(self):
+        cfg = comp.CompetitionConfig(AVG_CFG)
+        assert cfg.is_team_race and cfg.averages_teams
+
+    def test_unknown_values_fall_back_to_the_defaults(self):
+        cfg = comp.CompetitionConfig({**BOTW_CFG, "format": "squads",
+                                      "team_scoring": "median"})
+        assert cfg.format == "individual" and cfg.team_scoring == "total"
+
+    def test_averaging_only_applies_to_a_team_race(self):
+        # An individual race's one roster team is scaffolding — never averaged.
+        cfg = comp.CompetitionConfig({**BOTW_CFG, "team_scoring": "average"})
+        assert cfg.averages_teams is False
+
+
+class TestTeamScore:
+    def _fold(self, *rows):
+        return comp.fold_rows(list(rows), comp.CompetitionConfig(BOTW_CFG))
+
+    def test_total_is_the_sum_of_members_ranked_values(self):
+        per = self._fold(_row(1, 10, rid=1), _row(2, 5, rid=2))
+        assert comp.team_score(per, comp.CompetitionConfig(TEAM_CFG), [1, 2, 3]) == 15
+
+    def test_average_divides_by_everyone_on_or_ever_on_the_team(self):
+        # Player 9 left the team but still has rows on it: their 6 kills stay
+        # in the total, so they stay in the divisor. Player 3 is on the roster
+        # with nothing yet — still a member.
+        per = self._fold(_row(1, 10, rid=1), _row(9, 6, rid=2))
+        cfg = comp.CompetitionConfig(AVG_CFG)
+        assert comp.team_member_count(per, [1, 3]) == 3
+        assert comp.team_score(per, cfg, [1, 3]) == round(16 / 3, 2)
+
+    def test_an_empty_team_averages_to_zero(self):
+        assert comp.team_score({}, comp.CompetitionConfig(AVG_CFG), []) == 0
+
+    def test_an_individual_race_always_sums(self):
+        per = self._fold(_row(1, 10, rid=1), _row(2, 5, rid=2))
+        cfg = comp.CompetitionConfig({**BOTW_CFG, "team_scoring": "average"})
+        assert comp.team_score(per, cfg, [1, 2, 3, 4]) == 15
+
+
+class TestTeamStandings:
+    def _teams(self):
+        cfg = comp.CompetitionConfig(TEAM_CFG)
+        folds = {
+            1: comp.fold_rows([_row(10, 8, rid=1), _row(11, 3, rid=2)], cfg),
+            2: comp.fold_rows([_row(20, 12, rid=3)], cfg),
+            3: {},
+        }
+        teams = [
+            {"team_id": 1, "name": "Red", "color": "#ff0000", "roster_ids": [10, 11, 12]},
+            {"team_id": 2, "name": "Blue", "color": None, "roster_ids": [20]},
+            {"team_id": 3, "name": "Green", "color": None, "roster_ids": []},
+        ]
+        names = {10: "Alice", 11: "Bob", 20: "Cara"}
+        return teams, folds, cfg, names
+
+    def test_total_scoring_ranks_by_summed_gains(self):
+        teams, folds, cfg, names = self._teams()
+        rows = comp.team_standings(teams, folds, cfg, names)
+        assert [(r["name"], r["score"], r["rank"]) for r in rows] == [
+            ("Blue", 12, 1), ("Red", 11, 2), ("Green", 0, 3)]
+        red = rows[1]
+        assert red["members"] == 3 and red["active"] == 2
+        assert red["top_player"] == {"player_id": 10, "player_name": "Alice", "value": 8}
+        assert red["average"] == round(11 / 3, 2)
+        assert rows[2]["top_player"] is None
+
+    def test_average_scoring_can_reorder_the_teams(self):
+        teams, folds, _cfg, names = self._teams()
+        teams[1]["roster_ids"] = [20, 21, 22, 23]   # Blue: 12 over 4 = 3.0
+        cfg = comp.CompetitionConfig(AVG_CFG)     # Red: 11 over 3 = 3.67
+        rows = comp.team_standings(teams, folds, cfg, names)
+        assert [r["name"] for r in rows] == ["Red", "Blue", "Green"]
+        assert rows[0]["score"] == round(11 / 3, 2) and rows[0]["total"] == 11
+
+
+class TestTeamAttribution:
+    def test_rows_carry_the_players_team(self):
+        cfg = comp.CompetitionConfig(TEAM_CFG)
+        per = comp.fold_rows([_row(1, 4, rid=1)], cfg)
+        wom = [
+            {"wom_player_id": 7, "display_name": "Wom Only", "gained": 2,
+             "team_name": "blue "},
+            {"wom_player_id": 8, "display_name": "Elsewhere", "gained": 1,
+             "team_name": "Purple"},
+        ]
+        rows = comp.standings(per, cfg, {1: "Alice"}, wom,
+                              player_teams={1: 10}, team_names={10: "Red", 11: "Blue"})
+        by_name = {r["player_name"]: r for r in rows}
+        assert (by_name["Alice"]["team_id"], by_name["Alice"]["team_name"]) == (10, "Red")
+        # A WOM-only row finds its team by (folded) WOM team name…
+        assert (by_name["Wom Only"]["team_id"], by_name["Wom Only"]["team_name"]) == (11, "Blue")
+        # …and keeps WOM's own label when the event has no such team.
+        assert (by_name["Elsewhere"]["team_id"], by_name["Elsewhere"]["team_name"]) == (None, "Purple")
+
+    def test_individual_rows_have_no_team(self):
+        cfg = comp.CompetitionConfig(BOTW_CFG)
+        per = comp.fold_rows([_row(1, 4, rid=1)], cfg)
+        row = comp.standings(per, cfg, {1: "Alice"})[0]
+        assert row["team_id"] is None and row["team_name"] is None
+
+
+class TestTeamWording:
+    def test_summed_team_scores_read_like_player_scores(self):
+        assert comp.team_score_text(2_481_034, comp.CompetitionConfig(
+            {**SOTW_CFG, "format": "teams", "ranking": {"mode": "gained"}})) == "2.48M XP"
+        assert comp.team_score_text(312, comp.CompetitionConfig(TEAM_CFG)) == "312 KC"
+
+    def test_averaged_team_scores_say_per_member(self):
+        assert comp.team_score_text(12.5, comp.CompetitionConfig(AVG_CFG)) == "12.5 KC per member"
+        assert comp.team_score_text(41_250.4, comp.CompetitionConfig(
+            {**SOTW_CFG, "format": "teams", "team_scoring": "average",
+             "ranking": {"mode": "gained"}})) == "41,250 XP per member"
+        assert comp.team_score_text(275_400, comp.CompetitionConfig(
+            {**SOTW_CFG, "format": "teams", "team_scoring": "average",
+             "ranking": {"mode": "gained"}})) == "275.4K XP per member"
+        assert comp.team_score_text(27.0, comp.CompetitionConfig(
+            {**SOTW_CFG, "format": "teams", "team_scoring": "average"})) == "27 pts per member"
+
+    def test_the_metric_line_says_the_team_wins(self):
+        assert comp.metric_line(comp.CompetitionConfig(BOTW_CFG)).endswith(
+            "most kills gained wins")
+        assert comp.metric_line(comp.CompetitionConfig(TEAM_CFG)).endswith(
+            "the team with the most kills gained wins")
+        assert comp.metric_line(comp.CompetitionConfig(AVG_CFG)).endswith(
+            "the team with the most kills gained per member wins")

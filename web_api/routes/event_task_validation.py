@@ -102,6 +102,8 @@ COMP_MAX_GAINED_PER_POINT = 1_000_000_000
 COMP_MIN_TIME_THRESHOLD_MS = 600
 COMP_MAX_TIME_THRESHOLD_MS = 6 * 60 * 60 * 1000
 COMP_RANKING_MODES = ("gained", "points")
+COMP_FORMATS = ("individual", "teams")
+COMP_TEAM_SCORING_MODES = ("total", "average")
 COMP_BONUS_RULE_TYPES = ("pet", "time_under", "task", "milestone")
 # Task types a ``task`` bonus rule may embed. kc_target/xp_target are absent on
 # purpose: the race already scores those kills and that XP, and their matcher
@@ -1375,6 +1377,20 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
         for canonical in canonical_npcs:
             if canonical not in scope_labels:
                 scope_labels.append(canonical)
+
+    # Individual race (one roster) or a race between the event's teams. Both
+    # keys are written explicitly so a stored config never depends on the
+    # scorer's defaults.
+    race_format = raw.get("format") or "individual"
+    if race_format not in COMP_FORMATS:
+        abort_problem(422, "Invalid format",
+                      f"format must be one of {list(COMP_FORMATS)}.")
+    out["format"] = race_format
+    team_scoring = raw.get("team_scoring") or "total"
+    if team_scoring not in COMP_TEAM_SCORING_MODES:
+        abort_problem(422, "Invalid team scoring",
+                      f"team_scoring must be one of {list(COMP_TEAM_SCORING_MODES)}.")
+    out["team_scoring"] = team_scoring if race_format == "teams" else "total"
 
     ranking = raw.get("ranking") if isinstance(raw.get("ranking"), dict) else {}
     mode = ranking.get("mode") or "gained"

@@ -200,6 +200,8 @@ class TestBoundsMirror:
         assert etv.COMP_MIN_TIME_THRESHOLD_MS == comp.MIN_TIME_THRESHOLD_MS
         assert etv.COMP_MAX_TIME_THRESHOLD_MS == comp.MAX_TIME_THRESHOLD_MS
         assert etv.COMP_RANKING_MODES == comp.RANKING_MODES
+        assert etv.COMP_FORMATS == comp.COMPETITION_FORMATS
+        assert etv.COMP_TEAM_SCORING_MODES == comp.TEAM_SCORING_MODES
         assert etv.COMP_MAX_RULE_NEED == comp.MAX_RULE_NEED
         assert etv.COMP_MIN_MILESTONE_STEP == comp.MIN_MILESTONE_STEP
         assert etv.COMP_MAX_MILESTONE_STEP == comp.MAX_MILESTONE_STEP
@@ -462,3 +464,24 @@ class TestPetRuleDefaults:
                 {"metric": {"key": "attack"},
                  "bonus_rules": [_task_rule(
                      {"type": "pet_collection", "target_value": 1})]})
+
+
+class TestRaceFormat:
+    def test_defaults_are_written_explicitly(self):
+        cfg = _botw()
+        assert cfg["format"] == "individual" and cfg["team_scoring"] == "total"
+
+    def test_team_race_with_average_scoring(self):
+        cfg = _botw(format="teams", team_scoring="average")
+        assert cfg["format"] == "teams" and cfg["team_scoring"] == "average"
+
+    def test_an_individual_race_never_stores_averaging(self):
+        # Averaging is a team-race setting; an individual race's one roster
+        # always sums, so the stored config says so.
+        assert _sotw(team_scoring="average")["team_scoring"] == "total"
+
+    def test_unknown_values_are_refused(self):
+        with pytest.raises(ProblemException):
+            _botw(format="squads")
+        with pytest.raises(ProblemException):
+            _botw(format="teams", team_scoring="median")

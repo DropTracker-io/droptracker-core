@@ -103,6 +103,7 @@ def parse_competition(raw) -> Optional[dict]:
             except (TypeError, ValueError):
                 return None
 
+        team_name = p.get("teamName")
         participations.append({
             "wom_player_id": player.get("id"),
             "username": player.get("username"),
@@ -111,6 +112,8 @@ def parse_competition(raw) -> Optional[dict]:
             "start": _num("start"),
             "end": _num("end"),
             "gained": _num("gained") or 0,
+            # Team competitions only (None on classic ones).
+            "team_name": (str(team_name).strip() or None) if team_name else None,
             "player_raw": player,
         })
     return {
@@ -130,17 +133,36 @@ def parse_competition(raw) -> Optional[dict]:
     }
 
 
+def wom_team_names(comp: Optional[dict]) -> list:
+    """The distinct WOM team names of a competition, in first-seen order."""
+    names, seen = [], set()
+    for p in (comp or {}).get("participations") or ():
+        name = p.get("team_name")
+        key = " ".join(str(name or "").lower().split())
+        if key and key not in seen:
+            seen.add(key)
+            names.append(str(name).strip())
+    return names
+
+
 def competition_link_problems(comp: Optional[dict], event_kind: str,
-                              now: Optional[datetime] = None) -> list:
+                              now: Optional[datetime] = None,
+                              race_format: str = "individual") -> list:
     """Why this competition can NOT back a sotw/botw event — [] when linkable.
-    Reasons are short machine codes; the routes turn them into copy."""
+    Reasons are short machine codes; the routes turn them into copy.
+
+    An individual race needs a classic competition; a team race needs a WOM
+    team competition (its teams become the event's teams)."""
     from utils.wiseoldman import wom_metric_kind
 
     now = now or datetime.now()
     if comp is None:
         return ["not_found"]
     problems = []
-    if comp.get("type") == "team":
+    if race_format == "teams":
+        if comp.get("type") != "team":
+            problems.append("classic_competition")
+    elif comp.get("type") == "team":
         problems.append("team_competition")
     if comp.get("multi_metric"):
         problems.append("multi_metric")
@@ -171,6 +193,7 @@ class CompetitionTarget:
     # The group reconciler's target shape, reused verbatim so its emission
     # helper (matching, seen-gate, clamps, envelope shapes) needs no fork.
     recon: object = field(default=None, repr=False)
+    race_format: str = "individual"        # individual | teams (task config)
 
 
 def _plan_targets_db(state) -> list:
@@ -192,6 +215,8 @@ def _plan_targets_db(state) -> list:
             continue
         comp_index = comp_task.get("competition") or {}
         metric_kind = comp_index.get("metric_kind")
+        task_config = comp_task.get("config") if isinstance(comp_task.get("config"), dict) else {}
+        race_format = "teams" if task_config.get("format") == "teams" else "individual"
         skills, bosses = {}, set()
         if metric_kind == "skill" and comp_index.get("skill"):
             from utils.wiseoldman import wom_skill_metric
@@ -205,7 +230,7 @@ def _plan_targets_db(state) -> list:
                 bosses = set(metrics)
         if not skills and not bosses:
             continue
-        candidates[event_id] = (metric_kind, skills, bosses)
+        candidates[event_id] = (metric_kind, skills, bosses, race_format)
     if not candidates:
         return []
 
@@ -240,7 +265,7 @@ def _plan_targets_db(state) -> list:
         reset_db_connections()
 
     targets = []
-    for event_id, (metric_kind, skills, bosses) in candidates.items():
+    for event_id, (metric_kind, skills, bosses, race_format) in candidates.items():
         comp_row = comp_rows.get(event_id)
         if comp_row is None:
             continue
@@ -274,6 +299,7 @@ def _plan_targets_db(state) -> list:
             verification_code=comp_row.wom_competition_code,
             metric_kind=metric_kind,
             recon=recon,
+            race_format=race_format,
         ))
     return targets
 
@@ -359,6 +385,7 @@ def _standings_cache(comp: dict, recon) -> list:
             "start": p.get("start"),
             "end": p.get("end"),
             "player_id": entry[0] if entry is not None else None,
+            "team_name": p.get("team_name"),
         })
     out.sort(key=lambda r: -r["gained"])
     return out
@@ -367,6 +394,362 @@ def _standings_cache(comp: dict, recon) -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 # The poll cycle
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Team races: WOM team competitions (blocking; run in a worker thread)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# LINKED team race — WOM owns the rosters (as it owns the dates): its teams
+# become the event's teams and every participant is placed on theirs. A
+# participant with no DropTracker account gets a WOM placeholder player
+# (``wom_temp_*``) so their gains land in the ledger and count for the team,
+# exactly like a clan member imported by the group sync.
+#
+# CREATED team race — DropTracker owns the rosters and pushes them out: the
+# whole team list is replaced whenever it changed (WOM keeps each staying
+# player's start snapshot), skipping teams nobody is on (WOM refuses empty
+# teams).
+
+_LINKED_ROSTER_DIGEST_KEY = "wom:comp:linkedroster:{event_id}"
+_TEAMS_PUSHED_KEY = "wom:comp:teamspushed:{event_id}"
+_TEAM_SYNC_TTL = 60 * 86400
+
+
+def _team_key(name) -> str:
+    return " ".join(str(name or "").lower().split())
+
+
+def _redis():
+    try:
+        from utils.redis import redis_client
+
+        return getattr(redis_client, "client", None)
+    except Exception:
+        return None
+
+
+def _digest(value) -> str:
+    import hashlib
+
+    return hashlib.sha1(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _resolve_wom_players(session, participations, stats: dict) -> dict:
+    """``{index: player_id}`` for each participation: the account holding the
+    WOM id, else the OSRS-equivalent name, else a newly minted WOM placeholder.
+    One bulk query covers the common case."""
+    from db.models import Player
+    from utils.rsn import find_player_by_rsn
+
+    wom_ids = sorted({int(p["wom_player_id"]) for p in participations
+                      if p.get("wom_player_id")})
+    by_wom = {}
+    if wom_ids:
+        by_wom = {int(w): pid for pid, w in
+                  session.query(Player.player_id, Player.wom_id)
+                  .filter(Player.wom_id.in_(wom_ids)).all()}
+    out = {}
+    for i, p in enumerate(participations):
+        wom_id = int(p["wom_player_id"]) if p.get("wom_player_id") else None
+        pid = by_wom.get(wom_id) if wom_id is not None else None
+        name = p.get("display_name") or p.get("username")
+        if pid is None and name:
+            found = find_player_by_rsn(session, Player, name)
+            pid = found.player_id if found is not None else None
+        if pid is None and wom_id is not None:
+            from utils.wiseoldman import _create_player_from_wom_member
+
+            minted = _create_player_from_wom_member(session, wom_id, name, None)
+            if minted is not None:
+                pid = minted.player_id
+                by_wom[wom_id] = pid
+                stats["minted"] += 1
+        if pid is not None:
+            out[i] = pid
+    return out
+
+
+def _team_is_referenced(session, team_id: int) -> bool:
+    from db.models import EventBuyin, EventCompletion, EventProgress, EventTeamDiscord
+
+    return any(
+        session.query(model.id).filter(model.team_id == team_id).first() is not None
+        for model in (EventCompletion, EventProgress, EventBuyin, EventTeamDiscord)
+    )
+
+
+def sync_linked_team_rosters_db(event_id: int, comp: dict, *, force: bool = False,
+                                session=None) -> dict:
+    """Mirror a linked WOM team competition's teams and rosters onto the
+    event (draft or active). Players leaving a team keep their history, as
+    everywhere else; DropTracker teams WOM doesn't have are dropped when
+    nothing references them. Skipped when neither side changed since the last
+    sync (unless ``force``). Commits its work — on ``session`` when the caller
+    passes one (the link route), else on a session of its own. Returns
+    counters."""
+    from db.models import Event, EventLeaderVote, EventTeam, EventTeamMember
+
+    stats = {"teams_created": 0, "teams_removed": 0, "added": 0, "moved": 0,
+             "removed": 0, "minted": 0, "unresolved": 0, "skipped": False}
+    wanted_names = wom_team_names(comp)
+    if not wanted_names:
+        return stats
+    participations = [p for p in (comp.get("participations") or ())
+                      if _team_key(p.get("team_name"))]
+    owns_session = session is None
+    if owns_session:
+        from api.core import get_db_session, reset_db_connections
+
+        session = get_db_session()
+    try:
+        event = session.query(Event).filter(Event.id == event_id).first()
+        if event is None or event.status not in ("draft", "active"):
+            return stats
+        teams = (session.query(EventTeam).filter(EventTeam.event_id == event_id)
+                 .order_by(EventTeam.id.asc()).all())
+        members = (session.query(EventTeamMember)
+                   .filter(EventTeamMember.event_id == event_id).all())
+        digest = _digest({
+            "wom": sorted((p.get("wom_player_id") or 0, _team_key(p.get("team_name")),
+                           _team_key(p.get("display_name")))
+                          for p in participations),
+            "teams": [(t.id, _team_key(t.name)) for t in teams],
+            "dt": sorted((m.team_id, m.player_id) for m in members),
+        })
+        conn = _redis()
+        key = _LINKED_ROSTER_DIGEST_KEY.format(event_id=event_id)
+        if not force and conn is not None:
+            try:
+                seen = conn.get(key)
+                if isinstance(seen, bytes):
+                    seen = seen.decode()
+                if seen == digest:
+                    stats["skipped"] = True
+                    return stats
+            except Exception:
+                pass
+
+        by_key: dict = {}
+        for t in teams:
+            by_key.setdefault(_team_key(t.name), t)
+        for name in wanted_names:
+            if _team_key(name) not in by_key:
+                team = EventTeam(event_id=event_id, name=name[:80], score=0)
+                session.add(team)
+                session.flush()
+                by_key[_team_key(name)] = team
+                stats["teams_created"] += 1
+
+        resolved = _resolve_wom_players(session, participations, stats)
+        desired: dict = {}
+        for i, p in enumerate(participations):
+            pid = resolved.get(i)
+            if pid is None:
+                stats["unresolved"] += 1
+                continue
+            desired.setdefault(pid, by_key[_team_key(p.get("team_name"))].id)
+
+        # Re-read after any placeholder commit inside the resolver.
+        current = {m.player_id: m for m in
+                   session.query(EventTeamMember)
+                   .filter(EventTeamMember.event_id == event_id).all()}
+        joined_at = event.activated_at or event.starts_at or datetime.now()
+        placements: dict = {}
+        departed: list = []
+        for pid, member in current.items():
+            want = desired.get(pid)
+            if want == member.team_id:
+                continue
+            kept_joined = member.joined_at
+            session.delete(member)
+            session.flush()
+            if want is None:
+                departed.append(pid)
+                placements[pid] = None
+                stats["removed"] += 1
+            else:
+                session.add(EventTeamMember(team_id=want, player_id=pid,
+                                            event_id=event_id, joined_at=kept_joined))
+                placements[pid] = want
+                stats["moved"] += 1
+        for pid, tid in desired.items():
+            if pid in current:
+                continue
+            session.add(EventTeamMember(team_id=tid, player_id=pid,
+                                        event_id=event_id, joined_at=joined_at))
+            placements[pid] = tid
+            stats["added"] += 1
+        session.flush()
+        if departed:
+            from sqlalchemy import or_
+
+            (session.query(EventLeaderVote)
+             .filter(EventLeaderVote.event_id == event_id,
+                     or_(EventLeaderVote.voter_player_id.in_(departed),
+                         EventLeaderVote.candidate_player_id.in_(departed)))
+             .delete(synchronize_session=False))
+
+        wanted_keys = {_team_key(n) for n in wanted_names}
+        for team in teams:
+            if _team_key(team.name) in wanted_keys:
+                continue
+            still_used = (session.query(EventTeamMember.player_id)
+                          .filter(EventTeamMember.team_id == team.id).first())
+            if still_used is None and not _team_is_referenced(session, team.id):
+                session.delete(team)
+                stats["teams_removed"] += 1
+        session.flush()
+
+        changed = any(stats[k] for k in ("teams_created", "teams_removed",
+                                         "added", "moved", "removed"))
+        if placements:
+            try:
+                from services.event_buyins import sync_buyin_teams
+
+                sync_buyin_teams(session, event_id, placements)
+            except ImportError:
+                pass
+        session.commit()
+        if changed:
+            try:
+                from services.event_team_discord import mark_team_members_dirty
+
+                mark_team_members_dirty(session, event_id)
+                session.commit()
+            except ImportError:
+                pass
+            try:
+                from services.event_engine import recompute_competition_teams
+
+                recompute_competition_teams(session, event_id)
+                session.commit()
+            except ImportError:
+                pass
+        if conn is not None:
+            try:
+                # The digest describes the state BEFORE this sync; recompute
+                # it from what is stored now so the next poll can skip.
+                after = {
+                    "wom": sorted((p.get("wom_player_id") or 0,
+                                   _team_key(p.get("team_name")),
+                                   _team_key(p.get("display_name")))
+                                  for p in participations),
+                    "teams": [(t.id, _team_key(t.name)) for t in
+                              session.query(EventTeam)
+                              .filter(EventTeam.event_id == event_id)
+                              .order_by(EventTeam.id.asc()).all()],
+                    "dt": sorted((m.team_id, m.player_id) for m in
+                                 session.query(EventTeamMember)
+                                 .filter(EventTeamMember.event_id == event_id).all()),
+                }
+                conn.set(key, _digest(after), ex=_TEAM_SYNC_TTL)
+            except Exception:
+                pass
+        return stats
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        if owns_session:
+            session.close()
+            reset_db_connections()
+
+
+def team_roster_payload_db(session, event_id: int) -> list:
+    """The event's teams in WiseOldMan's shape (``utils.wiseoldman
+    .wom_team_payload``): member names per team, empty teams left out."""
+    from db.models import EventTeam, EventTeamMember, Player
+    from utils.wiseoldman import wom_team_payload
+
+    teams = (session.query(EventTeam.id, EventTeam.name)
+             .filter(EventTeam.event_id == event_id)
+             .order_by(EventTeam.id.asc()).all())
+    names: dict = {}
+    for tid, pname in (session.query(EventTeamMember.team_id, Player.player_name)
+                       .join(Player, Player.player_id == EventTeamMember.player_id)
+                       .filter(EventTeamMember.event_id == event_id).all()):
+        names.setdefault(tid, []).append(pname)
+    return wom_team_payload([(name, names.get(tid, [])) for tid, name in teams])
+
+
+def _created_team_targets_db() -> list:
+    """Created-mode team races (draft or active) with their current rosters in
+    WOM's shape and a digest of them."""
+    from api.core import get_db_session, reset_db_connections
+    from db.models import Event, EventCompetition
+    from services.competition_setup import event_race_format
+
+    session = get_db_session()
+    try:
+        rows = (session.query(EventCompetition.event_id,
+                              EventCompetition.wom_competition_id,
+                              EventCompetition.wom_competition_code)
+                .join(Event, Event.id == EventCompetition.event_id)
+                .filter(EventCompetition.source_mode == "created",
+                        EventCompetition.wom_competition_id.isnot(None),
+                        EventCompetition.wom_competition_code.isnot(None),
+                        Event.status.in_(("draft", "active")))
+                .all())
+        out = []
+        for event_id, comp_id, code in rows:
+            if event_race_format(session, event_id) != "teams":
+                continue
+            teams = team_roster_payload_db(session, event_id)
+            out.append({"event_id": event_id, "competition_id": int(comp_id),
+                        "code": code, "teams": teams, "digest": _digest(teams)})
+        return out
+    finally:
+        session.close()
+        reset_db_connections()
+
+
+def mark_team_rosters_pushed(event_id: int, teams: list) -> None:
+    """Record ``teams`` as what WOM holds (the create route calls this so the
+    next poll doesn't re-send an identical roster)."""
+    conn = _redis()
+    if conn is None:
+        return
+    try:
+        conn.set(_TEAMS_PUSHED_KEY.format(event_id=event_id), _digest(teams),
+                 ex=_TEAM_SYNC_TTL)
+    except Exception:
+        pass
+
+
+async def push_created_team_rosters(redis_conn=None) -> dict:
+    """Push every created-mode team race whose rosters changed since the last
+    successful push. One WOM request per changed event."""
+    from utils.wiseoldman import push_wom_competition_teams
+
+    stats = {"checked": 0, "pushed": 0, "failed": 0}
+    targets = await asyncio.to_thread(_created_team_targets_db)
+    conn = redis_conn if redis_conn is not None else _redis()
+    for target in targets:
+        stats["checked"] += 1
+        if not target["teams"]:
+            continue
+        key = _TEAMS_PUSHED_KEY.format(event_id=target["event_id"])
+        try:
+            seen = conn.get(key) if conn is not None else None
+            if isinstance(seen, bytes):
+                seen = seen.decode()
+        except Exception:
+            seen = None
+        if seen == target["digest"]:
+            continue
+        ok, error = await push_wom_competition_teams(
+            target["competition_id"], target["code"], target["teams"])
+        if ok:
+            stats["pushed"] += 1
+            mark_team_rosters_pushed(target["event_id"], target["teams"])
+            await asyncio.to_thread(_store_sync_state_db, target["event_id"])
+        else:
+            stats["failed"] += 1
+            await asyncio.to_thread(
+                _store_sync_state_db, target["event_id"],
+                error=f"Team rosters not updated on WiseOldMan: {error}")
+    return stats
+
 
 def _new_stats() -> dict:
     # Superset of the keys the group reconciler's ``_emit_for_row`` touches
@@ -405,7 +788,8 @@ async def _poll_target(redis_conn, target: CompetitionTarget, *, now: datetime,
     stats["fetched"] += 1
     comp = parse_competition(raw)
     event_kind = "sotw" if target.metric_kind == "skill" else "botw"
-    problems = [p for p in competition_link_problems(comp, event_kind, now=now)
+    problems = [p for p in competition_link_problems(comp, event_kind, now=now,
+                                                     race_format=target.race_format)
                 if p != "finished"]  # a finished comp still serves its result
     if problems:
         stats["not_linkable"] += 1
@@ -436,6 +820,21 @@ async def _poll_target(redis_conn, target: CompetitionTarget, *, now: datetime,
         stats["drifted"] += 1
         log.info("Competition %s (event %s): window/title drift synced from WOM",
                  target.competition_id, target.event_id)
+    if target.race_format == "teams" and target.source_mode == "linked":
+        # WOM owns a linked team race's rosters. New members are picked up by
+        # the matcher on its next state refresh, so their gains are emitted on
+        # the following cycle (the seen-gates make that lossless).
+        try:
+            roster = await asyncio.to_thread(
+                sync_linked_team_rosters_db, target.event_id, comp)
+            if any(roster.get(k) for k in ("teams_created", "teams_removed",
+                                           "added", "moved", "removed")):
+                stats["rosters_synced"] = stats.get("rosters_synced", 0) + 1
+                log.info("Competition %s (event %s): team rosters synced from WOM %s",
+                         target.competition_id, target.event_id, roster)
+        except Exception:
+            log.error("Competition %s (event %s): team roster sync failed",
+                      target.competition_id, target.event_id, exc_info=True)
 
 
 async def poll_linked_once(state, redis_conn, now: Optional[datetime] = None,
@@ -454,6 +853,14 @@ async def poll_linked_once(state, redis_conn, now: Optional[datetime] = None,
         except Exception:
             log.error("Competition poll failed for event %s (comp %s)",
                       target.event_id, target.competition_id, exc_info=True)
+    # Created-mode team races (drafts included — sign-ups happen before the
+    # start): push rosters that changed since the last successful push.
+    try:
+        pushed = await push_created_team_rosters(redis_conn)
+        if pushed.get("pushed") or pushed.get("failed"):
+            stats["team_pushes"] = pushed
+    except Exception:
+        log.error("Created team-race roster push failed", exc_info=True)
     return stats
 
 

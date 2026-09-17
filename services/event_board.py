@@ -142,32 +142,62 @@ def _is_competition(event) -> bool:
     return (getattr(event, "kind", None) or "standard") in COMPETITION_EVENT_KINDS
 
 
-def _competition_board_data(session, event, limit: int) -> tuple:
-    """``(standings_rows, summary_line, player_count)`` for a sotw/botw board:
-    PLAYER standings (there is one roster team — team rows would render a
-    single meaningless line) with pre-worded ``score_text``, plus the
-    "⚔️ 34 players · 129M XP gained" headline. Fails soft to empty — the
-    board must render regardless."""
-    try:
-        from services.competition import format_gained, score_text
-        from services.event_lifecycle import _competition_ranked_rows
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'s' if n != 1 else ''}"
 
-        ranked, config, _team = _competition_ranked_rows(session, event)
+
+def _competition_board_data(session, event, limit: int) -> tuple:
+    """``(standings_rows, summary_line, count_label)`` for a sotw/botw board,
+    with pre-worded ``score_text`` on every row.
+
+    An individual race lists PLAYERS (its one roster team would render a
+    single meaningless line) under a "⚔️ 34 players · 129M XP gained"
+    headline. A team race lists TEAMS, and the headline adds the top three
+    players so the individual race stays visible in Discord too.
+    ``count_label`` is the status-line entrant count ("34 players" /
+    "3 teams · 24 players"). Fails soft to empty — the board must render
+    regardless."""
+    try:
+        from services.competition import format_gained, score_text, team_score_text
+        from services.event_lifecycle import competition_standings
+
+        data = competition_standings(session, event)
+        config, ranked = data["config"], data["players"]
         if config is None:
-            return [], None, 0
-        rows = []
-        for r in ranked[:limit]:
-            value = r["points"] if config.ranking_mode == "points" else r["gained"]
-            rows.append({"name": r["player_name"], "score": value,
-                         "score_text": score_text(value, config)})
+            return [], None, None
+
+        def _value(r):
+            return r["points"] if config.ranking_mode == "points" else r["gained"]
+
+        if config.is_team_race:
+            teams = data["teams"]
+            rows = [{"name": t["name"], "score": t["score"],
+                     "score_text": team_score_text(t["score"], config)}
+                    for t in teams[:limit]]
+            label = f"{_plural(len(teams), 'team')} · {_plural(len(ranked), 'player')}"
+            summary = None
+            if teams:
+                total_gained = sum(int(t["gained"] or 0) for t in teams)
+                summary = (f"⚔️ {label} · "
+                           f"{format_gained(total_gained, config.metric_kind)} gained")
+                top = [r for r in ranked if _value(r) > 0][:3]
+                if top:
+                    summary += "\n🏅 " + " · ".join(
+                        f"{r['player_name']} ({score_text(_value(r), config)})"
+                        for r in top)
+            return rows, summary, label
+
+        rows = [{"name": r["player_name"], "score": _value(r),
+                 "score_text": score_text(_value(r), config)}
+                for r in ranked[:limit]]
         total_gained = sum(r["gained"] for r in ranked)
         summary = None
         if ranked:
-            summary = (f"⚔️ {len(ranked)} player{'s' if len(ranked) != 1 else ''}"
+            summary = (f"⚔️ {_plural(len(ranked), 'player')}"
                        f" · {format_gained(total_gained, config.metric_kind)} gained")
-        return rows, summary, len(ranked)
+        return rows, summary, _plural(len(ranked), "player")
     except Exception:
-        return [], None, 0
+        return [], None, None
 
 
 def _tasks_summary(session, event) -> Optional[str]:
@@ -227,11 +257,11 @@ def _board_context(session, event, config: dict) -> dict:
     from services.event_notifications import event_url
 
     team_count = session.query(EventTeam).filter(EventTeam.event_id == event.id).count()
-    # SOTW/BOTW: the board is a PLAYER leaderboard — "1 team" would be a
-    # meaningless status; count entrants and add the summary headline instead.
-    comp_summary, comp_players = None, None
+    # SOTW/BOTW: "1 team" would be a meaningless status on an individual race;
+    # count entrants (and teams, on a team race) and add the summary headline.
+    comp_summary, comp_count = None, None
     if _is_competition(event):
-        _rows, comp_summary, comp_players = _competition_board_data(session, event, 0)
+        _rows, comp_summary, comp_count = _competition_board_data(session, event, 0)
     if event.status == "past":
         status_line = "Final standings \U0001F3C1"
     else:
@@ -248,8 +278,8 @@ def _board_context(session, event, config: dict) -> dict:
                 bits.append(f"Window closes <t:{window_state['current_end']}:R>")
             elif event.ends_at:
                 bits.append(f"Ends <t:{int(event.ends_at.timestamp())}:R>")
-        if comp_players is not None:
-            bits.append(f"{comp_players} player{'s' if comp_players != 1 else ''}")
+        if comp_count is not None:
+            bits.append(comp_count)
         else:
             bits.append(f"{team_count} team{'s' if team_count != 1 else ''}")
         status_line = " • ".join(bits)
@@ -371,7 +401,8 @@ async def _refresh_event_board_locked(bot, session, event, *,
             layout = _apply_top_n(
                 load_layout(session, event.group_id, "event_board", event_id=event.id),
                 top_n)
-            # SOTW/BOTW: player standings, not the single roster team.
+            # SOTW/BOTW: player standings on an individual race (not its one
+            # roster team); team standings on a team race.
             standings = (_competition_board_data(session, event, top_n)[0]
                          if _is_competition(event)
                          else _standings(session, event.id, top_n))

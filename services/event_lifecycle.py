@@ -188,6 +188,31 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
                 "message": ("Pick what the race tracks — a skill (Skill of the "
                             "Week) or a boss (Boss of the Week)."),
             })
+        if is_cvc:
+            # Clan-locked: a race belongs to one clan. The create/edit routes
+            # refuse the combination; this catches drafts made before that.
+            blockers.append({
+                "code": "competition_clan_vs_clan", "target": "competition",
+                "message": ("Skill/Boss of the Week events run within one "
+                            "clan — set the event's ownership back to "
+                            "Standard."),
+            })
+        elif cfg.is_team_race:
+            from services.competition import MIN_RACE_TEAMS
+
+            if team_count < MIN_RACE_TEAMS:
+                blockers.append({
+                    "code": "competition_needs_teams", "target": "teams",
+                    "message": (f"A team race needs at least {MIN_RACE_TEAMS} "
+                                f"teams — {team_count} set up so far."),
+                })
+        elif team_count > 1:
+            blockers.append({
+                "code": "competition_extra_teams", "target": "competition",
+                "message": ("An individual race has a single roster, but this "
+                            f"event has {team_count} teams — switch the race "
+                            "to Teams, or remove the extra teams."),
+            })
         row = competition_row(session, event.id)
         source_mode = getattr(row, "source_mode", "hosted") if row is not None else "hosted"
         if source_mode in ("linked", "created"):
@@ -541,31 +566,33 @@ def _board_final_standings(session, event, limit: int) -> list:
             for t in ordered]
 
 
-def _competition_ranked_rows(session, event) -> tuple:
-    """``(ranked_rows, config, team)`` for a competition event — the full
-    merged standings (DT ledger fold + cached WOM-only participants), ranked
-    under the event's ranking mode. ``([], None, None)`` when unscaffolded."""
-    from db.models import Player
-    from services import event_engine
-    from services.competition import CompetitionConfig, fold_rows, standings
-    from services.competition_setup import (competition_row, competition_task,
-                                            competition_team)
+def competition_standings(session, event) -> dict:
+    """The live read model of a competition event.
 
+    Returns ``{"players", "teams", "config", "team", "task"}``:
+
+    - ``players`` — the merged, ranked per-player standings (DT ledger fold +
+      cached WOM-only participants) under the event's ranking mode. On a team
+      race every row carries its ``team_id``/``team_name`` and folds the
+      player's WHOLE race (a player who changed team counts once).
+    - ``teams`` — ranked team rows (:func:`services.competition.team_standings`)
+      on a team race, ``[]`` on an individual one.
+    - ``team`` — the individual race's roster team (None on a team race).
+
+    Everything is empty with ``config`` None while unscaffolded."""
+    from db.models import EventTeamMember, Player
+    from services import event_engine
+    from services.competition import (CompetitionConfig, fold_rows, standings,
+                                      team_standings)
+    from services.competition_setup import (competition_row, competition_task,
+                                            competition_teams)
+
+    empty = {"players": [], "teams": [], "config": None, "team": None, "task": None}
     task = competition_task(session, event.id)
-    team = competition_team(session, event.id)
-    if task is None or team is None:
-        return [], None, None
+    if task is None:
+        return empty
+    teams = competition_teams(session, event.id)
     config = CompetitionConfig(task.config)
-    rows = event_engine._competition_applied_rows(
-        session, {"id": task.id}, team.id)
-    per = fold_rows(rows, config)
-    names = {}
-    if per:
-        names = dict(
-            session.query(Player.player_id, Player.player_name)
-            .filter(Player.player_id.in_(list(per.keys())))
-            .all()
-        )
     wom_rows = None
     comp_row = competition_row(session, event.id)
     if comp_row is not None and comp_row.wom_standings:
@@ -574,21 +601,92 @@ def _competition_ranked_rows(session, event) -> tuple:
             wom_rows = parsed if isinstance(parsed, list) else None
         except (TypeError, ValueError):
             wom_rows = None
-    return standings(per, config, names, wom_rows), config, team
+
+    def _names(player_ids):
+        ids = [p for p in player_ids if p is not None]
+        if not ids:
+            return {}
+        return dict(
+            session.query(Player.player_id, Player.player_name)
+            .filter(Player.player_id.in_(ids))
+            .all()
+        )
+
+    if not config.is_team_race:
+        team = teams[0] if teams else None
+        if team is None:
+            return empty
+        rows = event_engine._competition_applied_rows(
+            session, {"id": task.id}, team.id)
+        per = fold_rows(rows, config)
+        return {"players": standings(per, config, _names(per.keys()), wom_rows),
+                "teams": [], "config": config, "team": team, "task": task}
+
+    rows = event_engine._competition_event_rows(session, {"id": task.id})
+    team_ids = {t.id for t in teams}
+    folds = {t.id: fold_rows([r for r in rows if r.team_id == t.id], config)
+             for t in teams}
+    race = fold_rows([r for r in rows if r.team_id in team_ids], config)
+    roster_by_team: dict = {}
+    player_teams: dict = {}
+    for tid, pid in (session.query(EventTeamMember.team_id, EventTeamMember.player_id)
+                     .filter(EventTeamMember.event_id == event.id)
+                     .all()):
+        roster_by_team.setdefault(tid, []).append(pid)
+        player_teams[pid] = tid
+    # A contributor who has since left every team is still shown under the
+    # team they last scored for.
+    latest: dict = {}
+    for r in rows:
+        if r.player_id is None or r.team_id not in team_ids:
+            continue
+        key = (r.created_at is not None, r.created_at, r.id or 0)
+        if r.player_id not in latest or key > latest[r.player_id][0]:
+            latest[r.player_id] = (key, r.team_id)
+    for pid, (_key, tid) in latest.items():
+        player_teams.setdefault(pid, tid)
+    names = _names(set(race) | {p for per in folds.values() for p in per})
+    team_names = {t.id: t.name for t in teams}
+    players = standings(race, config, names, wom_rows,
+                        player_teams=player_teams, team_names=team_names)
+    team_rows = team_standings(
+        [{"team_id": t.id, "name": t.name, "color": getattr(t, "color", None),
+          "roster_ids": roster_by_team.get(t.id, [])} for t in teams],
+        folds, config, names)
+    return {"players": players, "teams": team_rows, "config": config,
+            "team": None, "task": task}
+
+
+def _competition_ranked_rows(session, event) -> tuple:
+    """``(ranked_rows, config, team)`` — the per-player half of
+    :func:`competition_standings` (``team`` is None on a team race).
+    ``([], None, None)`` when unscaffolded."""
+    data = competition_standings(session, event)
+    return data["players"], data["config"], data["team"]
 
 
 def _competition_final_standings(session, event, limit: int) -> list:
-    """Competition standings for the lifecycle surfaces: top PLAYERS (there is
-    only one roster team), shape-compatible with the team standings the ended
-    announcement and pot line consume — plus ``score_text`` so renderers can
-    say "2.48M XP" instead of a bare number labelled "pts"."""
-    from services.competition import score_text
+    """Competition standings for the lifecycle surfaces, shape-compatible with
+    the team standings the ended announcement and pot line consume — plus
+    ``score_text`` so renderers can say "2.48M XP" instead of a bare number
+    labelled "pts". An individual race lists its top PLAYERS (its one roster
+    team would be a single meaningless line); a team race lists its TEAMS."""
+    from services.competition import score_text, team_score_text
 
-    ranked, config, team = _competition_ranked_rows(session, event)
+    data = competition_standings(session, event)
+    config = data["config"]
     if config is None:
         return []
+    if config.is_team_race:
+        return [{
+            "team_id": row["team_id"],
+            "name": row["name"],
+            "score": row["score"],
+            "score_text": team_score_text(row["score"], config),
+        } for row in data["teams"][:limit]]
+    team = data["team"]
     out = []
-    for row in ranked[:limit]:
+    for row in data["players"][:limit]:
         value = row["points"] if config.ranking_mode == "points" else row["gained"]
         out.append({
             "team_id": team.id,
@@ -605,36 +703,80 @@ def finalize_competition(session, event, now: Optional[datetime] = None) -> dict
     depend on a re-fold or a long-gone WOM competition), and per-player
     contribution points are written ONCE (``EventPlayerPoints`` — deliberately
     not maintained live: an XP-snapshot stream would rewrite the whole roster
-    thousands of times a day). Idempotent; caller owns the commit."""
+    thousands of times a day). Idempotent; caller owns the commit.
+
+    An individual race freezes the ranked player list (a JSON array, as it
+    always has). A team race freezes ``{"format": "teams", "players": [...],
+    "teams": [...]}`` and writes each player's points under every team they
+    scored for."""
     from db.models import EventPlayerPoints
-    from services.competition_setup import competition_row, competition_task
+    from services import event_engine
+    from services.competition import fold_rows, rank_value
+    from services.competition_setup import competition_row
 
     now = now or datetime.now()
-    ranked, config, team = _competition_ranked_rows(session, event)
+    data = competition_standings(session, event)
+    config, task = data["config"], data["task"]
     row = competition_row(session, event.id)
-    if config is None or row is None:
+    if config is None or row is None or task is None:
         return {"players": 0, "frozen": False}
 
-    task = competition_task(session, event.id)
-    (session.query(EventPlayerPoints)
-     .filter(EventPlayerPoints.task_id == task.id,
-             EventPlayerPoints.team_id == team.id)
-     .delete(synchronize_session=False))
     written = 0
-    for entry in ranked:
-        if not entry.get("registered") or entry.get("player_id") is None:
-            continue
-        value = (entry["points"] if config.ranking_mode == "points"
-                 else entry["gained"])
-        session.add(EventPlayerPoints(
-            event_id=event.id, task_id=task.id, team_id=team.id,
-            player_id=entry["player_id"], points=float(value)))
-        written += 1
+    if config.is_team_race:
+        (session.query(EventPlayerPoints)
+         .filter(EventPlayerPoints.task_id == task.id)
+         .delete(synchronize_session=False))
+        rows = event_engine._competition_event_rows(session, {"id": task.id})
+        for team_row in data["teams"]:
+            tid = team_row["team_id"]
+            per = fold_rows([r for r in rows if r.team_id == tid], config)
+            for pid, entry in per.items():
+                session.add(EventPlayerPoints(
+                    event_id=event.id, task_id=task.id, team_id=tid,
+                    player_id=pid, points=float(rank_value(entry, config))))
+                written += 1
+        row.final_standings = json.dumps({
+            "format": "teams", "players": data["players"], "teams": data["teams"]})
+    else:
+        team, ranked = data["team"], data["players"]
+        (session.query(EventPlayerPoints)
+         .filter(EventPlayerPoints.task_id == task.id,
+                 EventPlayerPoints.team_id == team.id)
+         .delete(synchronize_session=False))
+        for entry in ranked:
+            if not entry.get("registered") or entry.get("player_id") is None:
+                continue
+            value = (entry["points"] if config.ranking_mode == "points"
+                     else entry["gained"])
+            session.add(EventPlayerPoints(
+                event_id=event.id, task_id=task.id, team_id=team.id,
+                player_id=entry["player_id"], points=float(value)))
+            written += 1
+        row.final_standings = json.dumps(ranked)
 
-    row.final_standings = json.dumps(ranked)
     row.finalized_at = now
     session.flush()
     return {"players": written, "frozen": True}
+
+
+def frozen_competition_standings(raw) -> Optional[dict]:
+    """Parse ``web_event_competitions.final_standings`` in either shape — the
+    individual race's JSON array, or a team race's object — into
+    ``{"players": [...], "teams": [...]}``. None when absent or unreadable
+    (callers then fall back to the live fold)."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(parsed, list):
+        return {"players": parsed, "teams": []}
+    if isinstance(parsed, dict) and isinstance(parsed.get("players"), list):
+        teams = parsed.get("teams")
+        return {"players": parsed["players"],
+                "teams": teams if isinstance(teams, list) else []}
+    return None
 
 
 def final_standings(session, event_id: int, limit: int = 5) -> list:
@@ -1590,6 +1732,66 @@ def run_reminder_sweep(session, redis_conn, rows, due, now: datetime) -> None:
                               "for event %s", event.id, exc_info=True)
 
 
+_AVG_ROSTER_DIGEST_KEY = "events:{event_id}:comp:rosterdigest"
+_AVG_ROSTER_DIGEST_TTL = 7 * 86400
+
+
+def sync_averaged_team_scores(session, redis_conn, event) -> bool:
+    """Keep an averaging team race's scores in step with its rosters.
+
+    A team scored per member changes rank when somebody joins or leaves, with
+    no ledger row to trigger the engine. This compares a digest of the
+    event's (team, player) pairs with the last one seen and, when it moved,
+    re-derives every team score from the ledger and publishes a ``recompute``
+    frame so open standings refetch. Returns True when a score changed.
+    No-op for every other event. Commits its own work."""
+    import hashlib
+
+    from db.models import EventTeamMember
+    from services.competition_setup import competition_task
+
+    task = competition_task(session, event.id)
+    if task is None:
+        return False
+    try:
+        cfg = json.loads(task.config or "{}")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(cfg, dict) or cfg.get("format") != "teams" \
+            or cfg.get("team_scoring") != "average":
+        return False
+    pairs = sorted(
+        (int(tid), int(pid)) for tid, pid in
+        session.query(EventTeamMember.team_id, EventTeamMember.player_id)
+        .filter(EventTeamMember.event_id == event.id)
+        .all()
+    )
+    digest = hashlib.sha1(json.dumps(pairs).encode()).hexdigest()
+    key = _AVG_ROSTER_DIGEST_KEY.format(event_id=event.id)
+    if redis_conn is not None:
+        try:
+            seen = redis_conn.get(key)
+            if isinstance(seen, bytes):
+                seen = seen.decode()
+            if seen == digest:
+                return False
+        except Exception:
+            pass
+    from services import event_engine
+
+    changed = event_engine.recompute_competition_teams(session, event.id)
+    session.commit()
+    if redis_conn is not None:
+        try:
+            redis_conn.set(key, digest, ex=_AVG_ROSTER_DIGEST_TTL)
+        except Exception:
+            pass
+    if changed:
+        _publish(event.id, {"kind": "recompute", "event_id": event.id,
+                            "competition": True, "reason": "roster"})
+    return bool(changed)
+
+
 def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None) -> dict:
     """One scheduler tick: activate due drafts / end due actives through the
     exact same transition functions the routes use. Commits per transition
@@ -1685,6 +1887,21 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
         except Exception:
             session.rollback()
             log.error("Sweep: auto-clan roster reconcile failed for event %s",
+                      event.id, exc_info=True)
+
+    # Team races that average per member: a roster change moves a team's
+    # ranked score without any ledger row, so re-derive it when the rosters
+    # changed since the last tick (a Redis digest skips the unchanged ones).
+    for event in rows:
+        if event.status != "active" or event.id in due["end"]:
+            continue
+        if (getattr(event, "kind", None) or "standard") not in _COMP_KINDS:
+            continue
+        try:
+            sync_averaged_team_scores(session, redis_conn, event)
+        except Exception:
+            session.rollback()
+            log.error("Sweep: averaged team-score sync failed for event %s",
                       event.id, exc_info=True)
 
     # Recurring schedules (web82a): announce scoring-window opens/closes on

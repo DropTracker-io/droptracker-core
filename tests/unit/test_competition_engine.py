@@ -537,3 +537,131 @@ class TestWeightedPoolEndToEnd:
         per = _comp.fold_rows(rows, cfg)
         assert per[5]["bonus"][7]["progress"] == 300
         assert per[5]["bonus_points"] == 0
+
+
+# ── team races ───────────────────────────────────────────────────────────────
+
+TEAM_BOTW = {**BOTW_CONFIG, "format": "teams"}
+
+
+def _team_row(rid, player_id, qty, team_id, note=None, source_type="drop"):
+    row = _ledger_row(rid, player_id, qty, note=note, source_type=source_type)
+    row.team_id = team_id
+    return row
+
+
+class TestTeamRaceApply:
+    """The engine's team-race wiring. The fake session can't evaluate SQL
+    filters, so the per-team helpers are routed through small fakes that
+    honour the team id — what's under test is what the apply does with
+    them."""
+
+    def _wire(self, monkeypatch, *, roster=None, rank=(1, 2)):
+        scores, leads, frames, enqueued = {}, [], [], []
+        monkeypatch.setattr(engine, "_publish", lambda eid, frame: frames.append(frame))
+        monkeypatch.setattr(engine, "_enqueue_notification",
+                            lambda s, ntype, ev, pid, payload: enqueued.append((ntype, payload)))
+        monkeypatch.setattr(engine, "_set_competition_team_score",
+                            lambda s, tid, value: scores.__setitem__(tid, value) or value)
+        monkeypatch.setattr(engine, "_loot_sweep_rank", lambda s, eid, tid: rank)
+        monkeypatch.setattr(engine, "_leader_snapshot", lambda s, ev: ("before",))
+        monkeypatch.setattr(
+            engine, "_announce_lead_change",
+            lambda s, ev, before, pid=None, **k: leads.append((before, pid, k.get("reason"))))
+        monkeypatch.setattr(engine, "_competition_roster_ids",
+                            lambda s, tid: list((roster or {}).get(tid, [])))
+        return scores, leads, frames, enqueued
+
+    def test_a_row_scores_its_own_team_and_ranks_the_player_race_wide(self, monkeypatch):
+        scores, leads, frames, _ = self._wire(monkeypatch)
+        progress = SimpleNamespace(progress=0, completed=False)
+        session = _Session(progress=progress)
+        red_a = _team_row(1, 5, 10, team_id=1)
+        red_b = _team_row(2, 6, 4, team_id=1)
+        blue = _team_row(3, 7, 8, team_id=2)       # this apply's row
+        session.ledger = [red_a, red_b, blue]
+        event = {"id": 7, "name": "E", "message_config": None}
+        task = _task(TEAM_BOTW)
+        result = engine._apply_competition(session, None, event, task, blue,
+                                           player_name="Cara")
+        # Blue's progress and score fold only blue's rows…
+        assert progress.progress == 8
+        assert scores == {2: 8}
+        # …while the player's rank is across the whole race (10 > 8 > 4).
+        assert result["rank"] == 2 and result["participants"] == 3
+        assert result["leader"]["player_id"] == 5
+        assert result["team_rank"] == 1 and result["team_count"] == 2
+        assert frames[0]["team_rank"] == 1
+        # The overtake check ran, bracketing the write.
+        assert leads == [(("before",), 7, "completion")]
+
+    def test_an_individual_race_never_checks_for_a_lead_change(self, monkeypatch):
+        _scores, leads, _frames, _ = self._wire(monkeypatch)
+        # The real announcer, which returns at once for the no-op snapshot.
+        monkeypatch.setattr(engine, "_announce_lead_change",
+                            lambda s, ev, before, *a, **k: leads.append(before)
+                            if before is not engine._NO_LEAD_SNAPSHOT else None)
+        session = _Session(progress=SimpleNamespace(progress=0, completed=False))
+        row = _ledger_row(1, 5, 3)
+        session.ledger = [row]
+        result = engine._apply_competition(session, None, {"id": 7, "name": "E"},
+                                           _task(BOTW_CONFIG), row)
+        assert leads == [] and "team_rank" not in result
+
+    def test_average_scoring_divides_by_the_roster(self, monkeypatch):
+        scores, _leads, _frames, _ = self._wire(monkeypatch, roster={1: [5, 6, 8, 9]})
+        session = _Session(progress=SimpleNamespace(progress=0, completed=False))
+        a = _team_row(1, 5, 10, team_id=1)
+        b = _team_row(2, 6, 5, team_id=1)
+        session.ledger = [a, b]
+        engine._apply_competition(session, None, {"id": 7, "name": "E"},
+                                  _task({**TEAM_BOTW, "team_scoring": "average"}), b)
+        assert scores == {1: round(15 / 4, 2)}
+
+    def test_a_bonus_message_carries_the_team_standing(self, monkeypatch):
+        _scores, _leads, _frames, enqueued = self._wire(monkeypatch, rank=(2, 3))
+        session = _Session(progress=SimpleNamespace(progress=0, completed=False))
+        bonus = _team_row(1, 5, 5, team_id=1, note="bonus:time_under:2 | 0:55",
+                          source_type="pb")
+        session.ledger = [bonus]
+        engine._apply_competition(session, None, {"id": 7, "name": "E"},
+                                  _task(TEAM_BOTW), bonus, player_name="Alice")
+        ntype, payload = enqueued[0]
+        assert ntype == "event_competition_bonus"
+        assert payload["team_race"] is True
+        assert (payload["team_rank"], payload["team_count"]) == (2, 3)
+
+    def test_a_players_bonus_cap_follows_them_across_teams(self):
+        # Rule 2 allows two awards. Two were earned on team 1; after moving to
+        # team 2 the player must not start a fresh cap.
+        task = _task(TEAM_BOTW)
+        session = _Session(ledger=[
+            _team_row(1, 5, 5, team_id=1, note="bonus:time_under:2"),
+            _team_row(2, 5, 5, team_id=1, note="bonus:time_under:2"),
+        ])
+        candidate = _team_row(99, 5, 5, team_id=2, note="bonus:time_under:2 | 0:51")
+        assert engine._row_advances_progress(session, task, 2, candidate) is False
+
+
+class TestTeamRaceRevoke:
+    def test_revoke_rewrites_the_team_score_absolutely(self, monkeypatch):
+        monkeypatch.setattr(engine, "_publish", lambda *a: None)
+        progress = SimpleNamespace(progress=14, completed=False)
+        team = SimpleNamespace(id=1, score=14)
+        session = _Session(ledger=[_ledger_row(1, 5, 10)], progress=progress, team=team)
+        revoked = _ledger_row(2, 5, 4, status="revoked")
+        summary = engine._revoke_competition(session, {"id": 7}, _task(TEAM_BOTW), 1, revoked)
+        assert summary["team_score"] == 10 and team.score == 10
+        assert progress.progress == 10
+
+
+class TestTeamScoreWrite:
+    def test_writes_only_when_the_value_moved(self):
+        team = SimpleNamespace(id=1, score=12)
+        session = _Session(team=team)
+        assert engine._set_competition_team_score(session, 1, 12) is None
+        assert engine._set_competition_team_score(session, 1, 12.5) == 12.5
+        assert team.score == 12.5
+        assert engine._set_competition_team_score(session, 1, 13.0) == 13
+        assert isinstance(team.score, int)
+        assert engine._set_competition_team_score(session, None, 5) is None

@@ -1021,3 +1021,25 @@ class TestBoardTurnTokens:
         joined = " ".join(b.get("content", "") for b in spec["blocks"] if "content" in b)
         assert not ml._TOKEN_RE.search(joined)
         assert "completed the final tile's task" in joined
+
+
+class TestCompetitionTeamPosition:
+    def _line(self, **data):
+        base = {"event_id": 7, "event_name": "E", "player_name": "Zed", "points": 5,
+                "rank": 4, "rank_value_text": "213 pts",
+                "bonus": {"rule_id": 2, "type": "time_under", "reason": "Fast"}}
+        base.update(data)
+        return ml.notification_context("event_competition_bonus", base)[
+            "competition_position_line"]
+
+    def test_an_individual_race_names_only_the_player_position(self):
+        assert self._line() == "Now **#4** · `213 pts`"
+
+    def test_a_team_race_adds_the_teams_standing(self):
+        assert self._line(team_race=True, team_rank=2, team_count=3,
+                          team_name="Reds") == (
+            "Now **#4** · `213 pts` · **Reds** **#2** of 3")
+
+    def test_a_team_race_without_a_name_still_reads(self):
+        assert self._line(team_race=True, team_rank=1, team_count=None) == (
+            "Now **#4** · `213 pts` · Their team **#1**")

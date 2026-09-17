@@ -1348,27 +1348,62 @@ def _wom_metric_enum(slug):
         return None
 
 
+# WiseOldMan's own limits (server/src/api/util/validation.ts and the
+# competition router): a competition title is 1-50 characters, a team name
+# 1-30, and every team must list at least one participant. An EMPTY teams
+# array is not an error there — it silently creates a whole-group CLASSIC
+# competition, whose type can never change afterwards — so callers must never
+# send one.
+WOM_TITLE_MAX = 50
+WOM_TEAM_NAME_MAX = 30
+
+
+def wom_team_payload(teams) -> list:
+    """``[{"name", "participants"}]`` in WOM's shape from ``[(name,
+    [player names])]`` — names clipped to WOM's 30 characters, teams with
+    nobody on them left out (WOM rejects an empty participants array)."""
+    out = []
+    for name, participants in teams or ():
+        members = sorted({str(p).strip() for p in participants or () if str(p).strip()},
+                         key=str.lower)
+        label = str(name or "").strip()[:WOM_TEAM_NAME_MAX]
+        if label and members:
+            out.append({"name": label, "participants": members})
+    return out
+
+
 async def create_wom_competition(title: str, metric_slug: str, starts_at,
                                  ends_at, wom_group_id: int,
-                                 group_verification_code: str) -> Optional[dict]:
-    """POST /competitions — a group-linked classic competition. Returns
-    ``{"competition_id", "verification_code"}`` (the COMPETITION's own code —
-    the caller must persist it; it is the only edit/delete credential) or
-    None. A 400/403 marks the group's code bad (same negative cache as
-    update-all) so callers stop retrying it."""
+                                 group_verification_code: str,
+                                 teams: Optional[list] = None,
+                                 errors: Optional[list] = None) -> Optional[dict]:
+    """POST /competitions — a group-linked classic competition, or (``teams``
+    given, in :func:`wom_team_payload` shape) a group-linked TEAM
+    competition. Returns ``{"competition_id", "verification_code"}`` (the
+    COMPETITION's own code — the caller must persist it; it is the only
+    edit/delete credential) or None; WiseOldMan's error message is appended to
+    ``errors`` when given. A bad group verification code is remembered (same
+    negative cache as update-all) so callers stop retrying it."""
     metric = _wom_metric_enum(metric_slug)
     if metric is None or not group_verification_code:
+        return None
+    if teams is not None and not teams:
+        # See WOM_TITLE_MAX's note: an empty list would create a classic comp.
+        if errors is not None:
+            errors.append("A team competition needs at least one team with players.")
         return None
     if not await limiter.wait():
         return None
     await client.start()
     try:
         _log_wom_call("competitions.create_competition", group=wom_group_id,
-                      metric=str(metric_slug))
+                      metric=str(metric_slug), teams=len(teams or ()))
         result = await client.competitions.create_competition(
-            str(title), metric, starts_at, ends_at,
+            str(title).strip()[:WOM_TITLE_MAX], metric, starts_at, ends_at,
             group_id=int(wom_group_id),
-            group_verification_code=str(group_verification_code))
+            group_verification_code=str(group_verification_code),
+            teams=([wom.Team(name=t["name"], participants=list(t["participants"]))
+                    for t in teams] if teams else None))
     except Exception as e:
         logger.warning("WOM competition create errored (group %s): %s",
                        wom_group_id, e)
@@ -1385,9 +1420,17 @@ async def create_wom_competition(title: str, metric_slug: str, starts_at,
         return None
     err = result.unwrap_err()
     status = getattr(err, "status", -1)
+    message = str(getattr(err, "message", err) or "")
     logger.warning("WOM competition create failed (group %s, status=%s): %s",
-                   wom_group_id, status, getattr(err, "message", err))
-    if status in (400, 403):
+                   wom_group_id, status, message)
+    if errors is not None and message:
+        errors.append(message)
+    # A team competition's 400 is usually about its rosters (an opted-out
+    # player, a duplicate name) — only a message naming the code condemns the
+    # group's code there. A classic create keeps the original rule.
+    bad_code = (status in (400, 403) if not teams
+                else "verification code" in message.lower())
+    if bad_code:
         try:
             redis_client.client.setex(
                 f"{UPDATE_ALL_BADCODE_PREFIX}{int(wom_group_id)}",
@@ -1395,6 +1438,46 @@ async def create_wom_competition(title: str, metric_slug: str, starts_at,
         except Exception:
             pass
     return None
+
+
+async def push_wom_competition_teams(competition_id: int, verification_code: str,
+                                     teams: list) -> tuple:
+    """PUT /competitions/:id with ``teams`` — replace a created-mode team
+    competition's rosters (WOM keeps the start snapshot of every player who
+    stays). ``teams`` is :func:`wom_team_payload` output and must be
+    non-empty. Returns ``(ok, error_message)``.
+
+    Raw route on purpose: success is the write, not the fork's typed decode
+    of the response body (which predates multi-metric competitions)."""
+    if not verification_code or not teams:
+        return False, "nothing to push"
+    if not await limiter.wait():
+        return False, "rate limited"
+    await client.start()
+    _log_wom_call("competitions.edit_competition.teams", id=competition_id,
+                  teams=len(teams))
+    try:
+        raw = await client._http.fetch(
+            _wom_routes.EDIT_COMPETITION.compile(int(competition_id)),
+            payload={"verificationCode": str(verification_code),
+                     "teams": [{"name": t["name"],
+                                "participants": list(t["participants"])}
+                               for t in teams]})
+    except Exception as e:
+        logger.warning("WOM team push errored (%s): %s", competition_id, e)
+        return False, "WiseOldMan request failed"
+    if isinstance(raw, (bytes, bytearray, str)):
+        # A new roster changes the competition's standings.
+        try:
+            redis_client.client.delete(
+                f"{_REDIS_COMPETITION_PREFIX}{int(competition_id)}")
+        except Exception:
+            pass
+        return True, None
+    message = str(getattr(raw, "message", raw) or "WiseOldMan refused the update")
+    logger.warning("WOM team push failed (%s, status=%s): %s", competition_id,
+                   getattr(raw, "status", -1), message)
+    return False, message[:255]
 
 
 async def edit_wom_competition(competition_id: int, verification_code: str, *,
@@ -1409,7 +1492,8 @@ async def edit_wom_competition(competition_id: int, verification_code: str, *,
         _log_wom_call("competitions.edit_competition", id=competition_id)
         result = await client.competitions.edit_competition(
             int(competition_id), str(verification_code),
-            title=title, starts_at=starts_at, ends_at=ends_at)
+            title=(str(title).strip()[:WOM_TITLE_MAX] if title else title),
+            starts_at=starts_at, ends_at=ends_at)
     except Exception as e:
         logger.warning("WOM competition edit errored (%s): %s",
                        competition_id, e)

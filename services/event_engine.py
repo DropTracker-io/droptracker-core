@@ -944,13 +944,16 @@ def pending_projection(session, task: dict, team_id) -> Optional[dict]:
             "pending_complete": False,
         }
     if kind == "competition":
-        # "applied"/"projected" are the team's ranking-mode totals (points or
-        # gained); a competition never completes either.
-        from services.competition import CompetitionConfig, fold_rows, team_totals
+        # "applied"/"projected" are the team's RANKED score (summed points or
+        # gained, or per member on an averaging team race); a competition
+        # never completes either.
+        from services.competition import CompetitionConfig, fold_rows, team_score
         cfg = CompetitionConfig(task.get("config") or {})
+        roster_ids = (_competition_roster_ids(session, team_id)
+                      if cfg.averages_teams else ())
         return {
-            "applied": team_totals(fold_rows(applied_rows, cfg), cfg)[1],
-            "projected": team_totals(fold_rows(rows, cfg), cfg)[1],
+            "applied": team_score(fold_rows(applied_rows, cfg), cfg, roster_ids),
+            "projected": team_score(fold_rows(rows, cfg), cfg, roster_ids),
             "pending_count": len(pending_rows),
             "pending_complete": False,
         }
@@ -4057,20 +4060,137 @@ def _competition_applied_rows(session, task: dict, team_id) -> list:
     )
 
 
+def _team_name(session, team_id) -> Optional[str]:
+    """One team's display name (None when unknown) — for message payloads."""
+    if team_id is None:
+        return None
+    try:
+        from db.models import EventTeam
+
+        row = (session.query(EventTeam.name)
+               .filter(EventTeam.id == team_id).first())
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _competition_is_team_race(task: dict) -> bool:
+    """Whether a competition task races the event's teams (config
+    ``format: "teams"``) rather than individuals."""
+    config = parse_task_config(task.get("config"))
+    return config.get("format") == "teams"
+
+
+def _competition_event_rows(session, task: dict) -> list:
+    """Applied ledger rows for a competition task across EVERY team — the
+    input for per-player standings, ranks and the per-player bonus caps (a
+    player who changes team mid-race keeps one cap). On an individual race
+    this is the same set as the roster team's rows."""
+    from db.models import EventCompletion
+
+    return list(
+        session.query(EventCompletion)
+        .filter(EventCompletion.task_id == task["id"],
+                EventCompletion.status.in_(APPLIED_BONUS_STATUSES))
+        .all()
+    )
+
+
 def _competition_fold(session, task: dict, team_id, *, include=None,
-                      exclude_id=None) -> tuple:
+                      exclude_id=None, rows=None) -> tuple:
     """``(per_player, config)`` for a competition (task, team), optionally
     folding an unsaved ``include`` row / dropping ``exclude_id`` — the same
-    before/after trick as :func:`_loot_sweep_score`."""
+    before/after trick as :func:`_loot_sweep_score`. ``rows`` supplies
+    pre-loaded applied rows (already scoped by the caller) instead of a
+    query; ``team_id`` is then ignored."""
     from services.competition import CompetitionConfig, fold_rows
 
-    rows = _competition_applied_rows(session, task, team_id)
+    if rows is None:
+        rows = _competition_applied_rows(session, task, team_id)
     if exclude_id is not None:
         rows = [r for r in rows if r.id != exclude_id]
     if include is not None and all(r.id != include.id for r in rows):
         rows = rows + [include]
     config = CompetitionConfig(task.get("config") or {})
     return fold_rows(rows, config), config
+
+
+def _competition_roster_ids(session, team_id) -> list:
+    """Player ids on one team's roster — the divisor side of an averaged team
+    score (:func:`services.competition.team_member_count`)."""
+    if team_id is None:
+        return []
+    from db.models import EventTeamMember
+
+    return [pid for (pid,) in
+            session.query(EventTeamMember.player_id)
+            .filter(EventTeamMember.team_id == team_id)
+            .all()]
+
+
+def _set_competition_team_score(session, team_id, value):
+    """Write a competition team's ranked score (absolute — it is a pure
+    function of the ledger and the roster) under the row lock. Returns the
+    stored score, or None when the team is gone or nothing changed."""
+    if team_id is None:
+        return None
+    from db.models import EventTeam
+
+    team = (session.query(EventTeam).filter(EventTeam.id == team_id)
+            .with_for_update().first())  # P0-7: locked score RMW
+    if team is None:
+        return None
+    value = round(float(value or 0), 2)
+    if round(float(team.score or 0), 2) == value:
+        return None
+    team.score = int(value) if value == int(value) else value
+    return team.score
+
+
+def recompute_competition_teams(session, event_id: int, team_ids=None) -> dict:
+    """Re-derive competition team scores (``EventTeam.score``) and gained
+    rollups (``EventProgress.progress``) from the ledger and the rosters.
+
+    The apply/revoke paths keep these current row by row; this is for the
+    changes that move no ledger row — a roster change on a race that averages
+    per member, or an operator repair. Returns ``{team_id: score}`` for the
+    teams whose score changed. Caller owns the transaction."""
+    from db.models import EventProgress, EventTask, EventTeam
+    from services.competition import team_score, team_totals
+
+    task_row = (session.query(EventTask)
+                .filter(EventTask.event_id == event_id,
+                        EventTask.type == "competition")
+                .order_by(EventTask.id.asc()).first())
+    if task_row is None:
+        return {}
+    task = {"id": task_row.id, "config": parse_task_config(task_row.config)}
+    q = session.query(EventTeam.id).filter(EventTeam.event_id == event_id)
+    if team_ids is not None:
+        q = q.filter(EventTeam.id.in_(list(team_ids)))
+    wanted = [tid for (tid,) in q.all()]
+    if not wanted:
+        return {}
+    rows = _competition_event_rows(session, task)
+    changed = {}
+    for tid in wanted:
+        per, config = _competition_fold(
+            session, task, tid, rows=[r for r in rows if r.team_id == tid])
+        gained, _total = team_totals(per, config)
+        roster = (_competition_roster_ids(session, tid)
+                  if config.averages_teams else ())
+        stored = _set_competition_team_score(
+            session, tid, team_score(per, config, roster))
+        if stored is not None:
+            changed[tid] = stored
+        progress = (session.query(EventProgress)
+                    .filter(EventProgress.task_id == task["id"],
+                            EventProgress.team_id == tid)
+                    .with_for_update().first())
+        if progress is not None and float(progress.progress or 0) != float(gained):
+            progress.progress = gained
+    session.flush()
+    return changed
 
 
 def _competition_rank(per_player: dict, config, player_id) -> tuple:
@@ -4144,9 +4264,9 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
     — ``EventProgress.progress`` is the team's total GAINED (metric units)
     and ``EventTeam.score`` the total under the event's ranking mode, both
     pure functions of the applied ledger like loot_sweep's."""
-    from db.models import EventProgress, EventTeam
-    from services.competition import (bonus_detail, parse_bonus_note,
-                                      player_points, team_totals)
+    from db.models import EventProgress
+    from services.competition import parse_bonus_note, team_totals
+    from services.competition import team_score as ranked_team_score
 
     team_id = completion.team_id
     player_id = completion.player_id
@@ -4165,41 +4285,94 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
             progress=0, completed=False)
         session.add(progress)
 
+    # One read of the race's whole ledger. The TEAM's numbers fold its own
+    # rows (a player who changed team leaves history with the old one, as on
+    # every other kind); the PLAYER's rank and totals fold every team's rows.
+    # On an individual race both are the same single roster team.
+    event_rows = _competition_event_rows(session, task)
+    team_rows = [r for r in event_rows if r.team_id == team_id]
     prev_fold, config = _competition_fold(session, task, team_id,
-                                          exclude_id=completion.id)
-    curr_fold, _ = _competition_fold(session, task, team_id, include=completion)
-    prev_gained, prev_score = team_totals(prev_fold, config)
-    curr_gained, curr_score = team_totals(curr_fold, config)
+                                          exclude_id=completion.id, rows=team_rows)
+    curr_fold, _ = _competition_fold(session, task, team_id, include=completion,
+                                     rows=team_rows)
+    if config.is_team_race:
+        prev_race, _ = _competition_fold(session, task, None,
+                                         exclude_id=completion.id, rows=event_rows)
+        curr_race, _ = _competition_fold(session, task, None, include=completion,
+                                         rows=event_rows)
+    else:
+        prev_race, curr_race = prev_fold, curr_fold
+    curr_gained, _curr_total = team_totals(curr_fold, config)
     progress.progress = curr_gained
     progress.completed = False
 
-    team_score = None
-    score_delta = curr_score - prev_score
-    if score_delta and team_id is not None:
-        team = (session.query(EventTeam).filter(EventTeam.id == team_id)
-                .with_for_update().first())  # P0-7: locked score RMW
-        if team is not None:
-            team.score = int(float(team.score or 0)) + score_delta
-            team_score = team.score
-            session.flush()
+    roster_ids = (_competition_roster_ids(session, team_id)
+                  if config.averages_teams else ())
+    # A team race announces overtakes like every other team event; the
+    # snapshot brackets the score write (compared once, below).
+    lead_before = (_leader_snapshot(session, event)
+                   if config.is_team_race and team_id is not None
+                   else _NO_LEAD_SNAPSHOT)
+    team_score_value = _set_competition_team_score(
+        session, team_id, ranked_team_score(curr_fold, config, roster_ids))
+    if team_score_value is not None:
+        session.flush()
     # Contribution points (EventPlayerPoints) are deliberately NOT rewritten
     # per row here — on an XP-snapshot stream that O(roster) delete-and-
     # rewrite would run thousands of times a day. finalize_competition
     # (services/event_lifecycle.py) writes them once, at the end.
 
-    entry = curr_fold.get(player_id) or {"gained": 0, "bonus_points": 0, "bonus": {}}
-    prev_entry = prev_fold.get(player_id) or {"gained": 0, "bonus_points": 0, "bonus": {}}
-    rank, participants, leader = _competition_rank(curr_fold, config, player_id)
+    # The PLAYER's view (their whole race, every team they rode with).
+    empty = {"gained": 0, "bonus_points": 0, "bonus": {}}
+    entry = curr_race.get(player_id) or empty
+    prev_entry = prev_race.get(player_id) or empty
+    rank, participants, leader = _competition_rank(curr_race, config, player_id)
+    team_rank = team_count = None
+    if config.is_team_race and team_id is not None:
+        team_rank, team_count = _loot_sweep_rank(session, event["id"], team_id)
+    team_score = team_score_value
     parsed_bonus = parse_bonus_note(completion.note)
     quantity = max(int(completion.quantity or 1), 1)
     # What this row was actually WORTH. Never the row's quantity for a bonus:
     # a ``task`` rule's quantity is credit units, and it pays nothing at all
     # until the rule's need is met (then the whole award at once). Reading it
-    # off the fold is correct under every rule dialect, and is already what
-    # EventTeam.score deltas on.
+    # off the fold is correct under every rule dialect.
     bonus_delta = (int(entry.get("bonus_points") or 0)
                    - int(prev_entry.get("bonus_points") or 0))
     row_value = bonus_delta if parsed_bonus is not None else quantity
+
+    result = _competition_side_effects(
+        session, event, task, completion, config, player_name=player_name,
+        entry=entry, prev_entry=prev_entry, rank=rank,
+        participants=participants, leader=leader, team_rank=team_rank,
+        team_count=team_count, team_score=team_score,
+        parsed_bonus=parsed_bonus, bonus_delta=bonus_delta,
+        row_value=row_value, curr_gained=curr_gained)
+    # Compared once, after every write this apply made — the same rule
+    # _apply_loot_sweep follows. Only a team race has a lead to change (the
+    # snapshot is the no-op sentinel otherwise).
+    _announce_lead_change(session, event, lead_before, player_id,
+                          reason="completion", extra={
+                              "task_id": task["id"],
+                              "task_label": task.get("label"),
+                              "completion_id": completion.id,
+                              "competition": True,
+                          })
+    return result
+
+
+def _competition_side_effects(session, event: dict, task: dict, completion,
+                              config, *, player_name, entry, prev_entry, rank,
+                              participants, leader, team_rank, team_count,
+                              team_score, parsed_bonus, bonus_delta, row_value,
+                              curr_gained) -> dict:
+    """Result dict, SSE frame and announcements for one applied competition
+    row (split out of :func:`_apply_competition` so the lead-change compare
+    runs on every exit path)."""
+    from services.competition import bonus_detail, player_points
+
+    team_id = completion.team_id
+    player_id = completion.player_id
 
     result = {
         "kind": "competition",
@@ -4218,6 +4391,10 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
     }
     if team_score is not None:
         result["team_score"] = team_score
+    if team_rank is not None:
+        # Team race: the row's team standing next to the player's own.
+        result["team_rank"] = team_rank
+        result["team_count"] = team_count
     if leader is not None:
         result["leader"] = {"player_id": leader[0], "value": leader[1]}
     session.flush()
@@ -4277,6 +4454,12 @@ def _apply_competition(session, redis_conn, event: dict, task: dict, completion,
             "rank_value_text": score_text(rank_value(entry, config), config),
             "ranking_mode": config.ranking_mode,
             "metric_kind": config.metric_kind,
+            # Team race: where the award left the player's TEAM.
+            "team_race": config.is_team_race,
+            "team_rank": team_rank,
+            "team_count": team_count,
+            "team_name": (_team_name(session, team_id)
+                          if config.is_team_race else None),
             "matched_target": completion.matched_target,
             # Pet awards: the pet's item icon becomes the message thumbnail
             # (the sender's completion_icon resolution keys off received_item).
@@ -4324,7 +4507,8 @@ def _revoke_competition(session, event: dict, task: dict, team_id, completion) -
     caller already flipped the row to ``revoked``, so the applied-ledger fold
     excludes it; per-player bonus caps self-heal (the fold counts surviving
     rows only — a freed slot pays out again on the next qualifying kill)."""
-    from db.models import EventProgress, EventTeam
+    from db.models import EventProgress
+    from services.competition import team_score as ranked_team_score
     from services.competition import team_totals
 
     # P0-7: locked read — progress is a read-modify-write shared between the
@@ -4335,14 +4519,11 @@ def _revoke_competition(session, event: dict, task: dict, team_id, completion) -
                         EventProgress.team_id == team_id)
                 .with_for_update()
                 .first())
-    prev_fold, config = _competition_fold(session, task, team_id,
-                                          include=completion)
-    curr_fold, _ = _competition_fold(session, task, team_id)
-    _prev_gained, prev_score = team_totals(prev_fold, config)
-    curr_gained, curr_score = team_totals(curr_fold, config)
+    curr_fold, config = _competition_fold(session, task, team_id)
+    curr_gained, curr_total = team_totals(curr_fold, config)
 
     if progress is None:
-        if curr_gained <= 0 and curr_score <= 0:
+        if curr_gained <= 0 and curr_total <= 0:
             return {"progress": 0, "completed": False, "team_score": None}
         progress = EventProgress(event_id=event["id"], task_id=task["id"],
                                  team_id=team_id, progress=0, completed=False)
@@ -4350,14 +4531,10 @@ def _revoke_competition(session, event: dict, task: dict, team_id, completion) -
     progress.progress = curr_gained
     progress.completed = False
 
-    team_score = None
-    score_delta = curr_score - prev_score
-    if score_delta and team_id is not None:
-        team = (session.query(EventTeam).filter(EventTeam.id == team_id)
-                .with_for_update().first())  # P0-7: locked score RMW
-        if team is not None:
-            team.score = int(float(team.score or 0)) + score_delta
-            team_score = team.score
+    roster_ids = (_competition_roster_ids(session, team_id)
+                  if config.averages_teams else ())
+    team_score = _set_competition_team_score(
+        session, team_id, ranked_team_score(curr_fold, config, roster_ids))
 
     session.flush()
     frame = {"kind": "revoke", "event_id": event["id"], "task_id": task["id"],
@@ -4751,7 +4928,11 @@ def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
             return True
         cfg = CompetitionConfig(task.get("config") or {})
         rule = cfg.rules_by_id.get(parsed[1])
-        rows = _competition_applied_rows(session, task, team_id)
+        # Caps are per player for the whole race: a player who changes team
+        # mid-race must not start a fresh cap on the new team. (Individual
+        # races have one team, so this is the same set as before.)
+        rows = [r for r in _competition_event_rows(session, task)
+                if r.player_id == candidate.player_id]
         if rule is not None and rule.type == "task":
             # A task rule's rows are PROGRESS, not awards, so the gate is
             # "did the number move?" — not "is there an award left?". The
@@ -5383,10 +5564,14 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         return summary
 
     if _list_kind(task) == "competition":
-        # Per-player standings re-fold; the single-team score follows. Team
-        # lead-change announcements are meaningless with one roster team, so
-        # none fire here (the SSE frame carries the corrected numbers).
-        return _revoke_competition(session, event, task, team_id, completion)
+        # Per-player standings re-fold; the team score follows. Only a team
+        # race announces the hand-over — an individual race's one roster team
+        # has no lead to lose (the SSE frame carries the corrected numbers).
+        summary = _revoke_competition(session, event, task, team_id, completion)
+        if _competition_is_team_race(task):
+            _announce_lead_change(session, event, lead_before, completion.player_id,
+                                  reason="revoke", extra=lead_extra)
+        return summary
 
     new_progress = _derive_applied_progress(session, task, team_id)
 

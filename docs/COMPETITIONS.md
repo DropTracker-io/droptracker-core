@@ -1,8 +1,9 @@
 # SOTW / BOTW — the `sotw` / `botw` competition event kinds (web105a)
 
-Skill of the Week / Boss of the Week: a time-boxed race of INDIVIDUALS —
-most XP gained in one skill (`sotw`) or most KC gained at one boss / NPC
-group (`botw`) between the event's start and end. Any duration ("of the
+Skill of the Week / Boss of the Week: a time-boxed race — most XP gained in
+one skill (`sotw`) or most KC gained at one boss / NPC group (`botw`) between
+the event's start and end — run between INDIVIDUALS or between the event's
+TEAMS (see "Team races"). Any duration ("of the
 Week" is branding). Feature parity with WiseOldMan's competition bot
 (lifecycle announcements, standings) plus DropTracker-only enrichments:
 live plugin tracking between hiscores updates, a self-updating Discord
@@ -25,8 +26,9 @@ Following the loot_sweep recipe — almost no new storage:
   competition settings — the generic task routes 422 on it
   (`validate_task_payload`, the PATCH/DELETE guards), and serializers flag
   it `"managed": true`.
-- **One roster team** ("Participants"). Participation mode lives nowhere
-  new: `team.auto_clan` IS the fact — `whole_clan` sets
+- **One roster team** ("Participants") on an individual race — a team
+  race uses the event's ordinary teams instead (see "Team races").
+  Participation mode lives nowhere new: `team.auto_clan` IS the fact — `whole_clan` sets
   `auto_clan=True, group_id` (the matcher expands the clan's current
   membership; `sync_auto_clan_rosters` mirrors it, its `clan_vs_clan` gate
   widened to admit competition kinds), `signup` leaves a plain team with
@@ -147,6 +149,90 @@ test_competition_validation.py::TestBoundsMirror` keeps the copies honest).
   `finalize_competition` writes `EventPlayerPoints` once at end.
 - Standings are a ledger aggregation (`GET /events/{id}/competition`),
   never a stored rollup; past events serve the frozen `final_standings`.
+
+## Team races (`format: "teams"`, 2026-09-16)
+
+The same race between the event's ordinary teams — formed with the standard
+formation modes (self-join / auto-assign / sign-up pool / admin-built), the
+same sign-up flows and Discord sign-up button, team roles and channels. Two
+config keys ride in the hidden task (no DDL), locked at activation like the
+rest:
+
+```jsonc
+{ "format": "individual" | "teams",     // absent = individual (older configs)
+  "team_scoring": "total" | "average" }  // teams only; the validator stores
+                                        // "total" for an individual race
+```
+
+- **Scaffold** (`ensure_competition_scaffold`): a team race builds no roster
+  team and never touches `formation_mode`. The individual -> teams switch on a
+  draft is the one moment the old "Participants" scaffold is retired (deleted
+  while nothing references it, else demoted to a plain team) — a later save
+  never touches an organiser's team, whatever it is called. A draft switched
+  INTO a competition kind with 2+ teams becomes a team race; a sotw<->botw
+  flip keeps the format.
+- **Scoring**: a team's `EventProgress.progress` and `EventTeam.score` fold
+  ONLY its own rows (a player who changes team leaves history with the old
+  one, as on every kind). `EventTeam.score` is written ABSOLUTE
+  (`_set_competition_team_score`) — the summed ranked values, or with
+  `average` that sum divided by `team_member_count` = current roster ∪
+  anyone with rows on the team (a departed member's gains stay in the total,
+  so they stay in the divisor). Stored as a 2dp float when fractional.
+- **Players** still rank race-wide: `_apply_competition` folds every team's
+  rows for the player's rank/leader/bonus message, and the record-time cap
+  gate counts the player's rows across the event (caps are per player per
+  race, not per team stint).
+- **Lead changes**: team races bracket the score write with
+  `_leader_snapshot` / `_announce_lead_change` (the loot_sweep rule); the
+  revoke path announces too. Individual races never do.
+- **Averaging and rosters**: a roster change moves an averaged score with no
+  ledger row, so `event_lifecycle.sync_averaged_team_scores` (every sweep
+  tick) compares a digest of the event's (team, player) pairs and calls
+  `event_engine.recompute_competition_teams` when it moved, publishing a
+  `recompute` frame.
+- **Read model**: `event_lifecycle.competition_standings()` returns
+  `{"players", "teams", "config", "team", "task"}` — players carry
+  `team_id`/`team_name` (current roster, else the team they last scored for;
+  a WOM-only row maps by WOM team name), teams come from
+  `competition.team_standings` (score / total / average / members / active /
+  top_player). `GET /events/{id}/competition` adds `teams` (with pre-worded
+  `score_text`) on a team race. `finalize_competition` freezes
+  `{"format": "teams", "players", "teams"}` (individual races still freeze a
+  bare list — `frozen_competition_standings` reads both) and writes
+  `EventPlayerPoints` per (team, player).
+- **Surfaces**: the Discord board and the ended/lead-change/ending-soon posts
+  list TEAMS (`team_score_text`: "2.48M XP" / "41.3K XP per member"); the
+  board headline adds the top three players. The bonus message's
+  `{competition_position_line}` gains the team's standing (same token, no
+  re-seed). Clan points place TEAMS through the ordinary team payout
+  (`event_point_awards._is_team_race`); no competition kind prices EHE.
+- **Launch checks**: a team race needs ≥2 teams (`competition_needs_teams`);
+  an individual race with more than one team is refused
+  (`competition_extra_teams`), and `POST /events/{id}/teams` 409s on it.
+- **WiseOldMan**. Individual races link/create CLASSIC competitions, team
+  races TEAM competitions (`classic_competition` / `team_competition` link
+  problems); a competition's type can never change on WOM, so switching the
+  format with a competition attached is refused (unlink first).
+  - *Linked*: WOM owns the rosters (as it owns the dates).
+    `competition_wom.sync_linked_team_rosters_db` (at link time, then every
+    poll) creates the WOM teams, places each participant on theirs —
+    resolving by WOM id, then OSRS-equivalent name, else minting a
+    `wom_temp_` placeholder so their gains land in the ledger and count for
+    the team — moves/removes members to match, and drops DT teams WOM lacks
+    when nothing references them. Skipped while a digest of both sides is
+    unchanged.
+  - *Created*: DropTracker owns the rosters. `wom-create` sends
+    `teams=[{name, participants}]` with the group link (WOM limits: team
+    names 1-30 characters and unique, every team non-empty — an EMPTY teams
+    array would silently create a classic whole-group competition, so the
+    route refuses it; titles are clipped to 50). Afterwards
+    `push_created_team_rosters` (each poll cycle, drafts included) replaces
+    WOM's team list whenever the roster digest changed
+    (`PUT /competitions/:id`, raw route — WOM keeps each staying player's
+    start snapshot), skipping empty teams.
+- **Clan-locked**: `mode=clan_vs_clan` is refused for competition kinds on
+  create/PATCH and blocks activation (`competition_clan_vs_clan`); a draft
+  made before the lock may still switch back to Standard.
 
 ## Source modes (`web_event_competitions.source_mode`)
 
@@ -359,7 +445,8 @@ an admin who wants another bonus mid-race must wait; append-only forward-only
 edits are the intended follow-up (editing an existing rule's `points` is NOT
 safe: a task rule's points come from the rule at fold time, so it would rewrite
 history) · sotw drop bonuses (no item→skill dataset exists) ·
-Teams / WOM team comps / clan_vs_clan mapping · "overall" as a sotw metric
+clan_vs_clan races (clan-locked by decision) · auto-splitting a whole clan
+into balanced teams · "overall" as a sotw metric
 (mixed-baseline double-count trap needs its own design) · multi-metric
 comps · recurring-window competitions (blocked at activation) ·
 `/event standings` slash command · overtake/milestone messages

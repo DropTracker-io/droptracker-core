@@ -211,25 +211,46 @@ def _competition_signature(session, event) -> Optional[dict]:
     the ledger), so this re-screenshots exactly when the table changes.
     ``None`` when the event carries no competition task."""
     from services.competition import CompetitionConfig, fold_rows
-    from services.competition_setup import competition_task, competition_team
+    from services.competition_setup import (competition_task, competition_team,
+                                            competition_teams)
 
     task = competition_task(session, event.id)
-    team = competition_team(session, event.id)
-    if task is None or team is None:
+    if task is None:
         return None
-    from services.event_engine import _competition_applied_rows
+    config = CompetitionConfig(task.config)
+    from services.event_engine import _competition_applied_rows, _competition_event_rows
 
-    rows = _competition_applied_rows(session, {"id": task.id}, team.id)
-    per = fold_rows(rows, CompetitionConfig(task.config))
+    if config.is_team_race:
+        # Every team's (gained, bonus) plus the per-player race: a roster move
+        # or a team rename re-screenshots too.
+        rows = _competition_event_rows(session, {"id": task.id})
+        teams = competition_teams(session, event.id)
+        team_sig = []
+        for t in teams:
+            per_team = fold_rows([r for r in rows if r.team_id == t.id], config)
+            team_sig.append((t.id, t.name, round(float(t.score or 0), 2),
+                             sum(e["gained"] for e in per_team.values()),
+                             sum(e["bonus_points"] for e in per_team.values())))
+        per = fold_rows(rows, config)
+    else:
+        team = competition_team(session, event.id)
+        if team is None:
+            return None
+        rows = _competition_applied_rows(session, {"id": task.id}, team.id)
+        per = fold_rows(rows, config)
+        team_sig = None
     ordered = sorted(
         ((pid, e["gained"], e["bonus_points"]) for pid, e in per.items()),
         key=lambda t: (-t[1], t[0]))
-    return {
+    sig = {
         "kind": "competition",
         "name": event.name,
         "status": event.status,
         "players": ordered,
     }
+    if team_sig is not None:
+        sig["teams"] = team_sig
+    return sig
 
 
 def board_kept_to_admins(event) -> bool:

@@ -1683,8 +1683,15 @@ def notification_context(notification_type: str, data: dict) -> dict:
         rank = data.get("rank")
         if rank:
             value_text = data.get("rank_value_text")
-            put("competition_position_line",
-                f"Now **#{int(rank)}**"
-                + (f" · `{value_text}`" if value_text else ""))
+            line = (f"Now **#{int(rank)}**"
+                    + (f" · `{value_text}`" if value_text else ""))
+            # A team race also says where the award left the player's team —
+            # inside the same token, so no group's layout needs re-seeding.
+            team_rank, team_count = data.get("team_rank"), data.get("team_count")
+            if data.get("team_race") and team_rank:
+                who = f"**{data['team_name']}**" if data.get("team_name") else "Their team"
+                line += (f" · {who} **#{int(team_rank)}**"
+                         + (f" of {int(team_count)}" if team_count else ""))
+            put("competition_position_line", line)
 
     return context

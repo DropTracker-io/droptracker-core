@@ -83,6 +83,22 @@ METRIC_KINDS = ("skill", "boss")
 RANKING_MODES = ("gained", "points")
 BONUS_RULE_TYPES = ("pet", "time_under", "task", "milestone")
 
+# Race formats (config ``format``). ``individual`` is the one-roster scaffold:
+# every entrant sits on a single "Participants" team and the leaderboard is
+# per player. ``teams`` races the event's ordinary teams (formed with the
+# standard formation modes) — each team scores the sum of its members'
+# ranked values, and the per-player leaderboard stays alongside.
+COMPETITION_FORMATS = ("individual", "teams")
+DEFAULT_FORMAT = "individual"
+# How a team race ranks its teams (config ``team_scoring``): the members'
+# summed ranked values, or that sum per team member (fairer when team sizes
+# differ). The divisor is everyone who is or was on the team — see
+# :func:`team_member_count`.
+TEAM_SCORING_MODES = ("total", "average")
+DEFAULT_TEAM_SCORING = "total"
+# A team race needs somebody to race against.
+MIN_RACE_TEAMS = 2
+
 # Rule types whose ledger rows are AWARDS (one row = one payout, quantity =
 # points) rather than units of progress. The note's type segment is the only
 # thing a reader needs to tell the two ledger dialects apart.
@@ -294,7 +310,8 @@ class CompetitionConfig:
     string — task configs reach some callers unparsed)."""
 
     __slots__ = ("metric_kind", "skill", "npcs", "ranking_mode",
-                 "gained_per_point", "bonus_rules", "rules_by_id")
+                 "gained_per_point", "bonus_rules", "rules_by_id",
+                 "format", "team_scoring")
 
     def __init__(self, raw):
         if isinstance(raw, str):
@@ -305,6 +322,13 @@ class CompetitionConfig:
         raw = raw if isinstance(raw, dict) else {}
         self.metric_kind = (raw.get("metric_kind")
                             if raw.get("metric_kind") in METRIC_KINDS else None)
+        # Configs written before team races carry neither key: they are
+        # individual races, scored exactly as before.
+        self.format = (raw.get("format") if raw.get("format") in COMPETITION_FORMATS
+                       else DEFAULT_FORMAT)
+        self.team_scoring = (raw.get("team_scoring")
+                             if raw.get("team_scoring") in TEAM_SCORING_MODES
+                             else DEFAULT_TEAM_SCORING)
         self.skill = _norm(raw.get("skill")) or None
         npcs: list = []
         for name in (raw.get("npcs") or ())[:MAX_NPCS]:
@@ -341,6 +365,15 @@ class CompetitionConfig:
         if self.metric_kind == "boss":
             return bool(self.npcs)
         return False
+
+    @property
+    def is_team_race(self) -> bool:
+        return self.format == "teams"
+
+    @property
+    def averages_teams(self) -> bool:
+        """Whether a team's ranked score is per member rather than summed."""
+        return self.is_team_race and self.team_scoring == "average"
 
     # ---- matcher precompute -------------------------------------------------
     def matcher_index(self) -> dict:
@@ -544,34 +577,124 @@ def rank_value(entry: dict, config: CompetitionConfig) -> int:
 
 
 def team_totals(per_player: dict, config: CompetitionConfig) -> tuple:
-    """``(gained_total, score_total)`` across every player — the (single)
-    roster team's ``EventProgress.progress`` and ``EventTeam.score``."""
+    """``(gained_total, score_total)`` across every player of ONE team's fold
+    — that team's ``EventProgress.progress`` and summed ranked value. (On an
+    individual race the one roster team holds everybody.)"""
     gained_total = sum(_int(e.get("gained")) for e in per_player.values())
     score_total = sum(rank_value(e, config) for e in per_player.values())
     return gained_total, score_total
+
+
+def team_member_count(per_player: dict, roster_ids: Iterable = ()) -> int:
+    """How many players an averaged team score is divided by: everyone on the
+    roster now, plus anyone who left but still has rows on the team. A
+    departed member's gains stay in the team total (history stands), so they
+    must stay in the divisor too, or the average would inflate."""
+    return len({pid for pid in roster_ids if pid is not None}
+               | {pid for pid in per_player if pid is not None})
+
+
+def team_score(per_player: dict, config: CompetitionConfig,
+               roster_ids: Iterable = ()) -> float:
+    """The number a team is RANKED by — what ``EventTeam.score`` holds.
+
+    The summed ranked value of the team's fold, or (``team_scoring:
+    average`` on a team race) that sum per team member, rounded to 2dp.
+    Individual races always sum: their one roster team is scaffolding."""
+    _gained, total = team_totals(per_player, config)
+    if not config.averages_teams:
+        return total
+    members = team_member_count(per_player, roster_ids)
+    return round(total / members, 2) if members else 0
+
+
+def team_standings(teams: Iterable, folds: dict, config: CompetitionConfig,
+                   names: dict) -> list:
+    """Ranked team rows for a team race.
+
+    ``teams`` is ``[{"team_id", "name", "color", "roster_ids"}]``; ``folds``
+    maps team id -> that team's :func:`fold_rows` output; ``names`` maps
+    player id -> display name (for each team's top player). ``score`` is the
+    ranked number (:func:`team_score`); ``total`` and ``average`` are both
+    always present so a surface can show the other one alongside."""
+    rows = []
+    for team in teams:
+        team_id = team.get("team_id")
+        per = folds.get(team_id) or {}
+        roster_ids = list(team.get("roster_ids") or ())
+        gained, total = team_totals(per, config)
+        members = team_member_count(per, roster_ids)
+        top = None
+        for pid, entry in per.items():
+            value = rank_value(entry, config)
+            if value <= 0:
+                continue
+            name = names.get(pid) or f"Player {pid}"
+            if (top is None or value > top["value"]
+                    or (value == top["value"] and _norm(name) < _norm(top["player_name"]))):
+                top = {"player_id": pid, "player_name": name, "value": value}
+        rows.append({
+            "team_id": team_id,
+            "name": team.get("name") or f"Team {team_id}",
+            "color": team.get("color"),
+            "members": members,
+            "active": sum(1 for e in per.values()
+                          if _int(e.get("gained")) > 0 or _int(e.get("bonus_points")) > 0),
+            "gained": gained,
+            "bonus_points": sum(_int(e.get("bonus_points")) for e in per.values()),
+            "points": sum(player_points(e, config) for e in per.values()),
+            "total": total,
+            "average": round(total / members, 2) if members else 0,
+            "score": team_score(per, config, roster_ids),
+            "top_player": top,
+        })
+    rows.sort(key=lambda r: (-r["score"], -r["total"], -r["gained"],
+                             _norm(r["name"]), r["team_id"] or 0))
+    for i, row in enumerate(rows):
+        row["rank"] = i + 1
+    return rows
 
 
 # --------------------------------------------------------------------------- #
 # Standings
 # --------------------------------------------------------------------------- #
 def standings(per_player: dict, config: CompetitionConfig, names: dict,
-              wom_rows: Optional[list] = None) -> list:
+              wom_rows: Optional[list] = None, player_teams: Optional[dict] = None,
+              team_names: Optional[dict] = None) -> list:
     """Merged, ranked standings rows.
 
     ``per_player`` is :func:`fold_rows` output (DT-tracked players);
     ``names`` maps player_id -> display name. ``wom_rows`` (linked/created
     events) is the cached WOM participation list — dicts with
     ``wom_player_id`` / ``display_name`` / ``gained`` and optionally the
-    resolved ``player_id``. WOM rows whose player is already in
-    ``per_player`` are dropped (the ledger row is richer — it carries plugin
-    top-ups and bonuses); the rest render as unregistered display-only rows
-    (no bonus points — bonuses need plugin data, which needs an account).
+    resolved ``player_id`` and the WOM ``team_name``. WOM rows whose player is
+    already in ``per_player`` are dropped (the ledger row is richer — it
+    carries plugin top-ups and bonuses); the rest render as unregistered
+    display-only rows (no bonus points — bonuses need plugin data, which
+    needs an account).
+
+    ``player_teams`` (player_id -> team_id) and ``team_names`` (team_id ->
+    name) attach each row's team on a team race; a WOM-only row falls back to
+    its WOM team name. Rows carry ``team_id``/``team_name`` as None otherwise.
     """
+    player_teams = player_teams or {}
+    team_names = team_names or {}
+    team_by_norm = {_norm(n): tid for tid, n in team_names.items() if n}
+
+    def _team_of(player_id, wom_team=None):
+        tid = player_teams.get(player_id) if player_id is not None else None
+        if tid is None and wom_team:
+            tid = team_by_norm.get(_norm(wom_team))
+        if tid is not None:
+            return tid, team_names.get(tid)
+        return None, (str(wom_team).strip() or None) if wom_team else None
+
     rows: list = []
     seen_norm_names = set()
     for player_id, entry in per_player.items():
         name = names.get(player_id) or f"Player {player_id}"
         seen_norm_names.add(_norm(name))
+        team_id, team_name = _team_of(player_id)
         rows.append({
             "player_id": player_id,
             "wom_player_id": None,
@@ -581,6 +704,8 @@ def standings(per_player: dict, config: CompetitionConfig, names: dict,
             "bonus_points": _int(entry.get("bonus_points")),
             "points": player_points(entry, config),
             "bonus": entry.get("bonus") or {},
+            "team_id": team_id,
+            "team_name": team_name,
         })
     known_ids = set(per_player)
     for raw in wom_rows or ():
@@ -596,6 +721,7 @@ def standings(per_player: dict, config: CompetitionConfig, names: dict,
             continue
         gained = max(_int(raw.get("gained")), 0)
         entry = {"gained": gained, "bonus_points": 0}
+        team_id, team_name = _team_of(resolved, raw.get("team_name"))
         rows.append({
             "player_id": resolved,
             "wom_player_id": raw.get("wom_player_id"),
@@ -605,6 +731,8 @@ def standings(per_player: dict, config: CompetitionConfig, names: dict,
             "bonus_points": 0,
             "points": player_points(entry, config),
             "bonus": {},
+            "team_id": team_id,
+            "team_name": team_name,
         })
     key = ("points" if config.ranking_mode == "points" else "gained")
     rows.sort(key=lambda r: (-r[key], -r["bonus_points"], -r["gained"],
@@ -641,6 +769,28 @@ def score_text(entry_value: int, config: CompetitionConfig) -> str:
     return format_gained(entry_value, config.metric_kind)
 
 
+def _format_fraction(value: float) -> str:
+    """An averaged amount: the gained-style abbreviation for big numbers,
+    one decimal for small ones (``12.5`` KC per member is a real answer)."""
+    value = max(float(value or 0), 0.0)
+    if value >= 100_000:
+        return format_gained(int(round(value)), None).rsplit(" ", 1)[0]
+    if value >= 100 or value == int(value):
+        return f"{int(round(value)):,}"
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def team_score_text(value, config: CompetitionConfig) -> str:
+    """A team's ranked number, worded — ``"2.48M XP"`` / ``"270 pts"`` for a
+    summed team, ``"41.3K XP per member"`` / ``"12.5 pts per member"`` when
+    the race averages."""
+    if not config.averages_teams:
+        return score_text(_int(round(float(value or 0))), config)
+    unit = ("pts" if config.ranking_mode == "points"
+            else ("XP" if config.metric_kind == "skill" else "KC"))
+    return f"{_format_fraction(value)} {unit} per member"
+
+
 def format_time_ms(ms: int) -> str:
     """``91_800`` -> ``1:31.8`` — OSRS kill-time style (tick precision keeps
     at most one decimal place; whole seconds drop it)."""
@@ -654,14 +804,20 @@ def format_time_ms(ms: int) -> str:
 
 def metric_line(config: CompetitionConfig) -> Optional[str]:
     """One-line race description for announcements — ``**Skill** Mining —
-    most XP gained wins`` / ``**Boss** Zulrah — most kills gained wins``."""
+    most XP gained wins`` / ``**Boss** Zulrah — most kills gained wins``;
+    a team race says the TEAM wins (and "per member" when it averages)."""
+    if config.is_team_race:
+        who = "the team with the most"
+        tail = " per member wins" if config.averages_teams else " wins"
+    else:
+        who, tail = "most", " wins"
     if config.metric_kind == "skill" and config.skill:
-        return f"**Skill** {config.skill.title()} — most XP gained wins"
+        return f"**Skill** {config.skill.title()} — {who} XP gained{tail}"
     if config.metric_kind == "boss" and config.npcs:
         names = ", ".join(n.title() for n in config.npcs[:3])
         if len(config.npcs) > 3:
             names += f" (+{len(config.npcs) - 3} more)"
-        return f"**Boss** {names} — most kills gained wins"
+        return f"**Boss** {names} — {who} kills gained{tail}"
     return None
 
 

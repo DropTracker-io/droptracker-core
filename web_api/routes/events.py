@@ -582,7 +582,10 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         comp_task = competition_task(s, ev.id)
         comp_cfg = CompetitionConfig(comp_task.config if comp_task is not None else None)
         block = _serialize_competition_config(s, comp_cfg, competition_row(s, ev.id))
-        block["participation"] = participation_mode(competition_team(s, ev.id))
+        if not comp_cfg.is_team_race:
+            # Who competes, for an individual race. A team race forms its
+            # teams with the event's ordinary formation mode instead.
+            block["participation"] = participation_mode(competition_team(s, ev.id))
         block["configured"] = comp_cfg.valid
         base["competition"] = block
 
@@ -3531,6 +3534,10 @@ def _serialize_competition_config(s, config, comp_row) -> dict:
         "bonus_rules": rules,
         "source_mode": getattr(comp_row, "source_mode", "hosted") if comp_row else "hosted",
         "wom": None,
+        # Individual race, or a race between the event's teams (ranked by
+        # their summed or per-member score).
+        "format": config.format,
+        "team_scoring": config.team_scoring,
     }
     if comp_row is not None and comp_row.wom_competition_id:
         out["wom"] = {
@@ -3568,34 +3575,33 @@ async def get_competition_standings(event_id: int):
             if (ev.kind or "standard") not in COMPETITION_EVENT_KINDS:
                 abort_problem(422, "Not a competition event",
                               "This event is not a Skill/Boss of the Week.")
-            from services.competition import CompetitionConfig
+            from services.competition import CompetitionConfig, team_score_text
             from services.competition_setup import (competition_row,
                                                     competition_task)
-            from services.event_lifecycle import _competition_ranked_rows
+            from services.event_lifecycle import (competition_standings,
+                                                  frozen_competition_standings)
 
             task = competition_task(s, event_id)
             comp_row = competition_row(s, event_id)
             config = CompetitionConfig(task.config if task is not None else None)
 
-            ranked = None
-            if (ev.status == "past" and comp_row is not None
-                    and comp_row.final_standings):
-                try:
-                    parsed = json.loads(comp_row.final_standings)
-                    ranked = parsed if isinstance(parsed, list) else None
-                except (TypeError, ValueError):
-                    ranked = None
-            if ranked is None:
-                ranked, live_config, _team = _competition_ranked_rows(s, ev)
-                if live_config is not None:
-                    config = live_config
+            frozen = None
+            if ev.status == "past" and comp_row is not None:
+                frozen = frozen_competition_standings(comp_row.final_standings)
+            if frozen is not None:
+                ranked, teams = frozen["players"], frozen["teams"]
+            else:
+                live = competition_standings(s, ev)
+                ranked, teams = live["players"], live["teams"]
+                if live["config"] is not None:
+                    config = live["config"]
 
             totals = {
                 "participants": len(ranked),
                 "gained": sum(int(r.get("gained") or 0) for r in ranked),
                 "bonus_points": sum(int(r.get("bonus_points") or 0) for r in ranked),
             }
-            return {
+            payload = {
                 "event_id": event_id,
                 "kind": ev.kind,
                 "status": ev.status,
@@ -3605,6 +3611,15 @@ async def get_competition_standings(event_id: int):
                 "finalized": bool(comp_row is not None and comp_row.finalized_at),
                 "updated_at": int(datetime.now().timestamp()),
             }
+            if config.is_team_race:
+                # Team standings alongside the per-player ones; every row's
+                # ranked score comes pre-worded ("2.48M XP" / "41.3K XP per
+                # member") so no client re-derives the wording.
+                payload["teams"] = [
+                    {**t, "score_text": team_score_text(t.get("score") or 0, config)}
+                    for t in teams
+                ]
+            return payload
 
     data = await asyncio.to_thread(_load)
     if data is None:
@@ -3766,9 +3781,12 @@ async def preview_wom_competition():
                       "number.")
     event_kind = request.args.get("kind")
     group_id = request.args.get("group_id", type=int)
+    # Individual races link classic competitions; team races link WOM team
+    # competitions (their teams become the event's). Omitted = individual.
+    race_format = "teams" if request.args.get("format") == "teams" else "individual"
 
     from services.competition_wom import (competition_link_problems,
-                                          parse_competition)
+                                          parse_competition, wom_team_names)
     from utils.wiseoldman import get_competition_raw, wom_metric_kind
 
     raw = await get_competition_raw(comp_id)
@@ -3782,7 +3800,17 @@ async def preview_wom_competition():
 
     metric_kind = wom_metric_kind(comp.get("metric"))
     problems = competition_link_problems(
-        comp, event_kind or ("sotw" if metric_kind == "skill" else "botw"))
+        comp, event_kind or ("sotw" if metric_kind == "skill" else "botw"),
+        race_format=race_format)
+    team_sizes: dict = {}
+    for p in comp.get("participations") or ():
+        if p.get("team_name"):
+            key = " ".join(str(p["team_name"]).lower().split())
+            team_sizes[key] = team_sizes.get(key, 0) + 1
+    teams_preview = [
+        {"name": name, "participants": team_sizes.get(" ".join(name.lower().split()), 0)}
+        for name in wom_team_names(comp)
+    ]
 
     def _load_extras():
         with db_session() as s:
@@ -3828,6 +3856,8 @@ async def preview_wom_competition():
         "wom_group_id": comp["group_id"],
         "group_matches": group_matches,
         "participant_count": comp["participant_count"],
+        # Team competitions: each WOM team and how many players it lists.
+        "teams": teams_preview,
         "linkable": not problems,
         "problems": problems,
         "linked_event_id": linked_event_id,
@@ -3917,17 +3947,20 @@ async def link_wom_competition(event_id: int):
                 abort_problem(409, "Event already started",
                               "The WOM link can only change while the event "
                               "is a draft.")
-            problems = competition_link_problems(comp, ev.kind)
+            from services.competition import CompetitionConfig
+            from services.competition_setup import (competition_row,
+                                                    competition_task)
+
+            task = competition_task(s, event_id)
+            config = CompetitionConfig(task.config if task is not None else None)
+            problems = competition_link_problems(comp, ev.kind,
+                                                 race_format=config.format)
             if problems:
                 abort_problem(
                     422, "Competition not linkable",
                     "This competition can't back the event: "
                     + ", ".join(problems) + ".",
                     extra={"problems": problems})
-
-            from services.competition import CompetitionConfig
-            from services.competition_setup import (competition_row,
-                                                    competition_task)
 
             other = (s.query(EventCompetition)
                      .filter(EventCompetition.wom_competition_id == comp_id,
@@ -3938,8 +3971,6 @@ async def link_wom_competition(event_id: int):
                               f"That competition is already linked to event "
                               f"#{other.event_id}.")
 
-            task = competition_task(s, event_id)
-            config = CompetitionConfig(task.config if task is not None else None)
             if not config.valid:
                 abort_problem(422, "Pick the metric first",
                               "Set the event's skill/boss on the Competition "
@@ -3988,6 +4019,12 @@ async def link_wom_competition(event_id: int):
                 before=None, after=f"competition_id:{comp_id}",
             ))
             s.commit()
+            if config.is_team_race:
+                # A team race takes WOM's teams and rosters as its own — now,
+                # so the draft shows them; the poller keeps them in step.
+                from services.competition_wom import sync_linked_team_rosters_db
+
+                sync_linked_team_rosters_db(event_id, comp, force=True, session=s)
             return _detail(s, ev, viewer_id=user_id)
 
     payload = await asyncio.to_thread(_apply)
@@ -4079,6 +4116,38 @@ async def create_wom_competition_route(event_id: int):
                     "its verification code saved in Group settings → "
                     "Integrations.",
                     extra={"code": "wom_not_ready"})
+            teams = None
+            if config.is_team_race:
+                # A WOM team competition: its type is fixed at creation, so it
+                # must be created WITH teams. WOM's own rules are checked here
+                # so the organiser gets a precise message, not a generic 502.
+                from services.competition_setup import competition_teams
+                from services.competition_wom import team_roster_payload_db
+                from utils.wiseoldman import WOM_TEAM_NAME_MAX
+
+                names = [t.name for t in competition_teams(s, event_id)]
+                too_long = [n for n in names if len(n.strip()) > WOM_TEAM_NAME_MAX]
+                if too_long:
+                    abort_problem(
+                        422, "Team names too long for WiseOldMan",
+                        f"WiseOldMan allows team names up to {WOM_TEAM_NAME_MAX} "
+                        f"characters — shorten: {', '.join(too_long)}.",
+                        extra={"code": "wom_team_name_length"})
+                folded = [" ".join(n.lower().split()) for n in names]
+                if len(set(folded)) != len(folded):
+                    abort_problem(
+                        422, "Duplicate team names",
+                        "WiseOldMan needs every team name to be different.",
+                        extra={"code": "wom_team_name_duplicate"})
+                teams = team_roster_payload_db(s, event_id)
+                if not teams:
+                    abort_problem(
+                        422, "Teams need players first",
+                        "A WiseOldMan team competition must be created with at "
+                        "least one team that has players on it. Put players on "
+                        "your teams, then create it — later changes to the "
+                        "rosters are sent to WiseOldMan automatically.",
+                        extra={"code": "wom_teams_empty"})
             return {
                 "title": ev.name,
                 "slug": slug,
@@ -4086,6 +4155,7 @@ async def create_wom_competition_route(event_id: int):
                 "ends_at": ev.ends_at,
                 "wom_group_id": wom_group_id,
                 "group_code": group_code,
+                "teams": teams,
             }
 
     prep = await asyncio.to_thread(_prepare)
@@ -4094,14 +4164,22 @@ async def create_wom_competition_route(event_id: int):
 
     from utils.wiseoldman import create_wom_competition
 
+    wom_errors: list = []
     created = await create_wom_competition(
         prep["title"], prep["slug"], prep["starts_at"], prep["ends_at"],
-        prep["wom_group_id"], prep["group_code"])
+        prep["wom_group_id"], prep["group_code"],
+        teams=prep["teams"], errors=wom_errors)
     if created is None:
-        abort_problem(502, "WiseOldMan create failed",
-                      "WiseOldMan did not accept the competition — check the "
-                      "group verification code in Group settings and try "
-                      "again in a minute.")
+        detail = ("WiseOldMan did not accept the competition — check the "
+                  "group verification code in Group settings and try "
+                  "again in a minute.")
+        if wom_errors:
+            detail = f"WiseOldMan did not accept the competition: {wom_errors[0]}"
+        abort_problem(502, "WiseOldMan create failed", detail)
+    if prep["teams"]:
+        from services.competition_wom import mark_team_rosters_pushed
+
+        mark_team_rosters_pushed(event_id, prep["teams"])
 
     def _persist():
         with db_session() as s:
@@ -4281,6 +4359,8 @@ async def create_event():
             "A clan-vs-clan event needs a host group_id (global clan-vs-clan "
             "events are not a thing).",
         )
+    if mode == "clan_vs_clan" and kind in COMPETITION_EVENT_KINDS:
+        abort_problem(*_COMPETITION_CLAN_LOCK)
 
     def _apply():
         with db_session() as s:
@@ -4397,6 +4477,40 @@ async def create_event():
     return jsonify({"id": ev_id})
 
 
+# Skill/Boss of the Week events are clan-locked: a race belongs to one clan
+# (teams inside it are fine — see the ``format`` setting).
+_COMPETITION_CLAN_LOCK = (
+    422, "Clan-vs-clan not available",
+    "Skill/Boss of the Week events run within one clan — use Standard "
+    "ownership (teams inside your clan are available as a team race).",
+)
+
+
+def _competition_format_guard(s, ev, cfg: dict) -> None:
+    """Refuse a race-format change a draft can't take: back to individual
+    while it still has several teams, or any switch once a WiseOldMan
+    competition is attached (WOM can't change a competition's type)."""
+    from services.competition_setup import (competition_row, competition_teams,
+                                            event_race_format)
+
+    new_format = cfg.get("format") or "individual"
+    old_format = event_race_format(s, ev.id)
+    if new_format == old_format:
+        return
+    row = competition_row(s, ev.id)
+    if row is not None and row.wom_competition_id:
+        abort_problem(
+            409, "Unlink WiseOldMan first",
+            "WiseOldMan can't turn an individual competition into a team one "
+            "(or back) — unlink the competition before switching the race "
+            "format.", extra={"code": "wom_format_locked"})
+    if new_format == "individual" and len(competition_teams(s, ev.id)) > 1:
+        abort_problem(
+            409, "Remove the extra teams first",
+            "An individual race has a single roster — delete the extra teams "
+            "(or keep the race as Teams).", extra={"code": "competition_extra_teams"})
+
+
 def _competition_participation_input(comp_body) -> str | None:
     """The wizard's participation choice ("whole_clan" / "signup"), validated;
     None = keep/derive the current mode (competition kinds only)."""
@@ -4511,13 +4625,21 @@ async def update_event(event_id: int):
                 if new_mode not in EVENT_MODES:
                     abort_problem(422, "Invalid mode", f"mode must be one of {list(EVENT_MODES)}.")
                 if new_mode != (getattr(ev, "mode", None) or "standard"):
+                    is_race = (getattr(ev, "kind", None) or "standard") in COMPETITION_EVENT_KINDS
+                    if new_mode == "clan_vs_clan" and is_race:
+                        abort_problem(*_COMPETITION_CLAN_LOCK)
                     # Mode is a structural choice: only a team-less draft may
                     # convert (participant rows and clan-bound teams would
                     # otherwise be stranded).
                     if ev.status != "draft":
                         abort_problem(409, "Event already started",
                                       "The event mode can only change while it is a draft.")
-                    if s.query(EventTeam.id).filter(EventTeam.event_id == ev.id).first():
+                    # Exception: a race drafted as clan-vs-clan before races
+                    # were clan-locked may always go back to Standard — its
+                    # only team is the roster scaffold, which stays valid.
+                    if (not (is_race and new_mode == "standard")
+                            and s.query(EventTeam.id)
+                            .filter(EventTeam.event_id == ev.id).first()):
                         abort_problem(409, "Teams exist",
                                       "Remove the event's teams before changing its mode.")
                     if new_mode == "clan_vs_clan":
@@ -4574,14 +4696,20 @@ async def update_event(event_id: int):
                             "window — clear the schedule before switching the "
                             "event type.",
                             extra={"code": "invalid_schedule", "target": "dates"})
+                    if (new_kind in COMPETITION_EVENT_KINDS
+                            and (getattr(ev, "mode", None) or "standard") == "clan_vs_clan"):
+                        abort_problem(*_COMPETITION_CLAN_LOCK)
                     prev_kind = getattr(ev, "kind", None) or "standard"
                     ev.kind = new_kind
                     # SOTW/BOTW scaffold follows the kind: build it on the way
                     # in (typed placeholder — the Competition step fills it),
                     # tear it down on the way out. A sotw<->botw flip resets
-                    # the metric side of the config (skill vs boss).
+                    # the metric side of the config (skill vs boss) and keeps
+                    # the race format.
                     from services.competition_setup import (
+                        competition_teams,
                         ensure_competition_scaffold,
+                        event_race_format,
                         remove_competition_scaffold,
                     )
 
@@ -4589,11 +4717,19 @@ async def update_event(event_id: int):
                             and new_kind not in COMPETITION_EVENT_KINDS):
                         remove_competition_scaffold(s, ev)
                     elif new_kind in COMPETITION_EVENT_KINDS:
-                        ensure_competition_scaffold(s, ev, {
+                        placeholder = {
                             "kind": "competition",
                             "metric_kind": ("skill" if new_kind == "sotw"
                                             else "boss"),
-                        })
+                        }
+                        if prev_kind in COMPETITION_EVENT_KINDS:
+                            placeholder["format"] = event_race_format(s, ev.id)
+                        elif len(competition_teams(s, ev.id)) > 1:
+                            # A draft that already has teams becomes a TEAM
+                            # race — adopting one of them as an individual
+                            # roster would silently drop the others.
+                            placeholder["format"] = "teams"
+                        ensure_competition_scaffold(s, ev, placeholder)
             if "competition" in body:
                 # SOTW/BOTW settings (metric / source prep / ranking / bonus
                 # rules / participation). Draft-only: baselines, WOM linkage
@@ -4618,6 +4754,7 @@ async def update_event(event_id: int):
 
                 comp_body = body.get("competition") or {}
                 cfg = validated_competition_config(s, ev.kind, comp_body)
+                _competition_format_guard(s, ev, cfg)
                 participation = _competition_participation_input(comp_body)
                 ensure_competition_scaffold(s, ev, cfg, participation)
             if "requires_confirmation" in body:
@@ -6409,6 +6546,18 @@ async def add_team(event_id: int):
                 abort_problem(404, "Event not found", f"No event {event_id}.")
             _assert_event_admin(s, user_id, ev)
             _assert_event_not_past(ev)
+            if (getattr(ev, "kind", None) or "standard") in COMPETITION_EVENT_KINDS:
+                from services.competition_setup import event_race_format
+
+                if event_race_format(s, ev.id) != "teams":
+                    # An individual race scores ONE roster; a second team
+                    # would score out of sight of every standings surface.
+                    abort_problem(
+                        409, "Individual race",
+                        "This Skill/Boss of the Week is an individual race — "
+                        "switch it to a team race in its Competition "
+                        "settings to add teams.",
+                        extra={"code": "competition_individual"})
             # clan_vs_clan: every team belongs to an accepted participant clan.
             # Standard/global teams stay unbound (group_id NULL).
             team_group_id = None
