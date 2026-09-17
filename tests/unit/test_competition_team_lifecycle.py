@@ -227,6 +227,11 @@ class TestLaunchChecks:
     def test_a_team_race_needs_two_teams(self):
         assert "competition_needs_teams" in self._codes(TEAM_BOTW, 1)
         assert "competition_needs_teams" not in self._codes(TEAM_BOTW, 2)
+        # One message for "no teams yet", with the race's number in it.
+        none = self._codes(TEAM_BOTW, 0)
+        assert "competition_needs_teams" in none and "no_teams" not in none
+        # An individual race keeps the generic one.
+        assert "no_teams" in self._codes(BOTW, 0)
 
     def test_an_individual_race_needs_exactly_one_roster(self):
         assert "competition_extra_teams" in self._codes(BOTW, 2)

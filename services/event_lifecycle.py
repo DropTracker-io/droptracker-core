@@ -201,6 +201,9 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
             from services.competition import MIN_RACE_TEAMS
 
             if team_count < MIN_RACE_TEAMS:
+                # Says the same thing as the generic "needs a team" with the
+                # right number in it — one message, not two.
+                blockers[:] = [b for b in blockers if b.get("code") != "no_teams"]
                 blockers.append({
                     "code": "competition_needs_teams", "target": "teams",
                     "message": (f"A team race needs at least {MIN_RACE_TEAMS} "
