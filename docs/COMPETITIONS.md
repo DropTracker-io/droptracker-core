@@ -304,8 +304,17 @@ mode, the same hook the bingo cell editor uses), restricted per race kind via
 collection mode a real task has, with zero duplicated UI; public page renders the
 standings table (`competition-standings.tsx`, SSE-refetching, WOM rows
 greyed, row-expand award log) + "How the race is scored" card; the manager
-gets a Competition tab and hides Tasks/Teams/Board; `/events/{id}/teams`
-404s. Mock mode ships a full botw fixture (event id 6).
+gets a Competition tab and hides Tasks/Board. Its Teams tab reads
+"Participants" on an individual race (roster, manual add/remove, the Discord
+sign-up button — no team create/delete) and is the ordinary Teams tab on a
+team race. `/events/{id}/teams` 404s for an individual race and shows the
+race's team table for a team race; team pages render
+`CompetitionTeamView`. A team race's wizard keeps the Teams step (after
+Joining & rules) and the formation-mode choice; the Ownership select is
+replaced by a note (clan-locked). The Discord Activity mounts the same
+components through `components/activity/competition-board.tsx` (bearer BFF
+routes `/api/activity/events/{id}/competition[/players/{pid}]`). Mock mode
+ships a full botw fixture (event id 6) and a team race (event id 7).
 
 ## Routes (web_api, `/api/v1`)
 
