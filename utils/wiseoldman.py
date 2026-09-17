@@ -1364,8 +1364,10 @@ def wom_team_payload(teams) -> list:
     nobody on them left out (WOM rejects an empty participants array)."""
     out = []
     for name, participants in teams or ():
+        # Tie-break on the exact name: set order is hash-seeded, so names equal
+        # under lower() ("A"/"a") would otherwise come out in a random order.
         members = sorted({str(p).strip() for p in participants or () if str(p).strip()},
-                         key=str.lower)
+                         key=lambda p: (p.lower(), p))
         label = str(name or "").strip()[:WOM_TEAM_NAME_MAX]
         if label and members:
             out.append({"name": label, "participants": members})
