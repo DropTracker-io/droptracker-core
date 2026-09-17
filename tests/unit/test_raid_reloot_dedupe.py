@@ -11,6 +11,7 @@ TestCompletionAwareRearm covers the other half: an identical bundle from a
 LATER completion (two purples of the same unique, ticket #441) must pass.
 """
 
+import logging
 import sys
 
 import pytest
@@ -336,6 +337,24 @@ class TestCompletionAwareRearm:
         watermark = next(k for k in fake_redis.store if k.startswith("raidloot:kc:"))
         assert watermark.endswith(":theatre-of-blood")
         assert fake_redis.store[watermark] == 818
+
+    def test_rejection_logs_who_and_what(self, fake_redis, caplog):
+        caplog.set_level(logging.INFO, logger="data.submissions.raid_dedupe")
+        flag_raid_reloot_duplicates(_purple_chest(818))
+        flag_raid_reloot_duplicates(_purple_chest(818))
+        (record,) = [r for r in caplog.records if "rejected" in r.getMessage()]
+        message = record.getMessage()
+        assert "player='Fazebook'" in message
+        assert "acc=4062539364958246995" in message
+        assert "kc=818" in message and "items=22477:1" in message
+
+    def test_accepted_repeat_is_logged(self, fake_redis, caplog):
+        caplog.set_level(logging.INFO, logger="data.submissions.raid_dedupe")
+        flag_raid_reloot_duplicates(_purple_chest(818))
+        flag_raid_reloot_duplicates(_purple_chest(819))
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("later completion" in m and "kc=819" in m for m in messages)
+        assert not any("rejected" in m for m in messages)
 
     def test_redis_errors_fail_open_for_current_builds(self, monkeypatch):
         _patch_redis(monkeypatch, _BrokenRedis())

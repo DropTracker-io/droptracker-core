@@ -57,6 +57,7 @@ arrives claiming kc+1.
 Redis trouble fails open (bundle treated as new)."""
 
 import hashlib
+import logging
 import re
 
 from utils.npc_names import (
@@ -65,6 +66,8 @@ from utils.npc_names import (
     npc_base_slug,
     npc_match_key,
 )
+
+log = logging.getLogger(__name__)
 
 #: Base-raid match keys whose reward chests can be re-opened at a bank chest.
 RAID_BASE_KEYS = {"theatre-of-blood", "tombs-of-amascut", "chambers-of-xeric"}
@@ -180,11 +183,14 @@ def _raid_bundles(processed_items) -> dict[tuple, list]:
     return bundles
 
 
-def _bundle_digest(items) -> str:
-    signature = ",".join(sorted(
+def _bundle_signature(items) -> str:
+    return ",".join(sorted(
         f"{item.get('item_id', item.get('id'))}:{item.get('quantity')}"
         for item in items
     ))
+
+
+def _bundle_digest(signature: str) -> str:
     return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]
 
 
@@ -337,21 +343,30 @@ def flag_raid_reloot_duplicates(processed_items) -> int:
     """
     flagged = 0
     for (acc_hash, raid, world), items in _raid_bundles(processed_items).items():
-        fingerprint = f"raidloot:reloot:{world}:{acc_hash}:{raid}:{_bundle_digest(items)}"
+        signature = _bundle_signature(items)
+        fingerprint = f"raidloot:reloot:{world}:{acc_hash}:{raid}:{_bundle_digest(signature)}"
         kill_count = _trusted_kill_count(items)
         completion_key = (
             _completion_key(acc_hash, world, items) if kill_count is not None else None
         )
         if not _bundle_is_new(fingerprint):
+            # Who and what, so a "my drop was blocked" ticket is one journal
+            # grep rather than an archaeology dig through kill-count gaps.
+            detail = (items[0].get("player_name") or items[0].get("player"),
+                      acc_hash, items[0].get("source"), world, kill_count, signature)
             if not (completion_key and _is_later_completion(completion_key, kill_count)):
                 for item in items:
                     item[RELOOT_FLAG] = True
                 flagged += len(items)
+                log.info("Raid re-loot duplicate rejected: player=%r acc=%s "
+                         "source=%r world=%s kc=%s items=%s", *detail)
                 continue
             # A later completion that rolled the same bundle. Re-arm for THIS
             # completion, so its own re-open is caught for the full window
             # rather than whatever the first sighting had left.
             _remember(fingerprint, "1", RELOOT_TTL_SECONDS)
+            log.info("Raid bundle repeat accepted as a later completion: player=%r "
+                     "acc=%s source=%r world=%s kc=%s items=%s", *detail)
         if completion_key:
             _remember(completion_key, kill_count, RELOOT_KC_TTL_SECONDS)
     return flagged
