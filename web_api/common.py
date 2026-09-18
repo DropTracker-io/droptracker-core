@@ -243,7 +243,7 @@ def player_list_loot_sum(player_ids: Iterable[int], partition: Optional[int] = N
 
     This used to call that function once per player: a GET, plus a ZSCORE for
     everyone without a total key, each its own round trip. The global group has
-    ~28k members of whom ~5k have loot in a month, so ``GET /groups/2`` spent
+    ~27k members of whom ~5k have loot in a month, so ``GET /groups/2`` spent
     3-4 seconds asking Redis about players with nothing, and
     ``_compute_group_totals`` repeats the loop for every group there is.
     ``services.redis_updates.get_player_list_loot_sum`` had the same shape and

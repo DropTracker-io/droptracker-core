@@ -249,7 +249,7 @@ def test_build_snapshot_shapes_database_rows(monkeypatch):
 
         def execute(self, statement, params=None):
             self.statements.append((str(statement), params))
-            if "COUNT(*)" in str(statement):
+            if "COUNT(" in str(statement):
                 return Result(scalar=27856)
             # MariaDB hands SUM() back as Decimal.
             return Result(rows=[(14150, "Yama", Decimal("31734859972"), Decimal("10138"))])
@@ -271,6 +271,14 @@ def test_build_snapshot_shapes_database_rows(monkeypatch):
         {"npc_id": 14150, "name": "Yama", "loot": 31_734_859_972, "drops": 10138},
     ]
     json.dumps(snapshot)  # must survive the trip into Redis (no Decimal left)
+
+    # "Accounts" means players. The association table also carries user-only
+    # rows and the odd duplicate, so a bare row count overstated it by ~1,100
+    # against production data (27,864 rows, 26,717 accounts).
+    member_sql, member_params = session.statements[0]
+    assert member_params == {"gid": ps.GLOBAL_GROUP_ID}
+    assert "COUNT(DISTINCT uga.player_id)" in member_sql
+    assert "JOIN players" in member_sql
 
     boss_sql, boss_params = session.statements[1]
     assert boss_params == {"partition": PART, "lim": ps.TOP_BOSSES}

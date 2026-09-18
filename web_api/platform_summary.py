@@ -7,9 +7,10 @@ The homepage used to take all three from ``GET /groups/2`` — the global group,
 which every tracked account belongs to. That endpoint is built for a clan page:
 it loads every member id, reads each member's month total, and joins the boss
 rollup against the membership table. For a clan of 200 that is nothing. For
-27,856 members (of whom about 4,800 have loot in a given month) it measured
-2.6-4.4s warm and 20s cold, and because its cache lives in the process, every
-restart of the web API was a cold start for the next visitor.
+~26,700 accounts (of whom about 4,800 have loot in a given month) it measured
+2.6-4.4s warm and ~20s cold — and cold is common, because its cache lives in the
+process: the web API runs two workers, each with its own copy expiring every
+two minutes, and every restart empties both.
 
 Nothing here needs that work:
 
@@ -22,9 +23,9 @@ Nothing here needs that work:
   invisible.
 * **Account count** and **top bosses** are the only parts that touch MariaDB,
   and neither changes quickly. They are computed together (about a second: the
-  boss rollup no longer joins 27k memberships, since "members of the global
-  group" is simply everybody) and kept in **Redis**, not in the process, so a
-  restart or a second worker starts warm.
+  boss rollup no longer joins ~27k memberships, since "members of the global
+  group" is simply everybody) and kept in **Redis**, not in the process, so
+  both workers share one copy and a restart starts warm.
 
 The snapshot is served stale-while-revalidate. A request never waits for a
 rebuild unless there is nothing at all to serve — the first request of a new
@@ -73,8 +74,15 @@ _TOP_BOSSES_SQL = text(
     "ORDER BY a.loot DESC"
 )
 
+# DISTINCT players, joined to `players` — not COUNT(*). The association table
+# also holds user-only rows (player_id NULL: 1,144 of them in the global group)
+# and a player can hold more than one row (the unique key includes user_id), so
+# a row count says 27,864 where the number of tracked accounts is 26,717.
 _MEMBER_COUNT_SQL = text(
-    "SELECT COUNT(*) FROM user_group_association WHERE group_id = :gid"
+    "SELECT COUNT(DISTINCT uga.player_id) "
+    "FROM user_group_association uga "
+    "JOIN players p ON p.player_id = uga.player_id "
+    "WHERE uga.group_id = :gid"
 )
 
 
