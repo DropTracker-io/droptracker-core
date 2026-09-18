@@ -73,6 +73,16 @@ class FakeRedis:
     def zcard(self, key):
         return len(self.zsets.get(key, {}))
 
+    def zrangebyscore(self, key, lo, hi):
+        z = self.zsets.get(key, {})
+        exclusive = isinstance(lo, str) and lo.startswith("(")
+        floor = float(lo[1:] if exclusive else lo)
+        ceiling = float(hi)
+        return [
+            m for m, score in z.items()
+            if (score > floor if exclusive else score >= floor) and score <= ceiling
+        ]
+
     def llen(self, key):
         return int(self.kv.get(f"__len__{key}", 0))
 
@@ -140,6 +150,45 @@ def test_active_players_trims_stale(r):
     assert "stale" not in r.zsets[sm._players_key(sm.SOURCE_API)]
 
 
+def test_recent_players_unions_the_intake_paths(r):
+    sm.record_processed(sm.SOURCE_API, "alice", r=r, now=NOW - 60)
+    sm.record_processed(sm.SOURCE_WEBHOOK, "alice", r=r, now=NOW - 30)   # same person, other path
+    sm.record_processed(sm.SOURCE_WEBHOOK, "bob", r=r, now=NOW - 200)
+    sm.record_processed(sm.SOURCE_API, "carol", r=r, now=NOW - 400)      # outside five minutes
+
+    # Adding the two paths' counts would say 3.
+    assert sm.count_recent_players(r=r, now=NOW) == 2
+    assert sm.count_recent_players((sm.SOURCE_API,), r=r, now=NOW) == 1
+
+
+def test_recent_players_leaves_the_hourly_set_alone(r):
+    # get_active_players trims to the window it is given; a five-minute reading
+    # built on it would empty the set the hourly reading depends on.
+    sm.record_processed(sm.SOURCE_API, "half-hour-ago", r=r, now=NOW - 1800)
+
+    assert sm.count_recent_players(r=r, now=NOW) == 0
+    assert "half-hour-ago" in r.zsets[sm._players_key(sm.SOURCE_API)]
+    assert sm.get_active_players(sm.SOURCE_API, r=r, now=NOW) == 1
+
+
+def test_recent_players_edge_agrees_with_active_players(r):
+    # Exactly on the boundary is out for both readings, so the two can never
+    # disagree about the same player at the same instant.
+    sm.record_processed(sm.SOURCE_API, "edge", r=r, now=NOW - 300)
+    sm.record_processed(sm.SOURCE_API, "inside", r=r, now=NOW - 299)
+
+    assert sm.count_recent_players(r=r, now=NOW, window_seconds=300) == 1
+    assert sm.get_active_players(sm.SOURCE_API, r=r, now=NOW, window_seconds=300) == 1
+
+
+def test_recent_players_fail_open():
+    class Boom:
+        def pipeline(self, transaction=True):
+            raise RuntimeError("redis down")
+
+    assert sm.count_recent_players(r=Boom(), now=NOW) == 0
+
+
 def test_heartbeat_age(r):
     assert sm.get_heartbeat_age("webhook_consumer", r=r, now=NOW) is None
     sm.heartbeat("webhook_consumer", r=r, now=NOW - 42)
@@ -177,6 +226,19 @@ def test_snapshot_all_operational(monkeypatch, r):
     assert snap["api"]["status"] == "operational"
     assert snap["webhook"]["status"] == "operational"
     assert snap["api"]["consumer_alive"] is True
+
+
+def test_snapshot_counts_players_online_across_both_paths(monkeypatch, r):
+    sm.record_processed(sm.SOURCE_API, "alice", r=r, now=NOW - 20)
+    sm.record_processed(sm.SOURCE_WEBHOOK, "alice", r=r, now=NOW - 10)
+    sm.record_processed(sm.SOURCE_WEBHOOK, "bob", r=r, now=NOW - 40)
+    sm.record_processed(sm.SOURCE_API, "carol", r=r, now=NOW - 2000)
+
+    snap = _snapshot(monkeypatch, r, ping=True, consumer_beat=True, webhook_beat=True)
+    assert snap["players_5m"] == 2
+    # The per-path hourly figures are untouched by the five-minute reading.
+    assert snap["api"]["players_1h"] == 2
+    assert snap["webhook"]["players_1h"] == 2
 
 
 def test_snapshot_api_offline(monkeypatch, r):

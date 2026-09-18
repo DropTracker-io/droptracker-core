@@ -34,6 +34,8 @@ WINDOWS = {"5m": 5, "30m": 30, "24h": 1440}
 _MINUTE_TTL = 25 * 3600
 _PLAYERS_TTL = 26 * 3600
 HEARTBEAT_TTL = 180
+# "Players online": anyone a submission was processed for this recently.
+ONLINE_WINDOW_SECONDS = 300
 
 ISSUES_REV_KEY = "status:issues:rev"
 
@@ -148,6 +150,37 @@ def get_active_players(source: str, *, window_seconds: int = 3600, r=None,
         return 0
 
 
+def count_recent_players(sources=(SOURCE_API, SOURCE_WEBHOOK), *,
+                         window_seconds: int = ONLINE_WINDOW_SECONDS, r=None,
+                         now: Optional[float] = None) -> int:
+    """Distinct players seen on ANY of ``sources`` inside the window.
+
+    Read-only on purpose. ``get_active_players`` trims its set down to the
+    window it is asked about, which suits the hour-long reading the set exists
+    to serve and would be destructive here: asking it for five minutes would
+    throw away the other fifty-five.
+
+    The sets are unioned rather than their sizes added, so somebody who shows
+    up on both intake paths inside the window is still one player.
+    """
+    conn = _conn(r)
+    if conn is None:
+        return 0
+    try:
+        ts = int(now if now is not None else time.time())
+        # Exclusive lower bound, matching what get_active_players keeps.
+        floor = f"({ts - window_seconds}"
+        pipe = conn.pipeline(transaction=False)
+        for source in sources:
+            pipe.zrangebyscore(_players_key(source), floor, "+inf")
+        seen = set()
+        for members in pipe.execute():
+            seen.update(members or ())
+        return len(seen)
+    except Exception:
+        return 0
+
+
 def get_heartbeat_age(service: str, *, r=None, now: Optional[float] = None) -> Optional[int]:
     """Seconds since the service last heartbeat, or None if no fresh beat."""
     conn = _conn(r)
@@ -220,6 +253,9 @@ def collect_service_snapshot(*, r=None, now: Optional[float] = None) -> dict:
 
     return {
         "generated_at": ts,
+        # Across both intake paths, de-duplicated: the two per-path hourly
+        # figures below cannot simply be added to get a headcount.
+        "players_5m": count_recent_players(r=r, now=ts),
         "api": {
             "status": api_status,
             "online": bool(api_online),
