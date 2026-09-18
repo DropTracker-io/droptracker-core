@@ -440,6 +440,29 @@ async def _check_and_award_points(
         f"raw_players_included={players_included}"
     )
 
+    # Read once per pass, and only on demand: whether this group shows a
+    # Discord user's RSNs as one total (db/point_standings.py).
+    combine_state = {}
+
+    def _counted_ids_for(target_player_id) -> list:
+        """Whose ledger rows make up the total PRINTED for this player: their
+        own, or -- when the group combines accounts -- every in-group account
+        of the same Discord user, so the notification quotes the number the
+        boards show. Any failure falls back to the player alone: a total is
+        decoration on a notification and must never cost the award."""
+        own = [int(target_player_id)]
+        try:
+            from db.point_standings import combine_enabled, counted_player_ids
+
+            if "on" not in combine_state:
+                combine_state["on"] = combine_enabled(session, int(group_id)) is True
+            if not combine_state["on"]:
+                return own
+            ids = counted_player_ids(session, int(group_id), own[0], combine=True)
+            return [int(i) for i in ids] or own
+        except Exception:
+            return own
+
     def _current_total_for(target_player_id) -> int:
         try:
             total = 0
@@ -447,7 +470,7 @@ async def _check_and_award_points(
                 session.query(PlayerPoints.amount)
                 .filter(
                     PlayerPoints.group_id == int(group_id),
-                    PlayerPoints.player_id == int(target_player_id),
+                    PlayerPoints.player_id.in_(_counted_ids_for(target_player_id)),
                 )
                 .all()
             )

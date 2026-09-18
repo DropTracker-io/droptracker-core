@@ -124,6 +124,7 @@ droptracker/
 │   ├── user.py             # /help, /accounts, /settings, /claim-rsn, etc.
 │   ├── admin.py            # /create-group, /webhooks, etc.
 │   ├── group_admin.py      # Point adjustments, audit log
+│   ├── points.py           # /group-points (paged board), /my-points, /lookup
 │   ├── submissions.py      # /submit drop|clog|pb|ca|pet — manual submissions
 │   │                       #   (item/NPC autocomplete; forwards to /manual-submit)
 │   └── utils.py            # try_create_user, is_admin, is_user_authorized
@@ -146,6 +147,8 @@ droptracker/
 │   ├── clan_sync.py        # WOM group ↔ Group membership reconciliation
 │   ├── group_creation.py   # Shared group-creation service (bot + web wizard)
 │   ├── player_claims.py    # Shared RSN claim/unclaim service (bot + web)
+│   ├── point_standings.py  # Who stands where on a clan's points board — the ONLY
+│   │                       #   place that decides it (site, bot and notifications)
 │   ├── entitlements.py     # Tier lookups used outside web_api
 │   ├── event_rate_limits.py# Per-tier event frequency caps
 │   ├── app_logger.py       # Structured JSON logger
@@ -425,7 +428,9 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Item valuation | `utils/ge_value.py`, `utils/value_overrides.py`, `web_api/routes/item_values.py` |
 | Change group configuration options | `web_api/config_registry.py` (+ frontend `packages/api-types`) |
 | Rename a group (name lives in 4 places) | `db/group_rename.py` — every rename path must go through it |
-| Points/premium features | `services/points.py`, `data/submissions/point_awards.py`, `db/models/group_points.py` |
+| Clan points: awarding | `data/submissions/point_awards.py`, `db/models/group_points.py`, `web_api/routes/points.py` (settings) |
+| Clan points: any total, rank or board shown to anyone | `db/point_standings.py` — current members only, RSNs optionally combined per Discord user (`points_combine_accounts`). Never write a fresh `SUM(amount)`; Discord surface is `commands/points.py` + `services/points_cards.py` |
+| Premium feature credits (a different ledger) | `services/points.py` |
 | Video upload flow | `api/routes/video.py`, `services/video_worker.py`, `utils/b2_storage.py` |
 | XenForo integration | `db/xf/`, `services/xf_services.py` |
 | Events v2 (tasks, bingo, teams) | `services/event_engine.py`, `workers/event_consumer.py`, `web_api/routes/events.py`, `db/models/events.py` |

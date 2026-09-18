@@ -95,6 +95,7 @@ async def build_help_components(bot=None):
     pingme_id          = await _cid("pingme")
     my_points_id       = await _cid("my-points")
     group_points_id    = await _cid("group-points")
+    lookup_id          = await _cid("lookup")
     # Sub-commands are cached under their full "<base> <sub>" name, and every
     # sub-command carries the *base* command's ID — which is exactly what the
     # </submit drop:ID> mention syntax expects.
@@ -134,8 +135,9 @@ async def build_help_components(bot=None):
                     f"-# </death-message:{death_message_id}> - Write what your clan sees when you die (if your clan allows members' own messages).\n"
                     f"-# </hideme:{hideme_id}> - Toggle whether your character(s) appear on public leaderboards/global channels.\n"
                     f"-# </pingme:{pingme_id}> - Toggle whether you get pinged when your submissions are sent to Discord.\n"
-                    f"-# </my-points:{my_points_id}> - View your earned points across all groups.\n"
-                    f"-# </group-points:{group_points_id}> - View this server's group point standings.\n"
+                    f"-# </my-points:{my_points_id}> - View your clan points: your rank, your accounts and your recent awards.\n"
+                    f"-# </group-points:{group_points_id}> - Browse this server's points leaderboard, by period or season.\n"
+                    f"-# </lookup:{lookup_id}> - Look up another player's clan points and DropTracker stats.\n"
                     f"-# </submit drop:{submit_id}> - Manually submit something you received, if the plugin missed it.\n"
                     "-# > Swap `drop` for `clog`, `pb`, `ca` or `pet` to submit any other achievement type.\n"
                 )

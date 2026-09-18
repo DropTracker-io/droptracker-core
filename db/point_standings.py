@@ -479,3 +479,125 @@ def recent_awards(session, group_id: int, player_ids: Sequence[int], limit: int 
          "reason": r[2] or "", "date_added": r[3]}
         for r in rows
     ]
+
+
+# --------------------------------------------------------------------------- #
+# DB: reads behind the Discord cards (/my-points, /lookup)
+# --------------------------------------------------------------------------- #
+def totals_by_group(session, player_ids: Sequence[int]) -> dict:
+    """``{group_id: points}`` across these accounts, counting each account only
+    in the groups it is currently a member of -- the same leaver rule as the
+    boards, applied per group. Groups that net to zero are left out."""
+    ids = sorted({int(p) for p in player_ids})
+    if not ids:
+        return {}
+    in_stmt = bindparam("ids", expanding=True)
+    memberships = {
+        (int(pid), int(gid))
+        for pid, gid in session.execute(
+            text(
+                "SELECT player_id, group_id FROM user_group_association "
+                "WHERE player_id IN :ids"
+            ).bindparams(in_stmt),
+            {"ids": ids},
+        ).fetchall()
+    }
+    out: dict = {}
+    for pid, gid, points in session.execute(
+        text(
+            "SELECT player_id, group_id, SUM(amount) FROM player_points "
+            "WHERE player_id IN :ids AND group_id IS NOT NULL "
+            "GROUP BY player_id, group_id"
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).fetchall():
+        if (int(pid), int(gid)) in memberships:
+            out[int(gid)] = out.get(int(gid), 0) + int(points or 0)
+    return {gid: pts for gid, pts in out.items() if pts != 0}
+
+
+def group_names(session, group_ids: Sequence[int]) -> dict:
+    ids = sorted({int(g) for g in group_ids})
+    if not ids:
+        return {}
+    rows = session.execute(
+        text("SELECT group_id, group_name FROM `groups` WHERE group_id IN :ids")
+        .bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).fetchall()
+    return {int(gid): (name or f"Group #{gid}") for gid, name in rows}
+
+
+def load_points_card(session, group_id: int, player_ids: Sequence[int], *,
+                     now: Optional[datetime] = None, recent: int = 5) -> dict:
+    """Everything a player card says about these accounts in this group: the
+    all-time and this-month boards (so the card can quote a rank *of how
+    many*), which of the accounts are current members, and the newest awards
+    of the ones that are.
+
+    Boards are returned whole rather than as a pre-picked standing because the
+    shape differs by mode -- one combined standing, or one per RSN -- and the
+    renderer already knows how to ask (``find_standing``).
+    """
+    ids = sorted({int(p) for p in player_ids})
+    combine = combine_enabled(session, group_id)
+    members = member_player_ids(session, group_id, ids)
+    token, start, end = resolve_period("month", now)
+    return {
+        "combined": combine,
+        "member_ids": members,
+        "all_time": load_standings(session, group_id, combine=combine),
+        "month": load_standings(session, group_id, start=start, end=end, combine=combine),
+        "month_token": token,
+        "recent": recent_awards(session, group_id, sorted(members), recent) if members else [],
+    }
+
+
+def search_member_names(session, group_id: Optional[int], typed: str, limit: int = 25) -> list:
+    """RSN suggestions for an autocomplete box: this group's current members
+    whose name contains ``typed`` (OSRS name equivalence), or -- with no group,
+    e.g. in a DM -- any player whose name starts with it.
+
+    Hidden players are never suggested. The in-group form folds separators in
+    SQL over one clan's roster; the global form is a plain indexed prefix seek,
+    because a ``%...%`` scan of every player on each keystroke is not something
+    an autocomplete gets to cost.
+    """
+    folded = " ".join(str(typed or "").replace("-", " ").replace("_", " ").split()).lower()
+    escaped = folded.replace("!", "!!").replace("%", "!%")
+    limit = max(1, min(int(limit), 25))
+    visible = (
+        "COALESCE(p.hidden, 0) = 0 AND NOT EXISTS ("
+        "SELECT 1 FROM users u WHERE u.user_id = p.user_id AND COALESCE(u.hidden, 0) = 1)"
+    )
+    if group_id is not None:
+        rows = session.execute(
+            text(
+                "SELECT p.player_name FROM players p "
+                "WHERE p.player_id IN (SELECT player_id FROM user_group_association "
+                "                      WHERE group_id = :gid AND player_id IS NOT NULL) "
+                "AND REPLACE(REPLACE(LOWER(p.player_name), '-', ' '), '_', ' ') "
+                "    LIKE :needle ESCAPE '!' "
+                f"AND {visible} "
+                "ORDER BY p.player_name LIMIT :lim"
+            ),
+            {"gid": int(group_id), "needle": f"%{escaped}%", "lim": limit},
+        ).fetchall()
+    else:
+        if not folded:
+            return []
+        rows = session.execute(
+            text(
+                "SELECT p.player_name FROM players p "
+                "WHERE p.player_name LIKE :needle ESCAPE '!' "
+                f"AND {visible} "
+                "ORDER BY p.player_name LIMIT :lim"
+            ),
+            {"needle": f"{escaped}%", "lim": limit},
+        ).fetchall()
+    seen, out = set(), []
+    for (name,) in rows:
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out

@@ -8,6 +8,7 @@ Modules:
     user: User-level commands (help, accounts, claim-rsn, dm-settings, etc.)
     admin: Administrator commands (group management, webhooks, etc.)
     group_admin: Group admin commands (manual point adjustments, audit log)
+    points: Member-facing points commands (/group-points, /my-points, /lookup)
     submissions: Manual submission commands (/submit drop|clog|pb|ca|pet)
     bug_tester: Bot-owner /bug-tester add|remove|list (main server only)
     utils: Utility functions and helpers for commands
@@ -16,6 +17,7 @@ Classes:
     UserCommands: Extension containing user-level commands
     ClanCommands: Extension containing clan/admin commands
     GroupAdminCommands: Extension containing group admin point management commands
+    PointsCommands: Extension containing the member-facing clan points commands
     SubmissionCommands: Extension containing the /submit manual-submission commands
     BugTesterCommands: Extension containing the owner-only /bug-tester commands
 
@@ -25,6 +27,7 @@ Author: joelhalen
 from .user import UserCommands
 from .admin import ClanCommands
 from .group_admin import GroupAdminCommands
+from .points import PointsCommands
 from .submissions import SubmissionCommands
 from .bug_tester import BugTesterCommands
 from .utils import try_create_user, is_admin, is_user_authorized, get_external_latency
@@ -33,6 +36,7 @@ __all__ = [
     'UserCommands',
     'ClanCommands',
     'GroupAdminCommands',
+    'PointsCommands',
     'SubmissionCommands',
     'BugTesterCommands',
     'try_create_user',

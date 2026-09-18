@@ -16,7 +16,7 @@ from datetime import datetime
 from secrets import token_hex
 from data.submissions import try_create_player
 from interactions import AutocompleteContext, SlashContext, Embed, OptionType, Extension, slash_command, slash_option
-from db.models import Session, User, Group, Guild, Player, UserConfiguration, session, PlayerPoints
+from db.models import Session, User, Group, Guild, Player, UserConfiguration, session
 from db.player_claims import claim_player, unclaim_player
 from services.components import build_help_components
 from services.points import award_points_to_player
@@ -25,7 +25,6 @@ from utils.site_urls import player_url
 from utils.app_emojis import emoji as app_emoji
 from utils.wiseoldman import check_user_by_username
 from .utils import try_create_user, is_admin, is_user_authorized
-from sqlalchemy import func
 
 
 def _time_since_iso(claimed_at):
@@ -597,163 +596,6 @@ class UserCommands(Extension):
             {"name": account.player_name, "value": account.player_name}
             for account in accounts
         ])
-
-    @slash_command(
-        name="my-points",
-        description="View your earned points across your groups",
-    )
-    async def my_points_cmd(self, ctx: SlashContext):
-        self._refresh_session()
-        user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
-        if not user:
-            await try_create_user(ctx=ctx)
-            user = session.query(User).filter(User.discord_id == str(ctx.user.id)).first()
-
-        players = session.query(Player).filter(Player.user_id == user.user_id).all()
-        if not players:
-            return await ctx.send(
-                "No claimed accounts were found for your user. Use `/claim-rsn` first.",
-                ephemeral=True
-            )
-
-        player_ids = [p.player_id for p in players]
-        player_name_by_id = {p.player_id: p.player_name for p in players}
-
-        current_group = self._get_group_for_guild(ctx.guild_id)
-        current_group_total = 0
-        if current_group:
-            current_group_total = int(
-                session.query(func.coalesce(func.sum(PlayerPoints.amount), 0))
-                .filter(
-                    PlayerPoints.group_id == current_group.group_id,
-                    PlayerPoints.player_id.in_(player_ids),
-                )
-                .scalar() or 0
-            )
-
-        per_group_rows = (
-            session.query(
-                PlayerPoints.group_id,
-                func.coalesce(func.sum(PlayerPoints.amount), 0).label("total_points")
-            )
-            .filter(
-                PlayerPoints.player_id.in_(player_ids),
-                PlayerPoints.group_id.isnot(None),
-            )
-            .group_by(PlayerPoints.group_id)
-            .order_by(func.sum(PlayerPoints.amount).desc())
-            .all()
-        )
-
-        total_points = int(sum(int(r.total_points or 0) for r in per_group_rows))
-        if total_points <= 0:
-            return await ctx.send(
-                "You have not earned any group points yet.",
-                ephemeral=True
-            )
-
-        group_ids = [int(r.group_id) for r in per_group_rows if r.group_id is not None]
-        groups = session.query(Group).filter(Group.group_id.in_(group_ids)).all() if group_ids else []
-        group_name_by_id = {g.group_id: g.group_name for g in groups}
-
-        per_player_rows = (
-            session.query(
-                PlayerPoints.player_id,
-                func.coalesce(func.sum(PlayerPoints.amount), 0).label("total_points")
-            )
-            .filter(PlayerPoints.player_id.in_(player_ids))
-            .group_by(PlayerPoints.player_id)
-            .order_by(func.sum(PlayerPoints.amount).desc())
-            .all()
-        )
-
-        embed = Embed(
-            title="Your Group Points",
-            description=f"Total points across all groups: **{total_points:,}**",
-        )
-        if current_group:
-            embed.add_field(
-                name=f"Current Server Group ({current_group.group_name})",
-                value=f"**{current_group_total:,}** point(s)",
-                inline=False
-            )
-
-        player_lines = []
-        for row in per_player_rows[:10]:
-            player_name = player_name_by_id.get(int(row.player_id), f"Player {row.player_id}")
-            player_lines.append(f"`{player_name}` - **{int(row.total_points or 0):,}**")
-        if player_lines:
-            embed.add_field(name="Your Accounts", value="\n".join(player_lines), inline=False)
-
-        group_lines = []
-        for row in per_group_rows[:10]:
-            gid = int(row.group_id)
-            gname = group_name_by_id.get(gid, f"Group #{gid}")
-            group_lines.append(f"`{gname}` - **{int(row.total_points or 0):,}**")
-        if group_lines:
-            embed.add_field(name="Top Groups For You", value="\n".join(group_lines), inline=False)
-
-        embed.set_footer(text="Points are based on tracked group point awards.")
-        await ctx.send(embed=embed, ephemeral=True)
-
-    @slash_command(
-        name="group-points",
-        description="View this server group's point standings",
-    )
-    async def group_points_cmd(self, ctx: SlashContext):
-        self._refresh_session()
-        if not ctx.guild_id:
-            return await ctx.send("Use this command inside your group's Discord server.", ephemeral=True)
-
-        group = self._get_group_for_guild(ctx.guild_id)
-        if not group:
-            return await ctx.send("This server is not linked to a DropTracker group.", ephemeral=True)
-
-        total_points = int(
-            session.query(func.coalesce(func.sum(PlayerPoints.amount), 0))
-            .filter(PlayerPoints.group_id == group.group_id)
-            .scalar() or 0
-        )
-        total_awards = int(
-            session.query(func.count(PlayerPoints.id))
-            .filter(PlayerPoints.group_id == group.group_id)
-            .scalar() or 0
-        )
-        total_players = int(
-            session.query(func.count(func.distinct(PlayerPoints.player_id)))
-            .filter(PlayerPoints.group_id == group.group_id)
-            .scalar() or 0
-        )
-
-        top_rows = (
-            session.query(
-                Player.player_name,
-                func.coalesce(func.sum(PlayerPoints.amount), 0).label("total_points")
-            )
-            .join(PlayerPoints, PlayerPoints.player_id == Player.player_id)
-            .filter(PlayerPoints.group_id == group.group_id)
-            .group_by(Player.player_id, Player.player_name)
-            .order_by(func.sum(PlayerPoints.amount).desc())
-            .limit(10)
-            .all()
-        )
-
-        embed = Embed(
-            title=f"{group.group_name} - Group Points",
-            description=f"**{total_points:,}** total point(s) across **{total_players:,}** player(s).",
-        )
-        embed.add_field(name="Award Entries", value=f"{total_awards:,}", inline=True)
-
-        if top_rows:
-            lines = [
-                f"**{idx}.** `{row.player_name}` - **{int(row.total_points or 0):,}**"
-                for idx, row in enumerate(top_rows, start=1)
-            ]
-            embed.add_field(name="Top Players", value="\n".join(lines), inline=False)
-        else:
-            embed.add_field(name="Top Players", value="No points have been awarded yet.", inline=False)
-
-        await ctx.send(embed=embed, ephemeral=True)
 
     @slash_command(
         name="sync-wom",

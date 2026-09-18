@@ -133,6 +133,28 @@ def _embed_from_dict(d: dict) -> Embed:
 # Embed rebuild — mirrors the notification service's template pipeline
 # ---------------------------------------------------------------------------
 
+def _shown_points_total(db, group_id: int, player_id: int) -> int:
+    """The running points total to print beside a player in this group.
+
+    Same rule as the boards and the award-time notification
+    (``db/point_standings.display_total``): the player's own total, or their
+    Discord user's combined in-group total when the group combines accounts --
+    so an edited notification never quotes a different number than the one it
+    replaced. Falls back to the player's own sum if that read fails.
+    """
+    try:
+        from db.point_standings import display_total
+
+        return int(display_total(db, group_id, player_id))
+    except Exception:
+        return int(
+            db.query(sa_func.sum(PlayerPoints.amount))
+            .filter(PlayerPoints.player_id == player_id, PlayerPoints.group_id == group_id)
+            .scalar()
+            or 0
+        )
+
+
 async def _rebuild_notification_embed(drop, player, item, npc, group_id, db):
     """
     Rebuild the Discord notification embed from the group's template using
@@ -231,11 +253,7 @@ async def _rebuild_notification_embed(drop, player, item, npc, group_id, db):
     members_awarded = []
     for pp in all_points:
         pp_player = db.query(Player).filter(Player.player_id == pp.player_id).first()
-        pp_total = (
-            db.query(sa_func.sum(PlayerPoints.amount))
-            .filter(PlayerPoints.player_id == pp.player_id, PlayerPoints.group_id == group_id)
-            .scalar()
-        ) or 0
+        pp_total = _shown_points_total(db, group_id, pp.player_id)
         members_awarded.append({
             "player_name": pp_player.player_name if pp_player else "Unknown",
             "player_id": pp.player_id,
@@ -252,11 +270,7 @@ async def _rebuild_notification_embed(drop, player, item, npc, group_id, db):
         and members_awarded[0].get("player_id") == player_id
     )
 
-    receiver_total = (
-        db.query(sa_func.sum(PlayerPoints.amount))
-        .filter(PlayerPoints.player_id == player_id, PlayerPoints.group_id == group_id)
-        .scalar()
-    ) or 0
+    receiver_total = _shown_points_total(db, group_id, player_id)
 
     video_url = getattr(drop, "video_url", None) or ""
     image_url = getattr(drop, "image_url", None) or ""
