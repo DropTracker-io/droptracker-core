@@ -1375,7 +1375,10 @@ async def points_leaderboard(group_id: int):
                 "entries": entries,
                 "seasons": _seasons_payload(s, group_id),
                 "meta": {"page": page, "limit": limit, "total": int(total)},
-            }
+            }, bool(behavior["points_leaderboard_public"])
 
-    resp = jsonify(await asyncio.to_thread(_load))
-    return with_cache_headers(resp, max_age=15)
+    payload, is_public = await asyncio.to_thread(_load)
+    resp = jsonify(payload)
+    # A members-only board was just authorised for THIS viewer; it must never
+    # be labelled cacheable for everyone else.
+    return with_cache_headers(resp, max_age=15) if is_public else private_no_store(resp)

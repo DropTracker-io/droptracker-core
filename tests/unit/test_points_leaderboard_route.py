@@ -188,6 +188,22 @@ async def test_private_board_admits_members(client, monkeypatch, clan):
     assert status == 200 and len(body["entries"]) == 3
 
 
+async def test_public_board_is_briefly_cacheable(client, monkeypatch, clan):
+    _wire(monkeypatch, clan)
+    resp = await client.get(f"/api/v1/groups/{GROUP}/points/leaderboard?period=all")
+    assert "public" in resp.headers["Cache-Control"]
+
+
+async def test_members_only_board_is_never_labelled_cacheable(client, monkeypatch, clan):
+    # It was authorised for this one viewer.
+    _wire(monkeypatch, clan, behavior={"points_leaderboard_public": False},
+          viewer_id=5, role="member")
+    resp = await client.get(f"/api/v1/groups/{GROUP}/points/leaderboard?period=all")
+    assert resp.status_code == 200
+    assert "no-store" in resp.headers["Cache-Control"]
+    assert "public" not in resp.headers["Cache-Control"]
+
+
 async def test_malformed_partition_is_a_400(client, monkeypatch, clan):
     _wire(monkeypatch, clan)
     resp = await client.get(f"/api/v1/groups/{GROUP}/points/leaderboard?period=20261399")
