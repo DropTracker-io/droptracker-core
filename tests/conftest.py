@@ -237,6 +237,18 @@ if "db.ca_points" not in sys.modules:
     sys.modules["db.ca_points"] = _mod
     _spec.loader.exec_module(_mod)
 
+# db/point_standings.py — who stands where on a clan's points board: the
+# current-members-only rule and the combine-accounts toggle. Same shape as
+# ca_points (SQLAlchemy-core text(), session passed in, no ORM-model imports),
+# and the website, the bot and the award engine all read totals through it, so
+# tests/unit/test_point_standings.py runs its real SQL against SQLite.
+_POINT_STANDINGS_PATH = _Path(__file__).resolve().parent.parent / "db" / "point_standings.py"
+if "db.point_standings" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("db.point_standings", _POINT_STANDINGS_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["db.point_standings"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/event_effort.py — the Bingo EHB scoring core. Pure by design
 # (stdlib-only module imports, injected lookups), so load the real module: the
 # effort tests assert on its relevance/EHB decisions directly.

@@ -25,7 +25,13 @@ Admin (session + group admin; mutations also need the `custom_points` entitlemen
 
 Public (leaderboard visibility honors the `points_leaderboard_public` group
 config; when the group opts out, members/admins can still view):
-  GET /api/v1/groups/{id}/points/leaderboard?period=&page=&limit=
+  GET /api/v1/groups/{id}/points/leaderboard?period=&q=&page=&limit=
+
+Who stands on that board is decided in `db/point_standings.py`, shared with the
+Discord commands and the totals notifications print: only CURRENT members
+stand (a leaver's ledger rows stay, their place does not), and the
+`points_combine_accounts` behavior sums a Discord user's in-group RSNs into one
+entry. `q` narrows the board by account name without re-ranking it.
 
 The awarding engine (`data/submissions/point_awards.py`) reads the same tables
 these routes write: `group_point_settings`, `group_point_mods`,
@@ -37,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from quart import Blueprint, jsonify, request
 from sqlalchemy import func
@@ -56,7 +62,6 @@ from db.models.analytics import Log
 from web_api.common import (
     abort_problem,
     db_session,
-    hidden_player_ids,
     parse_page,
     private_no_store,
     with_cache_headers,
@@ -91,6 +96,10 @@ BEHAVIOR_BOOL_KEYS = (
     "point_sharing",
     "points_require_group_only",
     "points_leaderboard_public",
+    # Display-only: sums a Discord user's in-group RSNs into one standing. The
+    # ledger stays per-player, so flipping it re-draws boards and never rewrites
+    # a row. Mirrors db/point_standings.COMBINE_CONFIG_KEY (pinned by a test).
+    "points_combine_accounts",
 )
 BEHAVIOR_INT_KEYS = ("min_submission_pts", "max_submission_pts")
 SHARING_METHODS = ("equal_split", "award_all")
@@ -100,9 +109,14 @@ BEHAVIOR_DEFAULTS = {
     "point_sharing_method": "equal_split",
     "points_require_group_only": False,
     "points_leaderboard_public": True,
+    "points_combine_accounts": False,
     "min_submission_pts": 0,
     "max_submission_pts": 0,
 }
+
+#: Longest leaderboard search accepted. An RSN is 12 characters; the slack is
+#: for a pasted name with stray whitespace, not for a paragraph.
+MAX_LEADERBOARD_QUERY = 40
 
 ADMIN_MANUAL_ENTRY_TYPE = 99  # mirrors commands/group_admin.py
 # Event clan-point awards (web114a) — entry_id is the paying event. Mirrors
@@ -298,6 +312,17 @@ def _season_payload(row: GroupPointSeason) -> dict:
     }
 
 
+def _seasons_payload(s, group_id: int) -> list[dict]:
+    """The group's leaderboard seasons, newest first."""
+    rows = (
+        s.query(GroupPointSeason)
+        .filter(GroupPointSeason.group_id == group_id)
+        .order_by(GroupPointSeason.start_at.desc())
+        .all()
+    )
+    return [_season_payload(row) for row in rows]
+
+
 def _audit(s, *, action: str, actor: User | None, group: Group, message: str, details: dict) -> None:
     payload = dict(details)
     payload.update({
@@ -330,17 +355,11 @@ async def get_points_settings(group_id: int):
 
             user = load_user(s, user_id)
             entitlements = resolve_group_entitlements(s, group_id, user=user)
-            seasons = (
-                s.query(GroupPointSeason)
-                .filter(GroupPointSeason.group_id == group_id)
-                .order_by(GroupPointSeason.start_at.desc())
-                .all()
-            )
             return {
                 "enabled": bool(entitlements.get(ENTITLEMENT_KEY)),
                 "rules": _rules_payload(s, group_id),
                 "behavior": _read_behavior(s, group_id),
-                "seasons": [_season_payload(row) for row in seasons],
+                "seasons": _seasons_payload(s, group_id),
             }
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
@@ -1274,50 +1293,49 @@ def _period_window(s, group_id: int, period: str):
             abort_problem(404, "Season not found", f"No season {season_id} on this group.")
         return f"season:{season_id}", season.start_at, season.end_at
 
-    if period == "all":
-        return "all", None, None
+    # Presets and explicit partitions: one resolver, shared with the Discord
+    # commands so "this week" means the same window on both.
+    from db.point_standings import resolve_period
 
-    if period == "day" or (len(period) == 8 and period.isdigit()):
-        if period == "day":
-            day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            try:
-                day = datetime.strptime(period, "%Y%m%d")
-            except Exception:
-                abort_problem(400, "Invalid period", f"Unrecognized day partition '{period}'.")
-        return day.strftime("%Y%m%d"), day, day + timedelta(days=1)
+    try:
+        return resolve_period(period, now)
+    except ValueError as exc:
+        abort_problem(400, "Invalid period", str(exc))
 
-    if period == "week" or (len(period) == 7 and period[4] == "w"):
-        if period == "week":
-            monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            try:
-                year, week = int(period[:4]), int(period[5:])
-                monday = datetime.fromisocalendar(year, week, 1)
-            except Exception:
-                abort_problem(400, "Invalid period", f"Unrecognized week partition '{period}'.")
-        iso = monday.isocalendar()
-        return f"{iso[0]}W{iso[1]:02d}", monday, monday + timedelta(days=7)
 
-    # Month (default): "month" or YYYYMM.
-    if period == "month":
-        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    else:
-        try:
-            start = datetime.strptime(period, "%Y%m")
-        except Exception:
-            start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
-    return start.strftime("%Y%m"), start, end
+def _standing_payload(standing) -> dict:
+    """One board row. ``id``/``name`` are the account the row is shown under
+    (the top-scoring one that may be named); ``accounts`` is every nameable
+    account behind the total -- one on a per-RSN board, several when the group
+    combines a Discord user's RSNs. A hidden account counts towards ``points``
+    but is never listed, so the breakdown can sum to less than the total."""
+    primary = standing.primary
+    return {
+        "rank": standing.rank,
+        "id": primary.player_id,
+        "name": primary.name,
+        "points": standing.points,
+        "accounts": [
+            {"id": a.player_id, "name": a.name, "points": a.points}
+            for a in standing.visible_accounts
+        ],
+    }
 
 
 @points_bp.get("/groups/<int:group_id>/points/leaderboard")
 async def points_leaderboard(group_id: int):
     viewer_id = optional_user_id()
     period = request.args.get("period", "month")
+    query = (request.args.get("q") or "").strip()[:MAX_LEADERBOARD_QUERY]
     page, limit = parse_page(request, default_limit=25, max_limit=100)
 
     def _load():
+        from db.point_standings import (
+            load_standings,
+            search_standings,
+            visible_standings,
+        )
+
         with db_session() as s:
             group = _assert_group_exists(s, group_id)
 
@@ -1332,64 +1350,30 @@ async def points_leaderboard(group_id: int):
 
             token, start, end = _period_window(s, group_id, period)
 
-            q = (
-                s.query(
-                    PlayerPoints.player_id,
-                    func.sum(PlayerPoints.amount).label("points"),
-                )
-                .filter(PlayerPoints.group_id == group_id)
+            # Ranked over every current member, THEN narrowed: a hidden player
+            # leaves a rank gap rather than promoting everyone below them
+            # (matches the loot boards), and a search hit keeps the rank it
+            # holds on the full board. Hidden rows are dropped before paging so
+            # a page is never short for a reason the viewer cannot see.
+            combine = bool(behavior["points_combine_accounts"])
+            board = visible_standings(
+                load_standings(s, group_id, start=start, end=end, combine=combine)
             )
-            if start is not None:
-                q = q.filter(PlayerPoints.date_added >= start)
-            if end is not None:
-                q = q.filter(PlayerPoints.date_added < end)
-            q = q.group_by(PlayerPoints.player_id).having(func.sum(PlayerPoints.amount) != 0)
-
-            total = q.count()
-            rows = (
-                q.order_by(func.sum(PlayerPoints.amount).desc(), PlayerPoints.player_id.asc())
-                .offset((page - 1) * limit)
-                .limit(limit)
-                .all()
-            )
-
-            hidden = hidden_player_ids()
-            ids = [int(pid) for pid, _ in rows if int(pid) not in hidden]
-            name_map = {}
-            if ids:
-                name_map = dict(
-                    s.query(Player.player_id, Player.player_name)
-                    .filter(Player.player_id.in_(ids))
-                    .all()
-                )
-
-            start_rank = (page - 1) * limit
-            entries = []
-            for pos, (pid, points) in enumerate(rows):
-                pid = int(pid)
-                if pid in hidden:
-                    # Keep rank gaps rather than reshuffling (matches loot boards).
-                    continue
-                entries.append({
-                    "rank": start_rank + pos + 1,
-                    "id": pid,
-                    "name": name_map.get(pid, f"Player {pid}"),
-                    "points": int(points),
-                })
-
-            seasons = (
-                s.query(GroupPointSeason)
-                .filter(GroupPointSeason.group_id == group_id)
-                .order_by(GroupPointSeason.start_at.desc())
-                .all()
-            )
+            matches = search_standings(board, query)
+            total = len(matches)
+            offset = (page - 1) * limit
+            entries = [_standing_payload(st) for st in matches[offset:offset + limit]]
 
             return {
                 "period": token,
                 "group_id": group_id,
                 "group_name": group.group_name,
+                # Whether rows are Discord users (RSNs summed) or single RSNs,
+                # so the page can say which it is showing.
+                "combined": combine,
+                "query": query,
                 "entries": entries,
-                "seasons": [_season_payload(r) for r in seasons],
+                "seasons": _seasons_payload(s, group_id),
                 "meta": {"page": page, "limit": limit, "total": int(total)},
             }
 
