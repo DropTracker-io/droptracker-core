@@ -225,10 +225,58 @@ def player_month_totals(player_ids: Iterable[int],
     return out
 
 
+# Players per MGET / ZMSCORE in player_list_loot_sum.
+_LOOT_SUM_BATCH = 1000
+
+
+def _redis_number_as_int(raw) -> int:
+    try:
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode()
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 def player_list_loot_sum(player_ids: Iterable[int], partition: Optional[int] = None) -> int:
+    """Sum of :func:`player_month_total` over the players, read in batches.
+
+    This used to call that function once per player: a GET, plus a ZSCORE for
+    everyone without a total key, each its own round trip. The global group has
+    ~28k members of whom ~5k have loot in a month, so ``GET /groups/2`` spent
+    3-4 seconds asking Redis about players with nothing, and
+    ``_compute_group_totals`` repeats the loop for every group there is.
+    ``services.redis_updates.get_player_list_loot_sum`` had the same shape and
+    was freezing the core bot's event loop until it was batched; this is that
+    fix, two round trips per thousand players.
+
+    Same keys, same fallback and the same answer as before. ``partition`` may be
+    a monthly int or any period token the leaderboards resolve.
+    """
+    if partition is None:
+        partition = get_current_partition()
+    conn = _rc()
+    if conn is None:
+        return 0
+    ids = [pid for pid in player_ids if pid is not None]
     total = 0
-    for pid in player_ids:
-        total += player_month_total(pid, partition)
+    try:
+        for start in range(0, len(ids), _LOOT_SUM_BATCH):
+            batch = ids[start:start + _LOOT_SUM_BATCH]
+            raws = conn.mget([f"player:{pid}:{partition}:total_loot" for pid in batch])
+            missing = []
+            for pid, raw in zip(batch, raws):
+                if raw is None:
+                    missing.append(pid)
+                else:
+                    total += _redis_number_as_int(raw)
+            if missing:
+                scores = conn.zmscore(leaderboard_key(partition), missing)
+                total += sum(_redis_number_as_int(s) for s in scores if s is not None)
+    except Exception:
+        # The per-player version swallowed each failure as 0; a failed batch is
+        # the same outcome at a coarser grain. Whatever was read still counts.
+        return total
     return total
 
 
