@@ -59,6 +59,7 @@ from web_api.routes.notification_defaults import notification_defaults_bp
 from web_api.routes.npcs import npcs_bp
 from web_api.routes.paypal_ipn import paypal_ipn_bp
 from web_api.routes.personal_bests import personal_bests_bp
+from web_api.routes.platform import platform_bp
 from web_api.routes.player_claims import player_claims_bp
 from web_api.routes.points import points_bp
 from web_api.routes.profiles import profiles_bp
@@ -231,6 +232,7 @@ def create_app() -> Quart:
     app.register_blueprint(paypal_ipn_bp, url_prefix=API_PREFIX)
     app.register_blueprint(leaderboards_bp, url_prefix=API_PREFIX)
     app.register_blueprint(personal_bests_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(platform_bp, url_prefix=API_PREFIX)
     app.register_blueprint(player_claims_bp, url_prefix=API_PREFIX)
     app.register_blueprint(points_bp, url_prefix=API_PREFIX)
     app.register_blueprint(profiles_bp, url_prefix=API_PREFIX)
