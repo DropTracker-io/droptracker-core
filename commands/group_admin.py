@@ -47,7 +47,15 @@ class GroupAdminCommands(Extension):
         self.bot = bot
 
     def _refresh_session(self):
-        session.remove()
+        """Drop stale ORM state before handling a new interaction.
+
+        ``expire_all()``, never ``session.remove()`` -- the scoped session is
+        shared by every coroutine in this bot, and tearing it down detaches
+        objects other tasks hold across an await (see
+        ``commands/user.py._refresh_session`` for the incident this caused).
+        The autocompletes here run this once per keystroke.
+        """
+        session.expire_all()
 
     def _get_group_for_guild(self, guild_id):
         if not guild_id:

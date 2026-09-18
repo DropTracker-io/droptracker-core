@@ -271,6 +271,11 @@ class TestProductionSourceGuards:
         "services/channel_names.py",
         "commands/user.py",
         "commands/submissions.py",
+        # Missed by the original sweep: its player autocompletes tore the
+        # shared session down once per keystroke until 2026-09-18.
+        "commands/group_admin.py",
+        "commands/admin.py",
+        "commands/points.py",
     ])
     def test_background_work_never_tears_down_the_shared_scoped_session(self, path):
         calls = _calls(ast.parse(_source(path)))
