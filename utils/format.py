@@ -12,6 +12,7 @@ from db import NpcList, session, models
 # OSRS player-name equivalence lives in utils/rsn.py, which has no db imports
 # (the Data API cannot import this module first -- see its docstring).
 from utils.rsn import (  # noqa: F401  (re-exported)
+    better_spelling,
     find_player_by_rsn,
     normalize_claim_rsn_input,
     normalize_player_display_equivalence,

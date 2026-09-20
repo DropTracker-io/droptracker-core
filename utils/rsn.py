@@ -134,3 +134,31 @@ def player_name_search_expr(column):
     return func.replace(
         func.replace(func.lower(column), "-", " "), "_", " ", type_=String
     )
+
+
+def better_spelling(stored: str, incoming: str, *, authoritative: bool) -> str | None:
+    """The spelling ``players.player_name`` should hold, or None to leave it.
+
+    Two writers supply a name and they disagree in ways that are not real name
+    changes, so "is this a different account?" (answered by
+    ``normalize_player_display_equivalence``) must not also answer "should I
+    rewrite the stored spelling?". Gating the rewrite on the normalized
+    comparison is what froze ~900 rows at WOM's lowercase ``username``
+    (ticket #441): the correct spelling normalized equal, so it was read as
+    "same name, nothing to do" and dropped -- 94 times for one account.
+
+    ``authoritative`` marks a WOM ``displayName``, which is the account's real
+    in-game spelling and wins outright. Everything else is a plugin-submitted
+    name: the plugin sends the game's spelling verbatim, so it is trusted for
+    CASE but not for separators, because WOM legitimately reports display names
+    carrying a '_' the game renders as a space ("ZE_ET" vs a submitted
+    "ZE ET"). Letting it overwrite separators too would make the hourly WOM
+    sync and every submission rewrite the row in turn, forever.
+    """
+    stored = "" if stored is None else str(stored)
+    incoming = "" if incoming is None else str(incoming)
+    if not incoming or incoming == stored:
+        return None
+    if authoritative:
+        return incoming
+    return incoming if stored.lower() == incoming.lower() else None

@@ -78,6 +78,7 @@ from utils.format import (
     get_true_boss_name,
     replace_placeholders,
     convert_from_ms,
+    better_spelling,
     normalize_player_display_equivalence,
 )
 import interactions
@@ -282,6 +283,7 @@ def _apply_authoritative_wom_identity(
     expected_wom_id: int | None,
     *,
     canonical_name: str | None = None,
+    canonical_is_wom: bool = False,
     total_level: int | None = None,
     log_slots: int | None = None,
     account_hash: str | None = None,
@@ -310,8 +312,13 @@ def _apply_authoritative_wom_identity(
             player.wom_id = expected_wom_id
             changed = True
 
-    if canonical_name and normalize_player_display_equivalence(player.player_name or "") != normalize_player_display_equivalence(canonical_name):
-        player.player_name = canonical_name
+    # canonical_name is only WOM's displayName when WOM actually answered;
+    # both callers fall back to the submitted RSN, which is trusted for case
+    # but not separators (see better_spelling).
+    restored = better_spelling(
+        player.player_name, canonical_name, authoritative=canonical_is_wom)
+    if restored is not None:
+        player.player_name = restored
         changed = True
 
     if total_level is not None and int(total_level) > 0 and int(player.total_level or 0) != int(total_level):
@@ -474,11 +481,10 @@ def check_auth(
                         if int(existing_player.wom_id or 0) == expected_wom_id:
                             return True, True
                     return True, False
-                if (
-                    normalize_player_display_equivalence(existing_player.player_name)
-                    != normalize_player_display_equivalence(player_name)
-                ):
-                    existing_player.player_name = player_name
+                restored = better_spelling(
+                    existing_player.player_name, player_name, authoritative=False)
+                if restored is not None:
+                    existing_player.player_name = restored
                     app_logger.log(
                         log_type="access",
                         data=f"Player {player_name} already exists with account hash {account_hash}, updating player name to {player_name}",
@@ -734,6 +740,7 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
     # 2) Authoritative WOM identity lookup for this RSN.
     wom_player = None
     canonical_name = player_name
+    canonical_is_wom = False
     try:
         # Release any open transaction before awaiting external API.
         try:
@@ -757,6 +764,7 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
             expected_wom_id = int(wom_player_id)
             wom_log_slots = log_slots
             canonical_name = str(resolved_name or player_name)
+            canonical_is_wom = bool(resolved_name)
             wom_total_level = _extract_total_level_from_wom_player(wom_player)
             wom_ehb = _extract_ehb_from_wom_player(wom_player)
     except (TypeError, ValueError):
@@ -801,6 +809,7 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
                 player,
                 expected_wom_id,
                 canonical_name=canonical_name,
+                canonical_is_wom=canonical_is_wom,
                 total_level=wom_total_level,
                 log_slots=wom_log_slots,
                 account_hash=account_hash if account_hash else None,
@@ -837,8 +846,10 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
     if expected_wom_id is not None:
         # Keep name/log slots aligned for the canonical WOM row.
         desired_name = canonical_name or player_name
-        if normalize_player_display_equivalence(player.player_name or "") != normalize_player_display_equivalence(desired_name):
-            player.player_name = desired_name
+        restored = better_spelling(
+            player.player_name, desired_name, authoritative=canonical_is_wom)
+        if restored is not None:
+            player.player_name = restored
         if wom_log_slots is not None and wom_log_slots >= 0 and player.log_slots != wom_log_slots:
             player.log_slots = wom_log_slots
         if wom_total_level is not None and int(wom_total_level) > 0 and int(player.total_level or 0) != int(wom_total_level):
@@ -1777,6 +1788,7 @@ async def create_player(player_name, account_hash, existing_session=None):
         return None
 
     canonical_name = str(resolved_name or player_name)
+    canonical_is_wom = bool(resolved_name)
     wom_total_level = _extract_total_level_from_wom_player(wom_player)
     wom_ehb = _extract_ehb_from_wom_player(wom_player)
     player = db_session.query(Player).filter(Player.wom_id == expected_wom_id).first()
@@ -1793,6 +1805,7 @@ async def create_player(player_name, account_hash, existing_session=None):
             player,
             expected_wom_id,
             canonical_name=canonical_name,
+            canonical_is_wom=canonical_is_wom,
             total_level=wom_total_level,
             log_slots=log_slots,
             account_hash=account_hash,

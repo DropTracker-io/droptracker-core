@@ -9,7 +9,7 @@ from db import Player, session, models
 
 import wom
 from wom import Err, Result
-from utils.format import normalize_player_display_equivalence
+from utils.format import better_spelling, normalize_player_display_equivalence
 from utils.redis import redis_client
 from typing import Optional, Dict, Any, List, Tuple
 load_dotenv()
@@ -161,8 +161,8 @@ WOM_UPDATE_TIMEOUT_SECONDS = float(os.getenv("WOM_UPDATE_TIMEOUT_SECONDS", "20")
 # after the fix was live. Bump this suffix whenever a change alters what counts
 # as an acceptable identity, so the new rules are applied from the first lookup
 # rather than after the last stale entry expires.
-_REDIS_PLAYER_PREFIX = "wom:player:v2:"
-_REDIS_PLAYER_FAIL_PREFIX = "wom:player:v2:fail:"
+_REDIS_PLAYER_PREFIX = "wom:player:v3:"
+_REDIS_PLAYER_FAIL_PREFIX = "wom:player:v3:fail:"
 _REDIS_GROUP_PREFIX = "wom:group:"
 
 # Stores the WOM-reported total member_count per group (populated during API calls).
@@ -268,6 +268,32 @@ def _total_level_from_raw_player(player) -> int:
         return 0
 
 
+def _display_name_from_raw_player(player):
+    r"""The in-game spelling of a WOM player's name, or None.
+
+    WOM exposes two names and they are NOT interchangeable. ``username`` is its
+    *standardized* key -- ``.replace(/[-_\s]/g, ' ').trim().toLowerCase()`` in
+    WOM's own ``standardizeUsername`` -- so it is always lowercase and always
+    space-folded. ``displayName`` is what the account is actually called in
+    game ("DEADCLlCK", "94 Fable 92", "Zuk-My-Feet").
+
+    We stored ``username`` for years (ticket #441), so ~900 of the ~3.4k rows we
+    can cross-check against a plugin-submitted spelling carry an all-lowercase,
+    separator-folded name -- purely cosmetic, but visible on every board, embed
+    and profile. Nothing could repair it afterwards either: every writer gated
+    its update on a case-folded comparison, so the correct spelling was
+    recognised as "the same name" and dropped. Prefer displayName, and keep
+    username as the fallback so a payload without one still yields a name.
+    """
+    for attr in ("display_name", "username"):
+        value = getattr(player, attr, None)
+        if value:
+            text = str(value).strip()
+            if text:
+                return text
+    return None
+
+
 def _ehb_from_raw_player(player):
     """Top-level efficient-hours-bossed off a WOM player detail object, or
     None when absent/garbage (None = unknown, distinct from a real 0.0)."""
@@ -359,7 +385,7 @@ async def check_user_by_username(username: str, *, force_refresh: bool = False) 
             if not _is_degenerate_wom_player(player):
                 log_slots = _extract_log_slots(player)
                 identity = _identity_shim(player)
-                payload = (identity, player.username, player.id, log_slots)
+                payload = (identity, _display_name_from_raw_player(player), player.id, log_slots)
                 await _store_player_cache(username, payload, success=True)
                 return payload
             # An empty placeholder must never become identity (see
@@ -443,7 +469,7 @@ async def check_user_by_username(username: str, *, force_refresh: bool = False) 
             return payload
         log_slots = _extract_log_slots(player)
         identity = _identity_shim(player)
-        payload = (identity, str(player.username), str(player.id), log_slots)
+        payload = (identity, _display_name_from_raw_player(player), str(player.id), log_slots)
         await _store_player_cache(username, payload, success=True)
         return payload
     except Exception as e:
@@ -478,7 +504,7 @@ async def check_user_by_id(uid: int, *, force_refresh: bool = False):
                 return payload
             log_slots = _extract_log_slots(player)
             identity = _identity_shim(player)
-            payload = (identity, str(player.username), str(player.id), log_slots)
+            payload = (identity, _display_name_from_raw_player(player), str(player.id), log_slots)
             await _store_player_cache(cache_key, payload, success=True)
             await _store_player_cache(player.username, payload, success=True)
             return payload
@@ -660,14 +686,20 @@ async def fetch_group_members(
                         existing_player.ehb = member_ehb
                         ehb_updates += 1
 
+                    # player_name here is WOM's displayName -- the account's real
+                    # in-game spelling -- so it is authoritative for case AND
+                    # separators. This used to be gated on
+                    # normalize_player_display_equivalence, which lowercases and
+                    # folds separators, so the one path that had the correct
+                    # spelling in hand every hour discarded it as "the same name"
+                    # (ticket #441). Most affected rows are on a linked roster, so
+                    # this heals them on the next sync without a backfill.
                     old_name = existing_player.player_name or ""
-                    new_name = player_name or ""
-                    # Only update if the names differ beyond hyphen/underscore vs space changes
-                    if normalize_player_display_equivalence(old_name) != normalize_player_display_equivalence(new_name):
-                        if old_name != new_name:
-                            print(f"Updated player name for {old_name} to {new_name}")
-                            existing_player.player_name = new_name
-                            session.commit()
+                    restored = better_spelling(old_name, player_name, authoritative=True)
+                    if restored is not None:
+                        print(f"Updated player name for {old_name} to {restored}")
+                        existing_player.player_name = restored
+                        session.commit()
                 else:
                     # No player found by WOM ID. A stale wom_id (e.g. after an RSN change
                     # that created a new WOM identity) would cause the sync to incorrectly

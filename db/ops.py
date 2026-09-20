@@ -41,7 +41,7 @@ from datetime import datetime, timedelta
 from utils.embeds import get_global_drop_embed
 from utils.app_emojis import emoji as app_emoji
 from utils.download import download_player_image
-from utils.format import normalize_player_display_equivalence
+from utils.format import better_spelling, normalize_player_display_equivalence
 from utils.site_urls import player_link
 from utils.wiseoldman import fetch_group_members, check_user_by_id, check_user_by_username, _group_member_count as _wom_group_member_count
 from utils import group_config
@@ -468,6 +468,7 @@ class DatabaseOperations:
                 return None
 
             canonical_name = str(resolved_name or player_name)
+            canonical_is_wom = bool(resolved_name)
             player = session.query(Player).filter(Player.wom_id == expected_wom_id).first()
             if not player:
                 # Legacy fallback rows can still exist by hash/name; reconcile those.
@@ -481,8 +482,15 @@ class DatabaseOperations:
                 if int(player.wom_id or 0) != expected_wom_id:
                     player.wom_id = expected_wom_id
                     changed = True
-                if normalize_player_display_equivalence(canonical_name) != normalize_player_display_equivalence(player.player_name):
-                    player.player_name = canonical_name
+                # A case-only correction ("deadcllck" -> "DEADCLlCK") must be
+                # adopted; the folded comparison here used to call it "the same
+                # name" and drop it (ticket #441). The rename NOTIFICATION below
+                # deliberately keeps the folded comparison -- restoring a
+                # spelling is not a rename and must not be announced as one.
+                restored = better_spelling(
+                    player.player_name, canonical_name, authoritative=canonical_is_wom)
+                if restored is not None:
+                    player.player_name = restored
                     changed = True
                 if log_slots is not None and int(log_slots) >= 0 and int(player.log_slots or 0) != int(log_slots):
                     player.log_slots = int(log_slots)
