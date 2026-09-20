@@ -371,6 +371,17 @@ class TestCombinedBoard:
         _set_combine(clan, group_id=OTHER_GROUP)
         assert combine_enabled(clan, GROUP) is False
 
+    def test_a_duplicate_row_reads_the_one_the_settings_page_writes(self, clan):
+        """``group_configurations`` has no unique key and does hold duplicate
+        (group_id, config_key) pairs. The settings route updates the row its
+        unordered ``.first()`` returns -- the lowest id -- so that is the row
+        that must be read back, or an admin ticks the box, sees it saved, and
+        the boards go on ignoring it."""
+        _set_combine(clan, on=True)   # lowest id: what the admin's save edits
+        _set_combine(clan, on=False)  # stale duplicate written earlier by hand
+        assert combine_enabled(clan, GROUP) is True
+        assert len(load_standings(clan, GROUP)) == 2
+
     def test_the_alt_that_left_stops_counting_the_main_stays(self, clan):
         # The case the two rules exist to get right together.
         _set_combine(clan)

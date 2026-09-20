@@ -280,12 +280,22 @@ def _chunks(values: Sequence[int]):
 
 
 def combine_enabled(session, group_id: int) -> bool:
-    """Whether ``group_id`` sums a Discord user's RSNs into one standing."""
+    """Whether ``group_id`` sums a Discord user's RSNs into one standing.
+
+    Reads the LOWEST-id row, not the newest. ``group_configurations`` has no
+    unique key on (``group_id``, ``config_key``) and does carry duplicate pairs,
+    and the settings route finds the row it updates with an unordered
+    ``.first()`` -- which, over
+    ``ix_group_configurations_config_key_group_id`` with the PK appended, is the
+    lowest id. Reading the newest row here would mean an admin ticking the box,
+    seeing it saved and read back on, while the boards and cards kept the stale
+    duplicate's "0" forever. Same row in, same row out.
+    """
     row = session.execute(
         text(
             "SELECT config_value FROM group_configurations "
             "WHERE group_id = :gid AND config_key = :key "
-            "ORDER BY id DESC LIMIT 1"
+            "ORDER BY id ASC LIMIT 1"
         ),
         {"gid": int(group_id), "key": COMBINE_CONFIG_KEY},
     ).first()
