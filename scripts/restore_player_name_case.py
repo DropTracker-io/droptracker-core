@@ -142,7 +142,7 @@ def main():
     """)
     rows = cur.fetchall()
 
-    changes, skipped_rename, no_source = [], 0, 0
+    changes, skipped_rename, no_source, skipped_lossy = [], 0, 0, 0
     for r in rows:
         stored = r["player_name"] or ""
         candidate = None
@@ -161,12 +161,20 @@ def main():
             # Not a spelling difference -- a real rename. Never touched here.
             skipped_rename += 1
             continue
+        if not any(c.isupper() for c in candidate) and any(c.isupper() for c in stored):
+            # Never destroy capitalisation we already hold. WOM echoes its
+            # standardized key as displayName when it has no display spelling
+            # (id 2082247 -> "r8d" while the game name is "R8d"), and a stale
+            # submitted row can be folded too. Mirrors utils.rsn.better_spelling.
+            skipped_lossy += 1
+            continue
         changes.append((r["player_id"], stored, candidate))
         if args.limit and len(changes) >= args.limit:
             break
 
     print(f"scanned {len(rows)} rows; {len(changes)} need a spelling restore "
-          f"({skipped_rename} genuine renames skipped, {no_source} with no source)")
+          f"({skipped_rename} genuine renames skipped, {skipped_lossy} refused as "
+          f"case-destroying, {no_source} with no source)")
     for pid, old, new in changes[:40]:
         print(f"  {pid:>8}  {old!r}  ->  {new!r}")
     if len(changes) > 40:

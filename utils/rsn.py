@@ -159,6 +159,24 @@ def better_spelling(stored: str, incoming: str, *, authoritative: bool) -> str |
     incoming = "" if incoming is None else str(incoming)
     if not incoming or incoming == stored:
         return None
+
+    same_name = (normalize_player_display_equivalence(stored)
+                 == normalize_player_display_equivalence(incoming))
+
+    # Never let a correction DESTROY capitalisation we already hold. WOM's
+    # displayName is not always the game's spelling: when WOM has no display
+    # spelling of its own it echoes the standardized key, so id 2082247 reports
+    # displayName "r8d" while the plugin, reading the live game name, sends
+    # "R8d". Adopting that folded echo overwrote a correct name with a worse
+    # one (caught in production 2026-09-20, minutes after deploy). A candidate
+    # for the same name must carry at least as much case information as the
+    # value it would replace. The cost is that a genuine rename which only
+    # lowercases ("R8d" -> "r8d") is refused; that is cosmetic and rare, and
+    # far cheaper than silently folding correct names.
+    if same_name and not any(c.isupper() for c in incoming) \
+            and any(c.isupper() for c in stored):
+        return None
+
     if authoritative:
         return incoming
     return incoming if stored.lower() == incoming.lower() else None

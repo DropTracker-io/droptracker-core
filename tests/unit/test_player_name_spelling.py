@@ -38,6 +38,17 @@ class TestBetterSpelling:
         ("ZE_ET", "ZE ET", "ZE ET"),
         # A real rename is applied, as before.
         ("oldname", "NewName", "NewName"),
+        # ...but WOM's displayName is NOT always the game's spelling. When WOM
+        # holds no display spelling it echoes the standardized key, so id
+        # 2082247 reports displayName "r8d" while the plugin, reading the live
+        # game name, sends "R8d". Adopting that echo overwrote a correct name
+        # (caught in production 2026-09-20). A correction must never destroy
+        # capitalisation we already hold.
+        ("R8d", "r8d", None),
+        ("IM Unleesh", "im unleesh", None),
+        ("SClMMY", "sclmmy", None),
+        # Separator changes between two cased spellings are still fine.
+        ("ZE_ET", "ZE ET", "ZE ET"),
         # No churn when nothing changed.
         ("DEADCLlCK", "DEADCLlCK", None),
         ("DEADCLlCK", "", None),
@@ -60,6 +71,13 @@ class TestBetterSpelling:
     ])
     def test_submitted_name_fixes_case_only(self, stored, incoming, expected):
         assert better_spelling(stored, incoming, authoritative=False) == expected
+
+    def test_a_correction_never_reduces_case_information(self):
+        """The guard is directional: gaining case is a fix, losing it is not."""
+        assert better_spelling("deadcllck", "DEADCLlCK", authoritative=True) == "DEADCLlCK"
+        assert better_spelling("DEADCLlCK", "deadcllck", authoritative=True) is None
+        # A name that genuinely holds no uppercase is not "losing" anything.
+        assert better_spelling("r8d", "R8d", authoritative=True) == "R8d"
 
     def test_case_only_difference_is_not_an_identity_change(self):
         """The two questions must stay separate: a case-only difference is the
