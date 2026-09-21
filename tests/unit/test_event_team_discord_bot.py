@@ -1363,11 +1363,10 @@ class _PassSession:
         pass
 
 
-class TestReconcileHoldsRenames:
-    """A held rename is a pause, not a failure: the row stays pending, is not
-    marked failed or noticed, and sits out provisioning until it is due."""
+class _ReconcileHarness:
+    """One team row in one event, driven through the real reconcile pass."""
 
-    def _setup(self, monkeypatch, *, members_dirty=False):
+    def _setup(self, monkeypatch, *, members_dirty=False, role=None):
         from unittest.mock import MagicMock
 
         _install_team_discord(monkeypatch)
@@ -1397,15 +1396,17 @@ class TestReconcileHoldsRenames:
         event = SimpleNamespace(
             id=86, name="BotW", group_id=None, mode="standard",
             discord_guild_id="1", message_config=None,
-            team_discord_config='{"channels_enabled": true, "roles_enabled": false}')
+            team_discord_config=('{"channels_enabled": true, "roles_enabled": %s}'
+                                 % ("true" if role is not None else "false")))
         team = SimpleNamespace(id=181, name="Reds", color=None)
         row = SimpleNamespace(
             id=64, event_id=86, team_id=181, guild_id="1", group_id=None,
-            sync_status="pending", role_id=None, channel_id="77",
+            sync_status="pending",
+            role_id=str(role.id) if role is not None else None, channel_id="77",
             channel_kind="text", voice_channel_id=None, members_dirty=members_dirty,
             member_state=None, last_error=None, delete_after=None, synced_at=None)
         channel = _NamedChannel("🟢┃reds")
-        guild = _Guild()
+        guild = _Guild(role)
 
         class _PassBot(_Bot):
             async def fetch_guild(self, guild_id):
@@ -1416,6 +1417,11 @@ class TestReconcileHoldsRenames:
 
     def _pass(self, bot, session, rc):
         asyncio.run(bot_mod._reconcile_pass(bot, lambda: session, rc))
+
+
+class TestReconcileHoldsRenames(_ReconcileHarness):
+    """A held rename is a pause, not a failure: the row stays pending, is not
+    marked failed or noticed, and sits out provisioning until it is due."""
 
     def test_held_rename_leaves_the_row_pending_and_deferred(self, monkeypatch):
         session, row, channel, bot = self._setup(monkeypatch)
@@ -1451,3 +1457,56 @@ class TestReconcileHoldsRenames:
 
         assert row.sync_status == "synced"
         assert channel.name == "🔴┃reds"      # the site's red for team #1
+
+
+class _RefusingRole(_Role):
+    async def edit(self, **kwargs):
+        raise RuntimeError("403 Forbidden (error code: 50013): Missing Permissions")
+
+
+class TestRoleRefusalDoesNotBlockTheChannel(_ReconcileHarness):
+    """A server whose DropTracker role sits below the team roles refuses the
+    role recolor. That used to stop the pass before the channel step, so the
+    channel kept its old circle; now the channel is renamed and the row still
+    fails (notice + retry backoff) for the role."""
+
+    def test_channel_is_renamed_and_row_fails_for_the_role(self, monkeypatch):
+        role = _RefusingRole(color=0)
+        session, row, channel, bot = self._setup(monkeypatch, role=role)
+        rc = _RedisClient()
+
+        self._pass(bot, session, rc)
+
+        assert channel.name == "🔴┃reds"          # renamed despite the role
+        assert row.sync_status == "failed"
+        assert row.last_error                      # friendly permission hint
+        assert row.channel_id == "77"
+
+    def test_role_edit_error_carries_the_original_cause(self, monkeypatch):
+        _install_team_discord(monkeypatch)
+        row = SimpleNamespace(role_id="500")
+        try:
+            asyncio.run(bot_mod._ensure_role(
+                _Guild(_RefusingRole()), row, SimpleNamespace(name="Reds", color=None), 0))
+        except bot_mod.RoleEditFailed as exc:
+            assert "50013" in str(exc.__cause__)
+        else:
+            raise AssertionError("refused edit was not reported")
+
+    def test_a_refused_role_create_is_still_fatal(self, monkeypatch):
+        # No role means the channel would be created PUBLIC; that must never
+        # be papered over by carrying on to the channel step.
+        _install_team_discord(monkeypatch)
+
+        class _NoCreate(_Guild):
+            async def create_role(self, **kwargs):
+                raise RuntimeError("403 Forbidden")
+
+        try:
+            asyncio.run(bot_mod._ensure_role(
+                _NoCreate(), SimpleNamespace(role_id=None),
+                SimpleNamespace(name="Reds", color=None), 0))
+        except bot_mod.RoleEditFailed:
+            raise AssertionError("create failure must not be softened")
+        except RuntimeError:
+            pass

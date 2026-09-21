@@ -162,7 +162,18 @@ async def _ensure_role(guild, row, team, icon_index: int = 0) -> None:
     if _role_color_value(role) != color:
         edits["color"] = color
     if edits:
-        await role.edit(**edits)  # Role.edit takes no audit reason in 5.x
+        try:
+            await role.edit(**edits)  # Role.edit takes no audit reason in 5.x
+        except Exception as exc:
+            raise RoleEditFailed(str(exc)) from exc
+
+
+class RoleEditFailed(Exception):
+    """The team role exists, but Discord refused to rename or recolor it
+    (usually the DropTracker role sitting below the team roles). Unlike a
+    failed role CREATE, this must not stop the channel steps: the role is
+    there, so the channel stays private to it. The original error is
+    ``__cause__``."""
 
 
 # --------------------------------------------------------------------------- #
@@ -880,8 +891,15 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                     # The team's ordinal picks its palette default, which the
                     # role color and every channel's circle all derive from.
                     icon_index = team_icon_index(session, event.id, team.id)
+                    role_error = None
                     if flags["role"]:
-                        await _ensure_role(guild, row, team, icon_index)
+                        try:
+                            await _ensure_role(guild, row, team, icon_index)
+                        except RoleEditFailed as exc:
+                            # Finish the channel steps first (a recolor must
+                            # not hold the channel name hostage), then fail
+                            # the row below exactly as before.
+                            role_error = exc.__cause__ or exc
                     elif row.role_id:
                         await _delete_discord_objects(bot, row.guild_id, row.role_id, None)
                         row.role_id = None
@@ -901,6 +919,12 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                         await _delete_discord_objects(bot, None, None,
                                                       row.voice_channel_id)
                         row.voice_channel_id = None
+                    if role_error is not None:
+                        # Keep what the channel steps just provisioned (the
+                        # failure handler rolls back), then fail the row:
+                        # last_error, the group notice and retry backoff.
+                        session.commit()
+                        raise role_error
                     row.sync_status = "synced"
                     row.synced_at = now
                     row.last_error = None
