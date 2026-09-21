@@ -70,6 +70,86 @@ def test_any_of_rejects_zero_quantity():
     assert exc.value.status == 422
 
 
+# ── any_of_distinct ("any N DIFFERENT items", ticket #446) ──────────────────
+
+HILTS = ["Armadyl hilt", "Bandos hilt", "Saradomin hilt", "Zamorak hilt"]
+
+
+def test_any_of_distinct_accepted_with_goal():
+    out = _validate({
+        "type": "item_collection",
+        "target_value": 3,
+        "config": {"kind": "any_of_distinct", "items": HILTS},
+    })
+    assert out["target_value"] == 3
+    cfg = _cfg(out)
+    assert cfg["kind"] == "any_of_distinct"
+    assert [i["item_name"] for i in cfg["items"]] == HILTS
+    assert not out["target"]  # list tasks carry no single target
+
+
+def test_any_of_distinct_defaults_to_one():
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_of_distinct", "items": HILTS},
+    })
+    assert out["target_value"] == 1
+
+
+def test_any_of_distinct_goal_may_equal_list_size():
+    out = _validate({
+        "type": "item_collection",
+        "target_value": len(HILTS),
+        "config": {"kind": "any_of_distinct", "items": HILTS},
+    })
+    assert out["target_value"] == len(HILTS)
+
+
+def test_any_of_distinct_goal_above_list_size_rejected():
+    # Five different items from a four-item list can never complete.
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "item_collection",
+            "target_value": len(HILTS) + 1,
+            "config": {"kind": "any_of_distinct", "items": HILTS},
+        })
+    assert exc.value.status == 422
+    assert "different items" in exc.value.detail
+
+
+def test_any_of_distinct_bound_counts_a_repeated_name_once():
+    # The list isn't deduplicated, so the bound must be: "Bandos hilt" twice
+    # is still only two different items.
+    with pytest.raises(ProblemException):
+        _validate({
+            "type": "item_collection",
+            "target_value": 3,
+            "config": {"kind": "any_of_distinct",
+                       "items": ["Bandos hilt", "bandos hilt", "Armadyl hilt"]},
+        })
+
+
+def test_any_of_distinct_rejects_zero():
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "item_collection",
+            "target_value": 0,
+            "config": {"kind": "any_of_distinct", "items": HILTS},
+        })
+    assert exc.value.status == 422
+
+
+def test_distinct_kinds_map_to_the_distinct_progress_shape():
+    # Competition bonus rules store this shape; a distinct kind that fell
+    # through to "count" would fold quantities again.
+    for kind in ("all_of", "assembly", "any_of_distinct"):
+        shape, need = etv._derived_progress_shape(
+            "item_collection", {"kind": kind}, 3)
+        assert (shape, need) == ("distinct", 3), kind
+    assert etv._derived_progress_shape(
+        "item_collection", {"kind": "any_of"}, 3) == ("count", 3)
+
+
 # ── groups (combined requirements) ───────────────────────────────────────────
 
 GODSWORD_BODY = {

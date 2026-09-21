@@ -438,6 +438,43 @@ class TestDistinctItemProgress:
         assert engine._list_kind(_task(config={})) is None
         assert engine._list_kind(_task(config=None)) is None
 
+    def test_distinct_kinds(self):
+        # any_of_distinct shares the all_of fold; plain any_of never does
+        # (it folds quantities — two Boaters are two).
+        assert set(engine.DISTINCT_ITEM_KINDS) == {"all_of", "assembly", "any_of_distinct"}
+        assert "any_of" not in engine.DISTINCT_ITEM_KINDS
+
+
+# ── any_of_distinct: any N DIFFERENT items (ticket #446) ────────────────────
+
+HILT_TASK = {
+    "kind": "any_of_distinct",
+    "items": ["Armadyl hilt", "Bandos hilt", "Saradomin hilt", "Zamorak hilt"],
+}
+
+
+class TestAnyOfDistinct:
+    def test_listed_items_match(self):
+        task = _task(target_value=3, config=HILT_TASK)
+        out = engine.match_task(task, _env("drop", {"item_name": "Bandos hilt"}))
+        assert out == {"mode": "count", "quantity": 1, "matched_target": "Bandos hilt"}
+        assert engine.match_task(task, _env("drop", {"item_name": "Dragon bones"})) is None
+
+    def test_repeat_of_an_item_counts_once(self):
+        # The ticket: two Mooletas toward "4 of 8 hilts" must be 1/4, not 2/4.
+        rows = [_Row("Bandos hilt"), _Row("Bandos hilt"), _Row("bandos hilt")]
+        assert engine._distinct_progress_from_rows(rows, threshold=3) == 1
+
+    def test_completes_at_goal_not_list_size(self):
+        rows = [_Row("Bandos hilt"), _Row("Zamorak hilt"), _Row("Armadyl hilt")]
+        assert engine._distinct_progress_from_rows(rows, threshold=3) == 3
+        task = _task(target_value=3, config=HILT_TASK)
+        assert engine.completion_threshold(task) == 3
+
+    def test_stack_counts_once(self):
+        rows = [_Row("Saradomin hilt", quantity=2)]
+        assert engine._distinct_progress_from_rows(rows, threshold=3) == 1
+
 
 # ── grouped (all-of + any-of) progress ───────────────────────────────────────
 

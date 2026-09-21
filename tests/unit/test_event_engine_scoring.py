@@ -185,6 +185,53 @@ class TestRowAdvancesProgress:
         s = _Session([])
         assert engine._row_advances_progress(s, task, 4, _Row("Bones", rid=None)) is True
 
+    # any_of_distinct ("any N DIFFERENT items", ticket #446): an item the team
+    # already has is dead weight, exactly like all_of — but the goal is N, not
+    # the whole list. Plain any_of keeps recording repeats (they count there).
+    ANY_DISTINCT = {
+        "id": 3, "type": "item_collection", "target_value": 2,
+        "config": {"kind": "any_of_distinct", "items": [
+            {"item_name": "Bones"}, {"item_name": "Coins"}, {"item_name": "Ashes"},
+        ]},
+    }
+
+    def test_any_of_distinct_repeat_is_dead_weight(self):
+        s = _Session([_Row("Bones", rid=10)])
+        candidate = _Row("Bones", rid=None)
+        assert engine._row_advances_progress(s, self.ANY_DISTINCT, 4, candidate) is False
+
+    def test_any_of_distinct_new_item_advances(self):
+        s = _Session([_Row("Bones", rid=10)])
+        candidate = _Row("Ashes", rid=None)
+        assert engine._row_advances_progress(s, self.ANY_DISTINCT, 4, candidate) is True
+
+    def test_any_of_repeat_still_advances(self):
+        task = dict(self.ANY_DISTINCT, config=dict(self.ANY_DISTINCT["config"], kind="any_of"))
+        s = _Session([_Row("Bones", rid=10)])
+        assert engine._row_advances_progress(s, task, 4, _Row("Bones", rid=None)) is True
+
+    def test_any_of_distinct_recompute_folds_repeats_once(self):
+        # The retro "recompute" path after switching a live any_of tile to
+        # any_of_distinct: the ledger's repeat rows collapse to one each.
+        s = _Session([_Row("Bones", rid=10), _Row("Bones", rid=11),
+                      _Row("Coins", quantity=500, rid=12)])
+        assert engine._derive_applied_progress(s, self.ANY_DISTINCT, 4) == 2
+        any_of = dict(self.ANY_DISTINCT, target_value=600,
+                      config=dict(self.ANY_DISTINCT["config"], kind="any_of"))
+        assert engine._derive_applied_progress(s, any_of, 4) == 502
+
+    def test_any_of_distinct_pending_repeat_projects_nothing(self):
+        rows = [SimpleNamespace(id=10, status="auto", matched_target="Bones",
+                                quantity=1, source_type="drop", note=None,
+                                player_id=1),
+                SimpleNamespace(id=11, status="pending", matched_target="Bones",
+                                quantity=1, source_type="drop", note=None,
+                                player_id=2)]
+        proj = engine.pending_projection(_Session(rows), self.ANY_DISTINCT, 4)
+        assert proj["applied"] == 1
+        assert proj["projected"] == 1
+        assert proj["pending_complete"] is False
+
     # any_path metric paths: the percent rollup floors, so a 1-kill row on a
     # 5,000-KC path never moves the integer — it must still record (progress
     # re-folds from ledger rows; a dropped row is credit lost forever).

@@ -156,6 +156,11 @@ def _item_collection_spec(task: dict, config: dict) -> dict:
     if kind == "any_of":
         if isinstance(tv, int) and tv > 1:
             badge = f"ANY {tv}"
+    elif kind == "any_of_distinct":
+        # Each item counts once — say so on the tile, where "ANY 4" would
+        # read as the quantity-folding any_of.
+        if isinstance(tv, int) and tv > 1:
+            badge = f"{tv} DIFFERENT"
     elif kind == "all_of":
         badge = "ALL ITEMS"
     elif kind == "assembly":

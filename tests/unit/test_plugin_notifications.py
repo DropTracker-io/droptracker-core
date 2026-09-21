@@ -506,6 +506,28 @@ class TestDescribeTask:
         assert len(reqs) == pn.REQUIREMENTS_LIMIT
         assert "(+8 more)" in desc
 
+    def test_any_of_distinct_says_different(self):
+        # Ticket #446: the tooltip must not read like the quantity any_of.
+        desc, reqs = pn.describe_task({
+            "type": "item_collection", "label": "4 of 8 hilts",
+            "target": None, "target_value": 3,
+            "config": json.dumps({"kind": "any_of_distinct", "items": [
+                "Armadyl hilt", "Bandos hilt", "Saradomin hilt", "Zamorak hilt"]}),
+        })
+        assert desc == ("Collect any 3 different items from the 4 listed. "
+                        "Each item counts once.")
+        assert [r["name"] for r in reqs] == [
+            "Armadyl hilt", "Bandos hilt", "Saradomin hilt", "Zamorak hilt"]
+
+    def test_any_of_distinct_of_one_reads_like_any_one(self):
+        desc, _ = pn.describe_task({
+            "type": "item_collection", "label": "x", "target": None,
+            "target_value": 1,
+            "config": json.dumps({"kind": "any_of_distinct",
+                                  "items": ["Bandos hilt", "Zamorak hilt"]}),
+        })
+        assert desc == "Collect any one of the 2 listed items."
+
     def test_single_target_collection(self):
         desc, reqs = pn.describe_task({
             "type": "item_collection", "label": "3x hilt",
@@ -576,6 +598,15 @@ class TestMarkObtainedRequirements:
         reqs = pn.mark_obtained_requirements(
             self._reqs(), {"kind": "any_of"}, {"coins"})
         assert all("obtained" not in r for r in reqs)
+
+    def test_any_of_distinct_marks_collected_items(self):
+        # A second copy can't advance an any_of_distinct task, so the banked
+        # item is struck through exactly like all_of.
+        reqs = pn.mark_obtained_requirements(
+            self._reqs(), {"kind": "any_of_distinct"}, {"bones"})
+        assert "obtained" not in reqs[0]
+        assert reqs[1].get("obtained") is True
+        assert "obtained" not in reqs[2]
 
     def test_groups_marks_only_all_of_mode_groups(self):
         config = {"kind": "groups", "groups": [

@@ -29,6 +29,10 @@ and a ``contributors`` roll-up (who obtained what).
 """
 from __future__ import annotations
 
+# A stdlib-only leaf (never stubbed), so safe at module level — unlike
+# services.event_engine below.
+from utils.task_progress import DISTINCT_ITEM_KINDS
+
 # NOTE: services.event_engine is imported lazily inside functions (matching
 # event_admin.py) — the unit-test conftest stubs `services` in sys.modules, so
 # a module-level import here breaks collection of every test that imports
@@ -342,18 +346,23 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
         out["paths"] = paths_out
 
     elif is_item_task and entries:
-        # Flat any_of / all_of / assembly / point_collection — one group.
-        if kind in ("all_of", "assembly"):
+        # Flat any_of / any_of_distinct / all_of / assembly / point_collection
+        # — one group. any_of_distinct renders as an "any N of" group flagged
+        # ``distinct``: each item needs one copy and counts once, like all_of.
+        distinct = kind == "any_of_distinct"
+        if kind in DISTINCT_ITEM_KINDS and not distinct:
             mode = "all_of"
         elif kind == "point_collection":
             mode = "points"
         else:
             mode = "any_of"
         need = target_val
-        single_need = need if mode == "any_of" and len(entries) == 1 else 1
+        single_need = (need if mode == "any_of" and not distinct and len(entries) == 1
+                       else 1)
         items = [_item_row(nn, icons, qty_by, entries.get(nn),
                            required_default=single_need) for nn in entries.keys()]
-        if mode == "all_of":
+        if mode == "all_of" or distinct:
+            # One unit per different item held — the engine's distinct fold.
             got = sum(1 for it in items if it["satisfied"])
         elif mode == "points":
             got = prog  # authoritative weighted-points total from the rollup
@@ -370,6 +379,8 @@ def build_task_breakdown(task: dict, tile: dict | None, rows, progress_row,
         }
         if mode == "points":
             group["unit"] = "pts"
+        if distinct:
+            group["distinct"] = True
         out["structure"] = "checklist"
         out["groups"] = [group]
 
@@ -469,7 +480,7 @@ def _annotate_pending(out: dict, task: dict, tile, rows, pending_rows, team,
     combined = list(rows) + list(pending_rows)
     if _pb_distinct_players({"type": task.get("type"), "config": config}):
         proj_val = _distinct_players_from_rows(combined, target_val)
-    elif kind in ("all_of", "assembly"):
+    elif kind in DISTINCT_ITEM_KINDS:
         proj_val = _distinct_progress_from_rows(combined, target_val)
     elif kind == "groups":
         proj_val = _grouped_progress_from_rows(combined, config, target_val)

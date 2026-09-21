@@ -37,6 +37,8 @@ import json
 import time
 import uuid
 
+from utils.task_progress import DISTINCT_ITEM_KINDS
+
 INBOX_KEY_TEMPLATE = "plugin:notify:{player_id}"
 INBOX_CAP = 50
 INBOX_TTL_SECONDS = 24 * 3600
@@ -495,17 +497,18 @@ def mark_obtained_requirements(requirements: list, config: dict,
     has already banked that item AND re-receiving it can no longer advance
     the task — the plugin strikes those lines through in task tooltips.
 
-    Eligible kinds: ``all_of``/``assembly`` (every listed item counts once),
-    and ``groups`` for items inside all_of-mode groups. ``any_of``
-    re-receives still fold into progress and ``point_collection`` items are
-    re-earnable for points, so those are never annotated. ``collected_names``
-    is a set of normalized ``EventCompletion.matched_target`` values.
+    Eligible kinds: :data:`DISTINCT_ITEM_KINDS` (``all_of``/``assembly``/
+    ``any_of_distinct`` — every listed item counts once), and ``groups`` for
+    items inside all_of-mode groups. ``any_of`` re-receives still fold into
+    progress and ``point_collection`` items are re-earnable for points, so
+    those are never annotated. ``collected_names`` is a set of normalized
+    ``EventCompletion.matched_target`` values.
     Mutates and returns ``requirements``. Pure.
     """
     if not requirements or not collected_names:
         return requirements
     kind = (config.get("kind") if isinstance(config, dict) else None) or "any_of"
-    if kind in ("all_of", "assembly"):
+    if kind in DISTINCT_ITEM_KINDS:
         eligible = None  # every listed item
     elif kind == "groups":
         eligible = set()
@@ -581,6 +584,9 @@ def describe_task(task: dict) -> tuple:
                     f"its own point value{extra}.")
         elif kind == "all_of":
             desc = f"Collect every one of the {total} listed items{extra}."
+        elif kind == "any_of_distinct" and isinstance(tv, int) and tv > 1:
+            desc = (f"Collect any {tv} different items from the {total} listed"
+                    f"{extra}. Each item counts once.")
         elif kind == "assembly":
             desc = f"Assemble the complete set: {total} pieces{extra}."
         elif kind == "groups":

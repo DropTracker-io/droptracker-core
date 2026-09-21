@@ -151,6 +151,36 @@ class TestItemCollection:
             config={"kind": "any_of", "items": ["Vial of blood"]}))
         assert spec["groups"][0]["items"][0]["required"] == 6000
 
+    def test_any_of_distinct_says_different_and_each_counts_once(self):
+        # Ticket #446: "4 of 8 hilts" where a second Mooleta must not count.
+        hilts = ["Armadyl hilt", "Bandos hilt", "Saradomin hilt", "Zamorak hilt"]
+        spec = requirement_spec(_task(
+            type="item_collection", target_value=3,
+            config={"kind": "any_of_distinct", "items": hilts}))
+        group = spec["groups"][0]
+        assert group["mode"] == "any_of"
+        assert group["distinct"] is True
+        assert group["need"] == 3
+        assert group["label"] == "Any 3 different"
+        assert [i["required"] for i in group["items"]] == [1, 1, 1, 1]
+        assert spec["summary"] == "Collect any 3 different items from these 4"
+        assert any("counts once" in n for n in spec["notes"])
+        assert spec["kind"] == "any_of_distinct"
+
+    def test_any_of_distinct_single_item_never_asks_for_copies(self):
+        spec = requirement_spec(_task(
+            type="item_collection", target_value=1,
+            config={"kind": "any_of_distinct", "items": ["Bandos hilt"]}))
+        assert spec["groups"][0]["items"][0]["required"] == 1
+        assert spec["groups"][0]["label"] == "Any of"
+
+    def test_plain_any_of_is_not_flagged_distinct(self):
+        spec = requirement_spec(_task(
+            type="item_collection", target_value=2,
+            config={"kind": "any_of", "items": ["Twisted bow", "Dragon claws"]}))
+        assert "distinct" not in spec["groups"][0]
+        assert not spec["notes"]
+
     def test_point_collection_carries_weights(self):
         spec = requirement_spec(_task(
             type="item_collection", target_value=500,

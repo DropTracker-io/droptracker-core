@@ -57,6 +57,21 @@ def test_any_of_list_with_need():
     assert tile["icons"][1]["id"] is None
 
 
+def test_any_of_distinct_badge_says_different():
+    # "ANY 3" would read as the quantity-folding any_of (ticket #446).
+    cfg = json.dumps({"kind": "any_of_distinct",
+                      "items": ["Bandos hilt", "Zamorak hilt", "Armadyl hilt", "Saradomin hilt"]})
+    tile = _tile(_task(type="item_collection", config=cfg, target_value=3))
+    assert tile["badge"] == "3 DIFFERENT"
+    assert len(tile["icons"]) == 4
+
+
+def test_any_of_distinct_of_one_is_any_item():
+    cfg = json.dumps({"kind": "any_of_distinct", "items": ["Bandos hilt", "Zamorak hilt"]})
+    tile = _tile(_task(type="item_collection", config=cfg, target_value=1))
+    assert tile["badge"] == "ANY ITEM"
+
+
 def test_assembly_badge_and_groups_flatten():
     cfg = json.dumps({"kind": "groups", "groups": [
         {"mode": "all_of", "items": ["Godsword shard 1", "Godsword shard 2"]},

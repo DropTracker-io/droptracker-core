@@ -24,6 +24,7 @@ are imported lazily inside functions — the unit-test conftest stubs
 
 from __future__ import annotations
 
+from utils.task_progress import DISTINCT_ITEM_KINDS
 from web_api.task_tiles import (
     _fmt_num,
     _fmt_time,
@@ -107,7 +108,7 @@ def _display_names(config: dict, norms) -> dict:
 def _item_collection_groups(task: dict, config: dict, need: int) -> tuple[list, list]:
     """(groups, paths) for an item_collection task — the same three shapes the
     breakdown reconstructs: multi-group ``groups``, either/or ``paths``, and
-    the flat any_of/all_of/assembly/point_collection list."""
+    the flat any_of/any_of_distinct/all_of/assembly/point_collection list."""
     from services.event_engine import _config_item_entries, _parse_requirement_groups
 
     kind = config.get("kind")
@@ -168,21 +169,31 @@ def _item_collection_groups(task: dict, config: dict, need: int) -> tuple[list, 
         return [], paths
 
     if entries:
-        if kind in ("all_of", "assembly"):
+        distinct = kind == "any_of_distinct"
+        if kind in DISTINCT_ITEM_KINDS and not distinct:
             mode, label, unit = "all_of", "All of", None
         elif kind == "point_collection":
             mode, label, unit = "points", "Points", "pts"
+        elif distinct:
+            # "Any N of" whose items each count once — flagged so a client can
+            # say so; the label already does for clients that don't.
+            mode, unit = "any_of", None
+            label = f"Any {need} different" if need > 1 else "Any of"
         else:
             mode = "any_of"
             label = f"Any {need} of" if need > 1 else "Any of"
             unit = None
         # A single-item any_of ("6000× Vial of blood") is a counted goal, so
-        # the group need belongs on the item row.
-        single = need if mode == "any_of" and len(entries) == 1 else 1
+        # the group need belongs on the item row. Never for a distinct list:
+        # one copy of an item is all it can ever contribute.
+        single = need if mode == "any_of" and not distinct and len(entries) == 1 else 1
         names = _display_names(config, list(entries))
         items = [_item(names[n], entries[n], single) for n in entries]
         group_need = len(items) if mode == "all_of" else need
-        return [_group(mode, items, group_need, label=label, unit=unit)], []
+        group = _group(mode, items, group_need, label=label, unit=unit)
+        if distinct:
+            group["distinct"] = True
+        return [group], []
 
     # Config-less single target: "Collect 3× Twisted bow".
     target = (task.get("target") or "").strip()
@@ -250,7 +261,15 @@ def requirement_spec(task: dict) -> dict:
         kind = config.get("kind")
         if paths:
             out["summary"] = "Complete any ONE of these paths"
-        elif kind in ("all_of", "assembly"):
+        elif kind == "any_of_distinct":
+            out["summary"] = (f"Collect any {need} different items from these {total}"
+                              if need > 1 else f"Collect any one of these {total} items")
+            # The one question this mode exists to answer ("why didn't my
+            # second Mooleta count?"), stated where the player looks first.
+            out["notes"].append(
+                "Each item counts once. Another copy of an item your team "
+                "already has doesn't add progress.")
+        elif kind in DISTINCT_ITEM_KINDS:
             out["summary"] = f"Collect all {total} items"
         elif kind == "point_collection":
             out["summary"] = f"Score {_fmt_num(need)} points from these {total} items"

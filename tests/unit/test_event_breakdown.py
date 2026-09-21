@@ -178,6 +178,59 @@ class TestFlatAnyOf:
         assert group["satisfied"]
 
 
+class TestFlatAnyOfDistinct:
+    """any_of_distinct (ticket #446): an "any N of" checklist whose items each
+    count once — the display must agree with the engine's distinct fold."""
+    CONFIG = {"kind": "any_of_distinct",
+              "items": ["Armadyl hilt", "Bandos hilt", "Saradomin hilt", "Zamorak hilt"]}
+
+    def test_repeats_count_once(self):
+        rows = [_row(1, target="Bandos hilt", rid=1),
+                _row(1, target="Bandos hilt", rid=2),
+                _row(1, target="Zamorak hilt", rid=3)]
+        out = _breakdown(_task(self.CONFIG, target_value=3), rows, progress=2)
+        group = out["groups"][0]
+        assert group["mode"] == "any_of"
+        assert group["distinct"] is True
+        assert group["need"] == 3
+        assert group["obtained"] == 2 == engine._distinct_progress_from_rows(rows, 3)
+        assert not group["satisfied"]
+
+    def test_items_need_one_copy_each(self):
+        out = _breakdown(_task(self.CONFIG, target_value=3),
+                         [_row(2, target="Bandos hilt")])
+        items = {it["name"]: it for it in out["groups"][0]["items"]}
+        assert all(it["required"] == 1 for it in items.values())
+        assert items["bandos hilt"]["satisfied"]
+
+    def test_single_item_list_is_not_a_counted_goal(self):
+        # Unlike any_of, a one-item distinct list can never need 2 copies.
+        config = {"kind": "any_of_distinct", "items": ["Bandos hilt"]}
+        out = _breakdown(_task(config, target_value=1), [_row(1, target="Bandos hilt")])
+        group = out["groups"][0]
+        assert group["items"][0]["required"] == 1
+        assert group["satisfied"]
+
+    def test_completes_at_goal(self):
+        rows = [_row(1, target=n, rid=i) for i, n in
+                enumerate(["Bandos hilt", "Zamorak hilt", "Armadyl hilt"], start=1)]
+        out = _breakdown(_task(self.CONFIG, target_value=3), rows, progress=3)
+        assert out["groups"][0]["satisfied"]
+
+    def test_pending_repeat_does_not_project_completion(self):
+        rows = [_row(1, target="Bandos hilt", rid=1),
+                _row(1, target="Zamorak hilt", rid=2)]
+        pending = [_row(1, target="Bandos hilt", rid=3)]
+        out = _breakdown(_task(self.CONFIG, target_value=3), rows, progress=2,
+                         pending_rows=pending)
+        assert not out["groups"][0].get("pending_satisfied")
+
+    def test_plain_any_of_group_is_not_flagged(self):
+        config = dict(self.CONFIG, kind="any_of")
+        out = _breakdown(_task(config, target_value=3), [_row(1, target="Bandos hilt")])
+        assert "distinct" not in out["groups"][0]
+
+
 class TestPetCollection:
     """A pet task used to be a bare N/3 meter with no list of eligible pets —
     the participant could not tell which of the 39 listed pets counted."""

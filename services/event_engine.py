@@ -34,7 +34,10 @@ v1 evaluation semantics (task doc table):
   point weight; ``groups`` combines all-of/any-of sub-requirements — every
   group must be satisfied, e.g. all godsword shards + any one hilt).
   Progress unit = quantity; ``any_of`` completes at ``target_value``
-  qualifying drops (default 1). ``any_path`` paths may also be METRIC paths
+  qualifying drops (default 1). ``any_of_distinct`` completes at
+  ``target_value`` DIFFERENT listed items — a second copy of an item the
+  team already has counts nothing, exactly like ``all_of`` (the kinds in
+  :data:`DISTINCT_ITEM_KINDS` share one fold). ``any_path`` paths may also be METRIC paths
   (``{"metric": "kc"|"loot_value", "npcs": [...], "need": N}``) — "boss pet
   OR 5,000 GWD kills"; each metric path folds its own tagged ledger rows
   (``note`` = ``path:<idx>``, guid suffixed ``#p<idx>``) with kc_target-style
@@ -782,9 +785,16 @@ def task_progress_notify_mode(task: dict) -> Optional[str]:
 
 
 def _list_kind(task: dict) -> Optional[str]:
-    """Item-list config kind (any_of/all_of/point_collection/assembly/groups/any_path), if any."""
+    """Item-list config kind (any_of/any_of_distinct/all_of/point_collection/
+    assembly/groups/any_path), if any."""
     config = task.get("config") or {}
     return config.get("kind") if isinstance(config, dict) else None
+
+
+# Kinds whose rollup counts each listed item once (all_of, assembly,
+# any_of_distinct). Test ``kind in DISTINCT_ITEM_KINDS`` — never a literal
+# tuple — so every fold, gate and projection below agrees on the set.
+DISTINCT_ITEM_KINDS = _tp.DISTINCT_ITEM_KINDS
 
 
 def _pb_distinct_players(task: dict) -> bool:
@@ -795,7 +805,7 @@ def _pb_distinct_players(task: dict) -> bool:
 
 
 def _distinct_item_progress(session, task: dict, team_id, include=None) -> int:
-    """all_of/assembly rollup: one unit per DISTINCT listed item collected
+    """:data:`DISTINCT_ITEM_KINDS` rollup: one unit per DISTINCT listed item collected
     (quantity is irrelevant — a 1,338-coins drop is still just "Coins"), plus
     manual wildcard rows (no matched item) counting their quantity each,
     capped at the threshold so wildcard awards can't overshoot.
@@ -957,7 +967,7 @@ def pending_projection(session, task: dict, team_id) -> Optional[dict]:
             "pending_count": len(pending_rows),
             "pending_complete": False,
         }
-    if kind in ("all_of", "assembly"):
+    if kind in DISTINCT_ITEM_KINDS:
         applied = _distinct_progress_from_rows(applied_rows, threshold)
         projected = _distinct_progress_from_rows(rows, threshold)
     elif kind == "groups":
@@ -1050,7 +1060,7 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
             # Off by default — existing tasks keep drop-only semantics.
             if kind != "drop" and not (task.get("config") or {}).get("clog_sources"):
                 return None
-        # The matched name rides along to the ledger row so all_of/assembly
+        # The matched name rides along to the ledger row so DISTINCT_ITEM_KINDS
         # progress can count DISTINCT items rather than folding quantities.
         return {"mode": "count", "quantity": credit,
                 "matched_target": str(item_name or "").strip()[:120] or None}
@@ -4604,7 +4614,7 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         # one player; recompute from the applied ledger like all_of items.
         progress.progress = _distinct_player_progress(
             session, task, team_id, threshold, include=completion)
-    elif _list_kind(task) in ("all_of", "assembly"):
+    elif _list_kind(task) in DISTINCT_ITEM_KINDS:
         # Distinct-item semantics: recompute from the applied ledger instead
         # of folding quantity (which let one big stack complete the set).
         progress.progress = _distinct_item_progress(session, task, team_id, include=completion)
@@ -4943,7 +4953,7 @@ def _row_advances_progress(session, task: dict, team_id, candidate) -> bool:
                     > task_rule_progress(held, rule))
         cap = rule.max_awards if rule is not None else 1
         return bonus_award_count(rows, candidate.player_id, parsed[1]) < cap
-    if kind in ("all_of", "assembly"):
+    if kind in DISTINCT_ITEM_KINDS:
         helper = _distinct_item_progress
     elif kind == "groups":
         helper = _grouped_item_progress
@@ -5483,7 +5493,7 @@ def _derive_applied_progress(session, task: dict, team_id) -> float:
     if _pb_distinct_players(task):
         return _distinct_player_progress(
             session, task, team_id, effective_threshold(session, task, team_id))
-    if _list_kind(task) in ("all_of", "assembly"):
+    if _list_kind(task) in DISTINCT_ITEM_KINDS:
         # Distinct-item semantics (revoked rows are already excluded — their
         # status flipped before this recompute).
         return _distinct_item_progress(session, task, team_id)

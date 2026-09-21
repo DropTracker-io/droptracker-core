@@ -36,6 +36,16 @@ _PATH_NOTE_PREFIX = "path:"
 # vocabulary of its own.
 PROGRESS_KINDS = ("count", "distinct", "groups", "any_path", "points")
 
+# Item-list config kinds that count each listed item ONCE: a second copy of an
+# item the team already has adds nothing. ``all_of``/``assembly`` need every
+# item on the list; ``any_of_distinct`` needs ``target_value`` different items
+# ("any 4 of these 8 hilts"). Plain ``any_of`` is NOT here — it folds
+# quantities, so two of the same item count twice. Every rollup, record gate
+# and display that treats distinct kinds specially reads this tuple, so a new
+# distinct kind cannot be wired into some of them and silently miss the rest
+# (a missed site falls back to summing quantities).
+DISTINCT_ITEM_KINDS = ("all_of", "assembly", "any_of_distinct")
+
 
 def norm(value) -> str:
     """Normalize a name for case-insensitive comparison — must stay identical
@@ -153,7 +163,7 @@ def count_progress_from_rows(rows, threshold: int) -> int:
 
 
 def distinct_progress_from_rows(rows, threshold: int) -> int:
-    """all_of/assembly rollup: one unit per DISTINCT listed item collected
+    """:data:`DISTINCT_ITEM_KINDS` rollup: one unit per DISTINCT listed item collected
     (quantity is irrelevant — a 1,338-coins drop is still just "Coins"), plus
     manual wildcard rows (no matched item) counting their quantity each,
     capped at the threshold so wildcard awards can't overshoot."""

@@ -15,6 +15,7 @@ import json
 import os
 
 from db import ItemList, NpcList
+from utils.task_progress import DISTINCT_ITEM_KINDS
 from web_api.common import abort_problem
 from web_api.routes.npc_source_aliases import expand_source_names
 
@@ -54,11 +55,12 @@ OSRS_SKILLS = (
 _SKILL_BY_NORM = {s.lower(): s for s in OSRS_SKILLS}
 
 # Item-collection config kinds the engine understands (any_of/all_of via the
-# generic items map, point_collection weighting, assembly best-effort,
+# generic items map, any_of_distinct counting each listed item once toward an
+# "any N different" goal, point_collection weighting, assembly best-effort,
 # groups combining all-of/any-of sub-requirements, any_path completing on
 # whichever alternative requirement set finishes first).
-ITEM_CONFIG_KINDS = ("any_of", "all_of", "point_collection", "assembly", "groups",
-                     "any_path")
+ITEM_CONFIG_KINDS = ("any_of", "any_of_distinct", "all_of", "point_collection",
+                     "assembly", "groups", "any_path")
 
 MAX_CONFIG_ITEMS = 100
 MAX_CONFIG_GROUPS = 10
@@ -1092,7 +1094,7 @@ def _derived_progress_shape(ttype: str, config: dict | None, tv) -> tuple:
             return "any_path", ANY_PATH_THRESHOLD
         if kind == "groups":
             return "groups", value
-        if kind in ("all_of", "assembly"):
+        if kind in DISTINCT_ITEM_KINDS:
             return "distinct", value
         if kind == "point_collection":
             # The rows arrive pre-weighted (the matcher returns the item's
@@ -1613,6 +1615,16 @@ def validate_task_payload(s, body: dict) -> dict:
                 # "Any N from the list" — quantities fold, so a stack of a
                 # listed item counts its size. Default: any single one.
                 tv = _require_target_value(tv if tv is not None else 1, what="Quantity")
+            elif kind == "any_of_distinct":
+                # "Any N DIFFERENT items from the list" — each item counts
+                # once, so the goal can't exceed how many different items the
+                # list holds (the list itself isn't deduplicated; a name given
+                # twice is still one item). Default: any single one.
+                different = len({" ".join(e["item_name"].lower().split())
+                                 for e in config["items"]})
+                tv = _require_target_value(tv if tv is not None else 1,
+                                           what="Number of different items",
+                                           hi=different)
             elif kind in ("all_of", "assembly"):
                 tv = len(config["items"])
             else:  # point_collection — points threshold to reach
