@@ -89,7 +89,12 @@ def _substitute_line(text: str, replacements: Dict[str, Any]) -> str:
         # semantics are the same simple substitution.
         for key, value in replacements.items():
             try:
-                text = text.replace(key, str(value))
+                value = str(value)
+                if "`" in value:
+                    # Already inline code: drop the template's own pair, as
+                    # replace_placeholders_in_text does.
+                    text = text.replace(f"`{key}`", value)
+                text = text.replace(key, value)
             except Exception:
                 continue
         return text

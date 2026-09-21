@@ -417,7 +417,16 @@ def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_ser
 def replace_placeholders_in_text(text, value_dict):
     for placeholder, value in value_dict.items():
         try:
-            text = text.replace(placeholder, str(value))
+            value = str(value)
+            if "`" in value:
+                # The value is already inline code: the drop sender's
+                # {item_value} is "`1.2M`", or "`3.6M` (3 x `1.2M`)" for a
+                # stack. A template that wraps it again, like the stock drop
+                # embed's "G/E Value: `{item_value}`", nests the backticks and
+                # Discord shows the stack with stray ones. The value's own
+                # formatting wins, so the template's pair goes.
+                text = text.replace(f"`{placeholder}`", value)
+            text = text.replace(placeholder, value)
         except Exception as e:
             text = text
             print("Couldn't replace placeholders in", text, f"using placeholder/value {placeholder}/{value}")

@@ -103,6 +103,18 @@ class TestRendering:
         assert "Ra ine" in text and "Vorkath" in text
         assert "{player_name}" not in text
 
+    def test_code_formatted_drop_value_is_not_wrapped_twice(self):
+        """The default drop layout wraps {item_value}, which the sender already
+        sends as inline code. Nested, a stack showed stray backticks."""
+        values = {
+            "{item_name}": "Steel cannonball",
+            "{item_value}": "`163.48K` (670 x `238`)",
+            "{npc_name}": "Phantom Muspah",
+            "{player_name}": "vconnah",
+        }
+        payload = render_layout(default_layout("drop"), values)
+        assert "G/E Value: `163.48K` (670 x `238`)" in str(payload)
+
     def test_drops_a_thumbnail_whose_placeholder_did_not_resolve(self):
         """Most players have no character model. The section must still send —
         an unresolved URL would make Discord reject the whole message."""

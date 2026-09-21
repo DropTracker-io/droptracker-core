@@ -258,6 +258,33 @@ class TestReplacePlaceholdersInText:
         result = replace_placeholders_in_text("", {"{player_name}": "Alice"})
         assert result == ""
 
+    def test_code_formatted_stack_is_not_wrapped_twice(self):
+        # The stock drop embed wraps {item_value}, which the sender already
+        # formats as inline code. Nested, Discord showed stray backticks.
+        result = replace_placeholders_in_text(
+            "G/E Value: `{item_value}`",
+            {"{item_value}": "`163.48K` (670 x `238`)"},
+        )
+        assert result == "G/E Value: `163.48K` (670 x `238`)"
+
+    def test_code_formatted_single_value_keeps_one_pair(self):
+        result = replace_placeholders_in_text(
+            "G/E Value: `{item_value}`", {"{item_value}": "`38.15K`"}
+        )
+        assert result == "G/E Value: `38.15K`"
+
+    def test_plain_value_keeps_the_template_backticks(self):
+        result = replace_placeholders_in_text(
+            "Received at `{killcount}`", {"{killcount}": "412"}
+        )
+        assert result == "Received at `412`"
+
+    def test_code_formatted_value_used_bare_is_unchanged(self):
+        result = replace_placeholders_in_text(
+            "Group Rank: {group_rank}", {"{group_rank}": "`1`/`2`"}
+        )
+        assert result == "Group Rank: `1`/`2`"
+
 
 # ── strip_title_markdown ──────────────────────────────────────────────────────
 
