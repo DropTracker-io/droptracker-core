@@ -429,6 +429,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Change group configuration options | `web_api/config_registry.py` (+ frontend `packages/api-types`) |
 | Rename a group (name lives in 4 places) | `db/group_rename.py` — every rename path must go through it |
 | Clan points: awarding | `data/submissions/point_awards.py`, `db/models/group_points.py`, `web_api/routes/points.py` (settings) |
+| Clan points: changes made from Discord (`/add-group-points`, `/remove-group-points`, "Modify Entry") | `commands/group_admin.py`, `services/entry_modifier.py`. Replies are public by default; `points_ephemeral_messages` makes them private (read only via `utils/group_config.points_replies_ephemeral`). The Modify Entry menu itself is always private: its buttons have no permission check |
 | Clan points: any total, rank or board shown to anyone | `db/point_standings.py` — current members only, RSNs optionally combined per Discord user (`points_combine_accounts`). Never write a fresh `SUM(amount)`; Discord surface is `commands/points.py` + `services/points_cards.py` |
 | Premium feature credits (a different ledger) | `services/points.py` |
 | Video upload flow | `api/routes/video.py`, `services/video_worker.py`, `utils/b2_storage.py` |
