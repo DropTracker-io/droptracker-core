@@ -26,6 +26,10 @@ class Ticket(Base):
     # cleared the moment a human replies (which restarts the 5-day clock). While
     # non-NULL the ticket is in the 24h grace window before auto-archive.
     inactivity_warned_at = Column(DateTime, nullable=True)
+    # Staff opt-out of that auto-close (web117a), set with /autoclose in the
+    # ticket channel. An exempt ticket is never warned or auto-closed; it
+    # stays open until someone closes it.
+    autoclose_exempt = Column(Boolean, nullable=False, default=False, server_default="0")
 
 
 class TicketMessage(Base):

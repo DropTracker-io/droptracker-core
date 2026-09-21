@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from urllib.parse import quote
 import interactions
 from sqlalchemy import text
-from interactions import ActionRow, AllowedMentions, Button, ButtonStyle, ComponentContext, Embed, Extension, IntervalTrigger, OverwriteType, Permissions, Task, slash_command, slash_option, OptionType, SlashContext, listen
+from interactions import ActionRow, AllowedMentions, Button, ButtonStyle, ComponentContext, Embed, Extension, IntervalTrigger, OverwriteType, Permissions, SlashCommandChoice, Task, slash_command, slash_option, OptionType, SlashContext, listen
 from interactions.api.events import MessageCreate, MessageUpdate, Component, Startup
 from interactions.models import (
     ContainerComponent,
@@ -33,27 +33,33 @@ from utils.redis import redis_client
 INACTIVITY_WARN_AFTER = timedelta(days=5)
 INACTIVITY_CLOSE_AFTER = timedelta(hours=24)
 
+# Roles that may close a ticket, and so decide which tickets stay open: the
+# same two that /close accepts. Ticket helpers (TICKETS_ROLE_ID) reply
+# everywhere but can't close, so they can't exempt a ticket from auto-close.
+TICKET_CLOSER_ROLE_IDS = {1342871954885050379, SUPPORT_ROLE_ID}
 
-def _author_has_staff_role(author) -> bool:
-    """True if the message author carries one of the ticket staff roles."""
+
+def _author_has_staff_role(author, role_ids=STAFF_ROLE_IDS) -> bool:
+    """True if the author carries one of ``role_ids`` (default: any ticket staff role)."""
     for role in (getattr(author, "roles", None) or []):
         try:
-            if int(getattr(role, "id", role)) in STAFF_ROLE_IDS:
+            if int(getattr(role, "id", role)) in role_ids:
                 return True
         except Exception:
             continue
     return False
 
 
-def _inactivity_decision(status, last_activity, warned_at, now):
+def _inactivity_decision(status, last_activity, warned_at, now, exempt=False):
     """Pure sweep decision — returns 'warn', 'close', or None.
 
+    * exempt (staff ran /autoclose off)                          -> None
     * open, never warned, idle beyond INACTIVITY_WARN_AFTER      -> 'warn'
     * open, warned, INACTIVITY_CLOSE_AFTER elapsed since the warn -> 'close'
     A human reply clears ``warned_at`` (in ticket_transcripts.upsert_message),
     so the 'close' branch only fires when nobody replied in the grace window.
     """
-    if status != "open":
+    if status != "open" or exempt:
         return None
     if warned_at is None:
         if last_activity is not None and last_activity < now - INACTIVITY_WARN_AFTER:
@@ -62,6 +68,80 @@ def _inactivity_decision(status, last_activity, warned_at, now):
     if warned_at < now - INACTIVITY_CLOSE_AFTER:
         return "close"
     return None
+
+
+def _set_autoclose_exempt(ticket, exempt: bool, now: datetime) -> bool:
+    """Apply an /autoclose change to a Ticket row. Returns False if nothing changed.
+
+    Either way any pending 5-day warning is dropped. Left in place, a warning
+    older than the 24h grace window would close the ticket on the first sweep
+    after auto-close is turned back on, without a fresh warning. Turning it
+    back on also restarts the idle clock (date_updated), so the ticket gets a
+    full 5 days before the next warning.
+    """
+    if bool(ticket.autoclose_exempt) == exempt:
+        return False
+    ticket.autoclose_exempt = exempt
+    ticket.inactivity_warned_at = None
+    if not exempt:
+        ticket.date_updated = now
+    return True
+
+
+def _apply_autoclose_setting(channel_id, setting):
+    """DB half of /autoclose (runs in a worker thread).
+
+    ``setting`` is 'off', 'on', or None to only read the current value.
+    Returns (outcome, exempt) where outcome is one of 'not_ticket',
+    'not_open', 'status', 'unchanged' or 'changed', and exempt is the
+    ticket's setting afterwards.
+    """
+    s = Session()
+    try:
+        ticket = s.query(Ticket).filter(Ticket.channel_id == str(channel_id)).first()
+        if ticket is None:
+            return "not_ticket", False
+        if ticket.status != "open":
+            return "not_open", bool(ticket.autoclose_exempt)
+        if setting is None:
+            return "status", bool(ticket.autoclose_exempt)
+        exempt = setting == "off"
+        if not _set_autoclose_exempt(ticket, exempt, datetime.now()):
+            return "unchanged", exempt
+        s.commit()
+        return "changed", exempt
+    except Exception:
+        s.rollback()
+        raise
+    finally:
+        s.close()
+
+
+def _autoclose_status_text(exempt: bool) -> str:
+    if exempt:
+        return (
+            "📌 Auto-close is **off** for this ticket. It stays open until staff close it.\n"
+            "-# Run `/autoclose` and pick On to turn it back on."
+        )
+    return (
+        "⏰ Auto-close is **on** for this ticket. After 5 days without a reply it gets a "
+        "warning, then closes 24 hours later.\n"
+        "-# Run `/autoclose` and pick Off to keep it open until staff close it."
+    )
+
+
+def _autoclose_changed_text(exempt: bool, changed_by: str) -> str:
+    if exempt:
+        return (
+            "📌 **Auto-close is off for this ticket.** It will stay open until staff "
+            "close it, with no inactivity reminders.\n"
+            f"-# Turned off by {changed_by}"
+        )
+    return (
+        "⏰ **Auto-close is back on for this ticket.** If it goes 5 days without a "
+        "reply, it gets a warning and closes 24 hours later.\n"
+        f"-# Turned on by {changed_by}"
+    )
 
 
 _LOGO_MEDIA = UnfurledMediaItem(url="https://www.droptracker.io/img/droptracker-small.gif")
@@ -637,7 +717,8 @@ class Tickets(Extension):
         try:
             for t in s.query(Ticket).filter(Ticket.status == "open").all():
                 decision = _inactivity_decision(
-                    t.status, t.date_updated or t.date_added, t.inactivity_warned_at, now
+                    t.status, t.date_updated or t.date_added, t.inactivity_warned_at, now,
+                    exempt=t.autoclose_exempt,
                 )
                 if decision == "warn":
                     to_warn.append((t.ticket_id, t.channel_id, t.created_by))
@@ -656,16 +737,17 @@ class Tickets(Extension):
 
         for ticket_id in to_close:
             # Re-check under a fresh read: a reply may have landed since the
-            # scan (which would have cleared the warning flag).
+            # scan (which would have cleared the warning flag), or staff may
+            # have turned auto-close off.
             recheck = Session()
             try:
                 row = (
-                    recheck.query(Ticket.status, Ticket.inactivity_warned_at)
+                    recheck.query(Ticket.status, Ticket.inactivity_warned_at, Ticket.autoclose_exempt)
                     .filter(Ticket.ticket_id == ticket_id)
                     .first()
                 )
                 still_due = (
-                    _inactivity_decision(row[0], None, row[1], datetime.now()) == "close"
+                    _inactivity_decision(row[0], None, row[1], datetime.now(), exempt=row[2]) == "close"
                     if row is not None
                     else False
                 )
@@ -694,7 +776,8 @@ class Tickets(Extension):
             f"{opener_ping}<@&{SUPPORT_ROLE_ID}> — if this still needs attention, "
             f"please reply here before <t:{close_ts}:F> (<t:{close_ts}:R>). "
             "Otherwise it will be **automatically archived and closed** to keep the "
-            "queue tidy.\n\n-# A single reply keeps it open and resets the timer for another 5 days."
+            "queue tidy.\n\n-# A single reply keeps it open and resets the timer for another 5 days.\n"
+            "-# Staff: `/autoclose` keeps a long-running ticket open with no more reminders."
         )
         allowed = AllowedMentions(
             roles=[str(SUPPORT_ROLE_ID)],
@@ -718,7 +801,13 @@ class Tickets(Extension):
         s = Session()
         try:
             live = s.query(Ticket).filter(Ticket.ticket_id == ticket_id).first()
-            if live is not None and live.status == "open" and live.inactivity_warned_at is None:
+            # Exempted between the scan and now: never start the grace window.
+            if (
+                live is not None
+                and live.status == "open"
+                and live.inactivity_warned_at is None
+                and not live.autoclose_exempt
+            ):
                 live.inactivity_warned_at = datetime.now()
                 s.commit()
         except Exception as e:
@@ -892,6 +981,48 @@ class Tickets(Extension):
             await ctx.channel.send(
                 ":warning: Archiving the conversation failed, so the ticket was **not** closed. Please try again."
             )
+
+    @slash_command(
+        name="autoclose",
+        description="Turn the 5-day inactivity auto-close off or on for this ticket",
+        dm_permission=False,
+    )
+    @slash_option(
+        name="setting",
+        description="Off keeps this ticket open until staff close it. Leave empty to see the current setting.",
+        required=False,
+        opt_type=OptionType.STRING,
+        choices=[
+            SlashCommandChoice(name="Off (keep open until staff close it)", value="off"),
+            SlashCommandChoice(name="On (warn after 5 idle days, then close)", value="on"),
+        ],
+    )
+    async def autoclose_ticket(self, ctx: SlashContext, setting: str = None):
+        if not _author_has_staff_role(ctx.author, TICKET_CLOSER_ROLE_IDS):
+            return await ctx.send(
+                ":warning: Only staff who can close tickets can change auto-close.", ephemeral=True
+            )
+        try:
+            outcome, exempt = await asyncio.to_thread(
+                _apply_autoclose_setting, ctx.channel_id, setting
+            )
+        except Exception as e:
+            print(f"[tickets] /autoclose failed (channel {ctx.channel_id}): {e}")
+            return await ctx.send(":warning: Couldn't update this ticket. Please try again.", ephemeral=True)
+        if outcome == "not_ticket":
+            return await ctx.send(
+                ":warning: This is not a ticket channel owned by the DropTracker ticket system.",
+                ephemeral=True,
+            )
+        if outcome == "not_open":
+            return await ctx.send("This ticket is already being closed.", ephemeral=True)
+        if outcome != "changed":
+            return await ctx.send(_autoclose_status_text(exempt), ephemeral=True)
+        # Public on purpose: both parties see it, and the mirror copies it into
+        # the transcript as the record of who changed it.
+        await ctx.send(
+            _autoclose_changed_text(exempt, ctx.author.display_name or ctx.author.username)
+        )
 
     @listen(Component)
     async def on_component(self, event: Component):
