@@ -1326,3 +1326,90 @@ def test_slayer_target_bounds_the_task_count():
         _validate({"type": "slayer_target", "target_value": 0})
     with pytest.raises(ProblemException):
         _validate({"type": "slayer_target", "target_value": etv.MAX_SLAYER_TASK_COUNT + 1})
+
+
+# ── DT2 vestiges: config.vestige_rings ("Gold rings count as vestiges") ──────
+
+_VESTIGE_ITEMS = {**_BY_NORM, **{n.lower(): n for n in (
+    "Ultor vestige", "Magus vestige", "Gold ring")}}
+
+
+@pytest.fixture
+def _stub_vestiges(monkeypatch):
+    monkeypatch.setattr(
+        etv, "_canonical_item",
+        lambda s, name: _VESTIGE_ITEMS.get((name or "").strip().lower()),
+    )
+
+
+def test_rings_off_is_kept_on_a_single_vestige(_stub_vestiges):
+    out = _validate({"type": "item_collection", "target": "ultor vestige",
+                     "config": {"vestige_rings": False}})
+    assert out["target"] == "Ultor vestige"
+    assert _cfg(out) == {"vestige_rings": False}
+
+
+def test_rings_off_rides_alongside_a_source_restriction(_stub_vestiges, monkeypatch):
+    monkeypatch.setattr(etv, "expand_source_names", lambda name: [name])
+    monkeypatch.setattr(etv, "_canonical_npc",
+                        lambda s, name: "Vardorvis" if name == "Vardorvis" else None)
+    out = _validate({"type": "item_collection", "target": "Ultor vestige",
+                     "config": {"source_npcs": ["Vardorvis"], "vestige_rings": False}})
+    assert _cfg(out) == {"source_npcs": ["Vardorvis"], "vestige_rings": False}
+
+
+def test_rings_off_is_kept_on_every_list_kind(_stub_vestiges):
+    for config in (
+        {"kind": "any_of", "items": ["Ultor vestige", "Boater"]},
+        {"kind": "point_collection",
+         "items": [{"item_name": "Magus vestige", "points": 40}]},
+        {"kind": "groups",
+         "groups": [{"mode": "any_of", "need": 1, "items": ["Magus vestige"]}]},
+        {"kind": "any_path", "paths": [
+            {"groups": [{"mode": "all_of", "items": ["Ultor vestige"]}]},
+            {"groups": [{"mode": "all_of", "items": ["Boater"]}]},
+        ]},
+    ):
+        body = {"type": "item_collection",
+                "config": {**config, "vestige_rings": False}}
+        if config["kind"] == "point_collection":
+            body["target_value"] = 40
+        assert _cfg(_validate(body))["vestige_rings"] is False, config["kind"]
+
+
+def test_rings_on_is_the_default_and_never_stored(_stub_vestiges):
+    out = _validate({"type": "item_collection",
+                     "config": {"kind": "any_of", "items": ["Ultor vestige"],
+                                "vestige_rings": True}})
+    assert "vestige_rings" not in _cfg(out)
+    single = _validate({"type": "item_collection", "target": "Ultor vestige",
+                        "config": {"vestige_rings": True}})
+    assert single["config"] is None
+
+
+def test_rings_off_is_dropped_when_no_vestige_is_listed(_stub_vestiges):
+    out = _validate({"type": "item_collection",
+                     "config": {"kind": "any_of", "items": ["Boater", "Gold ring"],
+                                "vestige_rings": False}})
+    assert "vestige_rings" not in _cfg(out)
+
+
+def test_rings_off_is_dropped_when_gold_ring_is_listed_too(_stub_vestiges):
+    # A listed ring only ever counts as a ring, so the switch changes nothing.
+    out = _validate({"type": "item_collection", "target_value": 1,
+                     "config": {"kind": "any_of", "items": ["Gold ring", "Ultor vestige"],
+                                "vestige_rings": False}})
+    assert "vestige_rings" not in _cfg(out)
+
+
+def test_rings_switch_must_be_a_boolean(_stub_vestiges):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection", "target": "Ultor vestige",
+                   "config": {"vestige_rings": "no"}})
+    assert exc.value.status == 422
+
+
+def test_rings_switch_means_nothing_to_other_task_types():
+    out = _validate({"type": "xp_target", "target": "Slayer", "target_value": 1000,
+                     "config": {"vestige_rings": False}})
+    assert out["config"] is None

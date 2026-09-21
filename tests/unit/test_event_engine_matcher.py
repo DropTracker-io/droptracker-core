@@ -937,6 +937,57 @@ class TestVestigeRings:
                 for m in matches] == [("count", None, "Ultor vestige"),
                                       ("kc", 1, None)]
 
+    # config.vestige_rings = false: the task's own "rings don't count" switch.
+
+    def test_rings_off_task_ignores_the_ring(self):
+        t = _task(target="Ultor vestige", config={"vestige_rings": False})
+        assert engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 1, "npc_name": "Vardorvis"})) is None
+
+    def test_rings_off_task_still_counts_the_vestige_itself(self):
+        t = _task(target="Ultor vestige", config={"vestige_rings": False})
+        m = engine.match_task(t, _env("drop", {
+            "item_name": "Ultor vestige", "quantity": 1, "npc_name": "Vardorvis"}))
+        assert m == {"mode": "count", "quantity": 1,
+                     "matched_target": "Ultor vestige"}
+
+    def test_rings_off_applies_to_list_kinds(self):
+        t = _task(config={"kind": "point_collection", "vestige_rings": False,
+                          "items": [{"item_name": "Bellator vestige", "points": 40}]},
+                  target_value=100)
+        assert engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 2,
+            "npc_name": "The Whisperer"})) is None
+
+    def test_explicit_true_is_the_default(self):
+        t = _task(target="Magus vestige", config={"vestige_rings": True})
+        m = engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 1, "npc_name": "Duke Sucellus"}))
+        assert m is not None and m["matched_target"] == "Magus vestige"
+
+    def test_rings_off_keeps_a_listed_gold_ring_counting(self):
+        # The switch is about the vestige alias only: a list that names Gold
+        # ring itself still takes the ring as a ring.
+        t = _task(config={"kind": "any_of", "vestige_rings": False,
+                          "items": ["Gold ring", "Ultor vestige"]}, target_value=3)
+        m = engine.match_task(t, _env("drop", {
+            "item_name": "Gold ring", "quantity": 2, "npc_name": "Vardorvis"}))
+        assert m == {"mode": "count", "quantity": 2, "matched_target": "Gold ring"}
+
+    def test_competition_rule_with_rings_off_ignores_the_ring(self):
+        def _comp(rule_config):
+            embedded = _task(target="Magus vestige", target_value=1,
+                             config=rule_config)
+            return {"id": 1, "event_id": 10, "type": "competition",
+                    "config": {}, "competition": {"task_rules": [
+                        {"id": 3, "kinds": ["drop", "clog"], "task": embedded}]}}
+
+        ring = _env("drop", {"item_name": "Gold ring", "quantity": 1,
+                             "npc_name": "Duke Sucellus", "total_value": 0})
+        on = engine.match_task_all(_comp({}), ring)
+        assert [m["bonus"] for m in on] == [{"rule_id": 3, "type": "task"}]
+        assert engine.match_task_all(_comp({"vestige_rings": False}), ring) == []
+
 
 # ── pb completion requirements (times / unique_players / whole_team) ─────────
 

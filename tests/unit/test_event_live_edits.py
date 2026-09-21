@@ -174,8 +174,11 @@ def _fake_engine(monkeypatch, result=None):
 
     class _Eng:
         @staticmethod
-        def recompute_task_rollups(s, ev, task, *, old_points=None):
+        def recompute_task_rollups(s, ev, task, *, old_points=None,
+                                   rescreen_vestige_rings=False):
             calls.append({"old_points": old_points, "task_id": task.id})
+            if rescreen_vestige_rings:
+                calls[-1]["rescreen_vestige_rings"] = True
             if isinstance(result, Exception):
                 raise result
             return result if result is not None else {"teams": {}, "bonuses": {}}
@@ -488,3 +491,197 @@ class TestDeriveAppliedProgress:
                 _row(quantity=99, source_type="bonus")])
         task = {"id": 9, "type": "kc_target", "config": None, "target_value": 5}
         assert engine._derive_applied_progress(s, task, 1) == 5
+
+
+# ── 4. "Gold rings count as vestiges" switch (config.vestige_rings) ──────────
+def _ledger(rid, target, *, status="auto", source_id=None, team_id=1, player_id=3,
+            acted_by_user_id=None, note=None, source_type="drop"):
+    return SimpleNamespace(
+        id=rid, matched_target=target, status=status, source_id=source_id,
+        team_id=team_id, player_id=player_id, acted_by_user_id=acted_by_user_id,
+        note=note, source_type=source_type, quantity=1)
+
+
+_RINGS_OFF_TASK = {"id": 9, "type": "item_collection", "target": "Ultor vestige",
+                   "target_value": 1, "config": {"vestige_rings": False}}
+_RINGS_ON_TASK = {**_RINGS_OFF_TASK, "config": {}}
+
+
+class TestRescreenVestigeRingCredits:
+    def test_switch_off_takes_back_ring_credits_only(self):
+        ring = _ledger(1, "Ultor vestige", source_id=100)
+        pending_ring = _ledger(2, "Ultor vestige", status="pending",
+                               source_id=102, player_id=4)
+        vestige = _ledger(3, "Ultor vestige", status="confirmed", source_id=101,
+                          player_id=5, acted_by_user_id=7)
+        s = _S(
+            [ring, pending_ring, vestige],                        # vestige drop rows
+            [(100, "Gold ring"), (101, "Ultor vestige"), (102, "Gold ring")],
+        )
+        out = engine._rescreen_vestige_ring_credits(s, _RINGS_OFF_TASK)
+        assert out == {"revoked": [1], "rejected": [2]}
+        assert (ring.status, ring.note) == ("revoked", engine.RING_OFF_NOTE)
+        assert (pending_ring.status, pending_ring.note) == ("rejected",
+                                                            engine.RING_OFF_NOTE)
+        # The vestige itself keeps counting.
+        assert (vestige.status, vestige.note) == ("confirmed", None)
+
+    def test_switch_off_without_ring_rows_changes_nothing(self):
+        vestige = _ledger(3, "Ultor vestige", source_id=101)
+        s = _S([vestige], [(101, "Ultor vestige")])
+        assert engine._rescreen_vestige_ring_credits(s, _RINGS_OFF_TASK) == {}
+        assert vestige.status == "auto"
+
+    def test_switch_on_restores_each_row_as_it_was(self):
+        auto = _ledger(1, "Ultor vestige", status="revoked", note=engine.RING_OFF_NOTE)
+        confirmed = _ledger(2, "Ultor vestige", status="revoked", player_id=4,
+                            acted_by_user_id=7, note=engine.RING_OFF_NOTE)
+        pending = _ledger(3, "Ultor vestige", status="rejected", player_id=5,
+                          note=engine.RING_OFF_NOTE)
+        s = _S([auto, confirmed, pending], [])
+        out = engine._rescreen_vestige_ring_credits(s, _RINGS_ON_TASK)
+        assert out == {"restored": [1, 2, 3]}
+        assert (auto.status, confirmed.status, pending.status) == (
+            "auto", "confirmed", "pending")
+        assert auto.note is None and confirmed.note is None and pending.note is None
+
+    def test_switch_on_keeps_one_credit_per_chain(self):
+        # While rings were off, this player's vestige itself dropped and
+        # counted: that is the chain's one credit, so the old ring stays out.
+        ring = _ledger(1, "Ultor vestige", status="revoked", note=engine.RING_OFF_NOTE)
+        vestige = _ledger(2, "Ultor vestige", source_id=101)
+        s = _S([ring], [vestige])
+        assert engine._rescreen_vestige_ring_credits(s, _RINGS_ON_TASK) == {}
+        assert (ring.status, ring.note) == ("revoked", engine.RING_OFF_NOTE)
+
+    def test_switch_on_restores_a_chain_once(self):
+        first = _ledger(1, "Ultor vestige", status="revoked", note=engine.RING_OFF_NOTE)
+        second = _ledger(2, "Ultor vestige", status="revoked", note=engine.RING_OFF_NOTE)
+        s = _S([first, second], [])
+        assert engine._rescreen_vestige_ring_credits(s, _RINGS_ON_TASK) == {
+            "restored": [1]}
+        assert second.status == "revoked"
+
+    def test_switch_on_skips_a_vestige_the_task_no_longer_lists(self):
+        task = {**_RINGS_ON_TASK, "target": "Magus vestige"}
+        ring = _ledger(1, "Ultor vestige", status="revoked", note=engine.RING_OFF_NOTE)
+        s = _S([ring], [])
+        assert engine._rescreen_vestige_ring_credits(s, task) == {}
+        assert ring.status == "revoked"
+
+    def test_switch_on_restores_nothing_once_gold_ring_is_listed(self):
+        task = {**_RINGS_ON_TASK, "target": None,
+                "config": {"kind": "any_of", "items": ["Gold ring", "Ultor vestige"]}}
+        s = _S()  # returns before any query
+        assert engine._rescreen_vestige_ring_credits(s, task) == {}
+
+    def test_other_task_types_issue_no_queries(self):
+        s = _S()  # any query raises
+        assert engine._rescreen_vestige_ring_credits(
+            s, {"id": 9, "type": "kc_target", "config": {}}) == {}
+
+
+class TestRecomputeWithVestigeRingRescreen:
+    def test_switching_rings_off_takes_back_a_ring_completion(self):
+        # "Ultor vestige" (10 pts) completed on a Gold ring; rings switched
+        # off with re-score → the ring row is revoked BEFORE the re-fold, so
+        # the tile un-completes and the points come off.
+        ring = _ledger(1, "Ultor vestige", source_id=100)
+        progress = SimpleNamespace(progress=1, completed=True,
+                                   completed_at=datetime(2026, 9, 20), team_id=1)
+        team = SimpleNamespace(id=1, score=10)
+        s = _S(
+            [ring],                    # rescreen: vestige drop rows
+            [(100, "Gold ring")],      # rescreen: their source drops' items
+            [(1,)],                    # progress team ids
+            [(1,)],                    # applied completion team ids
+            [progress],                # locked rollup read
+            [],                        # surviving ledger fold → 0
+            [team],                    # t60 leader snapshot (first score write)
+            [team],                    # score RMW
+            [],                        # player-points delete
+            [(1, 0)],                  # final scores for SSE frames
+            [team],                    # t60 leader compare
+        )
+        out = engine.recompute_task_rollups(
+            s, _ev_row(),
+            _task_row(type="item_collection", target="Ultor vestige", target_value=1,
+                      config='{"vestige_rings": false}'),
+            old_points=10, rescreen_vestige_rings=True)
+        assert ring.status == "revoked"
+        assert progress.completed is False and team.score == 0
+        assert out["vestige_rings"] == {"revoked": [1], "rejected": []}
+        assert out["teams"][1]["score_delta"] == -10
+
+    def test_nothing_to_rescreen_adds_no_summary_key(self):
+        s = _S([], [], [])  # no vestige drop rows; no teams
+        out = engine.recompute_task_rollups(
+            s, _ev_row(),
+            _task_row(type="item_collection", target="Ultor vestige", target_value=1,
+                      config='{"vestige_rings": false}'),
+            rescreen_vestige_rings=True)
+        assert out == {"teams": {}, "bonuses": {}}
+
+
+class TestUpdateTaskVestigeRings:
+    @pytest.fixture(autouse=True)
+    def _known_vestige(self, monkeypatch):
+        import web_api.routes.event_task_validation as etv
+
+        monkeypatch.setattr(
+            etv, "_canonical_item",
+            lambda s, name: ("Ultor vestige"
+                             if (name or "").strip().lower() == "ultor vestige" else None))
+
+    def _task(self, config=None):
+        return _task(type="item_collection", target="Ultor vestige", target_value=1,
+                     config=config)
+
+    async def test_flipping_the_switch_rescreens_on_recompute(self, client, monkeypatch):
+        task = self._task()
+        s = _S([_event(status="active")], [task], [SimpleNamespace(id=1)])
+        _wire_admin(monkeypatch, s)
+        summary = {"teams": {}, "bonuses": {},
+                   "vestige_rings": {"revoked": [5], "rejected": []}}
+        calls = _fake_engine(monkeypatch, summary)
+        r = await client.patch("/api/v1/events/1/tasks/9",
+                               json={"config": {"vestige_rings": False},
+                                     "retro": "recompute"})
+        assert r.status_code == 200
+        assert calls == [{"old_points": 10, "task_id": 9,
+                          "rescreen_vestige_rings": True}]
+        assert json.loads(task.config) == {"vestige_rings": False}
+        after = json.loads(s.added[-1].after)
+        assert after["vestige_rings"] == {"revoked": [5], "rejected": []}
+
+    async def test_switching_back_on_rescreens_too(self, client, monkeypatch):
+        task = self._task(config='{"vestige_rings": false}')
+        s = _S([_event(status="active")], [task], [SimpleNamespace(id=1)])
+        _wire_admin(monkeypatch, s)
+        calls = _fake_engine(monkeypatch)
+        r = await client.patch("/api/v1/events/1/tasks/9",
+                               json={"config": None, "retro": "recompute"})
+        assert r.status_code == 200
+        assert calls[0].get("rescreen_vestige_rings") is True
+        assert task.config is None
+
+    async def test_other_edits_leave_ring_credits_alone(self, client, monkeypatch):
+        task = self._task(config='{"vestige_rings": false}')
+        s = _S([_event(status="active")], [task], [SimpleNamespace(id=1)])
+        _wire_admin(monkeypatch, s)
+        calls = _fake_engine(monkeypatch)
+        r = await client.patch("/api/v1/events/1/tasks/9",
+                               json={"points": 25, "retro": "recompute"})
+        assert r.status_code == 200
+        assert calls == [{"old_points": 10, "task_id": 9}]
+
+    async def test_flip_with_keep_needs_no_engine(self, client, monkeypatch):
+        task = self._task()
+        s = _S([_event(status="active")], [task], [SimpleNamespace(id=1)])
+        _wire_admin(monkeypatch, s)
+        calls = _fake_engine(monkeypatch)
+        r = await client.patch("/api/v1/events/1/tasks/9",
+                               json={"config": {"vestige_rings": False},
+                                     "retro": "keep"})
+        assert r.status_code == 200
+        assert not calls and s.committed

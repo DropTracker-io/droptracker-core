@@ -222,6 +222,45 @@ class TestItemCollection:
         assert spec["npcs"] == ["Dagannoth Rex"]
         assert any("Dagannoth Rex" in n for n in spec["notes"])
 
+    # DT2 vestiges: a Gold ring can credit a vestige without appearing in the
+    # list, so the requirement view says which way this task goes.
+
+    def test_vestige_task_says_gold_rings_count_by_default(self):
+        spec = requirement_spec(_task(type="item_collection", target="Magus vestige"))
+        assert any(n.startswith("A Gold ring from a vestige's boss counts")
+                   for n in spec["notes"])
+
+    def test_vestige_task_with_rings_off_says_they_dont(self):
+        spec = requirement_spec(_task(
+            type="item_collection", target_value=2,
+            config={"kind": "any_of", "vestige_rings": False,
+                    "items": ["Ultor vestige", "Bellator vestige"]}))
+        assert "Gold rings don't count toward vestiges on this task. Only the "\
+               "vestige itself does." in spec["notes"]
+        assert not any("counts as that vestige" in n for n in spec["notes"])
+
+    def test_vestige_inside_an_either_or_path_gets_the_note(self):
+        spec = requirement_spec(_task(type="item_collection", config={
+            "kind": "any_path", "paths": [
+                {"groups": [{"mode": "all_of", "items": ["Venator vestige"]}]},
+                {"metric": "kc", "need": 500, "npcs": ["The Leviathan"]},
+            ]}))
+        assert any("Gold ring" in n for n in spec["notes"])
+
+    def test_no_ring_note_when_gold_ring_is_listed_itself(self):
+        spec = requirement_spec(_task(
+            type="item_collection", target_value=10,
+            config={"kind": "point_collection",
+                    "items": [{"item_name": "Gold ring", "points": 5},
+                              {"item_name": "Ultor vestige", "points": 50}]}))
+        assert not any("Gold ring" in n for n in spec["notes"])
+
+    def test_no_ring_note_without_a_vestige(self):
+        spec = requirement_spec(_task(
+            type="item_collection", target_value=1,
+            config={"kind": "any_of", "items": ["Gold ring", "Dragon axe"]}))
+        assert not any("Gold ring" in n for n in spec["notes"])
+
 
 class TestSerializedShape:
     """The payload shape the frontend chips read. An NPC row is

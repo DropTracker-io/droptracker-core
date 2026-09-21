@@ -50,7 +50,10 @@ v1 evaluation semantics (task doc table):
   DT2 vestiges: a Gold ring dropped by the vestige's boss credits a task
   that lists the vestige AS that vestige, one unit per drop (2-ring stacks
   are the same roll chain), deduped once per (task, team, player, vestige)
-  across rings/vestige/clog (:data:`VESTIGE_BOSSES`).
+  across rings/vestige/clog (:data:`VESTIGE_BOSSES`). A task with
+  ``config.vestige_rings = false`` opts out: rings never credit it and its
+  vestiges count like any other item (:mod:`utils.vestige_rings`), which is
+  also how a task that lists Gold ring itself behaves.
 - ``kc_target`` — drop from the target NPC (or ANY of ``config.npcs`` on a
   multi-NPC task); each qualifying kill counts once (deduped by
   ``(npc, kill_count)`` per player via Redis; multi-NPC tasks keep their
@@ -106,6 +109,7 @@ from typing import Optional
 from sqlalchemy.exc import DataError, IntegrityError
 
 from utils import task_progress as _tp
+from utils import vestige_rings as _vr
 
 # ── Redis keys / channels ─────────────────────────────────────────────────────
 QUEUE_KEY = "events:submissions"           # LPUSH by producers, BRPOP by worker
@@ -660,25 +664,22 @@ def _item_source_npcs(task: dict, item_name) -> frozenset:
 # roll is the achievement) — one unit regardless of stack size (the 2-ring
 # stack is the SAME vestige's second roll), deduped so one player's
 # ring/ring/vestige chain credits a task once (_dedupe_vestige_chain).
-VESTIGE_RING_NAME = "gold ring"
-# Canonical vestige display name -> normalized names of the one boss that
-# drops it (awakened variants included). Verified against recorded drops.
-VESTIGE_BOSSES = {
-    "Ultor vestige": frozenset({"vardorvis", "vardorvis (awakened)"}),
-    "Magus vestige": frozenset({"duke sucellus", "duke sucellus (awakened)"}),
-    "Venator vestige": frozenset({"the leviathan", "leviathan (awakened)"}),
-    "Bellator vestige": frozenset({"the whisperer", "whisperer (awakened)",
-                                   "the whisperer (awakened)"}),
-}
-_VESTIGE_NORMS = frozenset(name.lower() for name in VESTIGE_BOSSES)
+# On by default; a task opts out with config.vestige_rings = false. The shared
+# definitions live in utils.vestige_rings (the validator reads them too).
+VESTIGE_RING_NAME = _vr.RING_NAME
+VESTIGE_BOSSES = _vr.VESTIGE_BOSSES
+_VESTIGE_NORMS = _vr.VESTIGE_NORMS
 
 
 def _ring_vestige_for_task(task: dict, item_name, npc_name) -> Optional[str]:
     """The vestige display name a Gold-ring DROP credits on this task, or
     None. Applies only when the ring itself isn't a listed item (the caller
-    checks — a literal gold-ring task keeps normal stack semantics), the
-    source NPC is a vestige's boss, and the task lists/targets that vestige."""
+    checks — a literal gold-ring task keeps normal stack semantics), the task
+    hasn't switched rings off (``config.vestige_rings = false``), the source
+    NPC is a vestige's boss, and the task lists/targets that vestige."""
     if _norm(item_name) != VESTIGE_RING_NAME:
+        return None
+    if not _vr.rings_count(task.get("config")):
         return None
     npc = _norm(npc_name)
     if not npc:
@@ -5074,6 +5075,12 @@ def _dedupe_vestige_chain(session, task: dict, team_id, player_id, kind,
     target_norm = _norm(matched_target)
     if target_norm not in _VESTIGE_NORMS:
         return True
+    if not _ring_chain_applies(_bonus_rule_task(task, bonus)
+                               if ttype == "competition" else task):
+        # Rings never credit this task as a vestige, so there is no ring
+        # chain to collapse: the vestige is an ordinary item (the drop↔clog
+        # echo dedupe still covers its clog), and a second one counts again.
+        return True
     from db.models import EventCompletion
 
     query = (
@@ -5094,6 +5101,27 @@ def _dedupe_vestige_chain(session, task: dict, team_id, player_id, kind,
         and (r.source_type or "") in ("drop", "clog")
         for r in prior
     )
+
+
+def _ring_chain_applies(task: dict) -> bool:
+    """Whether a Gold ring can credit this task AS a vestige, which is what
+    makes one player's ring/ring/vestige a single chain: rings aren't switched
+    off (``config.vestige_rings``), and Gold ring isn't listed itself (a
+    listed ring only ever credits as a ring)."""
+    return (_vr.rings_count(task.get("config"))
+            and item_match_quantity(task, VESTIGE_RING_NAME, 1) is None)
+
+
+def _bonus_rule_task(task: dict, bonus) -> dict:
+    """The embedded task of the competition ``task`` bonus rule a match came
+    from, looked up by ``bonus["rule_id"]`` in the matcher index; {} when it
+    can't be found (which reads as the defaults)."""
+    rule_id = (bonus or {}).get("rule_id")
+    for rule in ((task.get("competition") or {}).get("task_rules") or ()):
+        embedded = rule.get("task")
+        if rule.get("id") == rule_id and isinstance(embedded, dict):
+            return embedded
+    return {}
 
 
 def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
@@ -5669,9 +5697,124 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
             "team_score": team_score, "revoked_bonuses": revoked_bonuses}
 
 
+# Marks a ledger row that a vestige_rings switch-off took back, so switching it
+# on again can tell those rows from ones an admin revoked or rejected. It is
+# also what the review ledger shows as the reason, hence the wording.
+RING_OFF_NOTE = "Gold ring: rings no longer count as the vestige on this task"
+
+
+def _ring_drop_ids(session, drop_ids) -> set:
+    """The subset of ``drop_ids`` whose dropped item is a Gold ring. Keyed by
+    primary key, so it's a handful of index probes however large drops is."""
+    from db.models import Drop, ItemList
+
+    if not drop_ids:
+        return set()
+    rows = (session.query(Drop.drop_id, ItemList.item_name)
+            .filter(Drop.drop_id.in_(sorted(drop_ids)),
+                    ItemList.item_id == Drop.item_id)
+            .all())
+    return {int(did) for did, name in rows if _norm(name) == VESTIGE_RING_NAME}
+
+
+def _rescreen_vestige_ring_credits(session, task: dict) -> dict:
+    """Bring a task's ring-credited ledger rows in line with its CURRENT
+    ``vestige_rings`` setting (a live edit flipped it and chose re-score).
+
+    A ring credit is stored under the vestige's name, so only the source drop
+    tells it apart from the vestige itself: this reads the item of each
+    vestige drop row's ``source_id`` (the drop id, for drop envelopes).
+
+    - Switched OFF: applied ring rows become ``revoked`` and pending ones
+      ``rejected``, each noted :data:`RING_OFF_NOTE`. The vestige itself and
+      its clog keep counting.
+    - Switched ON: rows carrying that note come back as they were (``pending``
+      from rejected; ``confirmed`` when an admin had confirmed it, else
+      ``auto``) unless the player's chain has credited that vestige since, the
+      task no longer lists it, or it now lists Gold ring itself. Rings that
+      dropped while it was off were never recorded, so they stay uncounted.
+
+    Returns ``{"revoked": [...], "rejected": [...]}`` or ``{"restored": [...]}``
+    (row ids), empty when nothing changed. Caller owns the commit."""
+    from db.models import EventCompletion
+
+    if task.get("type") != "item_collection":
+        return {}
+
+    if not _vr.rings_count(task.get("config")):
+        rows = [
+            r for r in (session.query(EventCompletion)
+                        .filter(EventCompletion.task_id == task["id"],
+                                EventCompletion.source_type == "drop",
+                                EventCompletion.status.in_(
+                                    ("auto", "confirmed", "pending")),
+                                EventCompletion.matched_target.in_(
+                                    tuple(VESTIGE_BOSSES)))
+                        .all())
+            if _norm(r.matched_target) in _VESTIGE_NORMS and r.source_id is not None
+        ]
+        rings = _ring_drop_ids(session, {int(r.source_id) for r in rows})
+        revoked, rejected = [], []
+        for row in rows:
+            if int(row.source_id) not in rings:
+                continue  # the vestige itself: still counts
+            if row.status == "pending":
+                row.status = "rejected"
+                rejected.append(row.id)
+            else:
+                row.status = "revoked"
+                revoked.append(row.id)
+            row.note = RING_OFF_NOTE
+        if not (revoked or rejected):
+            return {}
+        session.flush()
+        return {"revoked": revoked, "rejected": rejected}
+
+    if not _ring_chain_applies(task):
+        return {}  # Gold ring is listed itself now: a ring is only a ring
+    marked = (session.query(EventCompletion)
+              .filter(EventCompletion.task_id == task["id"],
+                      EventCompletion.status.in_(("revoked", "rejected")),
+                      EventCompletion.note == RING_OFF_NOTE)
+              .order_by(EventCompletion.id)
+              .all())
+    if not marked:
+        return {}
+    # The same chain the matcher enforces with rings on: one credit per
+    # (team, player, vestige) across drop and clog rows. Manual awards are
+    # outside it, exactly as in _dedupe_vestige_chain.
+    credited = {
+        (r.team_id, r.player_id, _norm(r.matched_target))
+        for r in (session.query(EventCompletion)
+                  .filter(EventCompletion.task_id == task["id"],
+                          EventCompletion.source_type.in_(("drop", "clog")),
+                          EventCompletion.status.in_(
+                              ("auto", "confirmed", "manual", "pending")))
+                  .all())
+        if _norm(r.matched_target) in _VESTIGE_NORMS
+    }
+    restored = []
+    for row in marked:
+        key = (row.team_id, row.player_id, _norm(row.matched_target))
+        if key in credited or item_match_quantity(task, row.matched_target, 1) is None:
+            continue
+        if row.status == "rejected":
+            row.status = "pending"
+        else:
+            row.status = "confirmed" if row.acted_by_user_id is not None else "auto"
+        row.note = None
+        credited.add(key)
+        restored.append(row.id)
+    if not restored:
+        return {}
+    session.flush()
+    return {"restored": restored}
+
+
 def recompute_task_rollups(session, event_row, task_row, *,
                            old_points: Optional[int] = None,
-                           preserve_completed: bool = False) -> dict:
+                           preserve_completed: bool = False,
+                           rescreen_vestige_rings: bool = False) -> dict:
     """Re-fold every (task, team) rollup after a LIVE task edit (web68a).
 
     The caller has already mutated + flushed the task row (new target/config/
@@ -5700,6 +5843,13 @@ def recompute_task_rollups(session, event_row, task_row, *,
     cell and any line bonus it fed. Progress, per-player contribution shares
     and the ledger are still corrected; only the completed flag is held. Not
     for live task edits, where the ledger IS the whole truth.
+
+    ``rescreen_vestige_rings``: the edit flipped ``config.vestige_rings``.
+    The re-fold only reads the ledger, and a ring credit is stored under the
+    vestige's name, so on its own it would keep counting rings the task no
+    longer accepts. :func:`_rescreen_vestige_ring_credits` first brings the
+    ring rows in line with the new setting; its summary rides back under
+    ``"vestige_rings"``.
 
     Raises ``ValueError("forward_only")`` for kinds with no recomputable
     ledger: manual-only types (custom/ehp_target/ehb_target) and board-game
@@ -5731,6 +5881,11 @@ def recompute_task_rollups(session, event_row, task_row, *,
         # recompute for, and a wrong refold would rewrite standings. Apply/
         # revoke (which re-fold from the ledger) remain the correction paths.
         raise ValueError("forward_only")
+
+    # Before the team ids are read: a restored ring row may belong to a team
+    # whose only applied rows were the ones this switches back on.
+    rings_summary = (_rescreen_vestige_ring_credits(session, task)
+                     if rescreen_vestige_rings else {})
 
     applied = ("auto", "confirmed", "manual")
     team_ids = {
@@ -5927,4 +6082,7 @@ def recompute_task_rollups(session, event_row, task_row, *,
     _announce_lead_change(session, event, lead_before, reason="task_edit",
                           extra={"task_id": task["id"],
                                  "task_label": task.get("label")})
-    return {"teams": teams_summary, "bonuses": bonuses}
+    out = {"teams": teams_summary, "bonuses": bonuses}
+    if rings_summary:
+        out["vestige_rings"] = rings_summary
+    return out

@@ -346,6 +346,20 @@ class TestEmbeddedTaskRules:
         # log slot filled at the raced boss is a real achievement.
         assert cfg["bonus_rules"][0]["task"]["config"]["clog_sources"] is True
 
+    def test_a_vestige_rule_keeps_its_gold_ring_switch(self, monkeypatch):
+        # The rule's criteria come from the task builder, so its "Gold rings
+        # count as vestiges" switch must survive the scoping rewrite.
+        monkeypatch.setattr(etv, "_canonical_item", lambda s, name: (
+            "Magus vestige" if (name or "").strip().lower() == "magus vestige" else None))
+        monkeypatch.setattr(etv, "_canonical_npc", lambda s, name: (
+            "Duke Sucellus" if (name or "").strip().lower() == "duke sucellus" else None))
+        cfg = _botw(npcs=["Duke Sucellus"], bonus_rules=[_task_rule(
+            {"type": "item_collection", "target": "Magus vestige",
+             "target_value": 1, "config": {"vestige_rings": False}})])
+        config = cfg["bonus_rules"][0]["task"]["config"]
+        assert config["vestige_rings"] is False
+        assert config["source_npcs"] == ["Duke Sucellus"]
+
     def test_rule_ids_stay_sequential_across_mixed_types(self, _stub_items):
         cfg = _botw(bonus_rules=[
             {"type": "milestone", "step": 100, "points": 10},

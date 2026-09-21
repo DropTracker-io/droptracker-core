@@ -66,6 +66,7 @@ from db import (
     GroupAdmin,
     Player,
 )
+from utils import vestige_rings
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
 from web_api.deps import (
     current_user_id,
@@ -962,7 +963,12 @@ async def update_task(event_id: int, task_id: int):
                 if has_rows and retro == "recompute":
                     s.flush()  # the engine re-reads the task row post-edit
                     recompute_summary = _engine().recompute_task_rollups(
-                        s, ev, task, old_points=_before_task["points"])
+                        s, ev, task, old_points=_before_task["points"],
+                        # A flipped "Gold rings count as vestiges" switch also
+                        # takes back (or restores) the ring credits themselves.
+                        rescreen_vestige_rings=(
+                            vestige_rings.rings_count(_before_task["config"])
+                            != vestige_rings.rings_count(_after_task["config"])))
 
             if _after_task != _before_task:
                 # Record the edit — and, on a live event, the maker's retro
@@ -974,6 +980,8 @@ async def update_task(event_id: int, task_id: int):
                         "forward_only" if forward_only else "none")
                 if recompute_summary is not None:
                     after_payload["recompute"] = recompute_summary["teams"]
+                    if recompute_summary.get("vestige_rings"):
+                        after_payload["vestige_rings"] = recompute_summary["vestige_rings"]
                 s.add(AuditLog(
                     actor_user_id=user_id, group_id=ev.group_id, event_id=event_id,
                     action="event.task.update",

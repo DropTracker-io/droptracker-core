@@ -389,6 +389,45 @@ class TestVestigeChainDedupe:
         assert engine._dedupe_vestige_chain(
             s, self.TASK, 4, 9, "drop", "Ultor vestige") is True
 
+    def test_rings_off_task_has_no_chain(self):
+        # With rings switched off a vestige is an ordinary item: the player's
+        # SECOND vestige is a second vestige, not an echo of the first.
+        task = {**self.TASK, "config": {**self.TASK["config"],
+                                        "vestige_rings": False}}
+        s = _Session([_Row("Ultor vestige", rid=10)])
+        assert engine._dedupe_vestige_chain(
+            s, task, 4, 9, "drop", "Ultor vestige") is True
+
+    def test_a_task_listing_gold_ring_itself_has_no_chain(self):
+        # A listed ring credits as a ring, never as the vestige, so a
+        # player's second vestige is simply a second vestige.
+        task = {**self.TASK, "config": {
+            "kind": "point_collection",
+            "items": [{"item_name": "Gold ring", "points": 5},
+                      {"item_name": "Ultor vestige", "points": 50}]}}
+        s = _Session([_Row("Ultor vestige", rid=10)])
+        assert engine._dedupe_vestige_chain(
+            s, task, 4, 9, "drop", "Ultor vestige") is True
+
+    @staticmethod
+    def _competition(rule_config):
+        return {"id": 7, "type": "competition", "competition": {"task_rules": [
+            {"id": 2, "task": {"type": "item_collection",
+                               "target": "Ultor vestige", "config": rule_config}},
+        ]}}
+
+    def test_competition_rule_keeps_the_chain_by_default(self):
+        s = _Session([_Row("Ultor vestige", rid=10)])
+        assert engine._dedupe_vestige_chain(
+            s, self._competition({}), 4, 9, "drop", "Ultor vestige",
+            bonus={"rule_id": 2, "type": "task"}) is False
+
+    def test_competition_rule_with_rings_off_has_no_chain(self):
+        s = _Session([_Row("Ultor vestige", rid=10)])
+        assert engine._dedupe_vestige_chain(
+            s, self._competition({"vestige_rings": False}), 4, 9, "drop",
+            "Ultor vestige", bonus={"rule_id": 2, "type": "task"}) is True
+
 
 class TestClogEchoDedupe:
     """_dedupe_clog_echo — one physical acquisition must credit an

@@ -24,6 +24,7 @@ are imported lazily inside functions — the unit-test conftest stubs
 
 from __future__ import annotations
 
+from utils import vestige_rings
 from utils.task_progress import DISTINCT_ITEM_KINDS
 from web_api.task_tiles import (
     _fmt_num,
@@ -293,6 +294,20 @@ def requirement_spec(task: dict) -> dict:
             out["notes"].append(
                 "Pets in this list are credited from the pet drop itself, not "
                 "from a collection-log entry.")
+        # The DT2 pity rings (utils.vestige_rings) credit a listed vestige
+        # without the ring appearing anywhere in the list, so say which way
+        # this task goes: the ring is the classic "why did that count?". A
+        # list that names Gold ring itself needs no note: a ring is a ring.
+        listed = [_norm(i["name"]) for g in groups for i in g["items"]] + [
+            _norm(i["name"]) for p in paths for g in p["groups"] for i in g["items"]]
+        if (vestige_rings.RING_NAME not in listed
+                and any(vestige_rings.is_vestige(name) for name in listed)):
+            out["notes"].append(
+                "A Gold ring from a vestige's boss counts as that vestige. A "
+                "player's rings and the vestige they lead to count once."
+                if vestige_rings.rings_count(config) else
+                "Gold rings don't count toward vestiges on this task. Only the "
+                "vestige itself does.")
         return out
 
     if ttype == "loot_value":

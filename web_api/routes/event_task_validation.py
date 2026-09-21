@@ -15,6 +15,7 @@ import json
 import os
 
 from db import ItemList, NpcList
+from utils import vestige_rings
 from utils.task_progress import DISTINCT_ITEM_KINDS
 from web_api.common import abort_problem
 from web_api.routes.npc_source_aliases import expand_source_names
@@ -1587,6 +1588,12 @@ def validate_task_payload(s, body: dict) -> dict:
         # canonicalization; found_pets collects the canonical spellings.
         pet_names = _pet_name_request_set((config or {}).get("pet_items"))
         found_pets: dict = {}
+        # Whether a DT2 Gold ring counts as the vestige it rolls toward
+        # (utils.vestige_rings). Default on; only ``false`` is stored.
+        vestige_rings_flag = (config or {}).get(vestige_rings.CONFIG_KEY)
+        if vestige_rings_flag is not None and not isinstance(vestige_rings_flag, bool):
+            abort_problem(422, "Invalid config",
+                          f"'{vestige_rings.CONFIG_KEY}' must be true or false.")
         if kind is not None and kind not in ITEM_CONFIG_KINDS:
             abort_problem(
                 422, "Invalid config",
@@ -1663,6 +1670,14 @@ def validate_task_payload(s, body: dict) -> dict:
             item_npcs = _validated_item_npcs(s, raw_item_npcs, allowed_items)
             if item_npcs:
                 config["item_npcs"] = item_npcs
+        # Kept only where it means something: the task lists a vestige, and
+        # not Gold ring itself (a listed ring only ever counts as a ring).
+        # Otherwise the switch is dropped rather than stored stale.
+        listed = _config_item_name_set(config or {}) | {target.lower()}
+        if (vestige_rings_flag is False
+                and vestige_rings.RING_NAME not in listed
+                and any(vestige_rings.is_vestige(name) for name in listed)):
+            config = {**(config or {}), vestige_rings.CONFIG_KEY: False}
 
     elif ttype in ("kc_target", "pb_target"):
         # kc_target: optionally several NPCs (config.npcs) — a kill of ANY of
