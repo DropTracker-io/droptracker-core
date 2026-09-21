@@ -62,6 +62,12 @@ Following the loot_sweep recipe — almost no new storage:
                                         // raced boss drops (wiki drop tables)
     { "id": 2, "type": "time_under", "npc": "Dagannoth Rex",
       "threshold_ms": 25200, "points": 5, "max_awards": 3 },  // per-player cap
+                                        // (1..100). Any rule may add
+                                        // "unlimited": true (stored only when
+                                        // on) to pay every time; max_awards
+                                        // is kept so the toggle can go back
+                                        // off. Scored as UNLIMITED_AWARDS;
+                                        // single-award task rules drop it.
 
     // ANY criteria the task builder can express, embedded verbatim and
     // evaluated by the engine's own match_task against a synthetic task dict.

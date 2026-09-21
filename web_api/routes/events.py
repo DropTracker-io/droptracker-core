@@ -3456,8 +3456,13 @@ def _serialize_bonus_rule(rule) -> dict:
     """
     from services.competition import rule_label, rule_scope_line
 
+    # ``max_awards`` is the admin's own number even when ``unlimited`` is on
+    # (the effective cap is a sentinel): the wizard echoes it back, so turning
+    # the toggle off restores what they had.
     entry = {"id": rule.id, "type": rule.type, "points": rule.points,
-             "max_awards": rule.max_awards, "label": rule_label(rule)}
+             "max_awards": rule.award_limit, "label": rule_label(rule)}
+    if rule.unlimited:
+        entry["unlimited"] = True
     if rule.label:
         # The admin's OWN wording, kept apart from `label` (which is the
         # DERIVED sentence when they didn't name the rule). The wizard echoes

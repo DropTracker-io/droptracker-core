@@ -1429,6 +1429,11 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
             "max_awards": _clamp_int(rr.get("max_awards"), default=1,
                                      lo=1, hi=COMP_MAX_AWARDS_PER_PLAYER),
         }
+        # "No limit" per player. Stored only when on, beside the finite
+        # max_awards (kept so turning the toggle off restores it). Only a
+        # real boolean: a stray "false" string must not lift the cap.
+        if rr.get("unlimited") is True:
+            rule["unlimited"] = True
         if rr.get("label"):
             rule["label"] = str(rr["label"]).strip()[:120]
         if rtype == "pet":
@@ -1495,6 +1500,7 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
                 # be earned; a state-condition type would pay on every later
                 # envelope. Pinning here keeps "Award 1 of 3" honest.
                 rule["max_awards"] = 1
+                rule.pop("unlimited", None)
         elif rtype == "milestone":
             step = rr.get("step")
             if not isinstance(step, (int, float)) or isinstance(step, bool) or not (

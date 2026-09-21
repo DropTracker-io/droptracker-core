@@ -267,6 +267,18 @@ class TestRowAdvances:
         candidate = _ledger_row(99, 5, 5, note="bonus:time_under:2")
         assert engine._row_advances_progress(session, task, 1, candidate) is True
 
+    def test_unlimited_rule_is_never_blocked(self):
+        config = {**BOTW_CONFIG, "bonus_rules": [
+            {"id": 2, "type": "time_under", "npc": "Zulrah",
+             "threshold_ms": 60_000, "points": 5, "max_awards": 2,
+             "unlimited": True}]}
+        task = _task(config)
+        existing = [_ledger_row(i, 5, 5, note="bonus:time_under:2")
+                    for i in range(1, 151)]
+        session = _Session(ledger=existing)
+        candidate = _ledger_row(999, 5, 5, note="bonus:time_under:2 | 0:55")
+        assert engine._row_advances_progress(session, task, 1, candidate) is True
+
 
 # ── apply / revoke ───────────────────────────────────────────────────────────
 

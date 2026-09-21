@@ -113,6 +113,20 @@ class TestBonusRules:
         assert rules[0]["npc"] == "Zulrah" and rules[0]["max_awards"] == 3
         assert rules[1]["max_awards"] == 1  # per-player default
 
+    def test_unlimited_is_stored_beside_the_finite_cap(self):
+        cfg = _botw(bonus_rules=[
+            {"type": "time_under", "threshold_ms": 60_000, "points": 5,
+             "max_awards": 3, "unlimited": True},
+            {"type": "time_under", "threshold_ms": 50_400, "points": 15,
+             "max_awards": 3, "unlimited": False},
+            {"type": "time_under", "threshold_ms": 40_000, "points": 25,
+             "unlimited": "true"},
+        ])
+        rules = cfg["bonus_rules"]
+        assert rules[0]["unlimited"] is True and rules[0]["max_awards"] == 3
+        # Off (or not a real boolean) stores nothing, like configs before it.
+        assert "unlimited" not in rules[1] and "unlimited" not in rules[2]
+
     def test_time_rule_npc_implied_for_single_boss_race(self):
         cfg = _botw(bonus_rules=[
             {"type": "time_under", "threshold_ms": 60_000, "points": 5}])
@@ -456,6 +470,10 @@ class TestPetRuleDefaults:
             {"type": "skill_target", "target": "mining", "target_value": 70},
             points=25, max_awards=5)])
         assert cfg["bonus_rules"][0]["max_awards"] == 1
+        cfg = _sotw(bonus_rules=[_task_rule(
+            {"type": "skill_target", "target": "mining", "target_value": 70},
+            points=25, unlimited=True)])
+        assert "unlimited" not in cfg["bonus_rules"][0]
 
     def test_sotw_pet_task_falls_back_to_the_skills_own_pet(self, _stub_items):
         # Without this the wizard's "+ Pet task bonus" stored a bare "any pet"

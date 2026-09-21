@@ -467,6 +467,71 @@ class TestRuleWording:
         assert cfg.rules_by_id[1].max_awards == 1
 
 
+# ── unlimited awards ─────────────────────────────────────────────────────────
+
+UNLIMITED_TIME_RULE = {"id": 2, "type": "time_under", "npc": "Zulrah",
+                       "threshold_ms": 60_000, "points": 5, "max_awards": 3,
+                       "unlimited": True}
+
+
+class TestUnlimitedAwards:
+    def test_lifts_the_cap_but_keeps_the_admins_number(self):
+        cfg = comp.CompetitionConfig(
+            {**BOTW_CFG, "bonus_rules": [UNLIMITED_TIME_RULE]})
+        rule = cfg.rules_by_id[2]
+        assert rule.unlimited is True
+        assert rule.max_awards == comp.UNLIMITED_AWARDS
+        assert rule.award_limit == 3  # restored when the toggle goes off
+
+    def test_only_a_real_boolean_lifts_the_cap(self):
+        for value in ("true", "false", 1, None):
+            cfg = comp.CompetitionConfig({**BOTW_CFG, "bonus_rules": [
+                {**UNLIMITED_TIME_RULE, "unlimited": value}]})
+            assert cfg.rules_by_id[2].unlimited is False
+            assert cfg.rules_by_id[2].max_awards == 3
+
+    def test_discrete_rule_pays_past_the_old_hundred_cap(self):
+        cfg = comp.CompetitionConfig(
+            {**BOTW_CFG, "bonus_rules": [UNLIMITED_TIME_RULE]})
+        rows = [_row(5, 5, note="bonus:time_under:2", rid=i) for i in range(1, 151)]
+        slot = comp.fold_rows(rows, cfg)[5]["bonus"][2]
+        assert slot["awarded"] == 150 and slot["points"] == 750
+
+    def test_milestone_pays_every_step(self):
+        cfg = comp.CompetitionConfig({**TASK_CFG, "bonus_rules": [
+            {**MILESTONE_RULE, "unlimited": True}]})
+        per = comp.fold_rows([_row(1, 100_000)], cfg)
+        assert per[1]["bonus"][3]["awarded"] == 1_000
+        assert per[1]["bonus_points"] == 10_000
+
+    def test_repeatable_task_rule_pays_every_completion(self):
+        cfg = comp.CompetitionConfig({**TASK_CFG, "bonus_rules": [
+            {**POOL_RULE, "unlimited": True}]})
+        # 400 Tanzanite fangs at 300 pts each = 120,000 pts of loot = 240 x 500.
+        rows = [_row(1, 300, note="bonus:task:2", rid=i,
+                     matched_target="Tanzanite fang") for i in range(1, 401)]
+        slot = comp.fold_rows(rows, cfg)[1]["bonus"][2]
+        assert slot["awarded"] == 240 and slot["points"] == 2_400
+
+    def test_a_rule_that_can_only_pay_once_ignores_it(self):
+        cfg = comp.CompetitionConfig({**TASK_CFG, "bonus_rules": [
+            {**SET_RULE, "unlimited": True}]})
+        rule = cfg.rules_by_id[1]
+        assert rule.unlimited is False and rule.max_awards == 1
+
+    def test_award_line_counts_up_with_no_ceiling(self):
+        cfg = comp.CompetitionConfig(
+            {**BOTW_CFG, "bonus_rules": [UNLIMITED_TIME_RULE]})
+        lines = [comp.bonus_detail(2, cfg, awarded_n=n)["cap_line"]
+                 for n in (1, 2, 3, 4, 11, 12, 13, 21, 102, 111, 1001)]
+        assert lines == ["1st award", "2nd award", "3rd award", "4th award",
+                         "11th award", "12th award", "13th award",
+                         "21st award", "102nd award", "111th award",
+                         "1,001st award"]
+        detail = comp.bonus_detail(2, cfg, awarded_n=150)
+        assert detail["unlimited"] is True and detail["awarded_n"] == 150
+
+
 # ── team races ───────────────────────────────────────────────────────────────
 
 TEAM_CFG = {**BOTW_CFG, "format": "teams"}

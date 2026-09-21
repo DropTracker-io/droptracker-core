@@ -32,6 +32,10 @@ except the duration is whatever the admins choose and DropTracker can layer
                    Folds straight off the gained number and writes NO ledger
                    rows at all, so it cannot double-count and needs no matcher.
 
+Any rule may carry ``unlimited: true`` instead of a finite ``max_awards``; it
+then pays every time it is earned (see :data:`UNLIMITED_AWARDS`). Task rules
+that can only pay once ignore it.
+
 Everything lands on ONE hidden ``competition`` task per event, so per-player
 standings fold from a single ledger. Rows tagged ``bonus:{type}:{rule_id}``
 (:func:`bonus_note`) belong to a bonus rule; every other row's ``quantity`` is
@@ -144,6 +148,11 @@ MIN_BONUS_POINTS = 1
 MAX_BONUS_POINTS = 10_000_000
 MIN_AWARDS_PER_PLAYER = 1
 MAX_AWARDS_PER_PLAYER = 100
+# A rule stored with ``unlimited: true`` has no per-player cap. It is scored as
+# this effective cap rather than special-cased in every fold: nobody earns a
+# billion awards in one race, so every ``min(..., max_awards)``, ``cap_units``
+# and the record-time gate stay correct unchanged.
+UNLIMITED_AWARDS = 1_000_000_000
 MIN_GAINED_PER_POINT = 1
 MAX_GAINED_PER_POINT = 1_000_000_000
 MIN_TIME_THRESHOLD_MS = 600         # one game tick
@@ -225,9 +234,10 @@ def parse_bonus_note(note) -> Optional[tuple]:
 class CompetitionBonusRule:
     """One normalized bonus rule (see the module docstring for semantics)."""
 
-    __slots__ = ("id", "type", "points", "max_awards", "pets", "npc",
-                 "threshold_ms", "label", "task", "progress_kind", "need",
-                 "kinds", "scope", "step", "unscoped", "metric_kind")
+    __slots__ = ("id", "type", "points", "max_awards", "award_limit",
+                 "unlimited", "pets", "npc", "threshold_ms", "label", "task",
+                 "progress_kind", "need", "kinds", "scope", "step", "unscoped",
+                 "metric_kind")
 
     def __init__(self, raw: dict, idx: int, metric_kind=None):
         raw = raw if isinstance(raw, dict) else {}
@@ -237,8 +247,15 @@ class CompetitionBonusRule:
         self.id = _int(raw.get("id"), idx + 1) or (idx + 1)
         self.points = _clamp(raw.get("points"), MIN_BONUS_POINTS,
                              MIN_BONUS_POINTS, MAX_BONUS_POINTS)
-        self.max_awards = _clamp(raw.get("max_awards"), 1,
-                                 MIN_AWARDS_PER_PLAYER, MAX_AWARDS_PER_PLAYER)
+        # ``award_limit`` is the number the admin set. It survives while
+        # ``unlimited`` is on, so switching the toggle back off restores it.
+        # ``max_awards`` is the EFFECTIVE cap, the one every fold and gate
+        # reads. Only a real boolean counts: a stray "false" string must not
+        # lift the cap.
+        self.award_limit = _clamp(raw.get("max_awards"), 1,
+                                  MIN_AWARDS_PER_PLAYER, MAX_AWARDS_PER_PLAYER)
+        self.unlimited = raw.get("unlimited") is True
+        self.max_awards = UNLIMITED_AWARDS if self.unlimited else self.award_limit
         # pet: the explicit allow-list (resolved at authoring — the validator
         # stores real pet names; no runtime taxonomy lookups here).
         self.pets = tuple(n for n in (_norm(p) for p in (raw.get("pets") or ()))
@@ -284,7 +301,8 @@ class CompetitionBonusRule:
                 or (self.task or {}).get("type") in SINGLE_AWARD_TASK_TYPES):
             # A set/percent fold saturates, so a second award is unreachable —
             # and a state-condition type would pay on EVERY later envelope.
-            self.max_awards = 1
+            self.max_awards = self.award_limit = 1
+            self.unlimited = False
 
     @property
     def valid(self) -> bool:
@@ -914,8 +932,12 @@ def bonus_detail(rule_id: int, config: CompetitionConfig,
         reason = f"{rule_label(rule)}: {str(matched_target).strip()}"
     else:
         reason = rule_label(rule)
-    cap_line = (f"Award {min(awarded_n, rule.max_awards)} of {rule.max_awards}"
-                if rule.max_awards > 1 else None)
+    if rule.unlimited:
+        cap_line = f"{_ordinal(awarded_n)} award"
+    elif rule.max_awards > 1:
+        cap_line = f"Award {min(awarded_n, rule.max_awards)} of {rule.max_awards}"
+    else:
+        cap_line = None
     return {
         "rule_id": rule.id,
         "type": rule.type,
@@ -925,5 +947,13 @@ def bonus_detail(rule_id: int, config: CompetitionConfig,
         "scope_line": rule_scope_line(rule),
         "cap_line": cap_line,
         "max_awards": rule.max_awards,
+        "unlimited": rule.unlimited,
         "awarded_n": min(awarded_n, rule.max_awards),
     }
+
+
+def _ordinal(n: int) -> str:
+    """1st, 2nd, 3rd, 4th ... 11th, 12th, 13th ... 21st."""
+    n = _int(n)
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n:,}{suffix}"
