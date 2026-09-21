@@ -280,9 +280,34 @@ def team_task_progress_mode(config: dict, team_id, inherited=None) -> str:
 # --------------------------------------------------------------------------- #
 # Every auto-created team channel leads with a colored circle
 # ("🔵┃blue-team"), so a server with several teams reads as a color-coded list
-# instead of a wall of "team-…". The order here is the fallback rotation for
-# teams with no accent color; a team that HAS one gets the matching circle.
-TEAM_CHANNEL_ICONS = ("🟢", "🔴", "🔵", "🟡", "🟠", "🟣", "⚪")
+# instead of a wall of "team-…". The circle is always derived from the team's
+# color as the site shows it (see :func:`effective_team_color`).
+
+# The site's team palette, mirrored from TEAM_COLORS in the web repo's
+# apps/web/lib/events.ts: keep the two lists identical, in the same order. A
+# team with no accent color of its own shows ``TEAM_PALETTE[ordinal]`` on the
+# site, so every other surface (the Discord channel circle, the team role's
+# color, the in-game orb) must start from that same default. Until 2026-09 the
+# Discord side rotated its own emoji list instead, and 7 of 8 colorless teams
+# in a live event showed one color on the site and a different one in Discord.
+TEAM_PALETTE = (
+    "#e05c4c",  # red
+    "#4c8fe0",  # blue
+    "#4cb96b",  # green
+    "#e0b34c",  # gold
+    "#a05ce0",  # purple
+    "#e07f4c",  # orange
+    "#4cc9c0",  # teal
+    "#e05ca8",  # pink
+    "#6d5ce0",  # indigo
+    "#e05cd0",  # fuchsia
+    "#c9d94c",  # lime
+    "#b07a4c",  # brown
+    "#4cc9a0",  # aqua
+    "#4c9fd8",  # cyan
+    "#e04c72",  # rose
+    "#9c8fd0",  # lavender
+)
 
 # Icon/name separator: U+2503 (heavy vertical bar), the Discord-convention
 # divider. It survives channel-name normalization untouched, unlike a space.
@@ -293,9 +318,12 @@ TEAM_CHANNEL_SEPARATOR = "┃"
 # light sky blue (206°) that pure blue (#0000e0, 240°) is FARTHER from than
 # the purple circle is, so nearest-center matching would put a "Blue Team" on
 # 🟣. Bands keep the obvious answer obvious. Red owns both ends of the wheel.
+# The orange/yellow edge sits at 40°, not 45°: the palette's gold (#e0b34c) is
+# 41.8°, the same hue as Twemoji's own 🟡 (42°), and at 45° it landed on 🟠
+# beside the palette's orange team.
 _ICON_HUE_BANDS = (
     (15.0, "🔴"),
-    (45.0, "🟠"),
+    (40.0, "🟠"),
     (70.0, "🟡"),
     (160.0, "🟢"),
     (250.0, "🔵"),
@@ -323,18 +351,40 @@ ORB_COLORS = {
 _ICON_MIN_SATURATION = 0.15
 
 
-def _icon_for_color(color) -> Optional[str]:
-    """Colored circle matching an admin-set "#rrggbb" accent, or None when the
-    team has no (usable) color."""
+def _normalize_hex(color) -> Optional[str]:
+    """``"#rrggbb"`` (lowercase) for a usable color value, else None."""
     if not isinstance(color, str):
         return None
-    value = color.strip().lstrip("#")
+    value = color.strip().lstrip("#").lower()
     if len(value) != 6:
         return None
     try:
-        red, green, blue = (int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        int(value, 16)
     except ValueError:
         return None
+    return "#" + value
+
+
+def default_team_color(index: int = 0) -> str:
+    """The site's palette default for the team at ``index`` (its ordinal
+    within the event, see :func:`team_icon_index`)."""
+    return TEAM_PALETTE[index % len(TEAM_PALETTE)]
+
+
+def effective_team_color(color=None, index: int = 0) -> str:
+    """The color a team actually shows everywhere: its admin-set accent when
+    it has a usable one, else the site's palette default for its ordinal.
+    Always a ``"#rrggbb"`` string."""
+    return _normalize_hex(color) or default_team_color(index)
+
+
+def _icon_for_color(color) -> Optional[str]:
+    """Colored circle matching a "#rrggbb" color, or None when the value is
+    not a usable color."""
+    value = _normalize_hex(color)
+    if value is None:
+        return None
+    red, green, blue = (int(value[i:i + 2], 16) / 255 for i in (1, 3, 5))
     import colorsys
 
     hue, _light, saturation = colorsys.rgb_to_hls(red, green, blue)
@@ -348,13 +398,11 @@ def _icon_for_color(color) -> Optional[str]:
 
 
 def team_channel_icon(color=None, index: int = 0) -> str:
-    """The circle that leads a team's channel name: matched to the team's
-    accent color when one is set — so the channel icon, the team role's color
-    and the web UI's team dot all agree — else rotated through
-    :data:`TEAM_CHANNEL_ICONS` by the team's ordinal (see
-    :func:`team_icon_index`) so sibling teams stay distinguishable."""
-    return (_icon_for_color(color)
-            or TEAM_CHANNEL_ICONS[index % len(TEAM_CHANNEL_ICONS)])
+    """The circle that leads a team's channel name, matched to the team's
+    effective color (its accent, else the site's palette default for its
+    ordinal), so the channel icon, the team role's color, the in-game orb and
+    the site's team dot all agree."""
+    return _icon_for_color(effective_team_color(color, index)) or "⚪"
 
 
 def team_orb(color=None, index: int = 0) -> tuple:
@@ -367,7 +415,9 @@ def team_orb(color=None, index: int = 0) -> tuple:
 
 def team_icon_index(session, event_id: int, team_id) -> int:
     """A team's ordinal within its event (creation order — stable across
-    renames, recolors and roster edits), used as the fallback icon rotation."""
+    renames, recolors and roster edits; deleting a team shifts the ones after
+    it). Picks the team's palette default, exactly as the site does from its
+    id-ordered roster."""
     from db.models import EventTeam
 
     ids = [tid for (tid,) in (session.query(EventTeam.id)

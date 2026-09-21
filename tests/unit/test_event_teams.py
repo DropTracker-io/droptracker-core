@@ -174,12 +174,18 @@ class TestTeamBadge:
         assert badge["color"] == "#3355cc"
         assert badge["icon_item_id"] == 4151
 
-    def test_colorless_team_rotates_by_index(self, real_team_discord):
+    def test_colorless_team_takes_the_site_palette_default(self, real_team_discord):
+        # Same circle as the Discord channel, which follows the color the
+        # site shows for a colorless team at that ordinal.
         first = et.team_badge(FakeTeam(1, "A"), 0)
         second = et.team_badge(FakeTeam(2, "B"), 1)
+        assert first["orb"] == etd.team_channel_icon(etd.TEAM_PALETTE[0])
+        assert second["orb"] == etd.team_channel_icon(etd.TEAM_PALETTE[1])
         assert first["orb"] != second["orb"]
         assert first["orb_color"] != second["orb_color"]
 
     def test_every_orb_has_a_fill(self):
-        for icon in etd.TEAM_CHANNEL_ICONS:
+        icons = {icon for _upper, icon in etd._ICON_HUE_BANDS} | {"⚪"}
+        icons |= {etd.team_channel_icon(color) for color in etd.TEAM_PALETTE}
+        for icon in icons:
             assert icon in etd.ORB_COLORS

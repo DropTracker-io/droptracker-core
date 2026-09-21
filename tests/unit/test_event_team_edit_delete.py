@@ -87,6 +87,28 @@ class TestUpdateTeam:
         assert team.name == "Reds"      # untouched
         assert s.committed and len(s.added) == 1
 
+    async def test_color_change_repends_the_team_discord_rows(self, client, monkeypatch):
+        # The edit IS the sync trigger: the bot recolors the role and renames
+        # the channel circle on its next tick, no drift polling involved.
+        team = _team(4, name="Reds")
+        s = _S([_event()], [team])
+        _wire(monkeypatch, s)
+        synced = []
+        monkeypatch.setattr(evr, "_sync_team_discord", lambda sess, ev: synced.append(ev.id))
+        r = await client.patch("/api/v1/events/1/teams/4", json={"color": "#4c8fe0"})
+        assert r.status_code == 200
+        assert synced == [1]
+
+    async def test_chat_tag_alone_does_not_repend(self, client, monkeypatch):
+        team = _team(4, name="Reds")
+        s = _S([_event()], [team])
+        _wire(monkeypatch, s)
+        synced = []
+        monkeypatch.setattr(evr, "_sync_team_discord", lambda sess, ev: synced.append(ev.id))
+        r = await client.patch("/api/v1/events/1/teams/4", json={"short_tag": "RR"})
+        assert r.status_code == 200
+        assert synced == []
+
     async def test_clear_color_with_null(self, client, monkeypatch):
         team = _team(4, color="#e05c4c")
         s = _S([_event()], [team])
@@ -154,6 +176,18 @@ class TestDeleteTeam:
         assert s._batches == []
         # One audit row for the deletion.
         assert len(s.added) == 1
+
+    async def test_delete_repends_the_surviving_teams(self, client, monkeypatch):
+        # Every later team moves up an ordinal, and a colorless team's
+        # default color follows its ordinal on the site and in Discord.
+        team = _team(4, name="Mistake")
+        s = self._script(team)
+        _wire(monkeypatch, s)
+        synced = []
+        monkeypatch.setattr(evr, "_sync_team_discord", lambda sess, ev: synced.append(ev.id))
+        r = await client.delete("/api/v1/events/1/teams/4")
+        assert r.status_code == 200
+        assert synced == [1]
 
     async def test_delete_on_past_event_blocked(self, client, monkeypatch):
         # A past event's roster (and history) is read-only.

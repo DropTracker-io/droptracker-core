@@ -979,6 +979,28 @@ class _FakeRedis:
             self.store.pop(key, None)
             self.ttls.pop(key, None)
 
+    # Sorted sets (the rename throttle). Scores are floats, members strings.
+    def zadd(self, key, mapping):
+        self._check()
+        zset = self.store.setdefault(key, {})
+        for member, score in mapping.items():
+            zset[str(member)] = float(score)
+
+    def zremrangebyscore(self, key, low, high):
+        self._check()
+        zset = self.store.get(key, {})
+        low = float("-inf") if low == "-inf" else float(low)
+        for member in [m for m, s in zset.items() if low <= s <= float(high)]:
+            del zset[member]
+
+    def zrange(self, key, start, end, withscores=False):
+        self._check()
+        items = sorted(self.store.get(key, {}).items(), key=lambda kv: kv[1])
+        items = items[start:] if end == -1 else items[start:end + 1]
+        if withscores:
+            return [(m.encode(), s) for m, s in items]
+        return [m.encode() for m, _s in items]
+
 
 class _RedisClient:
     def __init__(self, **kwargs):
@@ -1085,3 +1107,347 @@ class TestNotFoundClassifier:
         assert bot_mod._is_not_found(RuntimeError("503")) is False
         assert bot_mod._is_not_found(SimpleNamespace(status=403)) is False
         assert bot_mod._is_not_found(TimeoutError()) is False
+
+
+# --------------------------------------------------------------------------- #
+# Team colors on Discord follow the site
+# --------------------------------------------------------------------------- #
+class _Role:
+    def __init__(self, role_id=500, name="Reds", color=0):
+        self.id = role_id
+        self.name = name
+        self.color = SimpleNamespace(value=color)
+        self.edits = []
+
+    async def edit(self, **kwargs):
+        self.edits.append(kwargs)
+        if "color" in kwargs:
+            self.color = SimpleNamespace(value=kwargs["color"])
+        if "name" in kwargs:
+            self.name = kwargs["name"]
+
+
+class _Guild:
+    def __init__(self, role=None, guild_id=1):
+        self.id = guild_id
+        self.role = role
+        self.created = []
+
+    async def fetch_role(self, role_id):
+        return self.role
+
+    async def create_role(self, **kwargs):
+        self.created.append(kwargs)
+        self.role = _Role(role_id=501, name=kwargs["name"], color=kwargs["color"])
+        return self.role
+
+
+class TestEnsureRoleColor:
+    """The role carries the team's effective color: its accent, else the
+    palette default the site shows for its ordinal."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_new_role_for_a_colorless_team_takes_the_palette_default(self, monkeypatch):
+        etd = _install_team_discord(monkeypatch)
+        guild = _Guild()
+        row = SimpleNamespace(role_id=None)
+        self._run(bot_mod._ensure_role(guild, row, SimpleNamespace(name="Reds", color=None), 1))
+        assert guild.created[0]["color"] == int(etd.TEAM_PALETTE[1][1:], 16)
+        assert row.role_id == "501"
+
+    def test_existing_colorless_role_is_recolored(self, monkeypatch):
+        etd = _install_team_discord(monkeypatch)
+        role = _Role(color=0)   # created before this fix: no color at all
+        row = SimpleNamespace(role_id="500")
+        self._run(bot_mod._ensure_role(_Guild(role), row, SimpleNamespace(name="Reds", color=None), 0))
+        assert role.edits == [{"color": int(etd.TEAM_PALETTE[0][1:], 16)}]
+
+    def test_reset_color_goes_back_to_the_palette_default(self, monkeypatch):
+        # Reset stores NULL; the role used to keep the old accent forever.
+        etd = _install_team_discord(monkeypatch)
+        role = _Role(color=0x123456)
+        row = SimpleNamespace(role_id="500")
+        self._run(bot_mod._ensure_role(_Guild(role), row, SimpleNamespace(name="Reds", color=None), 2))
+        assert role.color.value == int(etd.TEAM_PALETTE[2][1:], 16)
+
+    def test_accent_color_wins_and_matching_role_is_left_alone(self, monkeypatch):
+        _install_team_discord(monkeypatch)
+        role = _Role(color=0x3355CC)
+        row = SimpleNamespace(role_id="500")
+        self._run(bot_mod._ensure_role(_Guild(role), row, SimpleNamespace(name="Reds", color="#3355cc"), 5))
+        assert role.edits == []
+
+
+class _NamedChannel:
+    def __init__(self, name, parent_id=None, fail=False):
+        self.name = name
+        self.parent_id = parent_id
+        self.fail = fail
+        self.edits = []
+
+    async def edit(self, **kwargs):
+        if self.fail:
+            raise RuntimeError("503 Service Unavailable")
+        self.edits.append(kwargs)
+        if "name" in kwargs:
+            self.name = kwargs["name"]
+
+
+class _Clock:
+    def __init__(self, now=1_000_000.0):
+        self.now = now
+
+    def time(self):
+        return self.now
+
+
+class TestRenameThrottle:
+    """Discord allows two renames per channel per ten minutes, and a third
+    makes interactions.py sleep through the 429 while holding the reconcile
+    lock. The reconciler holds such a rename back instead."""
+
+    def _rename(self, channel, rc, name, channel_id=77):
+        return asyncio.run(bot_mod._rename_channel(channel, channel_id, name, rc))
+
+    def test_two_renames_go_through_and_the_third_is_held(self, monkeypatch):
+        clock = _Clock()
+        monkeypatch.setattr(bot_mod, "time", clock)
+        rc = _RedisClient()
+        channel = _NamedChannel("🔴┃reds")
+        self._rename(channel, rc, "🔵┃reds")
+        clock.now += 60
+        self._rename(channel, rc, "🟢┃reds")
+        clock.now += 60
+        try:
+            self._rename(channel, rc, "🟣┃reds")
+        except bot_mod.RenameDeferred as held:
+            assert held.retry_at == (1_000_000.0 + bot_mod.RENAME_WINDOW_SECONDS
+                                     + bot_mod.RENAME_SLACK_SECONDS)
+        else:
+            raise AssertionError("third rename inside the window was not held")
+        assert channel.name == "🟢┃reds"
+        assert len(channel.edits) == 2
+
+    def test_rename_is_allowed_again_once_the_window_passes(self, monkeypatch):
+        clock = _Clock()
+        monkeypatch.setattr(bot_mod, "time", clock)
+        rc = _RedisClient()
+        channel = _NamedChannel("a")
+        self._rename(channel, rc, "b")
+        self._rename(channel, rc, "c")
+        clock.now += bot_mod.RENAME_WINDOW_SECONDS + 1
+        self._rename(channel, rc, "d")
+        assert channel.name == "d"
+
+    def test_the_tally_is_per_channel(self, monkeypatch):
+        monkeypatch.setattr(bot_mod, "time", _Clock())
+        rc = _RedisClient()
+        first, second = _NamedChannel("a"), _NamedChannel("a")
+        self._rename(first, rc, "b", channel_id=1)
+        self._rename(first, rc, "c", channel_id=1)
+        self._rename(second, rc, "b", channel_id=2)
+        assert second.name == "b"
+
+    def test_a_failed_rename_is_not_counted(self, monkeypatch):
+        monkeypatch.setattr(bot_mod, "time", _Clock())
+        rc = _RedisClient()
+        broken = _NamedChannel("a", fail=True)
+        for _ in range(3):
+            try:
+                self._rename(broken, rc, "b")
+            except RuntimeError:
+                pass
+        assert bot_mod._rename_retry_at(rc, 77, bot_mod.time.time()) is None
+
+    def test_redis_down_fails_open(self, monkeypatch):
+        monkeypatch.setattr(bot_mod, "time", _Clock())
+        rc = _RedisClient(broken=True)
+        channel = _NamedChannel("a")
+        for name in ("b", "c", "d"):
+            self._rename(channel, rc, name)
+        assert channel.name == "d"
+
+    def test_deferred_rows_expire_on_their_own(self):
+        rc = _RedisClient()
+        bot_mod._defer_row(rc, 7, 1_000.0)
+        bot_mod._defer_row(rc, 8, 2_000.0)
+        assert bot_mod._deferred_row_ids(rc, 500.0) == {7, 8}
+        assert bot_mod._deferred_row_ids(rc, 1_500.0) == {8}
+        assert bot_mod._deferred_row_ids(rc, 2_500.0) == set()
+
+    def test_ensure_channel_routes_renames_through_the_throttle(self, monkeypatch):
+        etd = _install_team_discord(monkeypatch)
+        monkeypatch.setattr(bot_mod, "time", _Clock())
+        rc = _RedisClient()
+        channel = _NamedChannel("🟢┃reds")   # the old rotation's circle
+        row = SimpleNamespace(channel_id="77", channel_kind="text", role_id=None)
+        team = SimpleNamespace(name="Reds", color=None)
+
+        async def go():
+            await bot_mod._ensure_channel(_Bot(channel), _Guild(), row, team,
+                                          {}, _event(), icon_index=0,
+                                          redis_client=rc)
+
+        asyncio.run(go())
+        assert channel.name == etd.channel_name_for_team("Reds", None, 0)
+        assert bot_mod._rename_retry_at(rc, 77, bot_mod.time.time()) is None
+        channel.name = "manually-renamed"
+        asyncio.run(go())
+        channel.name = "manually-renamed-again"
+        try:
+            asyncio.run(go())
+        except bot_mod.RenameDeferred:
+            pass
+        else:
+            raise AssertionError("third rename was not held")
+
+
+class _PassSession:
+    """Routes the reconcile pass's queries by model: the row query, the failed
+    retry scan, the Event/EventTeam lookups and team_icon_index's id list."""
+
+    def __init__(self, models, rows, event, team, team_ids):
+        self.models = models
+        self.rows = rows
+        self.event = event
+        self.team = team
+        self.team_ids = team_ids
+        self._model = None
+        self._row_queries = 0
+        self.commits = 0
+        self.rollbacks = 0
+
+    def query(self, model, *rest):
+        self._model = model
+        return self
+
+    def join(self, *args, **kwargs):
+        return self
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
+    def limit(self, *args, **kwargs):
+        return self
+
+    def all(self):
+        if self._model is self.models.EventTeamDiscord:
+            self._row_queries += 1
+            return list(self.rows) if self._row_queries == 1 else []
+        if self._model is self.models.EventTeam.id:
+            return [(tid,) for tid in self.team_ids]
+        return []
+
+    def first(self):
+        if self._model is self.models.Event:
+            return self.event
+        if self._model is self.models.EventTeam:
+            return self.team
+        return None
+
+    def delete(self, obj):
+        pass
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        pass
+
+
+class TestReconcileHoldsRenames:
+    """A held rename is a pause, not a failure: the row stays pending, is not
+    marked failed or noticed, and sits out provisioning until it is due."""
+
+    def _setup(self, monkeypatch, *, members_dirty=False):
+        from unittest.mock import MagicMock
+
+        _install_team_discord(monkeypatch)
+        models = SimpleNamespace(Event=MagicMock(name="Event"),
+                                 EventTeam=MagicMock(name="EventTeam"),
+                                 EventTeamDiscord=MagicMock(name="EventTeamDiscord"))
+        monkeypatch.setitem(sys.modules, "db.models", models)
+        # The real and_/or_ reject the mock columns; the pass only needs to
+        # build its filters, not run them.
+        monkeypatch.setattr(bot_mod, "and_", lambda *a: ("and",) + a)
+        monkeypatch.setattr(bot_mod, "or_", lambda *a: ("or",) + a)
+        monkeypatch.setattr(bot_mod, "time", _Clock())
+
+        async def _no_orphans(bot, rc):
+            return None
+
+        monkeypatch.setattr(bot_mod, "drain_team_discord_orphans", _no_orphans)
+        self.member_syncs = []
+
+        async def _sync_members(bot, guild, row, desired):
+            self.member_syncs.append(row.id)
+            return True
+
+        monkeypatch.setattr(bot_mod, "_sync_members", _sync_members)
+        monkeypatch.setattr(bot_mod, "_desired_member_ids", lambda s, t: set())
+
+        event = SimpleNamespace(
+            id=86, name="BotW", group_id=None, mode="standard",
+            discord_guild_id="1", message_config=None,
+            team_discord_config='{"channels_enabled": true, "roles_enabled": false}')
+        team = SimpleNamespace(id=181, name="Reds", color=None)
+        row = SimpleNamespace(
+            id=64, event_id=86, team_id=181, guild_id="1", group_id=None,
+            sync_status="pending", role_id=None, channel_id="77",
+            channel_kind="text", voice_channel_id=None, members_dirty=members_dirty,
+            member_state=None, last_error=None, delete_after=None, synced_at=None)
+        channel = _NamedChannel("🟢┃reds")
+        guild = _Guild()
+
+        class _PassBot(_Bot):
+            async def fetch_guild(self, guild_id):
+                return guild
+
+        session = _PassSession(models, [row], event, team, [181])
+        return session, row, channel, _PassBot(channel)
+
+    def _pass(self, bot, session, rc):
+        asyncio.run(bot_mod._reconcile_pass(bot, lambda: session, rc))
+
+    def test_held_rename_leaves_the_row_pending_and_deferred(self, monkeypatch):
+        session, row, channel, bot = self._setup(monkeypatch)
+        rc = _RedisClient()
+        # Two renames already spent on this channel inside the window.
+        now = bot_mod.time.time()
+        rc.client.zadd(bot_mod._rename_log_key(77), {"a": now - 100, "b": now - 50})
+
+        self._pass(bot, session, rc)
+
+        assert row.sync_status == "pending"
+        assert row.last_error is None
+        assert channel.edits == []
+        assert 64 in bot_mod._deferred_row_ids(rc, now)
+
+    def test_deferred_row_skips_provisioning_but_still_syncs_members(self, monkeypatch):
+        session, row, channel, bot = self._setup(monkeypatch, members_dirty=True)
+        rc = _RedisClient()
+        now = bot_mod.time.time()
+        bot_mod._defer_row(rc, 64, now + 300)
+
+        self._pass(bot, session, rc)
+
+        assert channel.edits == []            # no rename attempted
+        assert row.sync_status == "pending"   # still owed
+        assert self.member_syncs == [64]      # roster changes still land
+
+    def test_due_row_renames_and_syncs(self, monkeypatch):
+        session, row, channel, bot = self._setup(monkeypatch)
+        rc = _RedisClient()
+
+        self._pass(bot, session, rc)
+
+        assert row.sync_status == "synced"
+        assert channel.name == "🔴┃reds"      # the site's red for team #1

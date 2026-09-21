@@ -133,22 +133,29 @@ class TestTeamFlags:
 
 class TestChannelName:
     def test_slugified_with_icon_prefix(self):
-        assert etd.channel_name_for_team("The Reds!") == "🟢┃the-reds"
-        assert etd.channel_name_for_team("  A  B  ") == "🟢┃a-b"
+        # Colorless, first team: the site shows it in the palette's red.
+        assert etd.channel_name_for_team("The Reds!") == "🔴┃the-reds"
+        assert etd.channel_name_for_team("  A  B  ") == "🔴┃a-b"
 
     def test_empty_falls_back(self):
-        assert etd.channel_name_for_team("") == "🟢┃team"
-        assert etd.channel_name_for_team("!!!") == "🟢┃team"
+        assert etd.channel_name_for_team("") == "🔴┃team"
+        assert etd.channel_name_for_team("!!!") == "🔴┃team"
 
     def test_capped_length(self):
         assert len(etd.channel_name_for_team("x" * 300)) <= 90
 
-    def test_icon_rotates_by_index_without_a_color(self):
-        names = [etd.channel_name_for_team("t", None, i) for i in range(8)]
-        icons = [n[0] for n in names]
-        assert icons[:7] == list(etd.TEAM_CHANNEL_ICONS)
-        assert len(set(icons[:7])) == 7   # every sibling team differs
-        assert icons[7] == icons[0]       # wraps past the palette
+    def test_colorless_team_takes_the_site_palette_default(self):
+        # The site draws a colorless team in TEAM_PALETTE[ordinal]; its
+        # Discord circle must be the one for that same color, not an
+        # unrelated rotation (7 of 8 teams in a live event disagreed).
+        icons = [etd.channel_name_for_team("t", None, i)[0] for i in range(8)]
+        assert icons == ["🔴", "🔵", "🟢", "🟡", "🟣", "🟠", "🔵", "🟣"]
+        for i in range(len(etd.TEAM_PALETTE)):
+            assert etd.team_channel_icon(None, i) == \
+                etd.team_channel_icon(etd.TEAM_PALETTE[i])
+        # Wraps past the palette exactly as the site's modulo does.
+        assert etd.team_channel_icon(None, len(etd.TEAM_PALETTE)) == \
+            etd.team_channel_icon(None, 0)
 
     def test_icon_matches_the_team_accent_color(self):
         # The four colors real events actually use, named as a person would.
@@ -157,8 +164,9 @@ class TestChannelName:
         assert etd.channel_name_for_team("Green Team", "#00b900") == "🟢┃green-team"
         assert etd.channel_name_for_team("Yellow Team", "#ffff00") == "🟡┃yellow-team"
 
-    def test_color_beats_the_index_rotation(self):
-        # Index would have said 🔴; the team's own color wins.
+    def test_color_beats_the_palette_default(self):
+        # Index 1 would have said 🔵 (the palette's blue); the team's own
+        # color wins.
         assert etd.channel_name_for_team("Purple", "#8000ff", 1) == "🟣┃purple"
 
 
@@ -168,30 +176,82 @@ class TestTeamChannelIcon:
         assert etd.team_channel_icon("#ff0080") == "🟣"   # magenta reads purple
         assert etd.team_channel_icon("#00ffff") == "🔵"   # cyan reads blue
 
+    def test_gold_reads_yellow_not_orange(self):
+        # The palette's gold (41.8°) sits on Twemoji's own 🟡 hue; at the old
+        # 45° edge it landed on 🟠 beside the palette's orange team.
+        assert etd.team_channel_icon("#e0b34c") == "🟡"
+        assert etd.team_channel_icon("#e07f4c") == "🟠"   # palette orange
+        assert etd.team_channel_icon("#ffa500") == "🟠"   # CSS orange, 38.8°
+
     def test_grays_and_unusable_values_fall_back(self):
         assert etd.team_channel_icon("#ffffff") == "⚪"
         assert etd.team_channel_icon("#000000") == "⚪"
         assert etd.team_channel_icon("#808080") == "⚪"
-        # Junk / missing color drops to the index rotation, never raises.
-        assert etd.team_channel_icon(None, 2) == etd.TEAM_CHANNEL_ICONS[2]
-        assert etd.team_channel_icon("not-a-color", 2) == etd.TEAM_CHANNEL_ICONS[2]
-        assert etd.team_channel_icon("#zzzzzz", 2) == etd.TEAM_CHANNEL_ICONS[2]
+        # Junk / missing color drops to the palette default for the index
+        # (index 2 = the palette's green), never raises.
+        assert etd.team_channel_icon(None, 2) == "🟢"
+        assert etd.team_channel_icon("not-a-color", 2) == "🟢"
+        assert etd.team_channel_icon("#zzzzzz", 2) == "🟢"
+
+
+class TestEffectiveTeamColor:
+    def test_accent_wins_and_is_normalized(self):
+        assert etd.effective_team_color("#3355CC", 4) == "#3355cc"
+        assert etd.effective_team_color(" 3355cc ", 4) == "#3355cc"
+
+    def test_missing_or_junk_takes_the_palette_default(self):
+        assert etd.effective_team_color(None, 0) == etd.TEAM_PALETTE[0]
+        assert etd.effective_team_color("", 1) == etd.TEAM_PALETTE[1]
+        assert etd.effective_team_color("#zzzzzz", 2) == etd.TEAM_PALETTE[2]
+        assert etd.effective_team_color("#fff", 3) == etd.TEAM_PALETTE[3]
+
+    def test_wraps_like_the_site(self):
+        size = len(etd.TEAM_PALETTE)
+        assert etd.default_team_color(size + 3) == etd.TEAM_PALETTE[3]
+
+
+class TestPaletteMirrorsTheSite:
+    def test_palette_is_well_formed(self):
+        assert len(etd.TEAM_PALETTE) == 16
+        assert len(set(etd.TEAM_PALETTE)) == 16
+        for color in etd.TEAM_PALETTE:
+            assert etd._normalize_hex(color) == color
+
+    def test_matches_the_web_repo_when_checked_out_beside_it(self):
+        # CI checks out this repo alone; on the production box the web repo
+        # sits next to it and this catches the two palettes drifting apart.
+        import re
+
+        import pytest
+
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))))),
+            "web", "apps", "web", "lib", "events.ts")
+        if not os.path.exists(path):
+            pytest.skip("web repo not checked out beside this one")
+        with open(path, encoding="utf-8") as fh:
+            source = fh.read()
+        block = re.search(r"export const TEAM_COLORS = \[(.*?)\];", source, re.S)
+        assert block, "TEAM_COLORS not found in lib/events.ts"
+        site = re.findall(r'"(#[0-9a-fA-F]{6})"', block.group(1))
+        assert tuple(c.lower() for c in site) == etd.TEAM_PALETTE
 
 
 class TestThreadName:
     def test_keeps_the_real_name(self):
         # Forum threads aren't slugified by Discord — only the icon is added.
         assert etd.thread_name_for_team("Blue Team", "#0000e0") == "🔵┃Blue Team"
-        assert etd.thread_name_for_team("  A  B  ", None, 1) == "🔴┃A  B"
+        assert etd.thread_name_for_team("  A  B  ", None, 1) == "🔵┃A  B"
 
     def test_empty_falls_back_and_caps(self):
-        assert etd.thread_name_for_team("") == "🟢┃Team"
+        assert etd.thread_name_for_team("") == "🔴┃Team"
         assert len(etd.thread_name_for_team("x" * 300)) <= 100
 
     def test_voice_name_matches_thread_treatment(self):
         # Voice channels keep the real name too — same icon treatment.
         assert etd.voice_name_for_team("Blue Team", "#0000e0") == "🔵┃Blue Team"
-        assert etd.voice_name_for_team("") == "🟢┃Team"
+        assert etd.voice_name_for_team("") == "🔴┃Team"
 
 
 # ── notification-destination gating (pure parts) ─────────────────────────────

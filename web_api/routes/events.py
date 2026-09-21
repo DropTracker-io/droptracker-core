@@ -589,7 +589,12 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         block["configured"] = comp_cfg.valid
         base["competition"] = block
 
-    teams_rows = s.query(EventTeam).filter(EventTeam.event_id == ev.id).all()
+    # Id order is load-bearing: the site gives a colorless team the palette
+    # entry for its position in this list, and Discord (team channel circle,
+    # role color) and the plugin pick the same entry by id ordinal
+    # (services.event_team_discord.team_icon_index).
+    teams_rows = (s.query(EventTeam).filter(EventTeam.event_id == ev.id)
+                  .order_by(EventTeam.id.asc()).all())
     team_names = {tm.id: tm.name for tm in teams_rows}
     team_ids = [tm.id for tm in teams_rows]
     show_effort = _effort_visible(s, viewer_id, ev)
@@ -6766,6 +6771,12 @@ async def delete_team(event_id: int, team_id: int):
                 )
             ).delete(synchronize_session=False)
             s.delete(team)
+            s.flush()
+            # Every team after this one moves up an ordinal, and a colorless
+            # team's default color follows its ordinal (on the site and in
+            # Discord alike): re-pend the surviving teams' Discord rows so the
+            # bot recolors their roles and channel circles to match.
+            _sync_team_discord(s, ev)
             s.add(
                 AuditLog(
                     actor_user_id=user_id,

@@ -29,6 +29,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from datetime import datetime
 
 from sqlalchemy import and_, or_
@@ -131,11 +132,15 @@ async def _delete_discord_objects(bot, guild_id, role_id, channel_id,
             pass
 
 
-async def _ensure_role(guild, row, team) -> None:
-    """Create/rename/recolor the team role; writes row.role_id back."""
-    import interactions
+async def _ensure_role(guild, row, team, icon_index: int = 0) -> None:
+    """Create/rename/recolor the team role; writes row.role_id back. The role
+    always carries the team's effective color (its accent, else the site's
+    palette default for ``icon_index``), so a colorless team's role matches
+    the dot the site shows and a color reset recolors it back."""
+    from services.event_team_discord import effective_team_color
 
-    color = _parse_color(getattr(team, "color", None))
+    color = _parse_color(effective_team_color(getattr(team, "color", None),
+                                              icon_index))
     role = None
     if row.role_id:
         try:
@@ -145,7 +150,7 @@ async def _ensure_role(guild, row, team) -> None:
     if role is None:
         role = await guild.create_role(
             name=team.name[:100],
-            color=color if color is not None else interactions.MISSING,
+            color=color,
             mentionable=True,
             reason=PROVISION_REASON,
         )
@@ -154,10 +159,122 @@ async def _ensure_role(guild, row, team) -> None:
     edits = {}
     if role.name != team.name[:100]:
         edits["name"] = team.name[:100]
-    if color is not None and _role_color_value(role) != color:
+    if _role_color_value(role) != color:
         edits["color"] = color
     if edits:
         await role.edit(**edits)  # Role.edit takes no audit reason in 5.x
+
+
+# --------------------------------------------------------------------------- #
+# Renaming a channel without tripping Discord's rename cap
+# --------------------------------------------------------------------------- #
+# Discord lets a channel's name change only twice per ten minutes. A third
+# rename inside that window 429s, and interactions.py then SLEEPS through the
+# whole retry_after (up to ten minutes) inside the request, which is inside
+# this pass, which holds _RECONCILE_LOCK: team-channel setup for every event
+# stalls behind one team that was recolored three times in a row. A timeout
+# around the call is worse, not better: cancelling it mid-sleep leaves the
+# library's bucket lock for that channel held forever.
+#
+# So the reconciler keeps its own tally of the renames it made and holds a
+# rename back until Discord will accept it. The row stays ``pending`` and sits
+# out provisioning until then (member sync still runs; see _reconcile_pass).
+RENAME_LIMIT = 2
+RENAME_WINDOW_SECONDS = 600
+# Slack on top of the window, so a held rename lands after Discord's bucket
+# has certainly reset rather than racing it.
+RENAME_SLACK_SECONDS = 5
+# ZSET of row id -> unix time its held rename may be retried.
+RENAME_DEFERRED_KEY = "events:team_discord:rename_deferred"
+
+
+class RenameDeferred(Exception):
+    """A channel rename would exceed Discord's per-channel cap; retry the row
+    at ``retry_at`` (unix seconds)."""
+
+    def __init__(self, channel_id, retry_at: float):
+        super().__init__(f"channel {channel_id} rename held until {retry_at:.0f}")
+        self.channel_id = channel_id
+        self.retry_at = retry_at
+
+
+def _rename_log_key(channel_id) -> str:
+    return f"events:team_discord:renames:{int(channel_id)}"
+
+
+def _rename_retry_at(redis_client, channel_id, now: float):
+    """When ``channel_id`` may next be renamed, or None when it may be now.
+
+    Fails OPEN: without Redis the rename is attempted, which at worst is the
+    library's own blocking 429 handling, i.e. the behavior before this guard."""
+    conn = _raw_redis(redis_client)
+    if conn is None:
+        return None
+    key = _rename_log_key(channel_id)
+    try:
+        conn.zremrangebyscore(key, "-inf", now - RENAME_WINDOW_SECONDS)
+        stamps = sorted(score for _member, score in
+                        conn.zrange(key, 0, -1, withscores=True))
+    except Exception:
+        return None
+    if len(stamps) < RENAME_LIMIT:
+        return None
+    return stamps[-RENAME_LIMIT] + RENAME_WINDOW_SECONDS + RENAME_SLACK_SECONDS
+
+
+def _record_rename(redis_client, channel_id, now: float) -> None:
+    conn = _raw_redis(redis_client)
+    if conn is None:
+        return
+    key = _rename_log_key(channel_id)
+    try:
+        # Unique member per rename: two stamps sharing a timestamp must not
+        # collapse into one and under-count.
+        conn.zadd(key, {f"{now:.6f}-{os.urandom(4).hex()}": now})
+        conn.expire(key, RENAME_WINDOW_SECONDS + 60)
+    except Exception:
+        pass  # a lost stamp costs at most one blocking 429, as before
+
+
+async def _rename_channel(channel, channel_id, name, redis_client) -> None:
+    """Rename ``channel`` unless that would exceed Discord's rename cap, in
+    which case raise :class:`RenameDeferred`."""
+    now = time.time()
+    retry_at = _rename_retry_at(redis_client, channel_id, now)
+    if retry_at is not None:
+        raise RenameDeferred(channel_id, retry_at)
+    await channel.edit(name=name, reason=PROVISION_REASON)
+    _record_rename(redis_client, channel_id, now)
+
+
+def _deferred_row_ids(redis_client, now: float) -> set:
+    """Rows whose held rename is not due yet (expired entries are pruned).
+    Fails open to "none": a row retried early just defers itself again."""
+    conn = _raw_redis(redis_client)
+    if conn is None:
+        return set()
+    try:
+        conn.zremrangebyscore(RENAME_DEFERRED_KEY, "-inf", now)
+        members = conn.zrange(RENAME_DEFERRED_KEY, 0, -1)
+    except Exception:
+        return set()
+    out = set()
+    for member in members:
+        try:
+            out.add(int(member.decode() if isinstance(member, bytes) else member))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _defer_row(redis_client, row_id, retry_at: float) -> None:
+    conn = _raw_redis(redis_client)
+    if conn is None:
+        return
+    try:
+        conn.zadd(RENAME_DEFERRED_KEY, {str(int(row_id)): retry_at})
+    except Exception:
+        pass
 
 
 def _channel_intro(event, team) -> str:
@@ -175,7 +292,7 @@ def _channel_intro(event, team) -> str:
 
 
 async def _ensure_channel(bot, guild, row, team, config, event,
-                          icon_index: int = 0) -> None:
+                          icon_index: int = 0, redis_client=None) -> None:
     """Create/rename the team channel: a thread in the configured forum, or a
     private text channel visible to the team role (public when roles are off).
     Both are named with the team's colored circle up front ("🔵┃blue-team");
@@ -217,7 +334,7 @@ async def _ensure_channel(bot, guild, row, team, config, event,
             row.channel_id = str(post.id)
             row.channel_kind = "thread"
         elif getattr(channel, "name", None) != name:
-            await channel.edit(name=name, reason=PROVISION_REASON)
+            await _rename_channel(channel, row.channel_id, name, redis_client)
         return
 
     name = channel_name_for_team(team.name, getattr(team, "color", None),
@@ -261,7 +378,7 @@ async def _ensure_channel(bot, guild, row, team, config, event,
         row.channel_kind = "text"
     else:
         if getattr(channel, "name", None) != name:
-            await channel.edit(name=name, reason=PROVISION_REASON)
+            await _rename_channel(channel, row.channel_id, name, redis_client)
         # Category was added/changed after the channel already existed: move it
         # (a bad/deleted category id must not wedge the sync — best effort).
         if category_id and str(getattr(channel, "parent_id", "") or "") != str(category_id):
@@ -273,7 +390,7 @@ async def _ensure_channel(bot, guild, row, team, config, event,
 
 
 async def _ensure_voice_channel(bot, guild, row, team, config,
-                                icon_index: int = 0) -> None:
+                                icon_index: int = 0, redis_client=None) -> None:
     """Create/rename the team's temporary VOICE channel: private to the team
     role when one exists (deny @everyone, allow role view/connect/speak),
     public otherwise — the same access model as the text channel, in the same
@@ -323,7 +440,8 @@ async def _ensure_voice_channel(bot, guild, row, team, config,
         row.voice_channel_id = str(channel.id)
     else:
         if getattr(channel, "name", None) != name:
-            await channel.edit(name=name, reason=PROVISION_REASON)
+            await _rename_channel(channel, row.voice_channel_id, name,
+                                  redis_client)
         # Category added/changed after creation: move it (best effort — a
         # bad/deleted category id must not wedge the sync).
         if category_id and str(getattr(channel, "parent_id", "") or "") != str(category_id):
@@ -686,11 +804,20 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
     session = session_factory()
     try:
         now = datetime.now()
+        # Pending rows holding back a channel rename (see RenameDeferred) sit
+        # out provisioning until Discord will take it, so they don't eat the
+        # ROW_LIMIT page every tick; their member sync still runs meanwhile.
+        deferred_ids = _deferred_row_ids(redis_client, time.time())
+        provisionable = EventTeamDiscord.sync_status == "pending"
+        if deferred_ids:
+            provisionable = and_(provisionable,
+                                 EventTeamDiscord.id.notin_(deferred_ids))
         rows = (
             session.query(EventTeamDiscord)
             .filter(or_(
-                EventTeamDiscord.sync_status.in_(("pending", "delete_pending")),
-                and_(EventTeamDiscord.sync_status == "synced",
+                provisionable,
+                EventTeamDiscord.sync_status == "delete_pending",
+                and_(EventTeamDiscord.sync_status.in_(("synced", "pending")),
                      EventTeamDiscord.members_dirty.is_(True)),
             ))
             .order_by(EventTeamDiscord.id.asc())
@@ -749,16 +876,19 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                 if guild is None:
                     raise RuntimeError("bot is not a member of this guild")
 
-                if row.sync_status == "pending":
+                if row.sync_status == "pending" and row.id not in deferred_ids:
+                    # The team's ordinal picks its palette default, which the
+                    # role color and every channel's circle all derive from.
+                    icon_index = team_icon_index(session, event.id, team.id)
                     if flags["role"]:
-                        await _ensure_role(guild, row, team)
+                        await _ensure_role(guild, row, team, icon_index)
                     elif row.role_id:
                         await _delete_discord_objects(bot, row.guild_id, row.role_id, None)
                         row.role_id = None
                     if flags["channel"]:
                         await _ensure_channel(
                             bot, guild, row, team, scope["config"], event,
-                            icon_index=team_icon_index(session, event.id, team.id))
+                            icon_index=icon_index, redis_client=redis_client)
                     elif row.channel_id:
                         await _delete_discord_objects(bot, None, None, row.channel_id)
                         row.channel_id = None
@@ -766,7 +896,7 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                     if flags["voice"]:
                         await _ensure_voice_channel(
                             bot, guild, row, team, scope["config"],
-                            icon_index=team_icon_index(session, event.id, team.id))
+                            icon_index=icon_index, redis_client=redis_client)
                     elif row.voice_channel_id:
                         await _delete_discord_objects(bot, None, None,
                                                       row.voice_channel_id)
@@ -804,6 +934,19 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                         _raise_team_discord_notice(session, event, row, team)
                     else:
                         _resolve_team_discord_notice(session, event, row)
+            except RenameDeferred as held:
+                # Not a failure: Discord would refuse the rename for a few
+                # minutes. Keep whatever this pass already provisioned (a
+                # re-created role's id, say), leave the row pending, and sit
+                # it out until the rename window reopens.
+                try:
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                _defer_row(redis_client, row.id, held.retry_at)
+                print(f"[team-discord] row {row.id}: {held} (Discord allows "
+                      f"{RENAME_LIMIT} renames per channel per "
+                      f"{RENAME_WINDOW_SECONDS // 60} min)")
             except Exception as exc:  # noqa: BLE001 — isolate per row
                 session.rollback()
                 try:
