@@ -8,6 +8,11 @@ Authorization requires one of:
   - Discord ADMINISTRATOR permission in the guild
   - Discord ID listed in the group's `authed_users` GroupConfiguration entry
 
+The confirmation of an adjustment is posted for the whole channel unless the
+group turned on private points replies (`points_ephemeral_messages`, see
+`utils/group_config.points_replies_ephemeral`). Refusals and errors are always
+private: they record nothing that happened.
+
 Classes:
     GroupAdminCommands: Extension containing group admin point management commands
 
@@ -27,6 +32,7 @@ from sqlalchemy import desc
 from db.models import (
     session, User, Group, Guild, Player, PlayerPoints, Log,
 )
+from utils import group_config
 from utils.format import find_player_by_rsn, pick_player_by_rsn, rsn_contains
 
 from .utils import is_admin, is_user_authorized
@@ -232,7 +238,10 @@ class GroupAdminCommands(Extension):
         embed.add_field(name="Entry ID", value=f"`#{entry.id}`", inline=True)
         embed.add_field(name="Performed by", value=f"<@{ctx.author.id}>", inline=True)
         embed.set_footer(text="This adjustment has been recorded in the audit log.")
-        await ctx.send(embed=embed, ephemeral=True)
+        await ctx.send(
+            embed=embed,
+            ephemeral=group_config.points_replies_ephemeral(session, group.group_id),
+        )
 
     @add_group_points_cmd.autocomplete("player")
     async def add_group_points_autocomplete(self, ctx: AutocompleteContext):
@@ -363,7 +372,10 @@ class GroupAdminCommands(Extension):
         embed.add_field(name="Entry ID", value=f"`#{entry.id}`", inline=True)
         embed.add_field(name="Performed by", value=f"<@{ctx.author.id}>", inline=True)
         embed.set_footer(text="This adjustment has been recorded in the audit log.")
-        await ctx.send(embed=embed, ephemeral=True)
+        await ctx.send(
+            embed=embed,
+            ephemeral=group_config.points_replies_ephemeral(session, group.group_id),
+        )
 
     @remove_group_points_cmd.autocomplete("player")
     async def remove_group_points_autocomplete(self, ctx: AutocompleteContext):

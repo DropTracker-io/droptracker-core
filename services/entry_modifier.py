@@ -9,6 +9,14 @@ After every edit the original notification embed is **rebuilt from the
 group's template** so that all placeholder-driven fields (value, points,
 ranks, split members …) stay accurate.  A "History" field at the bottom of
 the embed accumulates a small-text audit trail of admin changes.
+
+Each completed change is also announced in the notification's channel (what
+changed, and which admin changed it) unless the group keeps its points replies
+private (``points_ephemeral_messages``, read by
+``utils/group_config.points_replies_ephemeral``). The menu itself is private
+to the admin who opened it whatever that setting says: its buttons delete and
+edit drops and nothing checks who presses them, so it is never posted where a
+member could.
 """
 
 import json
@@ -49,6 +57,7 @@ from db.models import (
 )
 from db.models.drop_split import DropSplit
 from services.redis_updates import RedisLootTracker, loot_tracker, get_player_list_loot_sum
+from utils import group_config
 from utils.redis import redis_client
 from utils.site_urls import player_link
 
@@ -678,6 +687,167 @@ async def _update_history_field(bot, channel_id: str, message_id: str, line: str
 
 
 # ---------------------------------------------------------------------------
+# Change notes: the channel's record of what an admin changed
+# ---------------------------------------------------------------------------
+
+_NOTE_DELETED = 0xED4245
+_NOTE_HIDDEN = 0x95A5A6
+_NOTE_RESTORED = 0x2ECC71
+_NOTE_EDITED = 0x3498DB
+
+
+def _points_for_drop(drop_id: int, group_id: int, db) -> int:
+    """This group's points for a drop, summed over everyone it paid.
+
+    Same rows the overview's "Points Awarded" line adds up.
+    """
+    total = (
+        db.query(sa_func.sum(PlayerPoints.amount))
+        .filter(PlayerPoints.entry_id == drop_id, PlayerPoints.group_id == group_id)
+        .scalar()
+    )
+    return int(total or 0)
+
+
+def _points_line(before: int, after: int) -> str | None:
+    """How the group's points for the drop moved; None when they did not."""
+    if before == after:
+        return None
+    return f"**Points:** {_format_gp(before)} → {_format_gp(after)}"
+
+
+def _note_names(data: dict) -> tuple[str, str]:
+    """(player name, item name) from a ``_load_context`` dict, never raising:
+    a note is built before the change it reports, and must not stop it."""
+    player_name = getattr(data.get("player"), "player_name", None) or "Unknown"
+    item_name = getattr(data.get("item"), "item_name", None) or "Unknown"
+    return player_name, item_name
+
+
+def _drop_lines(player_name: str, item_name: str, quantity) -> list[str]:
+    return [f"**Player:** {player_name}", f"**Item:** {item_name} (x{quantity or 1})"]
+
+
+def _note_text(lines) -> str:
+    return "\n".join(line for line in lines if line)
+
+
+def _deleted_note(player_name, item_name, quantity, total_value, points_before):
+    """(title, description, colour) for a deleted drop.
+
+    The notification is deleted with the drop, so this note is the one place
+    left that says which drop it was.
+    """
+    return "Drop deleted", _note_text([
+        *_drop_lines(player_name, item_name, quantity),
+        f"**Value:** {_format_gp(total_value)} GP",
+        _points_line(points_before, 0),
+    ]), _NOTE_DELETED
+
+
+def _hidden_note(points_before):
+    """Names no player, item or value, on purpose: hiding swapped the
+    notification for a blank card, and repeating what it said would undo that.
+    The note replies to that card, which is enough to tell which drop it was."""
+    return "Drop hidden", _note_text([
+        "It no longer counts towards loot totals or points.",
+        _points_line(points_before, 0),
+    ]), _NOTE_HIDDEN
+
+
+def _restored_note(player_name, item_name, quantity, points_before, points_after):
+    return "Drop restored", _note_text([
+        *_drop_lines(player_name, item_name, quantity),
+        _points_line(points_before, points_after),
+    ]), _NOTE_RESTORED
+
+
+def _value_note(player_name, item_name, quantity, total_before, total_after,
+                points_before, points_after):
+    return "Drop value changed", _note_text([
+        *_drop_lines(player_name, item_name, quantity),
+        f"**Value:** {_format_gp(total_before)} GP → {_format_gp(total_after)} GP",
+        _points_line(points_before, points_after),
+    ]), _NOTE_EDITED
+
+
+def _split_note(player_name, item_name, quantity, split_names, points_before, points_after):
+    """Lists who the drop is split with now, not before: the old list is only
+    knowable from point rows, which a group without point sharing never has."""
+    return "Drop split changed", _note_text([
+        *_drop_lines(player_name, item_name, quantity),
+        f"**Split with:** {', '.join(split_names) if split_names else 'nobody'}",
+        _points_line(points_before, points_after),
+    ]), _NOTE_EDITED
+
+
+def _change_note_embed(note, actor_id, drop_id: int) -> Embed:
+    title, description, color = note
+    embed = Embed(title=title, description=description, color=color)
+    embed.add_field(name="Performed by", value=f"<@{actor_id}>", inline=True)
+    embed.set_footer(text=f"Drop ID: {drop_id}")
+    return embed
+
+
+async def _post_change_note(bot, channel_id, reply_to_message_id, embed: Embed) -> bool:
+    """Post a change note in the notification's channel; False if nothing posted.
+
+    Replies to the notification while it exists, so the channel can jump
+    straight to the drop, and falls back to a plain message when the reply is
+    refused (the notification was deleted, or the reference was rejected).
+    """
+    try:
+        channel = await bot.fetch_channel(int(channel_id))
+    except Exception as e:
+        print(f"[EntryModifier] Could not fetch channel {channel_id} for a change note: {e}")
+        return False
+    if not channel:
+        return False
+    if reply_to_message_id:
+        try:
+            await channel.send(embeds=[embed], reply_to=int(reply_to_message_id))
+            return True
+        except Exception as e:
+            print(f"[EntryModifier] Change note could not reply to {reply_to_message_id}: {e}")
+    try:
+        await channel.send(embeds=[embed])
+        return True
+    except Exception as e:
+        print(f"[EntryModifier] Could not post a change note in channel {channel_id}: {e}")
+        return False
+
+
+async def _announce_change(bot, ctx, db, *, group_id, channel_id, reply_to_message_id,
+                           drop_id, build_note) -> None:
+    """Tell the channel what the admin changed, unless the group keeps it private.
+
+    Call it after the admin's own reply: the interaction has 3 seconds to be
+    answered, and a channel post must not spend them. ``build_note`` returns
+    one of the ``_*_note`` tuples; it runs in here so that a failure building
+    it lands in this function's guard, not in the caller's "operation failed"
+    reply for a change that did happen. If the note cannot be posted, the
+    admin hears so privately instead of assuming the channel saw it. Never
+    raises: the change it reports is already saved.
+    """
+    try:
+        if group_config.points_replies_ephemeral(db, group_id):
+            return
+        note = build_note()
+        if note is None:
+            return
+        embed = _change_note_embed(note, ctx.author_id, drop_id)
+        if await _post_change_note(bot, channel_id, reply_to_message_id, embed):
+            return
+        await ctx.send(
+            "The change is saved, but I couldn't post it in this channel. "
+            "Check that I can send messages and embed links here.",
+            ephemeral=True,
+        )
+    except Exception as e:
+        print(f"[EntryModifier] Change note for drop {drop_id} failed: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Extension
 # ---------------------------------------------------------------------------
 
@@ -794,6 +964,14 @@ class EntryModifier(Extension):
             # Capture before deletion invalidates the ORM object
             orig_channel_id = notified.channel_id
             orig_message_id = notified.message_id
+            group_id = notified.group_id
+            drop_id = drop.drop_id
+            note = _deleted_note(
+                *_note_names(data),
+                drop.quantity,
+                int(drop.value or 0) * int(drop.quantity or 1),
+                sum(p.amount for p in data["all_points"]),
+            )
 
             # 1. Delete points across all groups
             _delete_points_for_drop_all_groups(drop.drop_id, db)
@@ -829,6 +1007,10 @@ class EntryModifier(Extension):
                 embeds=[],
                 components=[],
             )
+            await _announce_change(
+                self.bot, ctx, db, group_id=group_id, channel_id=orig_channel_id,
+                reply_to_message_id=None, drop_id=drop_id, build_note=lambda: note,
+            )
         except Exception as e:
             db.rollback()
             print(f"[EntryModifier] Delete failed: {e}")
@@ -852,6 +1034,8 @@ class EntryModifier(Extension):
             drop = data["drop"]
             notified = data["notified"]
             player_id = drop.player_id
+            was_hidden = bool(drop.hidden)
+            points_before = sum(p.amount for p in data["all_points"])
 
             if not drop.hidden:
                 # --- HIDE ---
@@ -946,6 +1130,20 @@ class EntryModifier(Extension):
 
             # Re-render the overview for the admin
             await _send_overview(ctx, notified_id, db, edit=True)
+
+            def build_note():
+                if not was_hidden:
+                    return _hidden_note(points_before)
+                return _restored_note(
+                    *_note_names(data), drop.quantity, points_before,
+                    _points_for_drop(drop.drop_id, notified.group_id, db),
+                )
+
+            await _announce_change(
+                self.bot, ctx, db, group_id=notified.group_id,
+                channel_id=notified.channel_id, reply_to_message_id=notified.message_id,
+                drop_id=drop.drop_id, build_note=build_note,
+            )
         except Exception as e:
             db.rollback()
             print(f"[EntryModifier] Hide toggle failed: {e}")
@@ -1044,6 +1242,8 @@ class EntryModifier(Extension):
 
             drop = data["drop"]
             notified = data["notified"]
+            total_before = int(drop.value or 0) * int(drop.quantity or 1)
+            points_before = sum(p.amount for p in data["all_points"])
 
             # 1. Reverse existing points
             _delete_points_for_drop_all_groups(drop.drop_id, db)
@@ -1101,6 +1301,24 @@ class EntryModifier(Extension):
 
             # 6. Show updated overview
             await _send_overview(ctx, notified_id, db)
+
+            def build_note():
+                # Re-entering the value it already had changes nothing worth
+                # announcing -- unless the re-award moved the points.
+                total_after = new_value * int(drop.quantity or 1)
+                points_after = _points_for_drop(drop.drop_id, notified.group_id, db)
+                if total_after == total_before and points_after == points_before:
+                    return None
+                return _value_note(
+                    *_note_names(data), drop.quantity, total_before, total_after,
+                    points_before, points_after,
+                )
+
+            await _announce_change(
+                self.bot, ctx, db, group_id=notified.group_id,
+                channel_id=notified.channel_id, reply_to_message_id=notified.message_id,
+                drop_id=drop.drop_id, build_note=build_note,
+            )
         except Exception as e:
             db.rollback()
             print(f"[EntryModifier] Edit value failed: {e}")
@@ -1123,6 +1341,7 @@ class EntryModifier(Extension):
 
             drop = data["drop"]
             notified = data["notified"]
+            points_before = sum(p.amount for p in data["all_points"])
 
             # 1. Reverse existing points for this group
             _delete_points_for_drop(drop.drop_id, notified.group_id, db)
@@ -1188,6 +1407,15 @@ class EntryModifier(Extension):
 
             # 7. Show updated overview
             await _send_overview(ctx, notified_id, db)
+            await _announce_change(
+                self.bot, ctx, db, group_id=group_id,
+                channel_id=notified.channel_id, reply_to_message_id=notified.message_id,
+                drop_id=drop.drop_id,
+                build_note=lambda: _split_note(
+                    *_note_names(data), drop.quantity, new_split_names,
+                    points_before, _points_for_drop(drop.drop_id, group_id, db),
+                ),
+            )
         except Exception as e:
             db.rollback()
             print(f"[EntryModifier] Modify splits failed: {e}")

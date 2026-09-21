@@ -100,6 +100,11 @@ BEHAVIOR_BOOL_KEYS = (
     # ledger stays per-player, so flipping it re-draws boards and never rewrites
     # a row. Mirrors db/point_standings.COMBINE_CONFIG_KEY (pinned by a test).
     "points_combine_accounts",
+    # On: the Discord replies that change points (/add-group-points,
+    # /remove-group-points, "Modify Entry") are shown only to the admin who
+    # acted. Off, the default: they are posted for the whole channel. Mirrors
+    # utils/group_config.POINTS_EPHEMERAL_MESSAGES (pinned by a test).
+    "points_ephemeral_messages",
 )
 BEHAVIOR_INT_KEYS = ("min_submission_pts", "max_submission_pts")
 SHARING_METHODS = ("equal_split", "award_all")
@@ -110,6 +115,7 @@ BEHAVIOR_DEFAULTS = {
     "points_require_group_only": False,
     "points_leaderboard_public": True,
     "points_combine_accounts": False,
+    "points_ephemeral_messages": False,
     "min_submission_pts": 0,
     "max_submission_pts": 0,
 }

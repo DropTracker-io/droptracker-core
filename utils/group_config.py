@@ -45,6 +45,10 @@ NOTIFY_QUESTS = "notify_quests"
 NOTIFY_POINTS_AWARDED = "notify_points_awarded"
 NOTIFY_DEATHS = "notify_deaths"
 NOTIFY_DIARIES = "notify_diaries"
+# Points behavior toggle, written as "1"/"0" by the points settings route
+# (web_api/routes/points.py BEHAVIOR_BOOL_KEYS). Read through
+# points_replies_ephemeral() below, never directly.
+POINTS_EPHEMERAL_MESSAGES = "points_ephemeral_messages"
 
 # ── Cache internals ───────────────────────────────────────────────────────────
 _TTL: float = 30.0  # seconds
@@ -134,6 +138,28 @@ def get_bulk(
                 result[(row.group_id, row.config_key)] = row.config_value
 
     return result
+
+
+def points_replies_ephemeral(session, group_id: int) -> bool:
+    """Whether the Discord replies that change a group's points stay private.
+
+    Covers ``/add-group-points``, ``/remove-group-points`` and the changes made
+    through the "Modify Entry" message menu. Absent or "0" -- the default --
+    means they are posted where the whole channel can see what changed and who
+    changed it; "1" means only the admin who acted sees the reply.
+
+    Strictly "1", the way the settings route reads it back: a looser parse here
+    would let the bot go private while the admin's toggle shows off. If the
+    setting cannot be read, the reply stays private: that is how these replies
+    always worked, and it never shows a channel something its group asked to
+    keep to admins.
+    """
+    try:
+        value = get(session, group_id, POINTS_EPHEMERAL_MESSAGES)
+    except Exception as e:
+        print(f"[group_config] {POINTS_EPHEMERAL_MESSAGES} unreadable for group {group_id}: {e}")
+        return True
+    return str(value or "").strip() == "1"
 
 
 def invalidate(group_id: int, key: Optional[str] = None) -> None:
