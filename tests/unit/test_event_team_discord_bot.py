@@ -1117,14 +1117,33 @@ class _Role:
         self.id = role_id
         self.name = name
         self.color = SimpleNamespace(value=color)
-        self.edits = []
 
     async def edit(self, **kwargs):
-        self.edits.append(kwargs)
-        if "color" in kwargs:
-            self.color = SimpleNamespace(value=kwargs["color"])
-        if "name" in kwargs:
-            self.name = kwargs["name"]
+        # interactions 5.x Role.edit sends null for every argument it wasn't
+        # given, and Discord resets each of those fields: it renamed live team
+        # roles to "new role", made them unmentionable and reset their
+        # permissions. The reconciler must never call it.
+        raise AssertionError("Role.edit() resets every omitted field; "
+                             "PATCH the changed fields via http instead")
+
+
+class _Http:
+    """``bot.http``: records role PATCHes exactly as they would be sent."""
+
+    def __init__(self, fail=False):
+        self.patches = []
+        self.fail = fail
+
+    async def modify_guild_role(self, guild_id, role_id, payload, reason=None):
+        if self.fail:
+            raise RuntimeError("403 Forbidden (error code: 50013): Missing Permissions")
+        self.patches.append(dict(payload))
+        return dict(payload, id=str(role_id))
+
+
+class _RoleBot:
+    def __init__(self, fail=False):
+        self.http = _Http(fail=fail)
 
 
 class _Guild:
@@ -1153,31 +1172,68 @@ class TestEnsureRoleColor:
         etd = _install_team_discord(monkeypatch)
         guild = _Guild()
         row = SimpleNamespace(role_id=None)
-        self._run(bot_mod._ensure_role(guild, row, SimpleNamespace(name="Reds", color=None), 1))
+        self._run(bot_mod._ensure_role(_RoleBot(), guild, row,
+                                       SimpleNamespace(name="Reds", color=None), 1))
         assert guild.created[0]["color"] == int(etd.TEAM_PALETTE[1][1:], 16)
+        assert guild.created[0]["mentionable"] is True
         assert row.role_id == "501"
 
     def test_existing_colorless_role_is_recolored(self, monkeypatch):
         etd = _install_team_discord(monkeypatch)
         role = _Role(color=0)   # created before this fix: no color at all
-        row = SimpleNamespace(role_id="500")
-        self._run(bot_mod._ensure_role(_Guild(role), row, SimpleNamespace(name="Reds", color=None), 0))
-        assert role.edits == [{"color": int(etd.TEAM_PALETTE[0][1:], 16)}]
+        bot = _RoleBot()
+        self._run(bot_mod._ensure_role(bot, _Guild(role), SimpleNamespace(role_id="500"),
+                                       SimpleNamespace(name="Reds", color=None), 0))
+        assert bot.http.patches == [{"color": int(etd.TEAM_PALETTE[0][1:], 16)}]
 
     def test_reset_color_goes_back_to_the_palette_default(self, monkeypatch):
         # Reset stores NULL; the role used to keep the old accent forever.
         etd = _install_team_discord(monkeypatch)
-        role = _Role(color=0x123456)
-        row = SimpleNamespace(role_id="500")
-        self._run(bot_mod._ensure_role(_Guild(role), row, SimpleNamespace(name="Reds", color=None), 2))
-        assert role.color.value == int(etd.TEAM_PALETTE[2][1:], 16)
+        bot = _RoleBot()
+        self._run(bot_mod._ensure_role(bot, _Guild(_Role(color=0x123456)),
+                                       SimpleNamespace(role_id="500"),
+                                       SimpleNamespace(name="Reds", color=None), 2))
+        assert bot.http.patches == [{"color": int(etd.TEAM_PALETTE[2][1:], 16)}]
 
     def test_accent_color_wins_and_matching_role_is_left_alone(self, monkeypatch):
         _install_team_discord(monkeypatch)
-        role = _Role(color=0x3355CC)
-        row = SimpleNamespace(role_id="500")
-        self._run(bot_mod._ensure_role(_Guild(role), row, SimpleNamespace(name="Reds", color="#3355cc"), 5))
-        assert role.edits == []
+        bot = _RoleBot()
+        self._run(bot_mod._ensure_role(bot, _Guild(_Role(color=0x3355CC)),
+                                       SimpleNamespace(role_id="500"),
+                                       SimpleNamespace(name="Reds", color="#3355cc"), 5))
+        assert bot.http.patches == []
+
+
+class TestRolePatchTouchesOnlyNameAndColor:
+    """Everything but name and color belongs to the server. A PATCH that
+    carries any other key (even as null) resets it: that is how event 86's
+    team roles became unmentionable "new role"s with Mention Everyone."""
+
+    _FORBIDDEN = {"mentionable", "hoist", "permissions", "icon", "unicode_emoji"}
+
+    def _patch(self, monkeypatch, role, team):
+        _install_team_discord(monkeypatch)
+        bot = _RoleBot()
+        asyncio.run(bot_mod._ensure_role(bot, _Guild(role), SimpleNamespace(role_id="500"),
+                                         team, 0))
+        return bot.http.patches
+
+    def test_recolor_sends_color_alone(self, monkeypatch):
+        patches = self._patch(monkeypatch, _Role(name="Reds", color=0),
+                              SimpleNamespace(name="Reds", color="#4c8fe0"))
+        assert patches == [{"color": 0x4C8FE0}]
+
+    def test_rename_sends_name_alone(self, monkeypatch):
+        patches = self._patch(monkeypatch, _Role(name="Old", color=0x4C8FE0),
+                              SimpleNamespace(name="New", color="#4c8fe0"))
+        assert patches == [{"name": "New"}]
+
+    def test_both_changed_sends_both_and_nothing_else(self, monkeypatch):
+        patches = self._patch(monkeypatch, _Role(name="Old", color=0),
+                              SimpleNamespace(name="New", color="#4c8fe0"))
+        assert patches == [{"name": "New", "color": 0x4C8FE0}]
+        assert not (set(patches[0]) & self._FORBIDDEN)
+        assert None not in patches[0].values()
 
 
 class _NamedChannel:
@@ -1366,7 +1422,8 @@ class _PassSession:
 class _ReconcileHarness:
     """One team row in one event, driven through the real reconcile pass."""
 
-    def _setup(self, monkeypatch, *, members_dirty=False, role=None):
+    def _setup(self, monkeypatch, *, members_dirty=False, role=None,
+               refuse_role_edit=False):
         from unittest.mock import MagicMock
 
         _install_team_discord(monkeypatch)
@@ -1409,6 +1466,10 @@ class _ReconcileHarness:
         guild = _Guild(role)
 
         class _PassBot(_Bot):
+            def __init__(self, channel):
+                super().__init__(channel)
+                self.http = _Http(fail=refuse_role_edit)
+
             async def fetch_guild(self, guild_id):
                 return guild
 
@@ -1459,11 +1520,6 @@ class TestReconcileHoldsRenames(_ReconcileHarness):
         assert channel.name == "🔴┃reds"      # the site's red for team #1
 
 
-class _RefusingRole(_Role):
-    async def edit(self, **kwargs):
-        raise RuntimeError("403 Forbidden (error code: 50013): Missing Permissions")
-
-
 class TestRoleRefusalDoesNotBlockTheChannel(_ReconcileHarness):
     """A server whose DropTracker role sits below the team roles refuses the
     role recolor. That used to stop the pass before the channel step, so the
@@ -1471,8 +1527,8 @@ class TestRoleRefusalDoesNotBlockTheChannel(_ReconcileHarness):
     fails (notice + retry backoff) for the role."""
 
     def test_channel_is_renamed_and_row_fails_for_the_role(self, monkeypatch):
-        role = _RefusingRole(color=0)
-        session, row, channel, bot = self._setup(monkeypatch, role=role)
+        session, row, channel, bot = self._setup(monkeypatch, role=_Role(color=0),
+                                                 refuse_role_edit=True)
         rc = _RedisClient()
 
         self._pass(bot, session, rc)
@@ -1487,7 +1543,8 @@ class TestRoleRefusalDoesNotBlockTheChannel(_ReconcileHarness):
         row = SimpleNamespace(role_id="500")
         try:
             asyncio.run(bot_mod._ensure_role(
-                _Guild(_RefusingRole()), row, SimpleNamespace(name="Reds", color=None), 0))
+                _RoleBot(fail=True), _Guild(_Role()), row,
+                SimpleNamespace(name="Reds", color=None), 0))
         except bot_mod.RoleEditFailed as exc:
             assert "50013" in str(exc.__cause__)
         else:
@@ -1504,7 +1561,7 @@ class TestRoleRefusalDoesNotBlockTheChannel(_ReconcileHarness):
 
         try:
             asyncio.run(bot_mod._ensure_role(
-                _NoCreate(), SimpleNamespace(role_id=None),
+                _RoleBot(), _NoCreate(), SimpleNamespace(role_id=None),
                 SimpleNamespace(name="Reds", color=None), 0))
         except bot_mod.RoleEditFailed:
             raise AssertionError("create failure must not be softened")

@@ -132,11 +132,15 @@ async def _delete_discord_objects(bot, guild_id, role_id, channel_id,
             pass
 
 
-async def _ensure_role(guild, row, team, icon_index: int = 0) -> None:
+async def _ensure_role(bot, guild, row, team, icon_index: int = 0) -> None:
     """Create/rename/recolor the team role; writes row.role_id back. The role
     always carries the team's effective color (its accent, else the site's
     palette default for ``icon_index``), so a colorless team's role matches
-    the dot the site shows and a color reset recolors it back."""
+    the dot the site shows and a color reset recolors it back.
+
+    Name and color are the ONLY things this ever changes on an existing role.
+    Whatever else the server has set (mentionable, hoist, permissions, icon)
+    is theirs and is never sent."""
     from services.event_team_discord import effective_team_color
 
     color = _parse_color(effective_team_color(getattr(team, "color", None),
@@ -162,8 +166,17 @@ async def _ensure_role(guild, row, team, icon_index: int = 0) -> None:
     if _role_color_value(role) != color:
         edits["color"] = color
     if edits:
+        # A raw PATCH of exactly the changed fields. Never ``role.edit()``:
+        # interactions 5.x Role.edit defaults every argument to None and sends
+        # them all (its dict_filter only drops MISSING), and Discord reads a
+        # null as "reset". So ``role.edit(color=x)`` also set the name to "new
+        # role", turned mentionable and hoist off, cleared the icon, and reset
+        # permissions to Discord's default role set, which grants Mention
+        # Everyone, invites and server-wide view/send. On 2026-09-21 that hit
+        # all 8 team roles of event 86. Omitted fields are left untouched.
         try:
-            await role.edit(**edits)  # Role.edit takes no audit reason in 5.x
+            await bot.http.modify_guild_role(guild.id, role.id, edits,
+                                             reason=PROVISION_REASON)
         except Exception as exc:
             raise RoleEditFailed(str(exc)) from exc
 
@@ -894,7 +907,7 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                     role_error = None
                     if flags["role"]:
                         try:
-                            await _ensure_role(guild, row, team, icon_index)
+                            await _ensure_role(bot, guild, row, team, icon_index)
                         except RoleEditFailed as exc:
                             # Finish the channel steps first (a recolor must
                             # not hold the channel name hostage), then fail
