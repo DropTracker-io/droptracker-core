@@ -14,7 +14,7 @@
 # Every removal is recorded to logs/prune_drop_images_<ts>.tsv first.
 
 [Unit]
-Description=DropTracker drop-screenshot retention (prune low-value images past 30d)
+Description=DropTracker drop-screenshot retention (prune low-value images past 5d, other types past 30d)
 Wants=network-online.target
 After=network-online.target mariadb.service mysql.service
 

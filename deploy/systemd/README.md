@@ -28,6 +28,7 @@ sudo systemctl restart <unit>
 | `droptracker-webhook-consumer` | `workers/webhook_consumer.py` | — |
 | `droptracker-dev-sync` | `workers/dev_sync.py` — production only; pushes the Bug Tester roster to the dev instance (needs `DEV_SYNC_URL` + `DEV_SYNC_KEY`) | — |
 | `droptracker-prune-images` | `scripts/prune_drop_images.py` (timer-driven oneshot) | — |
+| `droptracker-prune-renders` | `scripts/prune_gear_renders.py` (timer-driven oneshot, ~05:00 UTC; gear renders past 5d) | — |
 
 Notes:
 
@@ -52,8 +53,8 @@ Notes:
   `monitor/sdnotifier.py`); the queue consumers and workers are `Type=simple`.
 - `droptracker-prune-images` is timer-driven (`.timer`, ~04:00 UTC), not a
   long-running service — enable the **timer**, never the service. It keeps a
-  drop screenshot only while the drop is worth >= 1,000,000 gp or is under 30
-  days old. It is scheduled ahead of `droptracker-db-backup` (08:30 UTC) on
+  drop screenshot only while the drop is worth >= 1,000,000 gp or is under 5
+  days old (30 until 2026-09-22). It is scheduled ahead of `droptracker-db-backup` (08:30 UTC) on
   purpose: the backup aborts below 25 GiB free, so the prune clears space for
   it. Dry-run it any time with
   `venv/bin/python -m scripts.prune_drop_images` (no `--apply` = no changes).

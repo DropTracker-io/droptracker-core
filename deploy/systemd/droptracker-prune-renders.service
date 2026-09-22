@@ -1,0 +1,32 @@
+# Daily retention pass over rendered character images (gear pictures).
+# Triggered by droptracker-prune-renders.timer — do not enable the service itself.
+#
+# One render is drawn per outfit a player uploads and, until 2026-09-22, kept
+# forever: 1.23M renders / 98 GiB in B2 for 76k live models. This sweep deletes
+# renders older than 5 days (plus their avatar crops) unless the outfit is the
+# player's current, pinned or a personal-best one — the same protected set the
+# model prune honours. A re-worn outfit is re-rendered from the kept model by
+# POST /player/model/check.
+#
+# Runs as `user`, the account that owns the intake API (which draws the
+# renders) and holds the B2 credentials in .env. The B2 listing is ~1.3M
+# objects; expect several minutes.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.prune_gear_renders
+# Manual real run: sudo systemctl start droptracker-prune-renders.service
+# Watch it:        journalctl -u droptracker-prune-renders.service -f
+# Every deletion is recorded to logs/prune_gear_renders_<ts>.tsv first.
+
+[Unit]
+Description=DropTracker gear-render retention (delete renders past 5d, protected outfits exempt)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.prune_gear_renders --apply
+TimeoutStartSec=6h
+Nice=15
+IOSchedulingClass=idle

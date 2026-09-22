@@ -195,3 +195,62 @@ class TestCheck:
 
         assert route._check("hash", "nope!") == {"has_model": False, "has_pet": False}
         assert log == []
+
+
+class TestRerenderKick:
+    """Renders age out (scripts/prune_gear_renders) while models are kept, so
+    switching back into a held outfit is the moment its picture comes back."""
+
+    def _gear_image(self, monkeypatch, exists):
+        calls = []
+
+        def image_exists(player_id, fingerprint):
+            calls.append((player_id, fingerprint))
+            return exists
+
+        monkeypatch.setattr(sys.modules["services.gear_image"], "image_exists", image_exists)
+        return calls
+
+    def test_a_held_outfit_without_a_picture_asks_for_one(self, held, monkeypatch):
+        store, _log = held
+        store[(42, "abcd1234", False)] = True
+        self._gear_image(monkeypatch, exists=False)
+        _session(monkeypatch, _Obj(player_id=42), _State(player_id=42, model_fingerprint="old"))
+        asked = []
+
+        result = route._check("hash", "abcd1234",
+                              on_missing_render=lambda pid, fp: asked.append((pid, fp)))
+
+        assert result == {"has_model": True, "has_pet": False}, "the answer is unchanged"
+        assert asked == [(42, "abcd1234")]
+
+    def test_a_picture_we_still_have_is_not_redrawn(self, held, monkeypatch):
+        store, _log = held
+        store[(42, "abcd1234", False)] = True
+        self._gear_image(monkeypatch, exists=True)
+        _session(monkeypatch, _Obj(player_id=42), _State(player_id=42, model_fingerprint="old"))
+        asked = []
+
+        route._check("hash", "abcd1234", on_missing_render=lambda pid, fp: asked.append((pid, fp)))
+
+        assert asked == []
+
+    def test_standing_still_never_even_looks(self, held, monkeypatch):
+        store, _log = held
+        store[(42, "abcd1234", False)] = True
+        looked = self._gear_image(monkeypatch, exists=False)
+        _session(monkeypatch, _Obj(player_id=42), _State(player_id=42, model_fingerprint="abcd1234"))
+        asked = []
+
+        route._check("hash", "abcd1234", on_missing_render=lambda pid, fp: asked.append((pid, fp)))
+
+        assert looked == [] and asked == [], "an unchanged outfit costs nothing"
+
+    def test_an_outfit_we_lack_is_the_upload_path_s_job(self, held, monkeypatch):
+        looked = self._gear_image(monkeypatch, exists=False)
+        _session(monkeypatch, _Obj(player_id=42), _State(player_id=42))
+        asked = []
+
+        route._check("hash", "beef", on_missing_render=lambda pid, fp: asked.append((pid, fp)))
+
+        assert looked == [] and asked == []

@@ -39,8 +39,9 @@ class FakeRedis:
     def get(self, key):
         return self.store.get(key)
 
-    def delete(self, key):
-        self.store.pop(key, None)
+    def delete(self, *keys):
+        for key in keys:
+            self.store.pop(key, None)
 
 
 @pytest.fixture
@@ -166,6 +167,43 @@ class TestExistsCache:
         monkeypatch.setattr(image_storage, "_redis", lambda: None)
         client.head_object.return_value = {"ContentLength": 5, "ETag": '"x"'}
         assert image_storage.key_exists("dt_img/a.png")
+
+
+class TestDeleteKeys:
+    def test_batches_of_a_thousand_and_invalidates(self, client, redis, monkeypatch):
+        monkeypatch.setattr(image_storage, "DELETE_BATCH", 2)
+        client.delete_objects.return_value = {}
+        keys = ["dt_img/a.png", "dt_img/b.png", "dt_img/c.png"]
+        for k in keys:
+            redis.store["b2img:exists:" + k] = "1"
+
+        assert image_storage.delete_keys(keys) == set()
+
+        sent = [c.kwargs["Delete"]["Objects"] for c in client.delete_objects.call_args_list]
+        assert [len(b) for b in sent] == [2, 1]
+        assert all(c.kwargs["Delete"]["Quiet"] for c in client.delete_objects.call_args_list)
+        assert redis.store == {}
+
+    def test_per_key_errors_are_returned_and_stay_cached(self, client, redis):
+        client.delete_objects.return_value = {
+            "Errors": [{"Key": "dt_img/b.png", "Code": "AccessDenied", "Message": "no"}]}
+        redis.store["b2img:exists:dt_img/a.png"] = "1"
+        redis.store["b2img:exists:dt_img/b.png"] = "1"
+
+        assert image_storage.delete_keys(["dt_img/a.png", "dt_img/b.png"]) == {"dt_img/b.png"}
+        assert redis.store == {"b2img:exists:dt_img/b.png": "1"}
+
+    def test_a_failed_request_fails_its_whole_batch(self, client, redis):
+        client.delete_objects.side_effect = RuntimeError("boom")
+
+        assert image_storage.delete_keys(["dt_img/a.png"]) == {"dt_img/a.png"}
+
+    def test_empty_and_duplicate_input(self, client):
+        assert image_storage.delete_keys([]) == set()
+        client.delete_objects.assert_not_called()
+        client.delete_objects.return_value = {}
+        image_storage.delete_keys(["dt_img/a.png", "dt_img/a.png", ""])
+        assert len(client.delete_objects.call_args[1]["Delete"]["Objects"]) == 1
 
 
 class TestGetAndHead:

@@ -8,6 +8,10 @@ viewer uses, so the posted image cannot drift from the site.
 Rendered once per outfit and reused. The fingerprint in the filename means a
 player who has not changed gear costs nothing after the first render, which is
 what makes it affordable to attach to every personal best.
+
+Renders age out after a few days (``scripts/prune_gear_renders.py``) unless
+the outfit is the player's current, pinned or a personal-best one; an outfit
+worn again after that is re-rendered by ``POST /player/model/check``.
 """
 from __future__ import annotations
 

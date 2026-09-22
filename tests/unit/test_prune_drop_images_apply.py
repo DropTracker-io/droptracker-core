@@ -324,3 +324,84 @@ def test_windows_are_half_open_and_stop_at_the_cutoff(prune):
     for (_a, end), (start, _b) in zip(windows, windows[1:]):
         assert end == start, "windows must abut without gaps or overlap"
     assert all(start < end for start, end in windows)
+
+
+class _FakeB2:
+    """B2-hosted rows: the scan queues keys and deletes them in one batch."""
+
+    def __init__(self, fail=()):
+        from utils import image_storage
+
+        self.USER_UPLOAD_PREFIX = image_storage.USER_UPLOAD_PREFIX
+        self.key_from_url = image_storage.key_from_url
+        self.batches: list[list[str]] = []
+        self.heads = 0
+        self._fail = set(fail)
+
+    def head(self, key):
+        self.heads += 1
+        return {"size": 1, "etag": "e"}
+
+    def delete_keys(self, keys):
+        self.batches.append(list(keys))
+        return {k for k in keys if k in self._fail}
+
+
+CDN = "https://video.droptracker.io/"
+
+
+def _b2(module, monkeypatch, fail=()):
+    monkeypatch.setenv("B2_CDN_BASE_URL", "https://video.droptracker.io")
+    fake = _FakeB2(fail)
+    monkeypatch.setattr(module, "_b2_storage", lambda: fake)
+    return fake
+
+
+def test_b2_rows_are_deleted_in_one_batch_without_a_head(prune, monkeypatch):
+    module, _root = prune
+    fake = _b2(module, monkeypatch)
+    session = FakeSession([
+        (201, CDN + "dt_img/user-upload/1/drop/Zulrah/Coal_0.jpg"),
+        (202, CDN + "dt_img/user-upload/1/drop/Zulrah/Coal_1.jpg"),
+    ])
+
+    assert _run(module, session, ["--apply", "--skip-non-drop"]) == 0
+
+    assert fake.batches == [[
+        "dt_img/user-upload/1/drop/Zulrah/Coal_0.jpg",
+        "dt_img/user-upload/1/drop/Zulrah/Coal_1.jpg",
+    ]]
+    assert fake.heads == 0, "a per-object HEAD is what made the pass take days"
+    assert sorted(session.cleared) == [201, 202]
+
+
+def test_b2_dry_run_queues_nothing_for_deletion(prune, monkeypatch):
+    module, _root = prune
+    fake = _b2(module, monkeypatch)
+    session = FakeSession([(201, CDN + "dt_img/user-upload/1/drop/Z/a.jpg")])
+
+    _run(module, session, ["--skip-non-drop"])
+
+    assert fake.batches == []
+    assert session.cleared == []
+    logs = list((Path(module.REPO_ROOT) / "logs").glob("prune_drop_images_*.tsv"))
+    assert "deleted_b2" in logs[0].read_text(), "dry run still reports"
+
+
+def test_b2_key_that_failed_to_delete_keeps_its_reference(prune, monkeypatch):
+    module, _root = prune
+    bad = "dt_img/user-upload/1/drop/Z/bad.jpg"
+    _b2(module, monkeypatch, fail={bad})
+    session = FakeSession([
+        (201, CDN + bad),
+        (202, CDN + "dt_img/user-upload/1/drop/Z/ok.jpg"),
+    ])
+
+    _run(module, session, ["--apply", "--skip-non-drop"])
+
+    assert session.cleared == [202]
+
+
+def test_default_retention_is_five_days(prune):
+    module, _root = prune
+    assert module.DEFAULT_RETENTION_DAYS == 5

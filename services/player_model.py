@@ -229,9 +229,12 @@ def prune_old_models(player_id: int, keep: int = 12,
     this outfit"), and outfit churn must not be able to break it. The pet file
     travels with its protected fingerprint.
 
-    Renders (``{fp}.png``) are deliberately NOT pruned in either backend: old
-    Discord notifications embed them by URL forever, exactly like drop
-    screenshots. Only the model itself and its derived avatar crop go.
+    Renders (``{fp}.png``) are not pruned here in either backend. They have
+    their own retention, by age, in ``scripts/prune_gear_renders.py`` (5
+    days, the same window as drop screenshots, with the same protected
+    fingerprints exempt) — leaving them forever for the sake of old Discord
+    posts had them at 98 GiB against 4.5 GiB of models by 2026-09-21. Only
+    the model itself and its derived avatar crop go here.
     """
     if _b2_enabled():
         return _prune_old_models_b2(player_id, keep, protect)

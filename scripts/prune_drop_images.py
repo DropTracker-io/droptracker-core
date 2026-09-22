@@ -33,7 +33,16 @@ Policy (both conditions decide KEEP; anything else is pruned):
 
   * the drop's total value (``value * quantity``) is >= ``--min-value``
     (default 1,000,000), or
-  * the drop is newer than ``--retention-days`` (default 30).
+  * the drop is newer than ``--retention-days`` (default 5; was 30 until
+    2026-09-22, when the bucket census showed low-value drop screenshots at
+    ~9.4 GiB/day. A screenshot's job is done once its Discord notification
+    has gone out, and Discord keeps its own copy of what it embedded).
+
+B2-hosted screenshots are deleted in DeleteObjects batches without a size
+lookup (see ``utils.image_storage.delete_keys``): the ``bytes`` column of the
+snapshot is 0 for those rows and the summary counts them as objects, not
+bytes. A per-object HEAD+DELETE was the difference between a nightly pass
+and a multi-day one.
 
 For a pruned drop we delete the file AND null the row's ``image_url``, so the
 site/HOF/Discord embeds render "no screenshot" rather than a broken image.
@@ -110,8 +119,10 @@ URL_PREFIXES = (
 )
 
 DEFAULT_MIN_VALUE = 1_000_000
-DEFAULT_RETENTION_DAYS = 30
+DEFAULT_RETENTION_DAYS = 5
 DEFAULT_NONDROP_RETENTION_DAYS = 30
+# B2 keys are deleted in batches of this many (the S3 DeleteObjects cap).
+B2_DELETE_CHUNK = 1_000
 
 # Every submission type that lands in the user-upload tree, and the table whose
 # ``image_url`` points at it (None = nothing in the DB references these files).
@@ -368,6 +379,18 @@ def prune_b2_refless_images(retention_days, protected_b2, snap, apply):
     refless = {t for t, ref in NON_DROP_TYPES.items() if ref is None}
     totals = {t: [0, 0, 0] for t in refless}  # removed, freed, skipped
     prefix = b2.USER_UPLOAD_PREFIX + "/"
+    doomed: list[tuple[str, int, str]] = []  # key, size, submission_type
+
+    def flush_doomed() -> None:
+        failed = b2.delete_keys([k for k, _, _ in doomed]) if apply else set()
+        for key, size, submission_type in doomed:
+            if key in failed:
+                continue
+            snap.write(f"0\t{key}\t{size}\tdeleted_b2_{submission_type}\n")
+            totals[submission_type][0] += 1
+            totals[submission_type][1] += size
+        doomed.clear()
+
     try:
         listing = b2.list_keys(prefix)
         for item in listing:
@@ -382,11 +405,10 @@ def prune_b2_refless_images(retention_days, protected_b2, snap, apply):
             if key in protected_b2:
                 totals[submission_type][2] += 1
                 continue
-            snap.write(f"0\t{key}\t{item['size']}\tdeleted_b2_{submission_type}\n")
-            if apply and not b2.delete_key(key):
-                continue
-            totals[submission_type][0] += 1
-            totals[submission_type][1] += item["size"]
+            doomed.append((key, item["size"], submission_type))
+            if len(doomed) >= B2_DELETE_CHUNK:
+                flush_doomed()
+        flush_doomed()
     except Exception as exc:
         print(f"  ! B2 listing failed, sweep incomplete: {exc}")
     snap.flush()
@@ -503,9 +525,11 @@ def main() -> int:
 
     protected, protected_b2 = recap_protected_paths()
 
-    scanned = pruned = missing = unresolved = protected_hits = 0
+    scanned = pruned = pruned_b2 = missing = unresolved = protected_hits = 0
     freed = 0
     pending_ids: list[int] = []
+    # B2-hosted drops wait here for a batched delete: (drop_id, key, url).
+    pending_b2: list[tuple[int, str, str]] = []
     stop = False
 
     clear_stmt = (
@@ -523,6 +547,26 @@ def main() -> int:
             session.execute(clear_stmt, {"ids": chunk})
         session.commit()
         pending_ids.clear()
+
+    def flush_b2(snap) -> tuple[int, int]:
+        """Delete the queued B2 screenshots in one batch and queue their rows
+        for clearing. Returns (deleted, failed). Objects are deleted before
+        the rows are cleared, same order as the local branch: a crash between
+        the two leaves a row pointing at nothing, which the next run heals."""
+        if not pending_b2:
+            return 0, 0
+        failed = set()
+        if args.apply:
+            failed = _b2_storage().delete_keys([k for _, k, _ in pending_b2])
+        done = 0
+        for drop_id, key, image_url in pending_b2:
+            if key in failed:
+                continue
+            snap.write(f"{drop_id}\t{image_url}\t0\tdeleted_b2\n")
+            pending_ids.append(drop_id)
+            done += 1
+        pending_b2.clear()
+        return done, len(failed)
 
     with open(snapshot_path, "w", encoding="utf-8") as snap:
         # `action` distinguishes a real reclamation from clearing a reference
@@ -573,25 +617,13 @@ def main() -> int:
                         if b2key in protected_b2:
                             protected_hits += 1
                             continue
-                        b2 = _b2_storage()
-                        try:
-                            info = b2.head(b2key)
-                        except Exception as exc:
-                            print(f"  ! could not check {b2key}: {exc}")
-                            continue
-                        if info is None:
-                            missing += 1
-                            snap.write(f"{drop_id}\t{image_url}\t0\tcleared_missing\n")
-                            pending_ids.append(drop_id)
-                            continue
-                        snap.write(f"{drop_id}\t{image_url}\t{info['size']}\tdeleted_b2\n")
-                        if args.apply and not b2.delete_key(b2key):
-                            continue
-                        pruned += 1
-                        part_pruned += 1
-                        freed += info["size"]
-                        part_freed += info["size"]
-                        pending_ids.append(drop_id)
+                        # No HEAD: a batched delete of a key that is already
+                        # gone is a success, and the row is cleared either way.
+                        pending_b2.append((drop_id, b2key, image_url))
+                        if len(pending_b2) >= B2_DELETE_CHUNK:
+                            done, _failed = flush_b2(snap)
+                            pruned_b2 += done
+                            part_pruned += done
                         continue
                     if path in protected:
                         # A recap card renders this one forever; leave both the
@@ -620,13 +652,18 @@ def main() -> int:
                     freed += size
                     part_freed += size
                     pending_ids.append(drop_id)
+                done, _failed = flush_b2(snap)
+                pruned_b2 += done
+                part_pruned += done
                 snap.flush()
                 flush_ids()
             if part_pruned:
                 print(f"  {win_start:%Y-%m-%d}: {part_pruned:,} images "
-                      f"({_fmt_bytes(part_freed)})")
+                      f"({_fmt_bytes(part_freed)} local)")
             if stop:
                 break
+        done, _failed = flush_b2(snap)
+        pruned_b2 += done
         flush_ids()
 
         if not args.skip_non_drop:
@@ -654,8 +691,9 @@ def main() -> int:
 
     verb = "freed" if args.apply else "would free"
     print(f"\ncandidates scanned : {scanned:,}")
-    print(f"images {'removed' if args.apply else 'to remove'} : {pruned:,}")
-    print(f"space {verb}       : {_fmt_bytes(freed)}")
+    print(f"images {'removed' if args.apply else 'to remove'} : {pruned:,} local"
+          f" + {pruned_b2:,} B2 objects")
+    print(f"space {verb}       : {_fmt_bytes(freed)} local (B2 sizes not fetched)")
     if missing:
         print(f"already missing    : {missing:,} (image_url "
               f"{'cleared' if args.apply else 'would be cleared'})")

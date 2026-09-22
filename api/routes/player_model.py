@@ -37,6 +37,10 @@ _MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 # of the response, and a frozenset would not survive jsonify anyway.
 _PROTECT_KEY = "_protect"
 
+# Strong references to fire-and-forget re-render tasks; the loop only holds
+# weak ones, and a task nobody references can be collected mid-render.
+_BG_TASKS: set = set()
+
 
 @player_model_bp.post("/player/model")
 async def upload_player_model():
@@ -110,8 +114,20 @@ async def check_player_model():
     if not acc_hash or not fingerprint:
         return jsonify({"error": "acc_hash and fingerprint are required"}), 422
 
+    loop = asyncio.get_running_loop()
+
+    def render_later(player_id, fp):
+        # Called from the worker thread; the render is a coroutine on the loop.
+        def spawn():
+            task = asyncio.ensure_future(_render_if_missing(player_id, fp))
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
+
+        loop.call_soon_threadsafe(spawn)
+
     try:
-        result = await asyncio.to_thread(_check, acc_hash, fingerprint)
+        result = await asyncio.to_thread(
+            _check, acc_hash, fingerprint, on_missing_render=render_later)
     except Exception as exc:
         print(f"/player/model/check failed: {exc}")
         # Not an error the client can act on: answering "we have nothing" makes
@@ -123,7 +139,9 @@ async def check_player_model():
     return jsonify({"accepted": True, **result}), 200
 
 
-def _check(acc_hash, fingerprint):
+def _check(acc_hash, fingerprint, on_missing_render=None):
+    """``on_missing_render(player_id, fingerprint)`` is called when the
+    player switches into a held outfit whose picture we no longer have."""
     from services.player_model import is_valid_fingerprint, model_exists
 
     if not is_valid_fingerprint(fingerprint):
@@ -158,6 +176,17 @@ def _check(acc_hash, fingerprint):
             if state.model_fingerprint != fingerprint:
                 state.model_fingerprint = fingerprint
                 db_session.commit()
+                # Renders age out after a few days (scripts/prune_gear_renders)
+                # while the model is kept far longer, so an outfit worn again
+                # after a gap is held without a picture. This is the only path
+                # a re-worn outfit takes, so it is where the picture comes back.
+                # Checked only on a change: it is a Redis hit when the render
+                # exists and a HEAD when it does not.
+                if on_missing_render is not None:
+                    from services.gear_image import image_exists
+
+                    if not image_exists(player_id, fingerprint):
+                        on_missing_render(player_id, fingerprint)
 
         return {"has_model": has_model, "has_pet": has_pet}
     except Exception:
@@ -165,6 +194,30 @@ def _check(acc_hash, fingerprint):
         raise
     finally:
         db_session.close()
+
+
+async def _render_if_missing(player_id: int, fingerprint: str) -> None:
+    """Re-render a held outfit whose picture aged out, at most once an hour.
+
+    The hourly lock is what stops a model the renderer cannot draw from being
+    retried on every outfit change; ``render_gear_image`` itself is a no-op
+    when the picture already exists.
+    """
+    try:
+        from utils.redis import RedisClient
+
+        r = RedisClient().client
+        if not r.set(f"gear:rerender:{int(player_id)}:{fingerprint}", "1",
+                     nx=True, ex=3600):
+            return
+    except Exception:
+        pass  # no Redis: render anyway, the exists-check still short-circuits
+    try:
+        from services.gear_image import render_gear_image
+
+        await render_gear_image(player_id, fingerprint)
+    except Exception as exc:
+        print(f"Re-render of gear image failed for player {player_id}: {exc}")
 
 
 async def _finish_in_background(player_id: int, fingerprint: str,

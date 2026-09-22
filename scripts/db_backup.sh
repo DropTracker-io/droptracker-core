@@ -23,7 +23,7 @@
 #
 # Env overrides (optional):
 #   BACKUP_ROOT=/store/droptracker/backups
-#   LOCAL_RETENTION_DAYS=7      REMOTE_RETENTION_DAYS=30
+#   LOCAL_RETENTION_DAYS=7      REMOTE_RETENTION_DAYS=3   (unit sets 1 / 3)
 #   MIN_FREE_GB=25              minimum free space on the backup fs before starting
 #   SKIP_B2=1                   local-only run (no upload / remote prune)
 #   SKIP_REDIS=1                skip the Redis snapshot copy
@@ -39,7 +39,7 @@ B2_SYNC="$REPO_DIR/scripts/b2_backup_sync.py"
 
 BACKUP_ROOT="${BACKUP_ROOT:-/store/droptracker/backups}"
 LOCAL_RETENTION_DAYS="${LOCAL_RETENTION_DAYS:-7}"
-REMOTE_RETENTION_DAYS="${REMOTE_RETENTION_DAYS:-30}"
+REMOTE_RETENTION_DAYS="${REMOTE_RETENTION_DAYS:-3}"
 MIN_FREE_GB="${MIN_FREE_GB:-25}"
 SKIP_B2="${SKIP_B2:-0}"
 SKIP_REDIS="${SKIP_REDIS:-0}"

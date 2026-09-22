@@ -59,7 +59,7 @@ Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service
 | `droptracker-webhook-consumer` | `workers/webhook_consumer.py` | Drains `webhook:queue` — **live** (`WEBHOOK_QUEUE_MODE=true` in prod `.env`) | — |
 | `droptracker-dev-sync` | `workers/dev_sync.py` | Production only: pushes the Bug Tester roster to the dev instance within seconds of a change | — |
 
-**Timers:** `droptracker-db-backup.timer` (08:30 UTC → `scripts/db_backup.sh`, MariaDB + Redis to local + B2) and `droptracker-prune-images.timer` (04:00 UTC → `scripts.prune_drop_images --apply`, low-value screenshots past 30d).
+**Timers:** `droptracker-db-backup.timer` (08:30 UTC → `scripts/db_backup.sh`, MariaDB + Redis to local + B2) and `droptracker-prune-images.timer` (04:00 UTC → `scripts.prune_drop_images --apply`, low-value screenshots past 5d, other types past 30d), and `droptracker-prune-renders.timer` (05:00 UTC → `scripts.prune_gear_renders --apply`, gear renders past 5d). B2 deletes only *hide* a version; the bucket's lifecycle rule (set 2026-09-21) frees the bytes a day later.
 
 Canonical unit files live in `deploy/systemd/` (install with `cp` + `daemon-reload`, see its README). Dev API runs on port **31324** via `droptracker-api-dev` (disabled by default, same `.env` as prod).
 

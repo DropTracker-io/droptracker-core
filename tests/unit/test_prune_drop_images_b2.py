@@ -46,6 +46,12 @@ class FakeB2:
         self.objects.pop(key, None)
         return True
 
+    def delete_keys(self, keys):
+        self.batches = getattr(self, "batches", 0) + 1
+        for key in keys:
+            self.delete_key(key)
+        return set()
+
     def list_keys(self, prefix):
         for key, (size, lm) in sorted(self.objects.items()):
             if key.startswith(prefix):
@@ -192,6 +198,26 @@ class TestReflessSweep:
         ]
         assert totals["level_up"][0] == 1
         assert totals["pet"][0] == 1
+        assert fake.batches == 1, "aged keys go in one DeleteObjects batch"
+
+    def test_a_failed_key_is_not_counted_as_freed(self, prune, monkeypatch,
+                                                  tmp_path):
+        old = datetime.now(timezone.utc) - timedelta(days=45)
+        bad = "dt_img/user-upload/9/level_up/Mining/lvl_1_aa.jpg"
+        fake = FakeB2({
+            bad: (10, old),
+            "dt_img/user-upload/9/level_up/Mining/lvl_2_bb.jpg": (10, old),
+        })
+        fake.delete_keys = lambda keys: {bad}
+        monkeypatch.setattr(prune, "_b2_storage", lambda: fake)
+
+        snap_path = tmp_path / "snap.tsv"
+        with snap_path.open("w") as snap:
+            totals = prune.prune_b2_refless_images(
+                30, frozenset(), snap, apply=True)
+
+        assert totals["level_up"][0] == 1
+        assert bad not in snap_path.read_text()
 
     def test_dry_run_deletes_nothing_but_reports(self, prune, monkeypatch,
                                                  tmp_path):

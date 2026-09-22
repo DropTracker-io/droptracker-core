@@ -1,0 +1,20 @@
+# Fires droptracker-prune-renders.service once a day, off-peak, after the
+# screenshot and transfer passes.
+#
+# Install:
+#   sudo cp deploy/systemd/droptracker-prune-renders.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now droptracker-prune-renders.timer
+# Check: systemctl list-timers droptracker-prune-renders.timer
+
+[Unit]
+Description=Daily DropTracker gear-render retention pass (~05:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 05:00:00 UTC
+RandomizedDelaySec=900
+Persistent=true
+Unit=droptracker-prune-renders.service
+
+[Install]
+WantedBy=timers.target

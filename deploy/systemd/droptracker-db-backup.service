@@ -31,7 +31,7 @@ IOSchedulingPriority=7
 # one means the box needs ~5 GB of headroom for a backup instead of ~34 GB,
 # and today's set is still on disk for a fast restore.
 Environment=LOCAL_RETENTION_DAYS=1
-Environment=REMOTE_RETENTION_DAYS=30
+Environment=REMOTE_RETENTION_DAYS=3
 # Sized to match: one set is ~5 GB, so this floor leaves ~5 GB of margin during
 # the dump, and the set is deleted again as soon as B2 has it. The old 25 GiB
 # floor was sized for seven retained local sets.

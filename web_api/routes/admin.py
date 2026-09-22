@@ -938,9 +938,11 @@ _B2_DATE_IN_KEY = re.compile(r"/(\d{4}-\d{2}-\d{2})/")
 # Required artifacts per nightly set; the Redis snapshot is best-effort and a
 # set without it still counts as complete (leaderboards are rebuildable).
 _BACKUP_REQUIRED = ("data-{d}.sql.gz", "data-schema-{d}.sql.gz", "xenforo-{d}.sql.gz")
-# Mirror the retention defaults in scripts/db_backup.sh.
-_BACKUP_LOCAL_RETENTION_DAYS = 7
-_BACKUP_REMOTE_RETENTION_DAYS = 30
+# Mirror the Environment= lines in deploy/systemd/droptracker-db-backup.service
+# (the unit overrides the script defaults). The local set is staging only and
+# is removed after a successful upload, so B2 holds the only copies.
+_BACKUP_LOCAL_RETENTION_DAYS = 1
+_BACKUP_REMOTE_RETENTION_DAYS = 3
 
 
 def _systemd_show(unit: str, props: list[str]) -> dict:

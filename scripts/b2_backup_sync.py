@@ -161,8 +161,11 @@ def cmd_download(args) -> None:
 
 
 def cmd_prune(args) -> None:
-    if args.days < 7:
-        fail("prune --days must be >= 7 (safety floor)")
+    # B2 is the only copy (the local set is removed after upload), and a
+    # failed night uploads nothing, so below two sets one bad night leaves
+    # no backup at all. The unit runs with 3 (2026-09-22; was 30).
+    if args.days < 2:
+        fail("prune --days must be >= 2 (safety floor)")
     client = get_client()
     cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
     log(f"pruning objects under {BACKUP_PREFIX!r} older than {args.days} days "

@@ -10,7 +10,9 @@ random delay, `Persistent=true` so a missed run replays after boot). It starts
 `droptracker-db-backup.service` (oneshot, root), which runs
 `scripts/db_backup.sh`:
 
-1. Prunes local sets older than **7 days** (`LOCAL_RETENTION_DAYS`).
+1. Prunes local sets older than **1 day** (`LOCAL_RETENTION_DAYS`; the script
+   default is 7, the unit sets 1 — and the local set is removed after a
+   successful upload anyway, so B2 holds the only copies).
 2. Aborts loudly if less than **25 GiB** free on `/store` (`MIN_FREE_GB`).
 3. Dumps with `mariadb-dump --single-transaction --quick --skip-lock-tables
    --routines --triggers --events --hex-blob` — a consistent InnoDB snapshot,
@@ -27,7 +29,15 @@ random delay, `Persistent=true` so a missed run replays after boot). It starts
 5. Uploads the whole set to B2 `dt_backups/mysql/YYYY-MM-DD/` via
    `scripts/b2_backup_sync.py` (venv boto3, same S3-compatible setup as
    `utils/b2_storage.py`), verifying each object's size after upload.
-6. Prunes B2 objects older than **30 days** (`REMOTE_RETENTION_DAYS`).
+6. Prunes B2 objects older than **3 days** (`REMOTE_RETENTION_DAYS`; 30 until
+   2026-09-22, when the bucket census found the backup prefix at 273 GiB —
+   including every set since July, because a B2 delete only *hides* a
+   version until the bucket's lifecycle rule purges it; that rule exists
+   now). Three sets is the whole backup history: a problem that goes
+   unnoticed for four days is not recoverable from these. A failed night
+   never prunes (the script aborts before the prune step), so the count
+   does not fall below three on a bad night. `b2_backup_sync.py prune`
+   refuses `--days` below 2.
 
 Local layout: `/store/droptracker/backups/YYYY-MM-DD/` (UTC dates).
 

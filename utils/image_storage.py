@@ -289,6 +289,57 @@ def delete_key(key: str) -> bool:
     return True
 
 
+# S3's DeleteObjects takes at most this many keys per request.
+DELETE_BATCH = 1000
+
+
+def delete_keys(keys) -> set:
+    """Delete many objects in DeleteObjects batches; returns the keys that
+    failed (empty set = everything went).
+
+    One request per thousand keys instead of one per key: a retention pass
+    over a day of screenshots is tens of thousands of objects, and at B2's
+    round trip a per-object delete turns that into hours (the first 5-day
+    drop sweep had ~480k). Deleting a key that no longer exists is a success
+    here, as it is on S3, so callers need not check first.
+
+    Note that on B2 a delete only *hides* the version; the bucket's lifecycle
+    rule ("keep only the last version", set 2026-09-21) is what frees the
+    bytes a day later. Without that rule nothing here reclaims anything.
+    """
+    keys = [k for k in dict.fromkeys(keys) if k]
+    if not keys:
+        return set()
+    client = _get_s3_client()
+    failed: set = set()
+    for i in range(0, len(keys), DELETE_BATCH):
+        batch = keys[i:i + DELETE_BATCH]
+        try:
+            resp = client.delete_objects(
+                Bucket=B2_BUCKET_NAME,
+                Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True},
+            )
+        except Exception as exc:
+            print(f"[image_storage] delete batch of {len(batch)} failed: {exc}")
+            failed.update(batch)
+            continue
+        for err in resp.get("Errors", []) or []:
+            key = err.get("Key")
+            if key:
+                failed.add(key)
+                print(f"[image_storage] delete {key} failed: "
+                      f"{err.get('Code')} {err.get('Message')}")
+        r = _redis()
+        if r is not None:
+            done = [_EXISTS_CACHE_PREFIX + k for k in batch if k not in failed]
+            if done:
+                try:
+                    r.delete(*done)
+                except Exception:
+                    pass
+    return failed
+
+
 def list_keys(prefix: str) -> Iterator[dict]:
     """Yields ``{"key", "size", "etag", "last_modified"}`` for every object
     under ``prefix`` (last_modified is tz-aware UTC)."""
@@ -326,3 +377,7 @@ async def akey_exists(key: str, *, use_cache: bool = True) -> bool:
 
 async def adelete_key(key: str) -> bool:
     return await asyncio.to_thread(delete_key, key)
+
+
+async def adelete_keys(keys) -> set:
+    return await asyncio.to_thread(delete_keys, list(keys))
