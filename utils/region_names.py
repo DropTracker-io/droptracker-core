@@ -36,6 +36,21 @@ _DATA_PATH = os.path.join(
 #: The coarse buckets RuneLite files areas under, for grouping the picker.
 AREA_TYPES = ("BOSSES", "RAIDS", "DUNGEONS", "MINIGAMES", "CITIES", "REGIONS")
 
+#: Where a death actually happened, for regions RuneLite names after the boss
+#: inside them. Each DT2 arena is its own "area" in the resource, so a death
+#: there read "Killed By: Duke Sucellus / Location: Duke Sucellus". Names are
+#: the ones players gave us in the bug report.
+#:
+#: Display only, applied once at ingest (``death_processor``). ``name_for``
+#: still returns RuneLite's name, because that is what the blacklist picker
+#: lists and what a "Duke Sucellus" region entry matches on.
+LOCATION_OVERRIDES: dict[int, str] = {
+    12132: "Ghorrock Prison",   # Duke Sucellus
+    8291: "The Scar",           # The Leviathan
+    4405: "Stranglewood",       # Vardorvis
+    10595: "Lassar Undercity",  # The Whisperer
+}
+
 _lock = threading.Lock()
 _loaded = False
 #: region id -> {"name": str, "type": str}
@@ -101,6 +116,17 @@ def name_for(region_id) -> str | None:
     except (TypeError, ValueError):
         return None
     return entry["name"] if entry else None
+
+
+def location_for(region_id) -> str | None:
+    """The corrected display location for this region id, or ``None``.
+
+    ``None`` means "no correction": keep whatever name the client sent.
+    """
+    try:
+        return LOCATION_OVERRIDES.get(int(region_id))
+    except (TypeError, ValueError):
+        return None
 
 
 def type_for(region_id) -> str | None:

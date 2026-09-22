@@ -192,3 +192,36 @@ class TestPersistedRow:
     def test_new_columns_are_written(self, column, expected):
         row, _ = _run(_payload())
         assert row[column] == expected
+
+
+class TestDt2BossLocations:
+    """RuneLite names each DT2 arena after its boss; the server says where it is."""
+
+    @pytest.mark.parametrize(
+        "region_id, boss, place",
+        [
+            (12132, "Duke Sucellus", "Ghorrock Prison"),
+            (8291, "The Leviathan", "The Scar"),
+            (4405, "Vardorvis", "Stranglewood"),
+            (10595, "The Whisperer", "Lassar Undercity"),
+        ],
+    )
+    def test_arena_is_reported_as_the_place_it_is_in(self, region_id, boss, place):
+        row, data = _run(_payload(
+            source=boss, region_id=str(region_id), region_name=boss, location=boss,
+        ))
+        assert row["location"] == row["region_name"] == place
+        assert data["location"] == data["region_name"] == place
+        # The id is left alone: the region blacklist resolves it to the arena.
+        assert data["region_id"] == region_id
+
+    def test_a_client_that_sent_no_name_still_gets_the_place(self):
+        row, _ = _run(_payload(
+            region_id="12132", region_name=_ABSENT, location=_ABSENT,
+        ))
+        assert row["region_name"] == "Ghorrock Prison"
+
+    def test_other_regions_keep_the_name_the_client_sent(self):
+        row, data = _run(_payload())
+        assert row["region_name"] == "Ungael"
+        assert data["location"] == "Ungael"

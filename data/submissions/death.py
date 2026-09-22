@@ -5,6 +5,7 @@ import asyncio
 from db import PlayerDeath
 from db.death_filter import parse_flag
 from db.models import Group
+from utils import region_names
 from utils.death_regions import is_safe_region
 
 from .common import (
@@ -96,6 +97,14 @@ async def death_processor(death_data, external_session=None, world_type="main"):
     # here so the row records them AND so they reach `notification_data` below,
     # which is the only thing the send-side filters can see.
     region_name = _safe_str(death_data.get("region_name"), 125) or _safe_str(location, 125)
+    # The plugin names DT2 boss arenas after the boss ("Location: Duke
+    # Sucellus"). Correct both fields here, once, so the row, every group's
+    # post and the member's DM agree. region_id is untouched, so the region
+    # blacklist still resolves it to the arena's own name.
+    corrected_location = region_names.location_for(region_id)
+    if corrected_location:
+        location = corrected_location
+        region_name = corrected_location
     region_type = _safe_str(death_data.get("region_type"), 32)
     killer_type = _safe_str(death_data.get("killer_type"), 16)
     is_pvp = parse_flag(death_data.get("is_pvp"))

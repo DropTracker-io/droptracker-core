@@ -196,6 +196,14 @@ class TestRegionBlacklistReason:
         assert blacklist_reason(db, 303, "death", {"region_id": 9520})
         assert blacklist_reason(db, 303, "death", {"region_id": 9620}) is None
 
+    def test_arena_entry_still_mutes_a_corrected_boss_location(self):
+        # death_processor rewrites "Duke Sucellus" to "Ghorrock Prison" for
+        # display. The entry a leader picked from the list is the arena's own
+        # name, and it must keep muting deaths there.
+        db = _db([("region", region_key("Duke Sucellus"))])
+        data = {"region_id": "12132", "region_name": "Ghorrock Prison", "location": "Ghorrock Prison"}
+        assert blacklist_reason(db, 303, "death", data)
+
     def test_unblacklisted_region_is_not_muted(self):
         db = _db([("region", "castle-wars")])
         assert blacklist_reason(db, 303, "death", {"region_id": 12889}) is None
