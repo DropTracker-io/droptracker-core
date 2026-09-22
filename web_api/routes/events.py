@@ -3474,6 +3474,8 @@ def _serialize_bonus_rule(rule) -> dict:
         entry["scope_line"] = scope_line
     if rule.type == "pet":
         entry["pets"] = list(rule.pets)
+        if rule.duplicate_pets:
+            entry["duplicate_pets"] = True
     elif rule.type == "time_under":
         entry["npc"] = rule.npc
         entry["threshold_ms"] = rule.threshold_ms
@@ -3497,6 +3499,8 @@ def _serialize_bonus_rule(rule) -> dict:
             entry["tiers"] = list(task_config.get("tiers") or ())
         if task.get("type") == "pet_collection":
             entry["pets"] = list(task_config.get("pets") or ())
+            if task_config.get("duplicate_pets") is True:
+                entry["duplicate_pets"] = True
         # The round-trippable criteria, in the shape the wizard PATCHes back.
         # Without this the manager's block -> input -> PATCH cycle would
         # silently ERASE every task rule the moment an admin re-saved a draft:

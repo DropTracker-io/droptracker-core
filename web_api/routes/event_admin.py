@@ -66,7 +66,7 @@ from db import (
     GroupAdmin,
     Player,
 )
-from utils import vestige_rings
+from utils import duplicate_pets, vestige_rings
 from web_api.common import abort_problem, db_session, parse_page, private_no_store
 from web_api.deps import (
     current_user_id,
@@ -968,7 +968,12 @@ async def update_task(event_id: int, task_id: int):
                         # takes back (or restores) the ring credits themselves.
                         rescreen_vestige_rings=(
                             vestige_rings.rings_count(_before_task["config"])
-                            != vestige_rings.rings_count(_after_task["config"])))
+                            != vestige_rings.rings_count(_after_task["config"])),
+                        # Same for "Duplicate pets count": the duplicate-pet
+                        # credits themselves are taken back or restored.
+                        rescreen_duplicate_pets=(
+                            duplicate_pets.duplicates_count(task.type, _before_task["config"])
+                            != duplicate_pets.duplicates_count(task.type, _after_task["config"])))
 
             if _after_task != _before_task:
                 # Record the edit — and, on a live event, the maker's retro
@@ -982,6 +987,8 @@ async def update_task(event_id: int, task_id: int):
                     after_payload["recompute"] = recompute_summary["teams"]
                     if recompute_summary.get("vestige_rings"):
                         after_payload["vestige_rings"] = recompute_summary["vestige_rings"]
+                    if recompute_summary.get("duplicate_pets"):
+                        after_payload["duplicate_pets"] = recompute_summary["duplicate_pets"]
                 s.add(AuditLog(
                     actor_user_id=user_id, group_id=ev.group_id, event_id=event_id,
                     action="event.task.update",

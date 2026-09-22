@@ -1413,3 +1413,85 @@ def test_rings_switch_means_nothing_to_other_task_types():
     out = _validate({"type": "xp_target", "target": "Slayer", "target_value": 1000,
                      "config": {"vestige_rings": False}})
     assert out["config"] is None
+
+
+# ── config.duplicate_pets ("Duplicate pets count") ───────────────────────────
+# Only a value that differs from the type's default is stored: item lists
+# count duplicates by default, pet tasks and sweeps don't.
+
+def test_duplicates_on_is_kept_on_every_pet_task_shape():
+    for body in (
+        {"type": "pet_collection", "target": "Vorki"},
+        {"type": "pet_collection", "config": {"categories": ["boss"]}},
+        {"type": "pet_collection", "config": {"pets": ["Vorki", "Baby mole"]}},
+        {"type": "pet_collection", "target_value": 3},
+    ):
+        config = {**(body.get("config") or {}), "duplicate_pets": True}
+        assert _cfg(_validate({**body, "config": config}))["duplicate_pets"] is True, body
+
+
+def test_duplicates_off_is_the_pet_task_default_and_never_stored():
+    out = _validate({"type": "pet_collection", "target": "Vorki",
+                     "config": {"duplicate_pets": False}})
+    assert out["config"] is None
+    out = _validate({"type": "pet_collection",
+                     "config": {"categories": ["boss"], "duplicate_pets": False}})
+    assert _cfg(out) == {"categories": ["boss"]}
+
+
+def test_duplicates_off_is_kept_on_an_item_list_with_a_pet():
+    out = _validate({
+        "type": "item_collection", "target_value": 1,
+        "config": {"kind": "any_of", "items": ["Boater", "baby mole"],
+                   "pet_items": ["baby mole"], "duplicate_pets": False},
+    })
+    cfg = _cfg(out)
+    assert cfg["pet_items"] == ["Baby mole"] and cfg["duplicate_pets"] is False
+
+
+def test_duplicates_on_is_the_item_list_default_and_never_stored():
+    out = _validate({
+        "type": "item_collection", "target_value": 1,
+        "config": {"kind": "any_of", "items": ["Boater", "baby mole"],
+                   "pet_items": ["baby mole"], "duplicate_pets": True},
+    })
+    assert "duplicate_pets" not in _cfg(out)
+
+
+def test_duplicates_switch_is_dropped_from_an_item_list_without_pets():
+    out = _validate({
+        "type": "item_collection", "target_value": 1,
+        "config": {"kind": "any_of", "items": ["Boater", "Red boater"],
+                   "duplicate_pets": False},
+    })
+    assert "duplicate_pets" not in _cfg(out)
+
+
+def test_duplicates_on_is_kept_on_a_sweep_with_a_pet_entry(_stub_ls):
+    groups = [{"npcs": ["Kree'arra"], "items": [
+        {"item_name": "Armadyl helmet", "points": 9},
+        {"item_name": "Pet kree'arra", "points": 60, "source": "pet"}]}]
+    out = _validate({"type": "loot_sweep",
+                     "config": {"groups": groups, "duplicate_pets": True}})
+    assert _cfg(out)["duplicate_pets"] is True
+
+
+def test_duplicates_switch_is_dropped_from_a_sweep_without_pets(_stub_ls):
+    groups = [{"npcs": ["Kree'arra"], "items": [
+        {"item_name": "Armadyl helmet", "points": 9}]}]
+    out = _validate({"type": "loot_sweep",
+                     "config": {"groups": groups, "duplicate_pets": True}})
+    assert "duplicate_pets" not in _cfg(out)
+
+
+def test_duplicates_switch_must_be_a_boolean():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "pet_collection", "target": "Vorki",
+                   "config": {"duplicate_pets": "yes"}})
+    assert exc.value.status == 422
+
+
+def test_duplicates_switch_means_nothing_to_other_task_types():
+    out = _validate({"type": "xp_target", "target": "Slayer", "target_value": 1000,
+                     "config": {"duplicate_pets": True}})
+    assert out["config"] is None

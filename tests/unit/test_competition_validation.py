@@ -170,6 +170,16 @@ class TestBonusRules:
                 {"metric": {"key": "attack"},
                  "bonus_rules": [{"type": "pet", "points": 50}]})
 
+    def test_pet_rule_keeps_duplicate_pets_only_when_true(self):
+        on = _botw(bonus_rules=[{"type": "pet", "points": 100,
+                                 "pets": ["Pet snakeling"], "duplicate_pets": True}])
+        assert on["bonus_rules"][0]["duplicate_pets"] is True
+        for value in (False, "true", 1):
+            off = _botw(bonus_rules=[{"type": "pet", "points": 100,
+                                      "pets": ["Pet snakeling"],
+                                      "duplicate_pets": value}])
+            assert "duplicate_pets" not in off["bonus_rules"][0], value
+
     def test_pet_rules_may_not_claim_the_same_pet_twice(self):
         # Several pet rules are allowed (a headline pet plus a consolation
         # one); overlapping lists are not, or one pet would pay twice.
@@ -488,6 +498,14 @@ class TestPetRuleDefaults:
             "config": {"categories": ["skilling"]}}, points=50)])
         # Dropping `categories` silently WIDENED the admin's selection.
         assert cfg["bonus_rules"][0]["task"]["config"] == {"categories": ["skilling"]}
+
+    def test_sotw_pet_task_keeps_its_duplicate_pets_switch(self, _stub_items):
+        # The skilling-pet default rebuilds the config; the switch must survive.
+        cfg = _sotw(bonus_rules=[_task_rule({
+            "type": "pet_collection", "target_value": 1,
+            "config": {"duplicate_pets": True}}, points=50)])
+        assert cfg["bonus_rules"][0]["task"]["config"] == {
+            "pets": ["Rock golem"], "duplicate_pets": True}
 
     def test_sotw_pet_task_on_a_petless_skill_says_why(self, _stub_items):
         with pytest.raises(ProblemException):

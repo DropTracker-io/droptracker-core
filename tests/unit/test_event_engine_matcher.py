@@ -1576,6 +1576,52 @@ class TestDuplicatePets:
         assert engine.match_task(t, _env("pet", {"pet_name": "Baby mole"})) is not None
 
 
+class TestDuplicatePetsSwitch:
+    """config.duplicate_pets: the organizer's per-task call. Absent keeps each
+    type's old behaviour (utils.duplicate_pets)."""
+
+    DUPE = {"pet_name": "Vorki", "is_new_pet": False}
+
+    def test_pet_collection_counts_duplicates_when_switched_on(self):
+        for config, target in (({"duplicate_pets": True}, "Vorki"),
+                               ({"categories": ["boss"], "duplicate_pets": True}, None),
+                               ({"pets": ["Vorki"], "duplicate_pets": True}, None)):
+            t = _task(type="pet_collection", target=target, config=config)
+            assert engine.match_task(t, _env("pet", dict(self.DUPE))) == {
+                "mode": "count", "quantity": 1, "matched_target": "Vorki"}
+
+    def test_pet_collection_switch_still_needs_a_listed_pet(self):
+        t = _task(type="pet_collection", target=None,
+                  config={"pets": ["Nexling"], "duplicate_pets": True})
+        assert engine.match_task(t, _env("pet", dict(self.DUPE))) is None
+
+    def test_explicit_false_on_pet_collection_is_the_default(self):
+        t = _task(type="pet_collection", target="Vorki",
+                  config={"duplicate_pets": False})
+        assert engine.match_task(t, _env("pet", dict(self.DUPE))) is None
+
+    def test_non_boolean_value_keeps_the_default(self):
+        t = _task(type="pet_collection", target="Vorki",
+                  config={"duplicate_pets": "true"})
+        assert engine.match_task(t, _env("pet", dict(self.DUPE))) is None
+
+    def test_item_list_refuses_duplicates_when_switched_off(self):
+        t = _task(config={**TestDuplicatePets.GLOWY, "duplicate_pets": False},
+                  target_value=5)
+        assert engine.match_task(
+            t, _env("pet", {"pet_name": "Dom", "is_new_pet": False})) is None
+        # A new pet still counts.
+        assert engine.match_task(
+            t, _env("pet", {"pet_name": "Dom", "is_new_pet": True})) == {
+                "mode": "count", "quantity": 1, "matched_target": "Dom"}
+
+    def test_switch_never_blocks_a_new_pet(self):
+        t = _task(type="pet_collection", target="Vorki",
+                  config={"duplicate_pets": False})
+        assert engine.match_task(
+            t, _env("pet", {"pet_name": "Vorki", "is_new_pet": True})) is not None
+
+
 # ── slayer_target ─────────────────────────────────────────────────────────────
 
 class TestSlayerTarget:

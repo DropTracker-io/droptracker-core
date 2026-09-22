@@ -138,6 +138,20 @@ class TestMatchTask:
         assert engine.match_task(task, _env("pet", pet_name="Ikkle hydra",
                                             is_new_pet=True)) is None
 
+    def test_pet_bonus_pays_a_duplicate_when_the_rule_says_so(self):
+        cfg = json.loads(json.dumps(BOTW_CONFIG))
+        for rule in cfg["bonus_rules"]:
+            if rule.get("type") == "pet":
+                rule["duplicate_pets"] = True
+        task = _task(cfg)
+        m = engine.match_task(task, _env("pet", pet_name="Pet snakeling",
+                                         is_new_pet=False))
+        assert m["mode"] == "count" and m["quantity"] == 100
+        assert m["bonus"] == {"rule_id": 1, "type": "pet"}
+        # Still only the rule's own pets.
+        assert engine.match_task(task, _env("pet", pet_name="Ikkle hydra",
+                                            is_new_pet=False)) is None
+
     def test_unconfigured_competition_matches_nothing(self):
         bare = {"id": 1, "type": "competition", "config": {}, "competition": {}}
         assert engine.match_task(bare, _env("drop", npc_name="Zulrah")) is None

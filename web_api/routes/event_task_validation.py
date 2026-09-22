@@ -15,7 +15,7 @@ import json
 import os
 
 from db import ItemList, NpcList
-from utils import vestige_rings
+from utils import duplicate_pets, vestige_rings
 from utils.task_progress import DISTINCT_ITEM_KINDS
 from web_api.common import abort_problem
 from web_api.routes.npc_source_aliases import expand_source_names
@@ -1227,6 +1227,10 @@ def _validated_bonus_task(s, raw_task, *, metric_kind: str,
             body["config"] = {"categories": categories}
         else:
             body["config"] = None
+        # The rebuild above would drop the duplicate-pets switch; carry it.
+        if duplicate_pets.CONFIG_KEY in cfg_in:
+            body["config"] = {**(body["config"] or {}),
+                              duplicate_pets.CONFIG_KEY: cfg_in[duplicate_pets.CONFIG_KEY]}
     elif ttype == "skill_target":
         if not skill:
             abort_problem(422, "Invalid bonus rule",
@@ -1488,6 +1492,10 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
                         f"{claimed_pets[key]} — a pet can only pay once.")
                 claimed_pets[key] = i
             rule["pets"] = pets
+            # Duplicates of an owned pet pay too. Off by default; only a real
+            # boolean true is stored, like ``unlimited``.
+            if rr.get(duplicate_pets.CONFIG_KEY) is True:
+                rule[duplicate_pets.CONFIG_KEY] = True
         elif rtype == "task":
             derived = _validated_bonus_task(
                 s, rr.get("task"), metric_kind=metric_kind,
@@ -1580,6 +1588,13 @@ def validate_task_payload(s, body: dict) -> dict:
             )
         # Preserved across the per-type config rebuilds below, like bingo_auto.
         passthrough["progress_notify"] = progress_notify
+    # Whether a duplicate pet counts (utils.duplicate_pets). Read before the
+    # per-type branches, which rebuild config from scratch, and folded back
+    # in after them where the task can be credited by a pet.
+    duplicate_pets_flag = (config or {}).get(duplicate_pets.CONFIG_KEY)
+    if duplicate_pets_flag is not None and not isinstance(duplicate_pets_flag, bool):
+        abort_problem(422, "Invalid config",
+                      f"'{duplicate_pets.CONFIG_KEY}' must be true or false.")
     if config == {}:
         config = None
 
@@ -1855,6 +1870,14 @@ def validate_task_payload(s, body: dict) -> dict:
             abort_problem(422, "Invalid target value", "target_value must be a non-negative integer.")
         target = target[:120]
 
+    # Stored only where a pet can credit the task, and only when it differs
+    # from the type's default (item lists count duplicates, pet tasks and
+    # sweeps don't), so every task saved before the switch keeps its meaning.
+    # A task that loses its last pet drops the key rather than keeping it stale.
+    if (isinstance(duplicate_pets_flag, bool)
+            and duplicate_pets_flag != duplicate_pets.default_for(ttype)
+            and duplicate_pets.has_pet_goal(ttype, config)):
+        config = {**(config or {}), duplicate_pets.CONFIG_KEY: duplicate_pets_flag}
     config = {**(config or {}), **passthrough} or None
     serialized = json.dumps(config) if config else None
     # web_event_tasks.config is a MySQL TEXT column (~64KB). A pathological

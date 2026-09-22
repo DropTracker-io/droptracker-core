@@ -70,12 +70,14 @@ v1 evaluation semantics (task doc table):
   listed); otherwise ``config.categories`` (a list like ``["boss"]``) gates
   by pet category via :mod:`utils.osrs_pets`, and an absent/empty list means
   "any pet" (the default set, misc excluded).
-  Progress unit = 1 per new pet; ``target_value`` is the count to collect
-  (default 1 → completes on the first qualifying pet). DUPLICATE pets are
-  refused (:func:`_pet_is_new`) — this counts acquisitions, so a re-drop of a
-  pet the player owns is not one. ``loot_sweep`` pet entries refuse them too
-  (status quo hold, see there); ``item_collection`` ``pet_items`` ACCEPTS
-  them — a "5 of these 4 items" tile needs the duplicate.
+  Progress unit = 1 per qualifying pet; ``target_value`` is the count to
+  collect (default 1 → completes on the first qualifying pet). DUPLICATE pets
+  (:func:`_pet_is_new`) are the organizer's call per task via
+  ``config.duplicate_pets`` (:mod:`utils.duplicate_pets`): a pet task or a
+  ``loot_sweep`` pet entry refuses them unless it is ``true`` (they counted
+  acquisitions), an ``item_collection`` ``pet_items`` list accepts them
+  unless it is ``false`` (a "5 of these 4 items" tile needs the duplicate),
+  and a competition pet bonus rule refuses them unless the RULE says ``true``.
 - ``slayer_target`` — slayer task completion (``kind == "slayer"``), one unit
   per completed task. ``config.masters`` is an allow-list of slayer master
   ids; otherwise ``config.exclude_masters`` is a deny-list. A config that
@@ -108,6 +110,7 @@ from typing import Optional
 
 from sqlalchemy.exc import DataError, IntegrityError
 
+from utils import duplicate_pets as _dp
 from utils import task_progress as _tp
 from utils import vestige_rings as _vr
 
@@ -603,6 +606,15 @@ def _pet_is_new(data: dict) -> bool:
     return bool((data or {}).get("is_new_pet", True))
 
 
+def _pet_counts(task: dict, data: dict) -> bool:
+    """Whether a ``pet`` envelope may credit this task at all: a new pet
+    always may; a duplicate only where the task counts them
+    (``config.duplicate_pets``, with a per-type default — see
+    :mod:`utils.duplicate_pets`)."""
+    return _pet_is_new(data) or _dp.duplicates_count(task.get("type"),
+                                                     task.get("config"))
+
+
 def _norm_npc_set(raw) -> frozenset:
     """Normalized NPC-name frozenset from a config value. Tolerates a
     non-list/garbage value (returns empty) so a hand-authored / seeded / template
@@ -1019,6 +1031,8 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
             raw_name = data.get("pet_name") or data.get("item_name")
             if not raw_name or _norm(raw_name) not in pets:
                 return None
+            if not _pet_counts(task, data):
+                return None  # a duplicate, and this list switched those off
             credit = item_match_quantity(task, raw_name, 1)
             if credit is None:
                 return None
@@ -1087,12 +1101,10 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
             except (TypeError, ValueError):
                 qty = 1
         elif kind == "pet":
-            if not _pet_is_new(data):
-                # Status quo hold, not a considered scoring rule: duplicates
-                # never reached the engine before the producer stopped gating
-                # them, and enabling them here would silently change scoring in
-                # a running sweep. Whether a duplicate pet is worth sweep points
-                # is an open policy call — delete these two lines to allow it.
+            if not _pet_counts(task, data):
+                # A duplicate: off unless the sweep says duplicate_pets: true.
+                # Off is the status quo from before the switch existed, so a
+                # running sweep's scoring never changed underneath it.
                 return None
             raw_name = data.get("pet_name") or data.get("item_name")
             name = _norm(raw_name)
@@ -1193,11 +1205,11 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
     if task_type == "pet_collection":
         if kind != "pet":
             return None
-        if not _pet_is_new(data):
-            # A DUPLICATE pet is not a collected pet: "obtain 3 boss pets" must
-            # not be satisfiable by re-killing one boss for a pet you already
-            # own. The producer emits duplicates now (item_collection tiles
-            # need them), so the gate lives here.
+        if not _pet_counts(task, data):
+            # A DUPLICATE pet, on a task that counts acquisitions (the default):
+            # "obtain 3 boss pets" isn't met by re-killing one boss for a pet
+            # the player already owns. config.duplicate_pets: true counts every
+            # pet drop instead.
             return None
         pet_name = data.get("pet_name") or data.get("item_name")
         if not pet_name:
@@ -1336,14 +1348,14 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
                 return None
             return {"mode": "kc_abs", "quantity": 0}
         if kind == "pet":
-            # A DUPLICATE pet is not an achievement worth bonus points — and
-            # the per-player cap must not be burnable by re-rolling a pet the
-            # player already owns.
-            if not _pet_is_new(data):
-                return None
             raw_name = data.get("pet_name") or data.get("item_name")
             rule = (comp.get("pet_rules") or {}).get(_norm(raw_name))
             if not rule:
+                return None
+            # A DUPLICATE pet pays only where the rule says so
+            # (duplicate_pets: true). By default it isn't an achievement worth
+            # bonus points, and it mustn't burn the per-player cap either.
+            if not _pet_is_new(data) and rule.get(_dp.CONFIG_KEY) is not True:
                 return None
             return {"mode": "count",
                     "quantity": max(int(rule.get("points") or 1), 1),
@@ -5811,10 +5823,90 @@ def _rescreen_vestige_ring_credits(session, task: dict) -> dict:
     return {"restored": restored}
 
 
+# Marks a ledger row that a duplicate_pets switch-off took back, so switching
+# it on again can tell those rows from ones an admin revoked or rejected. The
+# review ledger shows it as the reason, hence the wording.
+DUPLICATE_PET_OFF_NOTE = "Duplicate pet: duplicates no longer count on this task"
+
+
+def _rescreen_duplicate_pet_credits(session, task: dict) -> dict:
+    """Bring a task's duplicate-pet ledger rows in line with its CURRENT
+    ``duplicate_pets`` setting (a live edit flipped it and chose re-score).
+
+    A duplicate's row is a ``pet`` row with no ``source_id``: the pet
+    processor writes a ``player_pets`` row only for a new pet, and the
+    envelope's ``source_id`` is that row's id.
+
+    - Switched OFF: applied duplicate rows become ``revoked`` and pending ones
+      ``rejected``, each noted :data:`DUPLICATE_PET_OFF_NOTE`. New pets keep
+      counting.
+    - Switched ON: rows carrying that note come back as they were (``pending``
+      from rejected; ``confirmed`` when an admin had confirmed it, else
+      ``auto``) as long as the task still takes that pet. Duplicates that
+      dropped while it was off were never recorded, so they stay uncounted.
+
+    Returns ``{"revoked": [...], "rejected": [...]}`` or ``{"restored": [...]}``
+    (row ids), empty when nothing changed. Caller owns the commit."""
+    from db.models import EventCompletion
+
+    if task.get("type") not in _dp.PET_TASK_TYPES:
+        return {}
+
+    if not _dp.duplicates_count(task.get("type"), task.get("config")):
+        rows = [
+            r for r in (session.query(EventCompletion)
+                        .filter(EventCompletion.task_id == task["id"],
+                                EventCompletion.source_type == "pet",
+                                EventCompletion.source_id.is_(None),
+                                EventCompletion.status.in_(
+                                    ("auto", "confirmed", "pending")))
+                        .all())
+            if r.source_type == "pet" and r.source_id is None
+        ]
+        revoked, rejected = [], []
+        for row in rows:
+            if row.status == "pending":
+                row.status = "rejected"
+                rejected.append(row.id)
+            else:
+                row.status = "revoked"
+                revoked.append(row.id)
+            row.note = DUPLICATE_PET_OFF_NOTE
+        if not (revoked or rejected):
+            return {}
+        session.flush()
+        return {"revoked": revoked, "rejected": rejected}
+
+    marked = (session.query(EventCompletion)
+              .filter(EventCompletion.task_id == task["id"],
+                      EventCompletion.status.in_(("revoked", "rejected")),
+                      EventCompletion.note == DUPLICATE_PET_OFF_NOTE)
+              .order_by(EventCompletion.id)
+              .all())
+    restored = []
+    for row in marked:
+        # The same edit may have dropped this pet from the task: ask the
+        # matcher, as if the duplicate had just arrived.
+        if match_task(task, {"kind": "pet", "data": {
+                "pet_name": row.matched_target, "is_new_pet": False}}) is None:
+            continue
+        if row.status == "rejected":
+            row.status = "pending"
+        else:
+            row.status = "confirmed" if row.acted_by_user_id is not None else "auto"
+        row.note = None
+        restored.append(row.id)
+    if not restored:
+        return {}
+    session.flush()
+    return {"restored": restored}
+
+
 def recompute_task_rollups(session, event_row, task_row, *,
                            old_points: Optional[int] = None,
                            preserve_completed: bool = False,
-                           rescreen_vestige_rings: bool = False) -> dict:
+                           rescreen_vestige_rings: bool = False,
+                           rescreen_duplicate_pets: bool = False) -> dict:
     """Re-fold every (task, team) rollup after a LIVE task edit (web68a).
 
     The caller has already mutated + flushed the task row (new target/config/
@@ -5851,6 +5943,11 @@ def recompute_task_rollups(session, event_row, task_row, *,
     ring rows in line with the new setting; its summary rides back under
     ``"vestige_rings"``.
 
+    ``rescreen_duplicate_pets``: the edit flipped ``config.duplicate_pets``.
+    Same reason: the re-fold would keep counting duplicate-pet rows the task
+    no longer accepts. :func:`_rescreen_duplicate_pet_credits` runs first and
+    its summary rides back under ``"duplicate_pets"``.
+
     Raises ``ValueError("forward_only")`` for kinds with no recomputable
     ledger: manual-only types (custom/ehp_target/ehb_target) and board-game
     events (progress is entangled with turn state — coins/rolls must never
@@ -5882,10 +5979,13 @@ def recompute_task_rollups(session, event_row, task_row, *,
         # revoke (which re-fold from the ledger) remain the correction paths.
         raise ValueError("forward_only")
 
-    # Before the team ids are read: a restored ring row may belong to a team
-    # whose only applied rows were the ones this switches back on.
+    # Before the team ids are read: a restored ring or duplicate-pet row may
+    # belong to a team whose only applied rows were the ones this switches
+    # back on.
     rings_summary = (_rescreen_vestige_ring_credits(session, task)
                      if rescreen_vestige_rings else {})
+    pets_summary = (_rescreen_duplicate_pet_credits(session, task)
+                    if rescreen_duplicate_pets else {})
 
     applied = ("auto", "confirmed", "manual")
     team_ids = {
@@ -6085,4 +6185,6 @@ def recompute_task_rollups(session, event_row, task_row, *,
     out = {"teams": teams_summary, "bonuses": bonuses}
     if rings_summary:
         out["vestige_rings"] = rings_summary
+    if pets_summary:
+        out["duplicate_pets"] = pets_summary
     return out

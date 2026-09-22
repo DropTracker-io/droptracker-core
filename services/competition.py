@@ -9,7 +9,9 @@ except the duration is whatever the admins choose and DropTracker can layer
 - ``pet``        — a NEW pet from the event boss (botw) or the skill's
                    skilling pet (sotw): +N points, at most ``max_awards``
                    per player (a new pet is inherently once, but the cap is
-                   still enforced in the fold for defense in depth).
+                   still enforced in the fold for defense in depth). With
+                   ``duplicate_pets: true`` on the rule, a duplicate of a pet
+                   the player already owns pays too.
 - ``time_under`` — a kill of the rule's NPC in ``threshold_ms`` or better:
                    +N points, at most ``max_awards`` per player. Multiple
                    tiers may coexist ("under 1:00 = 5, under 0:50 = 15
@@ -235,7 +237,8 @@ class CompetitionBonusRule:
     """One normalized bonus rule (see the module docstring for semantics)."""
 
     __slots__ = ("id", "type", "points", "max_awards", "award_limit",
-                 "unlimited", "pets", "npc", "threshold_ms", "label", "task",
+                 "unlimited", "pets", "duplicate_pets", "npc", "threshold_ms",
+                 "label", "task",
                  "progress_kind", "need", "kinds", "scope", "step", "unscoped",
                  "metric_kind")
 
@@ -260,6 +263,10 @@ class CompetitionBonusRule:
         # stores real pet names; no runtime taxonomy lookups here).
         self.pets = tuple(n for n in (_norm(p) for p in (raw.get("pets") or ()))
                           if n)
+        # pet: whether a duplicate of a pet the player already owns pays too.
+        # Off unless a real ``true`` is stored (utils.duplicate_pets).
+        self.duplicate_pets = (self.type == "pet"
+                               and raw.get("duplicate_pets") is True)
         # time_under: one NPC + a tick-precision threshold.
         self.npc = _norm(raw.get("npc")) or None
         self.threshold_ms = _clamp(raw.get("threshold_ms"), 0,
@@ -403,7 +410,8 @@ class CompetitionConfig:
             "skill": self.skill,
             "npcs": list(self.npcs),
             "pet_rules": {
-                pet: {"id": r.id, "points": r.points}
+                pet: {"id": r.id, "points": r.points,
+                      **({"duplicate_pets": True} if r.duplicate_pets else {})}
                 for r in self.bonus_rules if r.type == "pet"
                 for pet in r.pets
             },
@@ -845,9 +853,11 @@ def rule_label(rule: CompetitionBonusRule) -> str:
     if rule.label:
         return rule.label
     if rule.type == "pet":
+        # "New" only while duplicates don't pay: with them on, any drop does.
+        head = "Pet" if rule.duplicate_pets else "New pet"
         if len(rule.pets) == 1:
-            return f"New pet: {rule.pets[0].title()}"
-        return "New pet"
+            return f"{head}: {rule.pets[0].title()}"
+        return head
     if rule.type == "time_under":
         npc = (rule.npc or "").title()
         return f"{npc} kill under {format_time_ms(rule.threshold_ms)}"
@@ -926,7 +936,8 @@ def bonus_detail(rule_id: int, config: CompetitionConfig,
         reason = (f"{(rule.npc or '').title()} in {time_text} "
                   f"(under {format_time_ms(rule.threshold_ms)})")
     elif rule.type == "pet" and matched_target:
-        reason = f"New pet: {str(matched_target).strip()}"
+        head = "Pet" if rule.duplicate_pets else "New pet"
+        reason = f"{head}: {str(matched_target).strip()}"
     elif rule.type == "task" and matched_target and rule.need <= 1:
         # A one-shot task rule is fully described by what triggered it.
         reason = f"{rule_label(rule)}: {str(matched_target).strip()}"

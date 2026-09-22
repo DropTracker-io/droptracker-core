@@ -299,6 +299,22 @@ class TestDisplay:
         assert "Pet snakeling" in pet_detail["reason"]
         assert comp.bonus_detail(99, cfg, awarded_n=1)["points"] == 0
 
+    def test_pet_rule_drops_new_when_duplicates_pay(self):
+        rules = [{**r, "duplicate_pets": True} if r.get("type") == "pet" else r
+                 for r in BOTW_CFG["bonus_rules"]]
+        cfg = comp.CompetitionConfig({**BOTW_CFG, "bonus_rules": rules})
+        rule = cfg.rules_by_id[1]
+        assert rule.duplicate_pets is True
+        assert comp.rule_label(rule).startswith("Pet")
+        assert cfg.matcher_index()["pet_rules"]["pet snakeling"]["duplicate_pets"] is True
+        detail = comp.bonus_detail(1, cfg, awarded_n=1, matched_target="Pet snakeling")
+        assert detail["reason"] == "Pet: Pet snakeling"
+        # Default: off, and the label keeps saying "New pet".
+        plain = comp.CompetitionConfig(BOTW_CFG)
+        assert plain.rules_by_id[1].duplicate_pets is False
+        assert comp.rule_label(plain.rules_by_id[1]).startswith("New pet")
+        assert "duplicate_pets" not in plain.matcher_index()["pet_rules"]["pet snakeling"]
+
 
 # ── embedded task rules + milestones ─────────────────────────────────────────
 

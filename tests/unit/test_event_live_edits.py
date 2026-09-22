@@ -175,10 +175,13 @@ def _fake_engine(monkeypatch, result=None):
     class _Eng:
         @staticmethod
         def recompute_task_rollups(s, ev, task, *, old_points=None,
-                                   rescreen_vestige_rings=False):
+                                   rescreen_vestige_rings=False,
+                                   rescreen_duplicate_pets=False):
             calls.append({"old_points": old_points, "task_id": task.id})
             if rescreen_vestige_rings:
                 calls[-1]["rescreen_vestige_rings"] = True
+            if rescreen_duplicate_pets:
+                calls[-1]["rescreen_duplicate_pets"] = True
             if isinstance(result, Exception):
                 raise result
             return result if result is not None else {"teams": {}, "bonuses": {}}
@@ -685,3 +688,134 @@ class TestUpdateTaskVestigeRings:
                                      "retro": "keep"})
         assert r.status_code == 200
         assert not calls and s.committed
+
+
+# ── 5. "Duplicate pets count" switch (config.duplicate_pets) ─────────────────
+_DUPES_ON_TASK = {"id": 9, "type": "pet_collection", "target": "Vorki",
+                  "target_value": 1, "config": {"duplicate_pets": True}}
+_DUPES_OFF_TASK = {**_DUPES_ON_TASK, "config": {}}
+
+
+def _pet_row(rid, *, source_id=None, **kw):
+    return _ledger(rid, "Vorki", source_id=source_id, source_type="pet", **kw)
+
+
+class TestRescreenDuplicatePetCredits:
+    def test_switch_off_takes_back_duplicate_credits(self):
+        dupe = _pet_row(1)
+        pending = _pet_row(2, status="pending", player_id=4)
+        s = _S([dupe, pending])
+        out = engine._rescreen_duplicate_pet_credits(s, _DUPES_OFF_TASK)
+        assert out == {"revoked": [1], "rejected": [2]}
+        assert (dupe.status, dupe.note) == ("revoked", engine.DUPLICATE_PET_OFF_NOTE)
+        assert (pending.status, pending.note) == ("rejected",
+                                                  engine.DUPLICATE_PET_OFF_NOTE)
+
+    def test_switch_off_leaves_new_pets_alone(self):
+        # A new pet's row carries its player_pets id; the query filters those
+        # out, and the belt-and-braces check skips one that slips through.
+        new_pet = _pet_row(3, source_id=555)
+        s = _S([new_pet])
+        assert engine._rescreen_duplicate_pet_credits(s, _DUPES_OFF_TASK) == {}
+        assert (new_pet.status, new_pet.note) == ("auto", None)
+
+    def test_switch_on_restores_each_row_as_it_was(self):
+        auto = _pet_row(1, status="revoked", note=engine.DUPLICATE_PET_OFF_NOTE)
+        confirmed = _pet_row(2, status="revoked", acted_by_user_id=7,
+                             note=engine.DUPLICATE_PET_OFF_NOTE)
+        pending = _pet_row(3, status="rejected", note=engine.DUPLICATE_PET_OFF_NOTE)
+        s = _S([auto, confirmed, pending])
+        out = engine._rescreen_duplicate_pet_credits(s, _DUPES_ON_TASK)
+        assert out == {"restored": [1, 2, 3]}
+        assert (auto.status, confirmed.status, pending.status) == (
+            "auto", "confirmed", "pending")
+        assert auto.note is None and confirmed.note is None and pending.note is None
+
+    def test_switch_on_skips_a_pet_the_task_no_longer_takes(self):
+        task = {**_DUPES_ON_TASK, "target": "Baby mole"}
+        row = _pet_row(1, status="revoked", note=engine.DUPLICATE_PET_OFF_NOTE)
+        s = _S([row])
+        assert engine._rescreen_duplicate_pet_credits(s, task) == {}
+        assert (row.status, row.note) == ("revoked", engine.DUPLICATE_PET_OFF_NOTE)
+
+    def test_item_list_default_on_restores_and_explicit_off_revokes(self):
+        items = {"kind": "any_of", "items": ["Dragon axe", "Vorki"],
+                 "pet_items": ["Vorki"]}
+        on = {"id": 9, "type": "item_collection", "target": None,
+              "target_value": 1, "config": dict(items)}
+        row = _pet_row(1, status="revoked", note=engine.DUPLICATE_PET_OFF_NOTE)
+        assert engine._rescreen_duplicate_pet_credits(_S([row]), on) == {
+            "restored": [1]}
+        off = {**on, "config": {**items, "duplicate_pets": False}}
+        dupe = _pet_row(2)
+        assert engine._rescreen_duplicate_pet_credits(_S([dupe]), off) == {
+            "revoked": [2], "rejected": []}
+
+    def test_other_task_types_issue_no_queries(self):
+        s = _S()  # any query raises
+        assert engine._rescreen_duplicate_pet_credits(
+            s, {"id": 9, "type": "kc_target", "config": {}}) == {}
+
+
+class TestRecomputeWithDuplicatePetRescreen:
+    def test_switching_duplicates_off_takes_back_a_completion(self):
+        # "Obtain Vorki" (10 pts) completed on a duplicate; duplicates switched
+        # off with re-score → that row is revoked BEFORE the re-fold, so the
+        # task un-completes and the points come off.
+        dupe = _pet_row(1)
+        progress = SimpleNamespace(progress=1, completed=True,
+                                   completed_at=datetime(2026, 9, 20), team_id=1)
+        team = SimpleNamespace(id=1, score=10)
+        s = _S(
+            [dupe],                    # rescreen: duplicate pet rows
+            [(1,)],                    # progress team ids
+            [(1,)],                    # applied completion team ids
+            [progress],                # locked rollup read
+            [],                        # surviving ledger fold → 0
+            [team],                    # t60 leader snapshot (first score write)
+            [team],                    # score RMW
+            [],                        # player-points delete
+            [(1, 0)],                  # final scores for SSE frames
+            [team],                    # t60 leader compare
+        )
+        out = engine.recompute_task_rollups(
+            s, _ev_row(),
+            _task_row(type="pet_collection", target="Vorki", target_value=1,
+                      config=None),
+            old_points=10, rescreen_duplicate_pets=True)
+        assert dupe.status == "revoked"
+        assert progress.completed is False and team.score == 0
+        assert out["duplicate_pets"] == {"revoked": [1], "rejected": []}
+        assert out["teams"][1]["score_delta"] == -10
+
+
+class TestUpdateTaskDuplicatePets:
+    def _task(self, config=None):
+        return _task(type="pet_collection", target="Vorki", target_value=1,
+                     config=config)
+
+    async def test_flipping_the_switch_rescreens_on_recompute(self, client, monkeypatch):
+        task = self._task()
+        s = _S([_event(status="active")], [task], [SimpleNamespace(id=1)])
+        _wire_admin(monkeypatch, s)
+        summary = {"teams": {}, "bonuses": {}, "duplicate_pets": {"restored": [5]}}
+        calls = _fake_engine(monkeypatch, summary)
+        r = await client.patch("/api/v1/events/1/tasks/9",
+                               json={"config": {"duplicate_pets": True},
+                                     "retro": "recompute"})
+        assert r.status_code == 200
+        assert calls == [{"old_points": 10, "task_id": 9,
+                          "rescreen_duplicate_pets": True}]
+        assert json.loads(task.config) == {"duplicate_pets": True}
+        after = json.loads(s.added[-1].after)
+        assert after["duplicate_pets"] == {"restored": [5]}
+
+    async def test_other_edits_leave_duplicate_credits_alone(self, client, monkeypatch):
+        task = self._task(config='{"duplicate_pets": true}')
+        s = _S([_event(status="active")], [task], [SimpleNamespace(id=1)])
+        _wire_admin(monkeypatch, s)
+        calls = _fake_engine(monkeypatch)
+        r = await client.patch("/api/v1/events/1/tasks/9",
+                               json={"points": 25, "retro": "recompute"})
+        assert r.status_code == 200
+        assert calls == [{"old_points": 10, "task_id": 9}]

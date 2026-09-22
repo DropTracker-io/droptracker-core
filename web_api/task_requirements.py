@@ -24,7 +24,7 @@ are imported lazily inside functions — the unit-test conftest stubs
 
 from __future__ import annotations
 
-from utils import vestige_rings
+from utils import duplicate_pets, vestige_rings
 from utils.task_progress import DISTINCT_ITEM_KINDS
 from web_api.task_tiles import (
     _fmt_num,
@@ -244,9 +244,13 @@ def requirement_spec(task: dict) -> dict:
             out["groups"] = [_group("any_of", [_item(n) for n in names], need,
                                     label=label)]
         # The matcher's duplicate gate is invisible in the config and is the
-        # single most common "why didn't this count?" question on pet tasks.
+        # single most common "why didn't this count?" question on pet tasks,
+        # so say which way this task goes (config.duplicate_pets).
         out["notes"].append(
-            "Only pets you obtain during the event count — a duplicate of a "
+            "Duplicate pets count too: a pet drop counts even if the account "
+            "already owns that pet."
+            if duplicate_pets.duplicates_count(ttype, config) else
+            "Only pets you obtain during the event count. A duplicate of a "
             "pet the account already owns does not.")
         if not target and not config.get("pets") and not config.get("categories"):
             out["notes"].append(
@@ -294,6 +298,12 @@ def requirement_spec(task: dict) -> dict:
             out["notes"].append(
                 "Pets in this list are credited from the pet drop itself, not "
                 "from a collection-log entry.")
+            # Default on for item lists; the note matters most when it's off.
+            out["notes"].append(
+                "A duplicate of a pet the account already owns counts too."
+                if duplicate_pets.duplicates_count(ttype, config) else
+                "Duplicate pets don't count here. Only a pet the account "
+                "didn't already own does.")
         # The DT2 pity rings (utils.vestige_rings) credit a listed vestige
         # without the ring appearing anywhere in the list, so say which way
         # this task goes: the ring is the classic "why did that count?". A

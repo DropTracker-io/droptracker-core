@@ -100,6 +100,13 @@ class TestPetCollection:
         and the #1 "why didn't this count?" question on pet tasks."""
         spec = requirement_spec(_task(type="pet_collection", target_value=3))
         assert any("duplicate" in n.lower() for n in spec["notes"])
+        assert not any(n.startswith("Duplicate pets count too") for n in spec["notes"])
+
+    def test_duplicates_on_says_they_count(self):
+        spec = requirement_spec(_task(type="pet_collection", target="Vorki",
+                                      config={"duplicate_pets": True}))
+        assert any(n.startswith("Duplicate pets count too") for n in spec["notes"])
+        assert not any(n.startswith("Only pets you obtain") for n in spec["notes"])
 
     def test_bare_any_pet_notes_the_misc_exclusion(self):
         spec = requirement_spec(_task(type="pet_collection", target_value=3))
@@ -254,6 +261,29 @@ class TestItemCollection:
                     "items": [{"item_name": "Gold ring", "points": 5},
                               {"item_name": "Ultor vestige", "points": 50}]}))
         assert not any("Gold ring" in n for n in spec["notes"])
+
+    # Duplicate pets (config.duplicate_pets): an item list counts them unless
+    # it says otherwise, and the notes say which way the task goes.
+
+    def test_item_list_pet_says_duplicates_count_by_default(self):
+        spec = requirement_spec(_task(
+            type="item_collection", target_value=1,
+            config={"kind": "any_of", "items": ["Dragon axe", "Vorki"],
+                    "pet_items": ["Vorki"]}))
+        assert "A duplicate of a pet the account already owns counts too." in spec["notes"]
+
+    def test_item_list_pet_with_duplicates_off_says_they_dont(self):
+        spec = requirement_spec(_task(
+            type="item_collection", target_value=1,
+            config={"kind": "any_of", "items": ["Dragon axe", "Vorki"],
+                    "pet_items": ["Vorki"], "duplicate_pets": False}))
+        assert any(n.startswith("Duplicate pets don't count here") for n in spec["notes"])
+
+    def test_item_list_without_pets_has_no_duplicate_note(self):
+        spec = requirement_spec(_task(
+            type="item_collection", target_value=1,
+            config={"kind": "any_of", "items": ["Dragon axe"]}))
+        assert not any("uplicate" in n for n in spec["notes"])
 
     def test_no_ring_note_without_a_vestige(self):
         spec = requirement_spec(_task(

@@ -121,11 +121,18 @@ class TestPetSource:
 
     def test_duplicate_pet_does_not_score(self):
         # The producer now emits duplicates (item_collection tiles need them);
-        # sweeps hold the old behaviour so a running event's scoring doesn't
-        # change underneath it. Flip is a two-line delete in match_task.
+        # a sweep keeps the old behaviour unless it opts in, so a running
+        # event's scoring doesn't change underneath it.
         env = {"kind": "pet", "data": {"pet_name": "Pet kree'arra",
                                        "is_new_pet": False}}
         assert engine.match_task(PET_TASK, env) is None
+
+    def test_duplicate_pet_scores_when_the_sweep_opts_in(self):
+        task = {**PET_TASK, "config": {**PET_CONFIG, "duplicate_pets": True}}
+        env = {"kind": "pet", "data": {"pet_name": "Pet kree'arra",
+                                       "is_new_pet": False}}
+        m = engine.match_task(task, env)
+        assert m and m["matched_target"] == "Pet kree'arra"
 
 
 class TestLootSweepScore:
