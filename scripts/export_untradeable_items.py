@@ -13,12 +13,13 @@ Excluded on purpose: GE-tradeable items (their 0gp rows are transient price
 lookup failures), pets (their ``pet`` submissions carry their own screenshot
 config), and high-rate farming byproducts (>5 drops/player/month — granite
 dust, abyssal pearls, satchels and the like) that would spam screenshot
-uploads. Edit the list below and re-publish to the content repo to change
-what clients capture.
+uploads. The boss jars are the one deliberate exception to the tradeable
+rule — see their block below.
 
-The content repo is **not** on this box, so this prints/writes the file
-content for you to commit + push to
-``droptracker-io.github.io/content/untradeable_items.txt``.
+Publishing is automatic: ``GithubPagesUpdater._item_list_contents``
+(``utils/github.py``) pushes this list from the ``droptracker-player-updates``
+loop, which imports it once, so restart that unit after an edit. The plugin
+reads the file at startup.
 
 Run:
     venv/bin/python -m scripts.export_untradeable_items                 # print to stdout
@@ -39,6 +40,26 @@ NOTABLE_UNTRADEABLES = [
     (31420, "Huge halibut"),
     (31424, "Purplefin"),
     (31428, "Swift marlin"),
+    # Boss jars: every item in the wiki's Category:Jars. All but Venom,
+    # Feathers and Light are GE-tradeable, but most trade under the plugin's
+    # default 250k screenshot threshold, so almost none of their drops had a
+    # screenshot (2026-09: 0 of 149 Jar of swamp, 0 of 306 Jar of miasma).
+    (12007, "Jar of dirt"),
+    (12885, "Jar of sand"),
+    (12936, "Jar of swamp"),
+    (13245, "Jar of souls"),
+    (13277, "Jar of miasma"),
+    (19701, "Jar of darkness"),
+    (21745, "Jar of stone"),
+    (22106, "Jar of decay"),
+    (23064, "Jar of chemicals"),
+    (23525, "Jar of eyes"),
+    (24495, "Jar of dreams"),
+    (25521, "Jar of spirits"),
+    (25524, "Jar of smoke"),
+    (29786, "Jar of Venom"),
+    (32921, "Jar of feathers"),
+    (34030, "Jar of light"),
     (5553, "Rogue top"),
     (6665, "Mudskipper hat"),
     (6666, "Flippers"),
@@ -196,7 +217,6 @@ NOTABLE_UNTRADEABLES = [
     (29269, "Guild hunter boots"),
     (29309, "Huntsman's kit"),
     (29781, "Coagulated venom"),
-    (29786, "Jar of Venom"),
     (29788, "Araxyte head"),
     (29892, "Pendant of ates (inert)"),
     (30626, "Deadeye prayer scroll"),
@@ -231,7 +251,6 @@ NOTABLE_UNTRADEABLES = [
     (32868, "Broken sextant"),
     (32869, "Mouldy doll"),
     (32870, "Smashed mirror"),
-    (32921, "Jar of feathers"),
     (33133, "Pristine spider silk"),
     (33382, "Immaculate mole skin"),
 ]
