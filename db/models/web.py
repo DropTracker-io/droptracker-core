@@ -322,3 +322,65 @@ class SiteRedirect(Base):
     author_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class PopupNotice(Base):
+    """A targeted site pop-up (web118a), written by staff in /admin/notices.
+
+    ``audience_json`` is a JSON list of rules (see ``web_api/popup_audience``),
+    matched against each visitor when they load the site. A visitor who matches
+    ANY rule sees the notice until they close it; nothing is fanned out per
+    recipient, so "everyone" costs the same as one user.
+
+    ``status`` is the staff-controlled lifecycle: ``draft`` (never shown),
+    ``live`` (shown inside the optional ``starts_at``/``expires_at`` window) and
+    ``ended`` (stopped by hand). ``audience_estimate`` is the matched user count
+    when it was sent, kept so the list can say how far a notice reached.
+    """
+
+    __tablename__ = "popup_notices"
+    __table_args__ = (
+        Index("idx_popup_notice_status", "status", "starts_at"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(120), nullable=False)
+    body_md = Column(Text, nullable=False)
+    cta_label = Column(String(40), nullable=True)
+    cta_url = Column(String(512), nullable=True)
+    tone = Column(String(12), nullable=False, default="info")  # info|important|success
+    size = Column(String(8), nullable=False, default="md")  # sm|md|lg
+    audience_json = Column(Text, nullable=False)
+    status = Column(String(12), nullable=False, default="draft")  # draft|live|ended
+    starts_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    audience_estimate = Column(Integer, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class PopupNoticeReceipt(Base):
+    """One user's history with one pop-up notice (web118a).
+
+    Written the first time the notice is shown (``seen_at``) and again when the
+    user closes it (``dismissed_at``). A non-null ``dismissed_at`` is the only
+    thing that stops a notice from coming back, and because it lives here
+    rather than in the browser it holds on every device the user signs in on.
+    """
+
+    __tablename__ = "popup_notice_receipts"
+    __table_args__ = (
+        UniqueConstraint("notice_id", "user_id", name="uix_popup_notice_receipt"),
+        Index("idx_popup_receipt_user", "user_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    notice_id = Column(Integer, ForeignKey("popup_notices.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False)
+    seen_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)

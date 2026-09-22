@@ -75,7 +75,7 @@ from .seasonal_combat_achievement import SeasonalCombatAchievementEntry
 from .seasonal_pet import SeasonalPlayerPet
 from .seasonal_quest_completion import SeasonalQuestCompletionEntry
 from .drop_split import DropSplit
-from .web import GroupAdmin, GroupEventManager, Announcement, AuditLog, DiscordOutbox, DocsPage, SiteRedirect, Suggestion, SuggestionMessage
+from .web import GroupAdmin, GroupEventManager, Announcement, AuditLog, DiscordOutbox, DocsPage, SiteRedirect, Suggestion, SuggestionMessage, PopupNotice, PopupNoticeReceipt
 from .dev_tracker import DevProject, DevTask, DevSubtask, DevNote, PROJECT_STATUSES, TASK_STATUSES
 from .file_transfer import (
     FileTransfer,
@@ -323,6 +323,8 @@ __all__ = [
     "DiscordOutbox",
     "DocsPage",
     "SiteRedirect",
+    "PopupNotice",
+    "PopupNoticeReceipt",
     "DevProject",
     "DevTask",
     "DevSubtask",
