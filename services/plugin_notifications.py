@@ -1244,6 +1244,35 @@ def compose_event_state(session, player_id) -> dict:
     return {"events": entries, "screenshot_item_ids": screenshot_item_ids}
 
 
+# Plugin builds 6.0.3-6.0.8 badged a teammate's clan-chat line by renaming the
+# chat MessageNode. RuneLite's setName rebuilds the node's sender identity from
+# the text after the last '>', so a badged name (ending in </col>) lost it: the
+# game stopped seeing a friend's PMs as a friend's and hid them under Private:
+# Friends, and the walk over the chat buffer recoloured names in PMs too. Later
+# builds decorate a line as it is drawn and send ``badges=2`` on /event_state.
+# Anything that doesn't is served no roster_version, which those builds read as
+# "server predates the stamp": they drop every badge within one poll and never
+# rename another node.
+BADGE_RENDERER_DRAW_TIME = 2
+
+
+def badge_renderer(raw) -> int:
+    """The ``badges`` capability a plugin sent on /event_state, or 0."""
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def withhold_roster_versions(state: dict) -> dict:
+    """Strip every entry's roster_version, in place, for a plugin that must not
+    badge chat. See :data:`BADGE_RENDERER_DRAW_TIME`."""
+    for entry in (state or {}).get("events") or []:
+        if isinstance(entry, dict):
+            entry.pop("roster_version", None)
+    return state
+
+
 def roster_digest(member_count, latest_join, teams) -> str:
     """Short hash that changes whenever an event's chat badges would look
     different, and not otherwise.

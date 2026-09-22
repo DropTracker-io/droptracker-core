@@ -180,10 +180,19 @@ async def get_event_state():
     import hashlib
     import json as _json
 
-    from services.plugin_notifications import compose_event_state
+    from services.plugin_notifications import (
+        BADGE_RENDERER_DRAW_TIME,
+        badge_renderer,
+        compose_event_state,
+        withhold_roster_versions,
+    )
 
+    # Only plugins that draw team badges at render time get a roster_version;
+    # older builds hid friends' PMs (see BADGE_RENDERER_DRAW_TIME). The two
+    # answers differ, so they are cached apart.
+    legacy_badges = badge_renderer(request.args.get("badges")) < BADGE_RENDERER_DRAW_TIME
     cache_key = "plugin:event_state:" + hashlib.sha1(
-        f"{player_name}:{acc_hash}".encode()).hexdigest()
+        f"{player_name}:{acc_hash}:{int(legacy_badges)}".encode()).hexdigest()
     try:
         from utils.redis import redis_client
 
@@ -210,6 +219,8 @@ async def get_event_state():
         return jsonify({"error": "Internal error"}), 500
     if state is None:
         return jsonify({"error": "Player not found"}), 404
+    if legacy_badges:
+        withhold_roster_versions(state)
     try:
         from utils.redis import redis_client
 
