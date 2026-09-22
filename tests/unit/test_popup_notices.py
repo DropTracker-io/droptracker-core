@@ -267,3 +267,28 @@ class TestRouteHelpers:
         # Editing a live notice may move its end into the past (ends it).
         _check_window(None, now - timedelta(minutes=1), sending=False)
         _check_window(None, now + timedelta(days=1), sending=True)
+
+
+class TestLiveNoticesFailSafe:
+    def test_read_failure_shows_nothing_and_is_cached(self, monkeypatch):
+        """Before web118a is migrated (or on any DB error) the visitor read
+        must answer "nothing live", once per cache fill, not raise."""
+        import web_api.routes.popup_notices as mod
+
+        calls = []
+
+        class Boom:
+            def __enter__(self):
+                calls.append(1)
+                raise RuntimeError("Table 'data.popup_notices' doesn't exist")
+
+            def __exit__(self, *a):
+                return False
+
+        store = {}
+        monkeypatch.setattr(mod, "db_session", lambda: Boom())
+        monkeypatch.setattr(mod, "cache_get", lambda k, ttl: store.get(k))
+        monkeypatch.setattr(mod, "cache_set", lambda k, v: store.__setitem__(k, v))
+        assert mod._live_notices() == []
+        assert mod._live_notices() == []
+        assert len(calls) == 1

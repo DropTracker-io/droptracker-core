@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime
 
@@ -54,6 +55,7 @@ from web_api.popup_audience import (
 )
 
 popup_notices_bp = Blueprint("v1_popup_notices", __name__)
+logger = logging.getLogger("web_api.popup_notices")
 
 TONES = ("info", "important", "success")
 SIZES = ("sm", "md", "lg")
@@ -142,38 +144,46 @@ def _viewer_payload(n: dict) -> dict:
 def _live_notices() -> list[dict]:
     """Every ``live`` notice that has not expired, with parsed rules. Cached
     in-process; scheduled ones are included and filtered per request so a
-    start time takes effect on the minute, not on the next cache fill."""
+    start time takes effect on the minute, not on the next cache fill.
+
+    A failed read (say the web118a tables aren't migrated yet) is cached as
+    "nothing live" for the same TTL and logged once per fill: this sits on
+    every signed-in page load, and a pop-up is never worth an error there."""
     cached = cache_get(_LIVE_KEY, _LIVE_TTL)
     if cached is not None:
         return cached
 
     now = datetime.now()
-    with db_session() as s:
-        rows = (
-            s.query(PopupNotice)
-            .filter(
-                PopupNotice.status == "live",
-                or_(PopupNotice.expires_at.is_(None), PopupNotice.expires_at > now),
+    try:
+        with db_session() as s:
+            rows = (
+                s.query(PopupNotice)
+                .filter(
+                    PopupNotice.status == "live",
+                    or_(PopupNotice.expires_at.is_(None), PopupNotice.expires_at > now),
+                )
+                .order_by(PopupNotice.sent_at.asc(), PopupNotice.id.asc())
+                .all()
             )
-            .order_by(PopupNotice.sent_at.asc(), PopupNotice.id.asc())
-            .all()
-        )
-        live = [
-            {
-                "id": r.id,
-                "title": r.title,
-                "body_md": r.body_md,
-                "cta_label": r.cta_label,
-                "cta_url": r.cta_url,
-                "tone": r.tone,
-                "size": r.size,
-                "sent_at": _ts(r.sent_at),
-                "starts_at": r.starts_at,
-                "expires_at": r.expires_at,
-                "rules": parse_stored_audience(r.audience_json),
-            }
-            for r in rows
-        ]
+            live = [
+                {
+                    "id": r.id,
+                    "title": r.title,
+                    "body_md": r.body_md,
+                    "cta_label": r.cta_label,
+                    "cta_url": r.cta_url,
+                    "tone": r.tone,
+                    "size": r.size,
+                    "sent_at": _ts(r.sent_at),
+                    "starts_at": r.starts_at,
+                    "expires_at": r.expires_at,
+                    "rules": parse_stored_audience(r.audience_json),
+                }
+                for r in rows
+            ]
+    except Exception:
+        logger.exception("popup notices: could not read live notices; showing none")
+        live = []
     cache_set(_LIVE_KEY, live)
     return live
 
