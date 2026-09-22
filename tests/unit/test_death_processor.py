@@ -202,7 +202,7 @@ class TestDt2BossLocations:
         [
             (12132, "Duke Sucellus", "Ghorrock Prison"),
             (8291, "The Leviathan", "The Scar"),
-            (4405, "Vardorvis", "Stranglewood"),
+            (4405, "Vardorvis", "The Stranglewood"),
             (10595, "The Whisperer", "Lassar Undercity"),
         ],
     )

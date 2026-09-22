@@ -38,8 +38,9 @@ AREA_TYPES = ("BOSSES", "RAIDS", "DUNGEONS", "MINIGAMES", "CITIES", "REGIONS")
 
 #: Where a death actually happened, for regions RuneLite names after the boss
 #: inside them. Each DT2 arena is its own "area" in the resource, so a death
-#: there read "Killed By: Duke Sucellus / Location: Duke Sucellus". Names are
-#: the ones players gave us in the bug report.
+#: there read "Killed By: Duke Sucellus / Location: Duke Sucellus". Names come
+#: from a player bug report; Vardorvis uses RuneLite's own zone name, "The
+#: Stranglewood", so it matches the rest of that zone.
 #:
 #: Display only, applied once at ingest (``death_processor``). ``name_for``
 #: still returns RuneLite's name, because that is what the blacklist picker
@@ -47,7 +48,7 @@ AREA_TYPES = ("BOSSES", "RAIDS", "DUNGEONS", "MINIGAMES", "CITIES", "REGIONS")
 LOCATION_OVERRIDES: dict[int, str] = {
     12132: "Ghorrock Prison",   # Duke Sucellus
     8291: "The Scar",           # The Leviathan
-    4405: "Stranglewood",       # Vardorvis
+    4405: "The Stranglewood",   # Vardorvis
     10595: "Lassar Undercity",  # The Whisperer
 }
 
