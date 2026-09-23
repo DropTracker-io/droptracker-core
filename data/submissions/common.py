@@ -1412,6 +1412,7 @@ GROUP_CHANNEL_NOTIFICATION_KEYS = {
     "quest": ("channel_id_to_post_quests", "channel_id_to_post_loot"),
     "death": ("channel_id_to_post_deaths", "channel_id_to_post_loot"),
     "diary": ("channel_id_to_post_diaries", "channel_id_to_post_loot"),
+    "slayer": ("channel_id_to_post_slayer", "channel_id_to_post_loot"),
     "pb": ("channel_id_to_post_pb", "channel_id_to_post_loot"),
     "ca": ("channel_id_to_post_ca", "channel_id_to_post_loot"),
     "clog": ("channel_id_to_post_clog", "channel_id_to_post_loot"),

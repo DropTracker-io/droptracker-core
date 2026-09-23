@@ -394,6 +394,7 @@ NOTIFICATION_TYPES = (
     "quest",
     "death",
     "diary",
+    "slayer",
     "kc_milestone",
     "rank_milestone",
 )
@@ -606,6 +607,44 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     # Diaries
     "diary_name": {"help": "The diary area", "sample": "Kourend & Kebos"},
     "diary_tier": {"help": "The tier completed", "sample": "Elite"},
+    # Slayer tasks. Prefixed because task_name/points_awarded already mean the
+    # combat achievement's. Figures are the game's own, from the completion
+    # chat line and the slayer varps (data/submissions/slayer.py).
+    "slayer_task": {
+        "help": "The assignment, or the boss on a boss task",
+        "sample": "Abyssal Demons",
+    },
+    "slayer_master": {
+        "help": "The slayer master who gave the task",
+        "sample": "Duradel",
+        "optional": True,
+    },
+    "slayer_kills": {"help": "Monsters killed on the task", "sample": "206"},
+    "slayer_task_size": {
+        "help": "How many the task asked for. A bracelet of slaughter or an expeditious bracelet makes it differ from the kills",
+        "sample": "206",
+        "optional": True,
+    },
+    "slayer_streak": {
+        "help": "Tasks completed in a row, as the game counts them (Krystilia and Mortimer keep their own count)",
+        "sample": "377",
+        "optional": True,
+    },
+    "slayer_points": {
+        "help": "Slayer points from this task. Empty when it earned none",
+        "sample": "15",
+        "optional": True,
+    },
+    "slayer_points_total": {
+        "help": "The player's Slayer points after this task",
+        "sample": "580",
+        "optional": True,
+    },
+    "slayer_xp": {"help": "Slayer XP from the task", "sample": "139,468", "optional": True},
+    "slayer_icon": {
+        "help": "Link to the Slayer skill icon, for a thumbnail",
+        "sample": "https://www.droptracker.io/img/metrics/slayer.png",
+    },
 }
 
 # {type: {"label", "group", "description", "tokens"}} — ``tokens`` extends
@@ -682,6 +721,17 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "group": "Progress",
         "description": "Posted when a member completes an achievement diary.",
         "tokens": ("diary_name", "diary_tier", "timestamp") + _MEDIA_TOKENS,
+    },
+    "slayer": {
+        "label": "Slayer task",
+        "group": "Progress",
+        "description": (
+            "Posted when a member completes a slayer task, unless your settings "
+            "skip that master."
+        ),
+        "tokens": ("slayer_task", "slayer_master", "slayer_kills", "slayer_task_size",
+                   "slayer_streak", "slayer_points", "slayer_points_total",
+                   "slayer_xp", "slayer_icon") + _MEDIA_TOKENS,
     },
     "kc_milestone": {
         "label": "KC milestone",
@@ -937,6 +987,29 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
             },
             {"type": "separator", "divider": True},
             {"type": "text", "content": "## {diary_tier} {diary_name}"},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    # No group-1 row for slayer either: mirrors _build_default_slayer_embed,
+    # whose title would repeat the headline, so the heading is what was killed
+    # and the Slayer icon sits beside it. Every figure under it can be absent
+    # (unknown master, no points earned), each on its own line.
+    "slayer": {
+        "accent_color": "#8B1A1A",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** completed a slayer task!"},
+            {"type": "separator", "divider": True},
+            {
+                "type": "section",
+                "content": (
+                    "## {slayer_kills} {slayer_task}\n"
+                    "**Master** {slayer_master}\n"
+                    "**Task streak** {slayer_streak}\n"
+                    "**Points earned** {slayer_points}\n"
+                    "**Slayer XP** {slayer_xp}"
+                ),
+                "thumbnail": "{slayer_icon}",
+            },
             {"type": "media", "urls": ["{image_url}"]},
         ],
     },

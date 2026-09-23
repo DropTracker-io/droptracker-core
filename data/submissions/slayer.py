@@ -1,9 +1,11 @@
 """Slayer task completion submissions processor.
 
-One row per completed task, then one events-engine envelope. Deliberately no
-Discord notification and no points yet (tracker t188 lists the notification
-as a follow-up): what the row is for today is counting tasks toward event
-goals, and a ``slayer_target`` task decides for itself which masters count.
+One row per completed task, then one events-engine envelope, then a Discord
+notification for each group that asked for one (``notify_slayer_tasks``). No
+points. Which masters count is decided per consumer, never here: a
+``slayer_target`` event task has its own master list, and a group's
+notifications skip the masters in ``slayer_excluded_masters`` (by default the
+streak-reset masters, Turael/Aya and Spria).
 
 The master that assigned the task arrives as the RAW ``SLAYER_MASTER`` varbit
 value. It is stored as sent and named here from ``utils.slayer_masters`` —
@@ -11,14 +13,20 @@ never trusted from the client's own label — so a mapping correction in the
 registry corrects every row retroactively.
 """
 
+import asyncio
+
 from db import SlayerTaskCompletionEntry
-from utils.slayer_masters import BOSS_TASK_ID
+from utils.slayer_masters import BOSS_TASK_ID, excluded_master_ids_from_config
 from utils.slayer_masters import master_name as _registry_master_name
 
 from .common import (
     SubmissionResponse,
     attach_webhook_screenshot,
+    create_notification,
     ensure_player_by_name_then_auth,
+    get_config_prefix,
+    get_player_groups_with_global,
+    screenshot_required,
     select_session_and_flag,
     ensure_can_create,
     debug_print,
@@ -66,6 +74,7 @@ async def slayer_processor(slayer_data, external_session=None, world_type="main"
     debug_print(f"=== SLAYER PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"[SLAYER] Raw slayer data: {slayer_data}")
 
+    config_prefix = get_config_prefix(world_type)
     is_seasonal = world_type == SEASONAL_WORLD_TYPE
     session, use_external_session = select_session_and_flag(external_session)
 
@@ -89,6 +98,7 @@ async def slayer_processor(slayer_data, external_session=None, world_type="main"
         master_name = client_label[:40] or None
     completion_message = str(slayer_data.get("completion_message") or "").strip()[:255] or None
     timestamp = _safe_int(slayer_data.get("timestamp"))
+    plugin_version = slayer_data.get("p_v", None)
     debug_print(
         f"[SLAYER] task_name={task_name} task_id={task_id} master_id={master_id} "
         f"master_name={master_name} unique_id={unique_id}"
@@ -180,5 +190,118 @@ async def slayer_processor(slayer_data, external_session=None, world_type="main"
         except Exception:
             pass
 
+    # Group notifications. The completion is stored and counted by now, so a
+    # failure here costs the announcement and nothing else.
+    notice = ""
+    try:
+        notice = await _queue_group_notifications(
+            session,
+            player,
+            entry,
+            player_name=player_name,
+            config_prefix=config_prefix,
+            unique_id=unique_id,
+            image_url=image_url,
+            video_key=video_key,
+            video_url=video_url,
+            world_type=world_type,
+            plugin_version=plugin_version,
+            use_external_session=use_external_session,
+        )
+    except Exception as e:
+        print(f"[SLAYER] Couldn't queue slayer task notifications: {e}")
+
     debug_print("[SLAYER] === SLAYER PROCESSOR END ===")
-    return SubmissionResponse(success=True, message=f"Slayer task recorded: {task_name}")
+    return SubmissionResponse(
+        success=True, message=f"Slayer task recorded: {task_name}", notice=notice or None
+    )
+
+
+def notification_payload(entry, *, group_id, player_name, unique_id, image_url,
+                         video_key, video_url, world_type, plugin_version) -> dict:
+    """What the notification sender is given for one group. Figures are the
+    stored row's, so the message says what the database says."""
+    return {
+        "group_id": group_id,
+        "player_name": player_name,
+        "player_id": entry.player_id,
+        "slayer_id": getattr(entry, "id", None),
+        "guid": unique_id,
+        "task_name": entry.task_name,
+        "task_id": entry.task_id,
+        "boss_id": entry.boss_id,
+        "master_id": entry.master_id,
+        "master_name": entry.master_name,
+        "amount_initial": entry.amount_initial,
+        "amount_killed": entry.amount_killed,
+        "streak": entry.streak,
+        "points_awarded": entry.points_awarded,
+        "points_total": entry.points_total,
+        "xp_gained": entry.xp_gained,
+        "timestamp": entry.timestamp,
+        "image_url": image_url or "",
+        "video_key": video_key,
+        "video_url": video_url,
+        "world_type": world_type,
+        "plugin_version": plugin_version,
+    }
+
+
+async def _queue_group_notifications(session, player, entry, *, player_name,
+                                     config_prefix, unique_id, image_url, video_key, video_url,
+                                     world_type, plugin_version,
+                                     use_external_session) -> str:
+    """Queue one ``slayer`` notification per group that wants this task.
+
+    Returns the screenshot notice for the plugin, or "". A group is skipped
+    when it has the notification off (the default), when the task's master is
+    one it leaves out, or when it requires a screenshot and there is none.
+    Channel, hidden-player and blacklist gates are create_notification's.
+    """
+    from utils import group_config as gc
+
+    notice = ""
+    for group in get_player_groups_with_global(session, player):
+        await asyncio.sleep(0)
+        group_id = group.group_id
+
+        if not gc.is_truthy(gc.get(session, group_id, f"{config_prefix}{gc.NOTIFY_SLAYER_TASKS}")):
+            continue
+
+        excluded = excluded_master_ids_from_config(
+            gc.get(session, group_id, gc.SLAYER_EXCLUDED_MASTERS)
+        )
+        if entry.master_id is not None and entry.master_id in excluded:
+            debug_print(
+                f"[SLAYER] {entry.master_name or entry.master_id} tasks are skipped "
+                f"by group {group.group_name}"
+            )
+            continue
+
+        if await screenshot_required(session, group_id):
+            if not image_url and not video_key and not video_url:
+                notice = (
+                    f"Your slayer task submission did not include a screenshot "
+                    f"(required for {group.group_name}). Please enable screenshots "
+                    f"in the DropTracker plugin configuration."
+                )
+                continue
+
+        await create_notification(
+            "slayer",
+            entry.player_id,
+            notification_payload(
+                entry,
+                group_id=group_id,
+                player_name=player_name,
+                unique_id=unique_id,
+                image_url=image_url,
+                video_key=video_key,
+                video_url=video_url,
+                world_type=world_type,
+                plugin_version=plugin_version,
+            ),
+            group_id,
+            existing_session=session if use_external_session else None,
+        )
+    return notice

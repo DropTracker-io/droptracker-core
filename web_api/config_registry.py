@@ -25,6 +25,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
+from utils.slayer_masters import DEFAULT_EXCLUDED_MASTER_IDS, SLAYER_MASTERS
+
 SEASONAL_PREFIX = "seasonal_"
 
 # Ordered category list (mirrors the TS CONFIG_CATEGORIES; TS calls the key
@@ -47,8 +49,11 @@ CONFIG_CATEGORIES: List[Dict[str, str]] = [
 ]
 
 # type ∈ channel | boolean | int | string | text | csv | bosslist | select
+#        | multiselect
 # (bosslist stores a comma-separated boss-name list like csv; the frontend
-# renders it as a picker backed by GET /groups/{id}/pb-bosses.)
+# renders it as a picker backed by GET /groups/{id}/pb-bosses. multiselect
+# stores comma-separated option values, in option order; its options are
+# {"value", "label"} dicts, where a select's are bare strings.)
 GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # --- Channels ---
     # NOTE: notification routing reads the channel_id_to_post_* keys (see
@@ -575,6 +580,40 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "seasonal": True,
     },
 
+    # --- Slayer tasks ---
+    # Completions come from the plugin's SlayerHandler (6.0.6+) and are
+    # recorded for every player whatever this says; these only decide what is
+    # announced. The master list is stored as comma-separated SLAYER_MASTER
+    # ids, and an ABSENT row means "the reset masters" (Turael/Aya, Spria),
+    # while a saved "" means "skip nobody". Read by data/submissions/slayer.py
+    # through utils.slayer_masters.excluded_master_ids_from_config.
+    {
+        "key": "notify_slayer_tasks",
+        "label": "Notify slayer tasks",
+        "category": "achievements",
+        "type": "boolean",
+        "help": "Post a notification when a member completes a slayer task.",
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "slayer_excluded_masters",
+        "label": "Skip tasks from",
+        "category": "achievements",
+        "type": "multiselect",
+        "help": "Tasks from these masters are not announced. By default that's Turael and Spria, whose tasks give no points and are mostly used to skip tasks from other masters.",
+        "default": ",".join(str(i) for i in sorted(DEFAULT_EXCLUDED_MASTER_IDS)),
+        "options": [{"value": str(m.id), "label": m.label} for m in SLAYER_MASTERS],
+    },
+    {
+        "key": "channel_id_to_post_slayer",
+        "label": "Slayer channel",
+        "category": "achievements",
+        "type": "channel",
+        "help": "Channel for slayer task notifications. Falls back to the drops channel when unset.",
+        "default": None,
+    },
+
     # --- Board settings ---
     # boardstyle: a lootboards-table row id chosen via the preview picker
     # (GET /lootboard-styles). Existence is validated in the PATCH route —
@@ -986,7 +1025,7 @@ def coerce_from_storage(field: Dict[str, Any], stored: Optional[str]) -> Any:
         if ("min" in field and value < field["min"]) or ("max" in field and value > field["max"]):
             return field.get("default")
         return value
-    # channel / string / text / csv / bosslist / select -> string
+    # channel / string / text / csv / bosslist / select / multiselect -> string
     return str(stored)
 
 
@@ -1042,6 +1081,29 @@ def coerce_message_list(key: str, value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def coerce_multiselect(key: str, field: Dict[str, Any], value: Any) -> str:
+    """Validate a multiselect value (a list, or the comma-separated stored
+    form) and return its stored form: the chosen option values in option
+    order, comma-separated, or "" for none chosen. "" is a real choice here,
+    distinct from the absent row that means the field's default."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        parts = [str(v).strip() for v in value]
+    elif isinstance(value, (str, int)) and not isinstance(value, bool):
+        parts = [p.strip() for p in str(value).split(",")]
+    else:
+        raise ConfigValidationError(key, f"'{key}' must be a list of options.")
+    chosen = {p for p in parts if p}
+    allowed = [o["value"] for o in field.get("options") or []]
+    unknown = sorted(chosen - set(allowed))
+    if unknown:
+        raise ConfigValidationError(
+            key, f"'{key}' has unknown option(s): {', '.join(unknown)}."
+        )
+    return ",".join(v for v in allowed if v in chosen)
+
+
 def coerce_to_storage(key: str, value: Any) -> str:
     """Validate a client value against the registry and return its text form
     for ``group_configurations.config_value``. Raises ConfigValidationError."""
@@ -1079,6 +1141,9 @@ def coerce_to_storage(key: str, value: Any) -> str:
 
     if ftype == "messagelist":
         return coerce_message_list(key, value)
+
+    if ftype == "multiselect":
+        return coerce_multiselect(key, field, value)
 
     # channel / string / text / csv / bosslist
     if value is None:

@@ -7,8 +7,8 @@ is the one staff surface over all three, backing the ACP's Default embeds page:
 
   embeds             ``group_embeds`` rows on group 1. Seven types have a row
                      and nothing behind it — a missing row stops the send — so
-                     those can be edited but never removed. quest/death/diary
-                     have no row and are sent the embed built in code
+                     those can be edited but never removed. quest/death/diary/
+                     slayer have no row and are sent the embed built in code
                      (``NotificationService._build_default_*_embed``); a row
                      saved here replaces that built-in for every group, and
                      removing it brings the built-in back.
@@ -23,7 +23,7 @@ is the one staff surface over all three, backing the ACP's Default embeds page:
 
   GET    /api/v1/admin/notification-defaults/embeds
   PUT    /api/v1/admin/notification-defaults/embeds/{type}
-  DELETE /api/v1/admin/notification-defaults/embeds/{type}             (quest/death/diary)
+  DELETE /api/v1/admin/notification-defaults/embeds/{type}             (quest/death/diary/slayer)
   GET    /api/v1/admin/notification-defaults/event-layouts
   PUT    /api/v1/admin/notification-defaults/event-layouts/{type}
   DELETE /api/v1/admin/notification-defaults/event-layouts/{type}
@@ -72,21 +72,21 @@ def _component_layouts_module():
 # Built-in embeds
 # --------------------------------------------------------------------------- #
 def _builtin_embed(embed_type: str, title: str, description: str, color: str,
-                   fields: tuple) -> dict:
+                   fields: tuple, thumbnail: str | None = None) -> dict:
     return {
         "embed_type": embed_type,
         "title": title,
         "url": None,
         "description": description,
         "color": color,
-        "thumbnail": None,
+        "thumbnail": thumbnail,
         "image": None,
         "timestamp": False,
         "fields": [{"name": n, "value": v, "inline": inline} for n, v, inline in fields],
     }
 
 
-# The code-built embeds the three row-less types are sent, written as templates
+# The code-built embeds the row-less types are sent, written as templates
 # so the editor can show them and start from them. A template cannot branch, so
 # these are close rather than exact: the builders print "?" for a missing
 # count, fall back to the region id when there is no location, and wrap the
@@ -124,6 +124,22 @@ BUILTIN_EMBEDS = {
         "{player_name} completed the **{diary_tier} {diary_name}** diary.",
         "#5A8DEE",
         (("Video", "{video_link}", False),),
+    ),
+    # Every field below the description can be absent (an unknown master, a
+    # task that earned no points), and each drops on its own.
+    "slayer": _builtin_embed(
+        "slayer",
+        "Slayer Task Completed",
+        "{player_name} killed **{slayer_kills} {slayer_task}**.",
+        "#8B1A1A",
+        (
+            ("Master", "{slayer_master}", True),
+            ("Task streak", "{slayer_streak}", True),
+            ("Points earned", "{slayer_points}", True),
+            ("Slayer XP", "{slayer_xp}", True),
+            ("Video", "{video_link}", False),
+        ),
+        thumbnail="{slayer_icon}",
     ),
 }
 

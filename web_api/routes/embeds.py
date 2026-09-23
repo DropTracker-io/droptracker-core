@@ -8,8 +8,12 @@ Templates live in ``group_embeds`` / ``group_embed_fields`` — the same tables
 the notification service reads (``db/ops.py get_group_embed``). Group 1 is the
 system template group: its rows are the defaults every non-subscribed group
 falls back to, so GET returns both the group's custom template and the group-1
-default per type. DELETE reverts a type to the default and intentionally needs
-no entitlement (a downgraded group must be able to clean up).
+default per type. A type with no group-1 row (quest, death, diary, slayer) is
+sent an embed built in code; GET returns that embed's template form
+(``notification_defaults.BUILTIN_EMBEDS``) as the default instead, so the
+editor starts from what the group receives rather than from a blank form.
+DELETE reverts a type to the default and intentionally needs no entitlement (a
+downgraded group must be able to clean up).
 
 The bot only *renders* a group's own rows when ``db.entitlements
 .has_custom_embeds()`` passes, so a row saved here never leaks to Discord
@@ -43,7 +47,9 @@ TEMPLATE_GROUP_ID = 1
 
 # Embed types the notification pipeline actually renders (see
 # services/notification_service.py + the lootboard loop in bots/main.py).
-EMBED_TYPES = ("drop", "clog", "pb", "ca", "pet", "level_up", "quest", "death", "diary", "lb")
+EMBED_TYPES = (
+    "drop", "clog", "pb", "ca", "pet", "level_up", "quest", "death", "diary", "slayer", "lb",
+)
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -194,6 +200,16 @@ def _validate_body(body: dict) -> dict:
     }
 
 
+def _builtin_default(embed_type: str) -> dict | None:
+    """The template form of a code-built default embed, or None for a type
+    that has none. Imported here, not at module level: notification_defaults
+    imports this module."""
+    from web_api.routes.notification_defaults import BUILTIN_EMBEDS
+
+    builtin = BUILTIN_EMBEDS.get(embed_type)
+    return json.loads(json.dumps(builtin)) if builtin else None
+
+
 def _load_rows(s, group_id: int, embed_type: str) -> list[GroupEmbed]:
     return (
         s.query(GroupEmbed)
@@ -273,7 +289,11 @@ async def list_group_embeds(group_id: int):
                             if custom_rows and group_id != TEMPLATE_GROUP_ID
                             else None
                         ),
-                        "default": _serialize_embed(default_rows[0]) if default_rows else None,
+                        "default": (
+                            _serialize_embed(default_rows[0])
+                            if default_rows
+                            else _builtin_default(embed_type)
+                        ),
                     }
                 )
             return {"embeds": out}

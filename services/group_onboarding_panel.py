@@ -232,6 +232,21 @@ def _short(value: str, limit: int = 60) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
+def multiselect_chosen(field: dict, stored) -> set:
+    """Option values a multiselect has chosen. ``stored`` is None when the
+    group never saved the field, which means its default; a saved "" means
+    none chosen."""
+    raw = field.get("default") if stored is None else stored
+    return {p.strip() for p in str(raw or "").split(",") if p.strip()}
+
+
+def multiselect_summary(field: dict, stored) -> str:
+    """The chosen options' labels, for a one-line description."""
+    chosen = multiselect_chosen(field, stored)
+    labels = [o["label"] for o in field.get("options") or [] if o["value"] in chosen]
+    return ", ".join(labels) if labels else "None"
+
+
 # ── Panel builders ───────────────────────────────────────────────────────────
 
 def _back(custom_id: str = f"{PREFIX}home") -> Button:
@@ -306,10 +321,19 @@ def build_category_page(group_id: int, cat_key: str, saved: str = ""):
             custom_id=f"{PREFIX}cfg:bools:{cat_key}:{group_id}",
         )))
     if others:
+        # A multiselect's "" is a saved choice, not "unset": read those keys
+        # again with absence kept distinct, and show labels, not ids.
+        multi_keys = [f["key"] for f in others if f.get("type") == "multiselect"]
+        stored_multi = (get_group_config_values(group_id, multi_keys, missing=None)
+                        if multi_keys else {})
         options = [
             StringSelectOption(
                 label=f["label"][:100], value=f["key"],
-                description=_short(current.get(f["key"], ""), 100),
+                description=(
+                    _short(multiselect_summary(f, stored_multi.get(f["key"])), 100)
+                    if f.get("type") == "multiselect"
+                    else _short(current.get(f["key"], ""), 100)
+                ),
             )
             for f in others[:25]
         ]
@@ -359,6 +383,28 @@ def build_select_editor(group_id: int, key: str, cat_key: str):
         ActionRow(StringSelectMenu(
             *options, placeholder="Choose…",
             custom_id=f"{PREFIX}cfg:sel:{cat_key}:{group_id}:{key}")),
+        ActionRow(_back(f"{PREFIX}cfg:page:{cat_key}:{group_id}")),
+    ]
+    return content, rows
+
+
+def build_multiselect_editor(group_id: int, key: str, cat_key: str):
+    field = _field(key)
+    stored = get_group_config_values(group_id, [key], missing=None).get(key)
+    chosen = multiselect_chosen(field, stored)
+    content = (f"## ⚙️ {field['label']}\n"
+               + (f"*{field.get('help')}*\n" if field.get("help") else "")
+               + "Select every one that applies; clear them all for none.")
+    options = [
+        StringSelectOption(label=str(opt["label"])[:100], value=str(opt["value"]),
+                           default=(str(opt["value"]) in chosen))
+        for opt in (field.get("options") or [])[:25]
+    ]
+    rows = [
+        ActionRow(StringSelectMenu(
+            *options, placeholder="None",
+            min_values=0, max_values=len(options),
+            custom_id=f"{PREFIX}cfg:msel:{cat_key}:{group_id}:{key}")),
         ActionRow(_back(f"{PREFIX}cfg:page:{cat_key}:{group_id}")),
     ]
     return content, rows
@@ -739,6 +785,8 @@ class GroupOnboardingPanel(Extension):
                 content, rows = build_channel_editor(gid, key, cat_key)
             elif ftype == "select":
                 content, rows = build_select_editor(gid, key, cat_key)
+            elif ftype == "multiselect":
+                content, rows = build_multiselect_editor(gid, key, cat_key)
             else:  # int / string / text / csv / bosslist / boardstyle
                 await ctx.send_modal(build_value_modal(gid, key, cat_key))
                 return
@@ -756,6 +804,12 @@ class GroupOnboardingPanel(Extension):
         elif action.startswith("cfg:sel:"):
             _, _, cat_key, gid, key = action.split(":", 4)
             set_group_config(int(gid), validate_updates({key: ctx.values[0]}),
+                             actor_discord_id=ctx.author.id)
+            content, rows = build_category_page(int(gid), cat_key, saved=SAVED)
+
+        elif action.startswith("cfg:msel:"):
+            _, _, cat_key, gid, key = action.split(":", 4)
+            set_group_config(int(gid), validate_updates({key: list(ctx.values or [])}),
                              actor_discord_id=ctx.author.id)
             content, rows = build_category_page(int(gid), cat_key, saved=SAVED)
 

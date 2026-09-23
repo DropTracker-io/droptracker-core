@@ -28,7 +28,9 @@ share an id here and either name resolves to it.
 **Reset masters.** Turael/Aya and Spria award no points and reset the task
 streak; they are what "Turael skipping" uses to shed an unwanted task in
 seconds. A ``slayer_target`` event task excludes them unless the organiser
-says otherwise (:data:`DEFAULT_EXCLUDED_MASTER_IDS`).
+says otherwise (:data:`DEFAULT_EXCLUDED_MASTER_IDS`), and so do a group's
+Discord notifications unless its ``slayer_excluded_masters`` setting says
+otherwise (:func:`excluded_master_ids_from_config`).
 
 **Assignment names** mirror RuneLite's ``Task`` enum, which is keyed on the
 game cache's own spelling (``DBTableID.SlayerTask`` ``COL_NAME_UPPERCASE``) and
@@ -49,6 +51,7 @@ __all__ = [
     "SlayerMaster",
     "canonical_task_name",
     "catalog_records",
+    "excluded_master_ids_from_config",
     "master_by_id",
     "master_by_name",
     "master_name",
@@ -76,6 +79,14 @@ class SlayerMaster:
     @property
     def names(self) -> tuple:
         return (self.name,) + tuple(self.aliases)
+
+    @property
+    def label(self) -> str:
+        """The name plus the alternates who stand in for this master, for a
+        picker ("Turael / Aya"). An alias containing the name is a longer
+        form of it ("Konar quo Maten"), not another NPC, so it is left out."""
+        others = tuple(a for a in self.aliases if self.name.lower() not in a.lower())
+        return " / ".join((self.name,) + others)
 
 
 SLAYER_MASTERS: tuple = (
@@ -148,6 +159,27 @@ def normalize_master_ids(raw: Iterable) -> list:
     if unknown:
         raise ValueError("Unknown slayer master(s): " + ", ".join(unknown))
     return sorted(ids)
+
+
+def excluded_master_ids_from_config(raw) -> frozenset:
+    """The masters a group's ``slayer_excluded_masters`` setting leaves out of
+    its Discord notifications.
+
+    ``None`` means the group never saved the setting, so the reset masters
+    are left out, the same default an event task uses. An empty string is a
+    saved choice to leave nobody out. Otherwise the value is the registry's
+    stored form, comma-separated master ids ("1,9"). Anything that is not a
+    known id is ignored rather than raised: this runs on the submission path,
+    and a bad stored value must not cost a notification.
+    """
+    if raw is None:
+        return DEFAULT_EXCLUDED_MASTER_IDS
+    ids = set()
+    for part in str(raw).split(","):
+        master = master_by_id(part)
+        if master is not None:
+            ids.add(master.id)
+    return frozenset(ids)
 
 
 def catalog_records() -> list:

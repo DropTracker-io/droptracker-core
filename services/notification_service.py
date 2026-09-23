@@ -73,6 +73,11 @@ CONTRIBUTION_CHANNEL_ID = int(os.getenv("DISCORD_CONTRIBUTION_CHANNEL_ID", "1490
 BRAND_THUMBNAIL = "https://www.droptracker.io/img/droptracker-small.gif"
 CONTRIBUTION_COLOR = "#00f0f0"
 
+# Slayer task notifications: the Slayer skill icon beside every one, and a
+# darker red than a death's #B23B3B so the two read apart in a shared channel.
+SLAYER_ICON_URL = f"{IMG_BASE}/metrics/slayer.png"
+SLAYER_COLOR = "#8B1A1A"
+
 # Direct-message queue types. Submission DMs (everything except dm_name_change)
 # are a supporter perk gated on the `dm_submissions` user entitlement; queueing
 # is opt-in via user_configurations `dm_*` keys (see data/submissions/*).
@@ -536,6 +541,67 @@ class NotificationService:
             description=f"{player_link(player_name, player_id)} completed the **{diary_label}** diary.",
             color="#5A8DEE",
         )
+        if video_url:
+            embed.add_field(name="Video", value=f"[Watch clip]({video_url})", inline=False)
+        embed.set_footer(global_footer)
+        return embed
+
+    @classmethod
+    def _slayer_placeholder_map(cls, data: dict) -> dict:
+        """The slayer-specific placeholders, shared by the embed template, the
+        components layout and the code-built default.
+
+        A figure the plugin could not read resolves to "" so its field or line
+        drops. So do points for a task that earned none (the first four of a
+        streak, Turael/Aya and Spria, most Mortimer tasks) and XP of zero: an
+        empty field says less than "0" does.
+        """
+        def number(key, *, positive_only=False):
+            value = cls._coerce_int(data.get(key))
+            if value is None or (positive_only and value <= 0):
+                return ""
+            return f"{value:,}"
+
+        return {
+            "{slayer_task}": str(data.get("task_name") or "").strip(),
+            "{slayer_master}": str(data.get("master_name") or "").strip(),
+            "{slayer_kills}": number("amount_killed"),
+            "{slayer_task_size}": number("amount_initial", positive_only=True),
+            "{slayer_streak}": number("streak"),
+            "{slayer_points}": number("points_awarded", positive_only=True),
+            "{slayer_points_total}": number("points_total"),
+            "{slayer_xp}": number("xp_gained", positive_only=True),
+            "{slayer_icon}": SLAYER_ICON_URL,
+        }
+
+    def _build_default_slayer_embed(self, data: dict, player_name: str, player_id: int, video_url: str = "") -> interactions.Embed:
+        """
+        Build the default slayer task embed when no DB-backed template exists.
+
+        Mirrored as a template by BUILTIN_EMBEDS["slayer"]
+        (web_api/routes/notification_defaults.py) and as a components layout
+        by DEFAULT_LAYOUTS["slayer"]; test_notification_default_embeds holds
+        the first pair together.
+        """
+        values = self._slayer_placeholder_map(data)
+        task = values["{slayer_task}"] or "a slayer task"
+        kills = values["{slayer_kills}"]
+        killed = f"{kills} {task}" if kills else task
+
+        embed = interactions.Embed(
+            title="Slayer Task Completed",
+            description=f"{player_link(player_name, player_id)} killed **{killed}**.",
+            color=SLAYER_COLOR,
+        )
+        embed.set_thumbnail(SLAYER_ICON_URL)
+        for name, token in (
+            ("Master", "{slayer_master}"),
+            ("Task streak", "{slayer_streak}"),
+            ("Points earned", "{slayer_points}"),
+            ("Slayer XP", "{slayer_xp}"),
+        ):
+            if values[token]:
+                embed.add_field(name=name, value=values[token], inline=True)
         if video_url:
             embed.add_field(name="Video", value=f"[Watch clip]({video_url})", inline=False)
         embed.set_footer(global_footer)
@@ -1590,6 +1656,8 @@ class NotificationService:
                 await self.send_death_notification_with_session(notification, data, db_session)
             elif notification_type == 'diary':
                 await self.send_diary_notification_with_session(notification, data, db_session)
+            elif notification_type == 'slayer':
+                await self.send_slayer_notification_with_session(notification, data, db_session)
             elif notification_type == 'new_npc':
                 await self.send_new_npc_notification_with_session(notification, data, db_session)
             elif notification_type == 'new_item':
@@ -2519,6 +2587,119 @@ class NotificationService:
                 )
 
             content = f"{formatted_name} completed an achievement diary!"
+
+            # Prefer attaching MP4 if available; otherwise attach screenshot if present.
+            video_attachment, video_local_path = (None, None)
+            if video_url:
+                video_attachment, video_local_path = await self._download_video_attachment(video_url, notification.id)
+
+            try:
+                if video_attachment:
+                    await self._send(channel, content, embed=embed, files=video_attachment)
+                elif image_url:
+                    try:
+                        # Resolved + containment-checked (local tree or our B2 bucket;
+                        # anything else needs the remote-host allowlist — see the resolver).
+                        attachment, _img_tmp = await self._resolve_image_attachment(
+                            image_url, notification.id)
+                        if attachment:
+                            await self._send(channel, content, embed=embed, files=attachment)
+                        else:
+                            await self._send(channel, content, embed=embed)
+                    except Exception:
+                        await self._send(channel, content, embed=embed)
+                else:
+                    await self._send(channel, content, embed=embed)
+            finally:
+                if video_local_path:
+                    try:
+                        os.remove(video_local_path)
+                    except Exception:
+                        pass
+
+            await self._cleanup_processed_local_video_after_send(db_session, data)
+            notification.status = 'sent'
+            notification.processed_at = datetime.now()
+            db_session.commit()
+
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            raise
+
+    async def send_slayer_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Send a slayer task completion notification.
+
+        Queued by data/submissions/slayer.py only for groups with
+        notify_slayer_tasks on whose skipped masters don't include this
+        task's. No group-1 template row ships: groups without their own get
+        _build_default_slayer_embed, like quest/death/diary.
+        """
+        notification.status = 'processing'
+        db_session.commit()
+        try:
+            group_id = notification.group_id
+            player_id = notification.player_id
+
+            # Dedicated slayer channel, falling back to the drops channel: the
+            # pair GROUP_CHANNEL_NOTIFICATION_KEYS["slayer"] gates enqueue on.
+            channel_id_value = self._resolve_group_channel_id(
+                db_session, group_id, 'channel_id_to_post_slayer'
+            )
+            if not channel_id_value:
+                notification.status = 'failed'
+                notification.error_message = f"No channel configured for group {group_id}"
+                db_session.commit()
+                return
+
+            channel, channel_error = await self._fetch_sendable_channel(channel_id_value)
+            if channel is None:
+                notification.status = 'failed'
+                notification.error_message = channel_error or f"Channel not found for group {group_id}"
+                db_session.commit()
+                return
+
+            if has_custom_embeds(group_id):
+                embed_template = await self.db_ops.get_group_embed('slayer', group_id)
+            else:
+                embed_template = await self.db_ops.get_group_embed('slayer', 1)
+
+            player_name = data.get("player_name") or ""
+            image_url = data.get("image_url") or ""
+            video_url = self._maybe_get_video_url(db_session, data)
+
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
+            replacements = {
+                "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
+                "{video_url}": video_url or "",
+                "{video_link}": f"[Video]({video_url})" if video_url else "",
+                # Prefer video for display; keep screenshot in data["image_url"] for attachments
+                "{image_url}": video_url or image_url or "",
+            }
+            replacements.update(self._slayer_placeholder_map(data))
+            replacements.update(self._plugin_version_placeholder_map(data))
+
+            if await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "slayer", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
+            if embed_template:
+                embed = replace_placeholders(embed_template, replacements)
+                if group_id == 2:
+                    embed = await self.remove_group_field(embed)
+            else:
+                embed = self._build_default_slayer_embed(
+                    data=data,
+                    player_name=player_name,
+                    player_id=player_id,
+                    video_url=video_url,
+                )
+
+            content = f"{formatted_name} completed a slayer task!"
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.
             video_attachment, video_local_path = (None, None)

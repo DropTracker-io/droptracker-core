@@ -89,16 +89,17 @@ def set_group_config(group_id: int, stored: dict, *,
     group_config.invalidate(group_id)
 
 
-def get_group_config_values(group_id: int, keys) -> dict:
-    """{key: effective stored string} for the requested keys ('' when
-    unset). Reads long_value when config_value spilled."""
+def get_group_config_values(group_id: int, keys, missing="") -> dict:
+    """{key: effective stored string} for the requested keys (``missing``,
+    '' by default, when unset — pass None where a saved '' and no row mean
+    different things). Reads long_value when config_value spilled."""
     s = Session()
     try:
         rows = (s.query(GroupConfiguration)
                 .filter(GroupConfiguration.group_id == group_id,
                         GroupConfiguration.config_key.in_(list(keys)))
                 .all())
-        out = {k: "" for k in keys}
+        out = {k: missing for k in keys}
         for r in rows:
             out[r.config_key] = (r.long_value
                                  if (r.long_value and not r.config_value)

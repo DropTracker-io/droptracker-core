@@ -266,7 +266,7 @@ A full walkthrough is in `docs/SUBMISSION_PIPELINE.md`. Short version:
 4. Each processor: deduplicates → validates player/item/NPC → resolves identity → writes DB row → updates Redis leaderboard → creates a `NotificationQueue` entry → queues the submission for Events v2
 5. `services/notification_service.py` (polls every 3s) builds Discord embeds and sends them to the group's configured channel
 
-**Submission types:** `drop`, `pb`, `clog`, `ca`, `pet`, `quest`, `experience`, `death`, `diary`, `adventure_log` (webhook.py accepts aliases — `npc`/`other`→drop, `player_death`→death, `achievement_diary`→diary, …)
+**Submission types:** `drop`, `pb`, `clog`, `ca`, `pet`, `quest`, `experience`, `death`, `diary`, `slayer`, `adventure_log` (webhook.py accepts aliases — `npc`/`other`→drop, `player_death`→death, `achievement_diary`→diary, …)
 
 ---
 
@@ -351,7 +351,8 @@ Stored in `group_configurations` (key-value per group). The authoritative schema
 
 | Key | Purpose |
 |---|---|
-| `channel_id_to_post_loot` | Drop notification channel (per-type overrides: `channel_id_to_post_{levels,pb,ca,pets,quests,clog,deaths,diaries}`) |
+| `channel_id_to_post_loot` | Drop notification channel (per-type overrides: `channel_id_to_post_{levels,pb,ca,pets,quests,clog,deaths,diaries,slayer}`) |
+| `notify_slayer_tasks` / `slayer_excluded_masters` | Slayer task announcements (off by default); skipped masters are comma-separated `SLAYER_MASTER` ids, and no row = Turael/Aya + Spria (`utils/slayer_masters.excluded_master_ids_from_config`) |
 | `minimum_value_to_notify` | GP threshold for drop announcements (default: 2,500,000) |
 | `only_send_messages_with_images` | Require screenshots before notifying |
 | `send_stacks_of_items` | Announce stackable items (e.g. runes) |
@@ -419,7 +420,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Change notification embed format | `utils/embeds.py` + `db/models/embed.py` (GroupEmbed) |
 | Put an item or NPC icon inside a message | `utils/game_emojis.py` (`emoji_for_item`/`emoji_for_npc`, name **or** id); regenerate the set with `scripts/rank_game_emojis.py --report` then `--write`, upload with `scripts/seed_game_emojis.py` |
 | Notifications sent as Components V2 instead of an embed | `services/component_layout.py` (DSL, defaults, token docs, pilot allowlist) + `web_api/routes/notification_layouts.py`; the send-path branch is `NotificationService._try_send_component_layout` |
-| Site-wide default notification designs (template group 1: embeds, event layouts, component starting layouts) | `web_api/routes/notification_defaults.py` (staff editor behind the web's `/admin/embeds`); quest/death/diary have no stored default and use `NotificationService._build_default_*_embed` |
+| Site-wide default notification designs (template group 1: embeds, event layouts, component starting layouts) | `web_api/routes/notification_defaults.py` (staff editor behind the web's `/admin/embeds`); quest/death/diary/slayer have no stored default and use `NotificationService._build_default_*_embed` |
 | Change event message wording/layout | `services/event_message_layouts.py` (DB-seeded — reseed on default change) |
 | Change leaderboard ranking logic | `services/redis_updates.py` |
 | Change lootboard image layout | `lootboard/generator.py` or `lootboard/flexible_generator.py` |

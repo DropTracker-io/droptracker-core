@@ -45,6 +45,10 @@ NOTIFY_QUESTS = "notify_quests"
 NOTIFY_POINTS_AWARDED = "notify_points_awarded"
 NOTIFY_DEATHS = "notify_deaths"
 NOTIFY_DIARIES = "notify_diaries"
+NOTIFY_SLAYER_TASKS = "notify_slayer_tasks"
+# Comma-separated SLAYER_MASTER ids; an absent row means the registry default.
+# Read through utils.slayer_masters.excluded_master_ids_from_config.
+SLAYER_EXCLUDED_MASTERS = "slayer_excluded_masters"
 # Points behavior toggle, written as "1"/"0" by the points settings route
 # (web_api/routes/points.py BEHAVIOR_BOOL_KEYS). Read through
 # points_replies_ephemeral() below, never directly.

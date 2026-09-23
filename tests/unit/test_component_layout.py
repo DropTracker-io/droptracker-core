@@ -356,6 +356,7 @@ class TestDefaultsMirrorTheEmbeds:
             "level_up": "levelled-up:",
             "quest": "completed a quest!",
             "diary": "completed an achievement diary!",
+            "slayer": "completed a slayer task!",
         }
         for notification_type, headline in expected.items():
             first = default_layout(notification_type)["blocks"][0]
@@ -386,6 +387,7 @@ class TestDefaultsMirrorTheEmbeds:
         assert default_layout("death")["accent_color"] == "#B23B3B"
         assert default_layout("quest")["accent_color"] == "#5A8DEE"
         assert default_layout("diary")["accent_color"] == "#5A8DEE"
+        assert default_layout("slayer")["accent_color"] == "#8B1A1A"
 
     def test_points_lines_only_where_the_sender_supplies_them(self):
         """level_up/quest/death/diary build no points map, so a points line
