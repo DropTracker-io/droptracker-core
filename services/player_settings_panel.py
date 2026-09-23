@@ -100,13 +100,16 @@ EVENT_PREF_LABELS = {
     "event_ended": "Event ended",
     "event_window_opened": "Scoring window opens",
     "event_window_closed": "Scoring window closes",
+    # Not an event type: the routine "Drop processed" chat line. Plugin
+    # 6.0.10+ has its own toggle, which overrides this one.
+    "drop_confirmation": "Drop processed confirmations",
 }
 
 
 def _event_pref_types() -> tuple:
-    from services.plugin_notifications import WEB_PREF_TYPES
+    from services.plugin_notifications import PLAYER_PREF_TYPES
 
-    return WEB_PREF_TYPES
+    return PLAYER_PREF_TYPES
 
 
 # ── Pure selection <-> state mapping (unit-tested) ───────────────────────────
@@ -429,9 +432,11 @@ def build_ig_panel(user_id: int, player_id=None, saved: str = "") -> tuple[str, 
     state = _event_prefs_state(target["id"], types)
     content = (
         f"{saved}## 🎮 In-game notifications — `{target['name']}`\n"
-        "Which event notifications the RuneLite plugin shows you in-game. "
+        "Which event notifications the RuneLite plugin shows you in-game, "
+        "and whether you get the *Drop processed* chat line. "
         "Task-progress ticks are muted in the plugin's own settings "
-        "(*Task progress notifications*)."
+        "(*Task progress notifications*), and a plugin that has its own "
+        "*Drop confirmations* setting uses that instead of this one."
     )
     select = StringSelectMenu(
         *[

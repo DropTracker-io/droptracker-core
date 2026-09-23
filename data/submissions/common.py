@@ -1350,6 +1350,29 @@ def is_user_dm_enabled(session, user_id, key):
     return user_has_entitlement(user_id, "dm_submissions")
 
 
+# Embed field plugin 6.0.10+ adds to every submission: the player's "Drop
+# confirmations" toggle ("true"/"false").
+DROP_CONFIRM_FIELD = "drop_confirm"
+
+
+def wants_drop_confirmation(session, submission_data: dict, player_id) -> bool:
+    """Whether to send the routine "Drop processed - a message has been sent
+    to X" chat line back to the player.
+
+    The plugin's own toggle wins whenever the submission carries it. Older
+    builds don't send it, so the website pref (player_notification_prefs
+    ``drop_confirmation``, default on) decides for them.
+    """
+    raw = submission_data.get(DROP_CONFIRM_FIELD)
+    if raw is not None and str(raw).strip() != "":
+        return is_truthy_config(raw)
+    if player_id is None:
+        return True
+    from services.plugin_notifications import player_pref_enabled
+
+    return player_pref_enabled(session, player_id, "drop_confirmation")
+
+
 async def ensure_item_by_name(session, item_name):
     if not item_name:
         return None

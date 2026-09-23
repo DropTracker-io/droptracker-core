@@ -150,6 +150,17 @@ WEB_PREF_TYPES = (
     "event_window_closed",
 )
 
+# Submission-side chat a player may switch off on the website. Not event types:
+# they never go through fan-out, the submission processor checks them itself
+# (:func:`player_pref_enabled`). drop_confirmation is the routine "Drop
+# processed - a message has been sent to X" line. Plugin 6.0.10+ carries its
+# own toggle and sends it on every submission; when that field is present it
+# wins over this pref (see data/submissions/common.wants_drop_confirmation),
+# so the website switch is what covers older plugin builds.
+SUBMISSION_PREF_TYPES = ("drop_confirmation",)
+# Everything the website / Discord settings panels list per account.
+PLAYER_PREF_TYPES = WEB_PREF_TYPES + SUBMISSION_PREF_TYPES
+
 # Broadcast importance (t66): the plugin styles/queues pop-ups by this, so a
 # raid drop that just finished a tile no longer reads like the next 50-KC
 # tick. The distinguishing data was already on the wire (event_completion
@@ -1473,7 +1484,7 @@ def _event_player_ids(session, event_id) -> list:
 def _players_with_type_disabled(session, notification_type: str, player_ids) -> set:
     """Subset of player_ids whose stored website prefs disable this type.
     Missing rows / missing keys mean enabled (defaults are all-on)."""
-    if notification_type not in WEB_PREF_TYPES or not player_ids:
+    if notification_type not in PLAYER_PREF_TYPES or not player_ids:
         return set()
     # Fail-open: a prefs lookup failure (e.g. table not migrated yet) must
     # not kill delivery — defaults are all-on anyway.
@@ -1498,6 +1509,13 @@ def _players_with_type_disabled(session, notification_type: str, player_ids) -> 
         if prefs.get(notification_type) is False:
             disabled.add(row.player_id)
     return disabled
+
+
+def player_pref_enabled(session, player_id, pref_type: str) -> bool:
+    """Whether one player's stored website prefs leave ``pref_type`` on.
+    Same semantics as delivery-time filtering: only an explicit ``false``
+    disables, and a lookup failure fails open."""
+    return player_id not in _players_with_type_disabled(session, pref_type, [player_id])
 
 
 def fan_out_event_notification(session, notification_type: str, event: dict,

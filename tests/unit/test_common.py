@@ -751,3 +751,59 @@ class TestHealStubOntoHashOwner:
 
     def test_none_wom_row_is_passed_through(self):
         assert self.fn(MagicMock(), None, self._row(1, "h"), 99) is None
+
+
+# ── wants_drop_confirmation ───────────────────────────────────────────────────
+
+class TestWantsDropConfirmation:
+    """The plugin's own toggle wins when the submission carries it; otherwise
+    the website pref (player_notification_prefs) decides."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        import sys
+        import types
+
+        from data.submissions.common import wants_drop_confirmation
+
+        self.fn = wants_drop_confirmation
+        self.pref_calls = []
+        self.site_pref = True
+        fake = types.ModuleType("services.plugin_notifications")
+
+        def player_pref_enabled(session, player_id, pref_type):
+            self.pref_calls.append((player_id, pref_type))
+            return self.site_pref
+
+        fake.player_pref_enabled = player_pref_enabled
+        with patch.dict(sys.modules, {"services.plugin_notifications": fake}):
+            yield
+
+    def test_plugin_false_suppresses_without_reading_site_pref(self):
+        assert self.fn(None, {"drop_confirm": "false"}, 5) is False
+        assert self.pref_calls == []
+
+    def test_plugin_true_beats_site_off(self):
+        self.site_pref = False
+        assert self.fn(None, {"drop_confirm": "true"}, 5) is True
+        assert self.pref_calls == []
+
+    def test_absent_field_uses_site_pref(self):
+        self.site_pref = False
+        assert self.fn(None, {"p_v": "6.0.9"}, 5) is False
+        assert self.pref_calls == [(5, "drop_confirmation")]
+
+    def test_blank_field_counts_as_absent(self):
+        self.site_pref = False
+        assert self.fn(None, {"drop_confirm": ""}, 5) is False
+        assert self.pref_calls == [(5, "drop_confirmation")]
+
+    def test_player_id_zero_is_a_real_player(self):
+        # user/player ids run 0 and negative; never truthiness-test them.
+        self.site_pref = False
+        assert self.fn(None, {}, 0) is False
+        assert self.pref_calls == [(0, "drop_confirmation")]
+
+    def test_unknown_player_defaults_on(self):
+        self.site_pref = False
+        assert self.fn(None, {}, None) is True

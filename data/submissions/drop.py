@@ -15,6 +15,7 @@ from .common import (
     resolve_attachment_from_drop_data,
     get_player_groups_with_global,
     is_user_dm_enabled,
+    wants_drop_confirmation,
     screenshot_required,
     select_session_and_flag,
     create_notification,
@@ -1142,18 +1143,24 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
 
         debug_print(f"Drop processor completed for {player_name}")
         if sent_group_notifications != []:
-            if len(sent_group_notifications) == 1:
-                group_name = sent_group_notifications[0]
-            else:
-                group_name = {", ".join(sent_group_notifications)}
+            group_name = ", ".join(sent_group_notifications)
             debug_print(
                 f"Returning success with group notifications: {group_name}"
             )
             debug_print(f"=== DROP PROCESSOR END (SUCCESS) ===")
+            # A real notice (screenshot gate etc.) always goes out; only the
+            # routine confirmation is optional.
+            if notice == "":
+                try:
+                    if wants_drop_confirmation(session, drop_data, player_id):
+                        notice = f"Drop processed - a message has been sent to {group_name} for you"
+                except Exception as e:
+                    print(f"[DropConfirm] pref check failed, sending confirmation: {e}")
+                    notice = f"Drop processed - a message has been sent to {group_name} for you"
             return SubmissionResponse(
                 success=True,
                 message=f"Drop created successfully",
-                notice=notice if notice != "" else f"Drop processed - a message has been sent to {group_name} for you",
+                notice=notice or None,
             )
         else:
             debug_print(f"Returning success without group notifications")

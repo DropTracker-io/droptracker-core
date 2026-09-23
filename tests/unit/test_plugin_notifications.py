@@ -465,6 +465,15 @@ class TestTypeRegistryConsistency:
         for t in pn.WEB_PREF_TYPES:
             assert t in pn.AUDIENCE_FOR_TYPE, t
 
+    def test_submission_prefs_are_listed_but_not_event_types(self):
+        # Submission prefs show up in the settings panels but never go
+        # through event fan-out.
+        for t in pn.SUBMISSION_PREF_TYPES:
+            assert t in pn.PLAYER_PREF_TYPES
+            assert t not in pn.WEB_PREF_TYPES
+            assert t not in pn.AUDIENCE_FOR_TYPE
+        assert set(pn.WEB_PREF_TYPES) <= set(pn.PLAYER_PREF_TYPES)
+
     def test_task_progress_is_client_toggle_only(self):
         # Owner decision 2026-07-17: the noisiest type is muted in game, not
         # on the website — it must never appear in the web pref registry.

@@ -635,15 +635,18 @@ _EVENT_PREF_LABELS = {
     # web82a — recurring-schedule events only; silent for continuous ones.
     "event_window_opened": "Scoring window opens",
     "event_window_closed": "Scoring window closes",
+    # Not an event type: the routine "Drop processed" chat line. Plugin
+    # 6.0.10+ has its own toggle, which overrides this one.
+    "drop_confirmation": "Drop processed confirmations",
 }
 
 
 def _event_pref_types() -> tuple:
     # Single source of truth for the allowed keys; lazy so unit-test stubs of
     # the services package never break module import.
-    from services.plugin_notifications import WEB_PREF_TYPES
+    from services.plugin_notifications import PLAYER_PREF_TYPES
 
-    return WEB_PREF_TYPES
+    return PLAYER_PREF_TYPES
 
 
 def _prefs_map(row, types) -> dict:

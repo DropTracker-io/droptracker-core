@@ -51,7 +51,7 @@ def test_event_pref_labels_cover_all_types():
         os.path.join(_ROOT, "services", "plugin_notifications.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert set(mod.WEB_PREF_TYPES) == set(panel.EVENT_PREF_LABELS)
+    assert set(mod.PLAYER_PREF_TYPES) == set(panel.EVENT_PREF_LABELS)
 
 
 # ── Death message (members' own death messages) ─────────────────────────────
