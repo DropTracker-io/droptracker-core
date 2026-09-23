@@ -61,17 +61,27 @@ def _floor_div(value: int, divisor: int) -> int:
 
 
 def _round_half_up_div(value: int, divisor: int) -> int:
-    """Historical GP-threshold division: .5 and above rounded up.
-
-    Superseded by :func:`_floor_div` for drop awards — a 800k drop under a
-    "1 point per 1m" rule must award 0, not 1. Kept for the audit scripts that
-    reconstruct what an existing ledger row was computed with.
-    """
+    """Integer division with .5 rounded up for GP-threshold awards."""
     if divisor <= 0:
         return 0
     if value <= 0:
         return 0
     return (value + (divisor // 2)) // divisor
+
+
+def _threshold_div(value: int, divisor: int) -> int:
+    """GP-threshold division for drop awards.
+
+    The divisor is a minimum, not just a rate: a drop worth less than it has
+    not met the bar the group set, so it earns nothing — an 800k drop under
+    "1 point per 1m" is 0, never 1. Once the bar IS met, the remainder still
+    rounds half-up the way it always has, so 1.6m is 2 points.
+    """
+    if divisor <= 0:
+        return 0
+    if value < divisor:
+        return 0
+    return _round_half_up_div(value, divisor)
 
 
 def _compute_split_shares(point_award, target_count, split_method):
@@ -633,7 +643,7 @@ async def _check_and_award_points(
     elif has_mod_override:
         # Mod override but no quantity: use divisor formula or flat award
         if reason == "drop" and divisor > 1:
-            point_award = _floor_div(int(value), int(divisor)) * int(award)
+            point_award = _threshold_div(int(value), int(divisor)) * int(award)
         else:
             point_award = int(award)
     elif reason == "drop":
@@ -647,12 +657,12 @@ async def _check_and_award_points(
                 stacks_award_points = await get_group_point_stack_config(group_id, external_session)
                 if not stacks_award_points:
                     per_item_value = total_value // int(qty)
-                    per_item_points = _floor_div(int(per_item_value), int(div)) * int(award)
+                    per_item_points = _threshold_div(int(per_item_value), int(div)) * int(award)
                     point_award = per_item_points * int(qty)
                 else:
-                    point_award = _floor_div(int(total_value), int(div)) * int(award)
+                    point_award = _threshold_div(int(total_value), int(div)) * int(award)
             else:
-                point_award = _floor_div(int(total_value), int(div)) * int(award)
+                point_award = _threshold_div(int(total_value), int(div)) * int(award)
         except Exception:
             point_award = 0
     else:

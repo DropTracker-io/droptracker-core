@@ -1,12 +1,15 @@
 """Regression tests for GP-threshold rounding in ``_check_and_award_points``
 (``data/submissions/point_awards.py``).
 
-Contract (user-reported fix, 2026-09-23): a group's drop rule is a threshold,
-not a rate to round to. Under "1 point per 1m" a drop worth 800k awards
-nothing — the old half-up division paid a full point for anything from 500k
-up, which handed out points below the minimum the clan configured. Every GP
-path (default rule, stacked and unstacked quantities, and a per-item/NPC
-override with a divisor) floors the same way.
+Contract (user-reported fix, 2026-09-23): a group's drop divisor is a MINIMUM
+as well as a rate. A drop worth less than the divisor has not met the bar the
+clan set, so it earns nothing — half-up division used to pay a full point for
+anything from 500k up under "1 point per 1m", which handed out points below
+that minimum. Once the bar IS met the remainder still rounds half-up exactly
+as before: 1.6m is 2 points, 21.7m is 22. Only the sub-threshold case changed.
+
+Every GP path applies the same rule — the default drop rule, stacked and
+unstacked quantities, and a per-item/NPC override with a divisor.
 """
 
 import json
@@ -125,59 +128,89 @@ def make_mod(award=1, divisor=1_000_000):
     )
 
 
-class TestDefaultDropRuleFloors:
-    async def test_below_the_divisor_awards_nothing(self, monkeypatch):
+class TestBelowTheMinimum:
+    """The only behaviour that changed: a drop under the divisor pays nothing."""
+
+    async def test_reported_case_800k_awards_nothing(self, monkeypatch):
         result = await run(monkeypatch, value=800_000)
         assert result["receiver_points_awarded"] == 0
         assert result["total_points_awarded"] == 0
 
-    async def test_just_over_half_awards_nothing(self, monkeypatch):
-        # The half-up formula paid 1 here; the threshold was never met.
+    async def test_exactly_half_the_divisor_awards_nothing(self, monkeypatch):
+        # Half-up paid 1 from here up; the clan's minimum was never met.
         result = await run(monkeypatch, value=500_000)
         assert result["receiver_points_awarded"] == 0
 
-    async def test_exact_multiple_awards_in_full(self, monkeypatch):
+    async def test_one_gp_short_awards_nothing(self, monkeypatch):
+        result = await run(monkeypatch, value=999_999)
+        assert result["receiver_points_awarded"] == 0
+
+    async def test_exactly_the_divisor_pays(self, monkeypatch):
         result = await run(monkeypatch, value=1_000_000)
         assert result["receiver_points_awarded"] == 1
 
-    async def test_remainder_is_dropped_not_rounded(self, monkeypatch):
-        # 21.7m at 1 per 1m = 21 points, not 22.
-        result = await run(monkeypatch, value=21_700_000)
-        assert result["receiver_points_awarded"] == 21
-
-    async def test_award_multiplies_the_floored_quotient(self, monkeypatch):
-        # 5 points per 1m: 1.8m = 1 × 5, not 2 × 5.
-        result = await run(monkeypatch, value=1_800_000, point_config="5,1000000")
-        assert result["receiver_points_awarded"] == 5
+    async def test_high_divisor_only_gates_below_itself(self, monkeypatch):
+        # 5 per 10m: 9.9m is under the bar, 10m clears it and pays the award.
+        assert (await run(monkeypatch, value=9_900_000,
+                          point_config="5,10000000"))["receiver_points_awarded"] == 0
+        assert (await run(monkeypatch, value=10_000_000,
+                          point_config="5,10000000"))["receiver_points_awarded"] == 5
 
 
-class TestStackedDropsFloor:
-    async def test_stacked_total_floors(self, monkeypatch):
-        # Stacking on: the stack's full value goes through the divisor once.
-        result = await run(monkeypatch, value=1_800_000, quantity=3,
-                           stacks_award_points=True)
+class TestAboveTheMinimumStillRounds:
+    """Everything at or above the divisor rounds half-up, exactly as before."""
+
+    async def test_remainder_over_half_rounds_up(self, monkeypatch):
+        result = await run(monkeypatch, value=1_600_000)
+        assert result["receiver_points_awarded"] == 2
+
+    async def test_remainder_under_half_rounds_down(self, monkeypatch):
+        result = await run(monkeypatch, value=1_400_000)
         assert result["receiver_points_awarded"] == 1
 
-    async def test_unstacked_per_item_floors(self, monkeypatch):
-        # Stacking off: each 600k item is below the threshold, so nothing pays.
+    async def test_remainder_at_half_rounds_up(self, monkeypatch):
+        result = await run(monkeypatch, value=1_500_000)
+        assert result["receiver_points_awarded"] == 2
+
+    async def test_dex_example_unchanged(self, monkeypatch):
+        # 21.7m at 1 per 1m stays 22 points, as it has always been.
+        result = await run(monkeypatch, value=21_700_000)
+        assert result["receiver_points_awarded"] == 22
+
+    async def test_award_multiplies_the_rounded_quotient(self, monkeypatch):
+        # 5 points per 1m: 1.8m rounds to 2, so 10 points.
+        result = await run(monkeypatch, value=1_800_000, point_config="5,1000000")
+        assert result["receiver_points_awarded"] == 10
+
+
+class TestStackedDrops:
+    async def test_stacked_total_clears_the_bar_and_rounds(self, monkeypatch):
+        # Stacking on: the stack's full 1.8m goes through the divisor once.
+        result = await run(monkeypatch, value=1_800_000, quantity=3,
+                           stacks_award_points=True)
+        assert result["receiver_points_awarded"] == 2
+
+    async def test_unstacked_items_below_the_bar_pay_nothing(self, monkeypatch):
+        # Stacking off: each item is 600k, under the minimum, so nothing pays
+        # even though the stack is worth 1.8m.
         result = await run(monkeypatch, value=1_800_000, quantity=3,
                            stacks_award_points=False)
         assert result["receiver_points_awarded"] == 0
 
-    async def test_unstacked_per_item_over_threshold_pays_each(self, monkeypatch):
-        # Each item is 1.5m → 1 point apiece, remainders dropped per item.
+    async def test_unstacked_items_over_the_bar_round_per_item(self, monkeypatch):
+        # Each item is 1.5m → rounds to 2 apiece → 6.
         result = await run(monkeypatch, value=4_500_000, quantity=3,
                            stacks_award_points=False)
-        assert result["receiver_points_awarded"] == 3
+        assert result["receiver_points_awarded"] == 6
 
 
-class TestOverrideDivisorFloors:
-    async def test_override_without_quantity_floors(self, monkeypatch):
+class TestOverrideDivisor:
+    async def test_override_below_the_bar_pays_nothing(self, monkeypatch):
         result = await run(monkeypatch, value=800_000, quantity=None,
                            mods=[make_mod()])
         assert result["receiver_points_awarded"] == 0
 
-    async def test_override_without_quantity_pays_whole_multiples(self, monkeypatch):
-        result = await run(monkeypatch, value=2_400_000, quantity=None,
+    async def test_override_above_the_bar_still_rounds(self, monkeypatch):
+        result = await run(monkeypatch, value=2_600_000, quantity=None,
                            mods=[make_mod()])
-        assert result["receiver_points_awarded"] == 2
+        assert result["receiver_points_awarded"] == 3

@@ -115,7 +115,7 @@ async def run(monkeypatch, *, participants, **patch_kwargs):
         "drop",
         GROUP_ID,
         RECEIVER_ID,
-        22_000_000,  # 22 pts at 1 per 1m
+        21_700_000,  # ≈ 22 pts at 1 per 1m
         players_included=json.dumps(participants),
         item_id=13652,
         npc_id=NPC_ID,

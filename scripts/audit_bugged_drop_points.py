@@ -2,14 +2,19 @@
 """
 Audit drop point awards affected by the historical rounding-up bugs.
 
-Drop awards are a threshold ("1 point per 1m"), but two earlier formulas paid
-out below it: ceil division gave a full point to any non-zero value, and the
-half-up division that replaced it gave one to anything from half the divisor
-up. Both were superseded by floor division on 2026-09-23.
+A group's drop divisor ("1 point per 1m") is a MINIMUM as well as a rate, but
+two earlier formulas paid out below it: ceil division gave a full point to any
+non-zero value, and the half-up division that replaced it gave one to anything
+from half the divisor up. Since 2026-09-23 a drop under the divisor earns
+nothing, while anything at or above it rounds half-up as it always has.
 
 This script inspects existing `player_points` rows for drop awards and compares:
   - historical logic (`--historical half_up`, the default, or `ceil`)
-  - fixed logic (floor thresholding)
+  - fixed logic (sub-threshold drops pay 0, the rest round half-up)
+
+So it flags only awards that went to drops below the group's minimum. Rows
+where the remainder rounded up above the minimum are NOT findings: that is the
+intended behaviour and did not change.
 
 It is READ-ONLY: it never writes to `player_points`.
 
@@ -86,20 +91,21 @@ def _ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
 
 
-def _floor_div(value: int, divisor: int) -> int:
-    if divisor <= 0:
-        return 0
-    if value <= 0:
-        return 0
-    return value // divisor
-
-
 def _round_half_up_div(value: int, divisor: int) -> int:
     if divisor <= 0:
         return 0
     if value <= 0:
         return 0
     return (value + (divisor // 2)) // divisor
+
+
+def _threshold_div(value: int, divisor: int) -> int:
+    """The live rule: nothing below the divisor, half-up at or above it."""
+    if divisor <= 0:
+        return 0
+    if value < divisor:
+        return 0
+    return _round_half_up_div(value, divisor)
 
 
 HISTORICAL_DIV_FNS = {"half_up": _round_half_up_div, "ceil": _ceil_div}
@@ -306,7 +312,7 @@ def audit(args: argparse.Namespace) -> int:
                 npc_id=drop.npc_id,
                 cfg=cfg,
                 drop_mods=drop_mods.get(gid, []),
-                div_fn=_floor_div,
+                div_fn=_threshold_div,
             )
 
             if buggy_points <= fixed_points:

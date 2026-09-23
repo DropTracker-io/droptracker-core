@@ -4,7 +4,7 @@ splitting in ``_check_and_award_points`` (``data/submissions/point_awards.py``).
 Contract (user-reported fix, 2026-08-12): the TOTAL boost injected into one
 submission is always ``value × members present``. With sharing on, the split is
 computed on the un-boosted award and each recipient's share then gets ``+value``
-once (Dex 22m = 22 pts, 2 present, boost 20 → 11 + 20 = 31 each, NOT
+once (Dex 21.7m ≈ 22 pts, 2 present, boost 20 → 11 + 20 = 31 each, NOT
 11 + 20×2 = 51 each). Without a split, the receiver banks the whole
 ``value × N``. A zero floor-share still receives an active boost.
 """
@@ -145,12 +145,12 @@ async def run(monkeypatch, *, boosts, value, participants, sharing,
 
 class TestAddPerMemberWithSharing:
     async def test_dex_example_boost_added_once_per_share(self, monkeypatch):
-        # 22m Dex = 22 pts, 2 members present, boost 20/member:
+        # 21.7m Dex ≈ 22 pts, 2 members present, boost 20/member:
         # equal split 11/11, +20 each → 31 each, total 62 = 22 + 20×2.
         awards, result = await run(
             monkeypatch,
             boosts=[make_boost(operation_value=20)],
-            value=22_000_000,
+            value=21_700_000,
             participants=["Partner One"],
             sharing=True,
         )
@@ -162,7 +162,7 @@ class TestAddPerMemberWithSharing:
         awards, _ = await run(
             monkeypatch,
             boosts=[make_boost(operation_value=20)],
-            value=22_000_000,
+            value=21_700_000,
             participants=["Partner One"],
             sharing=True,
             split_method="award_all",
@@ -186,7 +186,7 @@ class TestAddPerMemberWithSharing:
         awards, _ = await run(
             monkeypatch,
             boosts=[],
-            value=22_000_000,
+            value=21_700_000,
             participants=["Partner One"],
             sharing=True,
         )
@@ -211,7 +211,7 @@ class TestAddPerMemberWithoutSharing:
         awards, result = await run(
             monkeypatch,
             boosts=[make_boost(operation_value=20)],
-            value=22_000_000,
+            value=21_700_000,
             participants=["Partner One"],
             sharing=False,
         )
@@ -222,7 +222,7 @@ class TestAddPerMemberWithoutSharing:
         awards, _ = await run(
             monkeypatch,
             boosts=[make_boost(operation_value=20)],
-            value=22_000_000,
+            value=21_700_000,
             participants=[],
             sharing=True,
         )
