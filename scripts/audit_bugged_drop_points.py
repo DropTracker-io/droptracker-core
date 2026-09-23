@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
-Audit drop point awards affected by the historical ceil-division bug.
+Audit drop point awards affected by the historical rounding-up bugs.
+
+Drop awards are a threshold ("1 point per 1m"), but two earlier formulas paid
+out below it: ceil division gave a full point to any non-zero value, and the
+half-up division that replaced it gave one to anything from half the divisor
+up. Both were superseded by floor division on 2026-09-23.
 
 This script inspects existing `player_points` rows for drop awards and compares:
-  - historical logic (ceil thresholding)
+  - historical logic (`--historical half_up`, the default, or `ceil`)
   - fixed logic (floor thresholding)
+
+It is READ-ONLY: it never writes to `player_points`.
 
 It uses group-specific config from:
   - `group_point_settings` (reason="drop") for award/divisor
@@ -39,8 +46,15 @@ class DropConfig:
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Audit drop point awards impacted by ceil-rounding bug.",
+        description="Audit drop point awards impacted by the rounding-up bugs.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--historical",
+        choices=("half_up", "ceil"),
+        default="half_up",
+        help="Which superseded formula to reconstruct awards with. 'half_up' is "
+             "what shipped until 2026-09-23; 'ceil' is the older bug before it.",
     )
     parser.add_argument("--group-id", type=int, default=None, help="Only audit one group_id")
     parser.add_argument("--since-id", type=int, default=None, help="Only rows with player_points.id >= this")
@@ -78,6 +92,17 @@ def _floor_div(value: int, divisor: int) -> int:
     if value <= 0:
         return 0
     return value // divisor
+
+
+def _round_half_up_div(value: int, divisor: int) -> int:
+    if divisor <= 0:
+        return 0
+    if value <= 0:
+        return 0
+    return (value + (divisor // 2)) // divisor
+
+
+HISTORICAL_DIV_FNS = {"half_up": _round_half_up_div, "ceil": _ceil_div}
 
 
 def _is_truthy_config(raw: Optional[str]) -> bool:
@@ -163,7 +188,7 @@ def compute_points(
     cfg: DropConfig,
     drop_mods: List[GroupPointMods],
     *,
-    use_fixed_floor: bool,
+    div_fn,
 ) -> int:
     award = cfg.award
     divisor = cfg.divisor if cfg.divisor != 0 else 1
@@ -188,8 +213,6 @@ def compute_points(
             except Exception:
                 divisor = cfg.divisor if cfg.divisor != 0 else 1
             break
-
-    div_fn = _floor_div if use_fixed_floor else _ceil_div
 
     qty = None
     try:
@@ -219,6 +242,7 @@ def compute_points(
 
 
 def audit(args: argparse.Namespace) -> int:
+    historical_div_fn = HISTORICAL_DIV_FNS[args.historical]
     db_session = Session()
     try:
         query = (
@@ -273,7 +297,7 @@ def audit(args: argparse.Namespace) -> int:
                 npc_id=drop.npc_id,
                 cfg=cfg,
                 drop_mods=drop_mods.get(gid, []),
-                use_fixed_floor=False,
+                div_fn=historical_div_fn,
             )
             fixed_points = compute_points(
                 total_value=total_value,
@@ -282,7 +306,7 @@ def audit(args: argparse.Namespace) -> int:
                 npc_id=drop.npc_id,
                 cfg=cfg,
                 drop_mods=drop_mods.get(gid, []),
-                use_fixed_floor=True,
+                div_fn=_floor_div,
             )
 
             if buggy_points <= fixed_points:
@@ -312,10 +336,45 @@ def audit(args: argparse.Namespace) -> int:
             elif int(pp.amount) > int(fixed_points):
                 potential_hits.append(result)
 
+        print(f"Historical formula reconstructed: {args.historical}")
         print(f"Rows scanned: {len(rows)}")
         print(f"Rows missing drop reference (entry_id not found in drops): {missing_drop_ref}")
         print(f"Strict bug matches: {len(strict_hits)}")
         print(f"Potential bug matches: {len(potential_hits)}")
+
+        # Per-group rollup: what each clan would decide on. "Overpaid" is the
+        # awarded amount minus what floor division would have paid, summed over
+        # strict matches (the rows we can attribute to the old formula with
+        # certainty); potential matches are counted separately since a boost or
+        # a later manual edit can also explain them.
+        by_group = defaultdict(lambda: {"strict_rows": 0, "strict_overpaid": 0,
+                                        "players": set(), "potential_rows": 0,
+                                        "potential_overpaid": 0})
+        for row in strict_hits:
+            bucket = by_group[row["group_id"]]
+            bucket["strict_rows"] += 1
+            bucket["strict_overpaid"] += row["awarded_amount"] - row["fixed_points"]
+            bucket["players"].add(row["player_id"])
+        for row in potential_hits:
+            bucket = by_group[row["group_id"]]
+            bucket["potential_rows"] += 1
+            bucket["potential_overpaid"] += row["awarded_amount"] - row["fixed_points"]
+            bucket["players"].add(row["player_id"])
+
+        if by_group:
+            print("\nPer-group totals (sorted by points overpaid):")
+            ordered = sorted(
+                by_group.items(),
+                key=lambda kv: kv[1]["strict_overpaid"] + kv[1]["potential_overpaid"],
+                reverse=True,
+            )
+            for gid, bucket in ordered:
+                print(
+                    f"- group={gid} players={len(bucket['players'])} "
+                    f"strict_rows={bucket['strict_rows']} strict_overpaid={bucket['strict_overpaid']} "
+                    f"potential_rows={bucket['potential_rows']} "
+                    f"potential_overpaid={bucket['potential_overpaid']}"
+                )
 
         if strict_hits:
             print("\nTop strict matches:")
