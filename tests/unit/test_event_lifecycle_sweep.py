@@ -137,3 +137,68 @@ class TestLifecycleError:
         assert err.title == "Already active"
         assert err.detail == "This event is already active."
         assert str(err) == "This event is already active."
+
+
+# ── Auto-start heads-up (leader DM a day before a draft starts on its own) ──
+
+class _NXRedis:
+    def __init__(self):
+        self.keys = set()
+
+    def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.keys:
+            return None
+        self.keys.add(key)
+        return True
+
+
+def _heads_up_harness(monkeypatch):
+    import types
+
+    alerts = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+        "_event_alerts_for_sweep",
+        os.path.join(os.path.dirname(_MODULE_PATH), "event_alerts.py")))
+    alerts.__spec__.loader.exec_module(alerts)
+    calls = []
+    monkeypatch.setattr(alerts, "enqueue_autostart_heads_up",
+                        lambda session, event, starts_at, blockers=None:
+                        calls.append((event.id, starts_at, blockers)) or 1)
+    pkg = sys.modules.get("services") or types.ModuleType("services")
+    monkeypatch.setitem(sys.modules, "services", pkg)
+    monkeypatch.setitem(sys.modules, "services.event_alerts", alerts)
+    monkeypatch.setattr(pkg, "event_alerts", alerts, raising=False)
+    monkeypatch.setattr(lc, "activation_blocker_items",
+                        lambda session, event, now=None: [{"message": "No teams yet"}])
+    return calls
+
+
+def test_autostart_heads_up_fires_once_per_start_time(monkeypatch):
+    calls = _heads_up_harness(monkeypatch)
+    redis = _NXRedis()
+    session = SimpleNamespace(rollback=lambda: None)
+    now = datetime(2026, 9, 23, 12, 0)
+    event = SimpleNamespace(id=5, status="draft", starts_at=now + timedelta(hours=3))
+
+    lc._autostart_heads_up(session, redis, event, now)
+    lc._autostart_heads_up(session, redis, event, now + timedelta(minutes=1))
+    assert len(calls) == 1
+    assert calls[0][2] == ["No teams yet"]
+
+    # Moving the start date re-arms it for the new time.
+    event.starts_at = now + timedelta(hours=5)
+    lc._autostart_heads_up(session, redis, event, now + timedelta(minutes=2))
+    assert len(calls) == 2
+
+
+def test_autostart_heads_up_waits_for_the_window(monkeypatch):
+    calls = _heads_up_harness(monkeypatch)
+    now = datetime(2026, 9, 23, 12, 0)
+    session = SimpleNamespace(rollback=lambda: None)
+    far = SimpleNamespace(id=6, status="draft", starts_at=now + timedelta(days=3))
+    undated = SimpleNamespace(id=7, status="draft", starts_at=None)
+    lc._autostart_heads_up(session, _NXRedis(), far, now)
+    lc._autostart_heads_up(session, _NXRedis(), undated, now)
+    # No Redis: skipped rather than risk a DM every tick.
+    soon = SimpleNamespace(id=8, status="draft", starts_at=now + timedelta(hours=1))
+    lc._autostart_heads_up(session, None, soon, now)
+    assert calls == []

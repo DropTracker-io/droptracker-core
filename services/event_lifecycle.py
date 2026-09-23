@@ -1666,6 +1666,34 @@ def _reminder_once(redis_conn, event_id: int, side: str) -> bool:
         return False
 
 
+def _autostart_heads_up(session, redis_conn, event, now: datetime) -> None:
+    """Privately DM the group's leaders a day before a draft starts on its own
+    (services/event_alerts.py). Once per (event, start time) via a Redis NX
+    flag, so moving the date re-arms it; skipped without Redis, like the
+    reminders. Contained: a failure here never touches the rest of the sweep."""
+    from services import event_alerts
+
+    starts_at = _ts(event.starts_at)
+    if not event_alerts.autostart_heads_up_due(starts_at, _ts(now)):
+        return
+    if redis_conn is None:
+        return
+    try:
+        key = event_alerts.AUTOSTART_HEADS_UP_KEY.format(
+            event_id=event.id, starts_at=starts_at)
+        if not redis_conn.set(key, "1", nx=True, ex=_REMINDER_SENT_TTL):
+            return
+    except Exception:
+        return
+    try:
+        blockers = [b.get("message") for b in
+                    activation_blocker_items(session, event, now=now)]
+    except Exception:
+        session.rollback()
+        blockers = []
+    event_alerts.enqueue_autostart_heads_up(session, event, starts_at, blockers)
+
+
 def run_reminder_sweep(session, redis_conn, rows, due, now: datetime) -> None:
     """Enqueue the one-shot lifecycle reminders whose lead window ``now`` sits
     inside: ``event_starting_soon`` for scheduled drafts (they activate at
@@ -1675,6 +1703,9 @@ def run_reminder_sweep(session, redis_conn, rows, due, now: datetime) -> None:
     from services import event_engine
 
     for event in rows:
+        if event.status == "draft":
+            _autostart_heads_up(session, redis_conn, event, now)
+
         # "Starting soon": a draft with a future scheduled start (an event
         # activated early is already running — nothing to tease).
         if (event.status == "draft" and event.starts_at is not None

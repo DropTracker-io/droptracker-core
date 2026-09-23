@@ -273,3 +273,64 @@ class TestEnqueueAlertDms:
         assert ea.enqueue_alert_dms(
             _Session(), SimpleNamespace(id=46, group_id=14, name="E"),
             "event_activation_failed", {}, "forbidden") == 0
+
+
+# ── Auto-start heads-up ──────────────────────────────────────────────────────
+
+def test_autostart_heads_up_due_window():
+    lead = ea.AUTOSTART_HEADS_UP_LEAD_SECONDS
+    now = 1_000_000
+    assert ea.autostart_heads_up_due(now + lead, now)          # edge of the window
+    assert ea.autostart_heads_up_due(now + 60, now)
+    assert not ea.autostart_heads_up_due(now + lead + 1, now)  # too early
+    assert not ea.autostart_heads_up_due(now, now)             # start reached: the sweep activates it
+    assert not ea.autostart_heads_up_due(now - 60, now)
+    assert not ea.autostart_heads_up_due(None, now)            # no start date, never auto-starts
+
+
+def test_event_schedule_url_opens_the_schedule_step(real_event_notifications):
+    assert ea.event_schedule_url(14, 99) == (
+        "https://www.droptracker.io/groups/14/events/new?event=99&step=1")
+
+
+def test_autostart_heads_up_embed_plain():
+    embed = ea.autostart_heads_up_embed("Summer Bingo", 1_700_000_000)
+    assert "Summer Bingo" in embed["description"]
+    assert "<t:1700000000:F>" in embed["description"]
+    assert "<t:1700000000:R>" in embed["description"]
+    assert "fields" not in embed
+
+
+def test_autostart_heads_up_embed_lists_blockers_capped():
+    blockers = [f"Problem {i}" for i in range(7)] + ["", None]
+    embed = ea.autostart_heads_up_embed("E", 1, blockers)
+    (field,) = embed["fields"]
+    assert field["name"] == "Not ready yet"
+    assert "• Problem 4" in field["value"]
+    assert "Problem 5" not in field["value"]
+    assert "and 2 more" in field["value"]
+    assert len(field["value"]) <= 1024
+
+
+def test_enqueue_autostart_heads_up_caps_recipients(monkeypatch, real_event_notifications):
+    sent = []
+    outbox = SimpleNamespace(enqueue=lambda session, **kw: sent.append(kw))
+    monkeypatch.setitem(sys.modules, "services.discord_outbox", outbox)
+    monkeypatch.setattr(ea, "alert_recipient_discord_ids",
+                        lambda session, gid: ["1", "2", "3", "4", "5"])
+    commits = []
+    session = SimpleNamespace(commit=lambda: commits.append(1), rollback=lambda: None)
+    event = SimpleNamespace(id=7, group_id=14, name="Weekly")
+
+    n = ea.enqueue_autostart_heads_up(session, event, 1_700_000_000, ["No teams yet"])
+
+    assert n == ea.AUTOSTART_HEADS_UP_RECIPIENTS == 3
+    assert [kw["channel_id"] for kw in sent] == ["1", "2", "3"]
+    assert all(kw["kind"] == "dm" and kw["ref_id"] == 7 for kw in sent)
+    assert sent[0]["components"][0]["url"].endswith("/groups/14/events/new?event=7&step=1")
+    assert commits == [1]
+
+
+def test_enqueue_autostart_heads_up_skips_global_events():
+    event = SimpleNamespace(id=7, group_id=None, name="Global")
+    assert ea.enqueue_autostart_heads_up(SimpleNamespace(), event, 1) == 0

@@ -117,6 +117,74 @@ def undelivered_reason_text(reason_code: str) -> str:
             "so it was sent to the group's leaders directly.")
 
 
+# ── Auto-start heads-up ─────────────────────────────────────────────────────
+# A draft with a start date goes live on its own (event_lifecycle.sweep_due has
+# no opt-in), and a clan had a planned event start by surprise that way. So a
+# day before a draft's scheduled start, its group's leaders get one private DM
+# saying so, with a link straight to the wizard's Schedule step. This is NOT the
+# public "starting soon" message (a toggleable event message players see).
+AUTOSTART_HEADS_UP_LEAD_SECONDS = 24 * 3600
+# Fewer than the failure alerts: this fires for every scheduled event, so a
+# group that schedules weekly would otherwise DM ten people every week. The
+# owner and the first admins are the ones who can pull the date.
+AUTOSTART_HEADS_UP_RECIPIENTS = 3
+# Keyed by the start time too, so moving the date re-arms the heads-up for the
+# new one instead of staying silent.
+AUTOSTART_HEADS_UP_KEY = "events:remind:{event_id}:leader-start:{starts_at}"
+_MAX_BLOCKER_LINES = 5
+
+
+def autostart_heads_up_due(starts_at: Optional[int], now: int,
+                           lead: int = AUTOSTART_HEADS_UP_LEAD_SECONDS) -> bool:
+    """True while ``now`` sits inside the lead window before a future start
+    (unix seconds). A start already reached is the sweep's activation, not a
+    heads-up."""
+    if starts_at is None:
+        return False
+    return now < starts_at <= now + lead
+
+
+def event_schedule_url(group_id, event_id) -> str:
+    """The setup wizard opened on its Schedule step (step 1 for every event
+    kind), where the start date is changed or cleared."""
+    from services.event_notifications import EVENT_BASE_URL
+
+    site = EVENT_BASE_URL.rsplit("/events", 1)[0]
+    return f"{site}/groups/{group_id}/events/new?event={event_id}&step=1"
+
+
+def autostart_heads_up_embed(event_name: str, starts_at: int,
+                             blockers=None) -> dict:
+    """The DM as a Discord embed dict. ``blockers`` are human messages from
+    ``activation_blocker_items``: a blocked draft does not start at its time
+    but keeps retrying, so it goes live the moment they're fixed."""
+    embed = {
+        "title": "Your event starts automatically",
+        "description": (
+            f"**{event_name or 'Event'}** is still a draft, but it has a start "
+            f"date, so it goes live on its own <t:{starts_at}:F> "
+            f"(<t:{starts_at}:R>).\n\n"
+            "If that's the plan, there's nothing to do. If not, change or "
+            "clear its start date before then."
+        ),
+        "color": 0xE0A526,
+    }
+    lines = [str(b).strip() for b in (blockers or []) if str(b or "").strip()]
+    if lines:
+        shown = lines[:_MAX_BLOCKER_LINES]
+        more = len(lines) - len(shown)
+        value = "\n".join(f"• {line}" for line in shown)
+        if more > 0:
+            value += f"\n• and {more} more"
+        embed["fields"] = [{
+            "name": "Not ready yet",
+            "value": (value + "\n-# It won't start until these are fixed, "
+                      "then it starts right away.")[:1024],
+            "inline": False,
+        }]
+    return embed
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Delivery
 # ══════════════════════════════════════════════════════════════════════════════
@@ -279,6 +347,64 @@ def enqueue_alert_dms(session, event, notification_type: str, data: dict,
                      f"{getattr(event, 'id', '?')}: {e}",
                 app_name="event_alerts",
                 description="enqueue_alert_dms",
+            )
+        except Exception:
+            pass
+        return 0
+
+
+def enqueue_autostart_heads_up(session, event, starts_at: int,
+                               blockers=None) -> int:
+    """DM the group's leaders that ``event`` (a draft) starts on its own at
+    ``starts_at``. The once-per-start guard is the caller's (the lifecycle
+    sweep's Redis NX key). Returns how many DMs were enqueued; never raises."""
+    group_id = getattr(event, "group_id", None)
+    event_id = getattr(event, "id", None)
+    if not group_id or event_id is None:
+        return 0  # global events have no group leadership to tell
+    try:
+        from services.discord_outbox import enqueue
+
+        recipients = alert_recipient_discord_ids(session, group_id)
+        recipients = recipients[:AUTOSTART_HEADS_UP_RECIPIENTS]
+        if not recipients:
+            return 0
+        embed = autostart_heads_up_embed(getattr(event, "name", None),
+                                         starts_at, blockers)
+        components = [{"label": "Change the start date",
+                       "url": event_schedule_url(group_id, event_id)}]
+        sent = 0
+        for discord_id in recipients:
+            try:
+                enqueue(
+                    session,
+                    channel_id=discord_id,
+                    embed=embed,
+                    components=components,
+                    kind="dm",
+                    ref_type="event",
+                    ref_id=event_id,
+                    commit=False,
+                )
+                sent += 1
+            except Exception:
+                continue
+        if sent:
+            session.commit()
+        return sent
+    except Exception as e:  # noqa: BLE001
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        try:
+            from db.app_logger import AppLogger
+
+            AppLogger().log(
+                log_type="error",
+                data=f"Auto-start heads-up failed for event {event_id}: {e}",
+                app_name="event_alerts",
+                description="enqueue_autostart_heads_up",
             )
         except Exception:
             pass
