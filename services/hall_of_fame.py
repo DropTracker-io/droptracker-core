@@ -96,6 +96,7 @@ from utils.hof import (
 from services import hof_layout
 from services.component_layout import to_interactions_components
 from services.hof_data import HofDataCollector, common_tokens, resolve_emoji_refs
+from utils.discord_threads import PROBLEM_STATES as THREAD_PROBLEM_STATES, ensure_thread_open
 from utils.redis import redis_client
 from utils.site_urls import WEBSITE_URL
 
@@ -979,6 +980,10 @@ class HallOfFame(Extension):
         channel = await self.bot.fetch_channel(int(cfg.channel_id))
         if channel is None or not hasattr(channel, "fetch_message"):
             return
+        if await ensure_thread_open(
+            self.bot.http, channel, group_id=group_id, feature="hall_of_fame",
+        ) in THREAD_PROBLEM_STATES:
+            return
         directory_url = self._directory_jump_url(group)
         entry, npcs = match
         components = self._render_boss_entry(group, entry, npcs, directory_url, cfg)
@@ -1136,6 +1141,14 @@ class HallOfFame(Extension):
             )
             exc.channel_id = cfg.channel_id
             raise exc
+        # Boards in a thread go stale when Discord auto-archives it (edits are
+        # not activity); reopen it before editing. See utils/discord_threads.
+        # If it cannot be reopened every edit would fail (and be retried), so
+        # skip the pass; the group's Diagnostics page says what to fix.
+        if await ensure_thread_open(
+            self.bot.http, channel, group_id=group_id, feature="hall_of_fame",
+        ) in THREAD_PROBLEM_STATES:
+            return
 
         if not cfg.boss_names:
             # Never treat an empty (possibly accidentally wiped) boss list as a

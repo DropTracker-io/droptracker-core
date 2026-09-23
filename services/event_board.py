@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from db.app_logger import AppLogger
+from utils.discord_threads import PROBLEM_STATES as THREAD_PROBLEM_STATES, ensure_thread_open
 
 app_logger = AppLogger()
 
@@ -380,6 +381,14 @@ async def _refresh_event_board_locked(bot, session, event, *,
 
             channel = await bot.fetch_channel(channel_id=row.channel_id)
             if channel is None or not callable(getattr(channel, "send", None)):
+                continue
+            # Standings edited in place freeze once Discord auto-archives the
+            # thread they live in (edits are not activity); reopen it first.
+            if await ensure_thread_open(
+                bot.http, channel,
+                group_id=getattr(row, "group_id", None) or getattr(event, "group_id", None),
+                feature="event_board",
+            ) in THREAD_PROBLEM_STATES:
                 continue
 
             # Render the board image once per sweep (reused across rows).

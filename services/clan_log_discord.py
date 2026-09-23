@@ -25,6 +25,7 @@ import io
 from typing import Optional
 
 from db.app_logger import AppLogger
+from utils.discord_threads import PROBLEM_STATES as THREAD_PROBLEM_STATES, ensure_thread_open
 
 app_logger = AppLogger()
 
@@ -184,6 +185,11 @@ async def refresh_standing_messages(bot, session, *, limit: int = MAX_RENDERS_PE
 
             channel = await bot.fetch_channel(channel_id=channel_id)
             if not channel:
+                continue
+            # Edits are not thread activity; reopen an auto-archived thread.
+            if await ensure_thread_open(
+                bot.http, channel, group_id=group_id, feature="clan_log",
+            ) in THREAD_PROBLEM_STATES:
                 continue
 
             message_id = (config.get((group_id, "clan_log_message_id")) or "").strip()

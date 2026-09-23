@@ -25,6 +25,7 @@ from services.channel_cache import shape_channel_cache
 from utils.embeds import create_boss_pb_embed, update_boss_pb_embed
 from utils.app_emojis import emoji as app_emoji, use_profile
 from utils.game_emojis import use_profile as use_game_emoji_profile
+from utils.discord_threads import PROBLEM_STATES as THREAD_PROBLEM_STATES, ensure_thread_open
 from utils.logger import LoggerClient
 from db.app_logger import AppLogger
 
@@ -748,6 +749,12 @@ async def lootboard_updates():
                     if not channel:
                         #print(f"Channel with id {group['channel']} not found on discord for group {group_id} ({group_obj.group_name}).")
                         continue
+                    # A board in a thread freezes once Discord auto-archives the
+                    # thread (edits are not activity); reopen it first.
+                    if await ensure_thread_open(
+                        bot.http, channel, group_id=group_id, feature="lootboard",
+                    ) in THREAD_PROBLEM_STATES:
+                        continue  # locked/forbidden: the group's Diagnostics page says so
                     message_to_update = None
                     # Every branch below must leave this set or `continue`;
                     # it used to be unbound on the "no saved message" path.

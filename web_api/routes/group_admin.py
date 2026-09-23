@@ -955,13 +955,26 @@ async def diagnostics(group_id: int):
 
             cached = _diag_cache_get(group_id, range_days)
             if cached is not None:
-                return cached
-
-            payload = _build_diagnostics(s, group, range_days)
-            _diag_cache_set(group_id, range_days, payload)
-            return payload
+                payload = cached
+            else:
+                payload = _build_diagnostics(s, group, range_days)
+                _diag_cache_set(group_id, range_days, payload)
+            # Read live, never cached: once an admin fixes a thread the next
+            # bot pass clears the record, and the panel should agree at once.
+            return {**payload, "channel_problems": _diag_channel_problems(group_id)}
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+def _diag_channel_problems(group_id: int) -> list:
+    """Boards the bot could not update because their thread is archived and
+    it may not reopen it (utils/discord_threads records these per pass)."""
+    try:
+        from utils.discord_threads import group_thread_health
+
+        return [r for r in group_thread_health(group_id) if r.get("problem")]
+    except Exception:
+        return []
 
 
 def _diag_cache_key(group_id: int, range_days: int) -> str:
