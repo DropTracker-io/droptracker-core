@@ -25,8 +25,14 @@ os.environ["HOF_ROLE"] = "legacy"
 # a raw <:construction:...> here. Unlike HOF_ROLE above this is read per call,
 # not at import — it sits alongside it because both declare what this process is.
 from utils.app_emojis import use_profile  # noqa: E402
+from utils.game_emojis import use_profile as use_game_emoji_profile  # noqa: E402
 
 use_profile("hof")
+# The boss/item glyphs a Hall of Fame layout can place ({boss_emoji},
+# {coins_emoji}, {emoji:...}) are seeded on the core application only. Declaring
+# "hof" makes every lookup here answer None, so those icons are left out rather
+# than posted as raw <:npc_...:id> text this app cannot render.
+use_game_emoji_profile("hof")
 
 from services import hall_of_fame  # noqa: E402
 from monitor.sdnotifier import SystemdWatchdog

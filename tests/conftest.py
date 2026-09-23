@@ -322,6 +322,15 @@ if "services.component_layout" not in sys.modules:
     sys.modules["services.component_layout"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/hof_layout.py — the Hall of Fame layout DSL. Pure (it renders from
+# already-formatted values and imports only component_layout, loaded above).
+_HOF_LAYOUT_PATH = _Path(__file__).resolve().parent.parent / "services" / "hof_layout.py"
+if "services.hof_layout" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.hof_layout", _HOF_LAYOUT_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.hof_layout"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/rank_milestones.py — the hiscores-rank crossing logic. Pure at
 # import time (WOM/DB/Redis access is lazy inside functions), and its
 # seed/crossing decisions are exactly what the tests must exercise for real.

@@ -41,7 +41,6 @@ import json
 import logging
 import os
 import random
-import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -55,17 +54,14 @@ from interactions import (
     Extension,
     StringSelectMenu,
     StringSelectOption,
-    UnfurledMediaItem,
     listen,
 )
 from interactions.api.events import Component, GuildJoin
 from interactions.client.errors import BadRequest, Forbidden, HTTPException, NotFound, RateLimited
 from interactions.models import (
     ContainerComponent,
-    SectionComponent,
     SeparatorComponent,
     TextDisplayComponent,
-    ThumbnailComponent,
 )
 
 from db.entitlements import resolve_group_entitlements
@@ -74,19 +70,15 @@ from db.models import (
     GroupConfiguration,
     GroupPersonalBestMessage,
     NpcList,
-    PersonalBestEntry,
     Player,
     Session,
-    get_current_partition,
     session,
 )
 from db.ops import get_formatted_name
-from utils.format import NPC_IMG_DIR, convert_from_ms, format_number, get_npc_image_url
+from utils.format import NPC_IMG_DIR, get_npc_image_url
 from utils.hof import (
     DIRECTORY_BOTTOM_KEY,
     DIRECTORY_KEY,
-    RAID_GROUPS,
-    SEPULCHRE_CANONICAL,
     BossPlanEntry,
     build_boss_plan,
     build_message_plan,
@@ -101,12 +93,14 @@ from utils.hof import (
     select_menu_custom_id,
     sync_note_text,
 )
+from services import hof_layout
+from services.component_layout import to_interactions_components
+from services.hof_data import HofDataCollector, common_tokens, resolve_emoji_refs
 from utils.redis import redis_client
-from utils.site_urls import WEBSITE_URL, npc_url
+from utils.site_urls import WEBSITE_URL
 
 log = logging.getLogger(__name__)
 
-_MEDAL_EMOJIS = {1: "🥇", 2: "🥈", 3: "🥉"}
 _FOOTER_TEXT = (
     f"-# Powered by the [DropTracker]({WEBSITE_URL}) • "
     f"[View all Personal Bests]({WEBSITE_URL}/personal-bests)"
@@ -1112,7 +1106,7 @@ class HallOfFame(Extension):
     async def _ensure_npc_image(self, npc: NpcList) -> None:
         """Best-effort on-demand fetch of a boss's HOF thumbnail if it's not cached
         on disk yet (e.g. a newly-minted NpcList row). Failures are non-fatal —
-        `_get_npc_img_url` falls back to a same-raid image if one is missing."""
+        `hof_data.npc_image_url` falls back to a same-raid image if one is missing."""
         if os.path.exists(f"{NPC_IMG_DIR}/{npc.npc_id}.png"):
             return
         try:
@@ -1516,202 +1510,37 @@ class HallOfFame(Extension):
         self, group: Group, entry: BossPlanEntry, npcs: List[NpcList],
         directory_url: Optional[str], cfg: GroupHOFConfig,
     ) -> Optional[List[BaseComponent]]:
-        """Render a boss (or grouped raid) message, shrinking until it fits
-        Discord's component/text limits.  Returns None if it cannot fit."""
-        if entry.grouped:
-            attempts = [3, 2, 1]
-            render = lambda n: self._render_grouped_boss(group, entry.display_name, npcs, directory_url, n)
-        else:
-            attempts = sorted({cfg.pb_entries, 5, 3, 2, 1}, reverse=True)
-            attempts = [n for n in attempts if n <= cfg.pb_entries] or [1]
-            render = lambda n: self._render_individual_boss(group, npcs[0], directory_url, n)
+        """Render one boss (or grouped raid) message from the group's layout.
 
+        The group's live Hall of Fame layout (services/hof_layout.py) if it has
+        one, otherwise the default. Leaderboards are shortened until the message
+        fits Discord's limits, and a custom layout that cannot be made to fit
+        falls back to the default for this boss. Returns None only when even
+        the default cannot fit.
+        """
+        layout = hof_layout.load_active_layout(self._db, group.group_id)
+        # Raids repeat their PB lists once per mode, so they start shorter —
+        # the same 3-per-bracket ceiling the pre-layout renderer used.
+        pb_count = min(cfg.pb_entries, 3) if entry.grouped else cfg.pb_entries
+        needs = hof_layout.needed_boards(hof_layout.DEFAULT_LAYOUT, pb_count)
+        if layout is not None:
+            for board, rows in hof_layout.needed_boards(layout, pb_count).items():
+                needs[board] = max(needs.get(board, 0), rows)
+        collector = HofDataCollector(
+            self._db, group.group_id, self._group_player_ids(group.group_id),
+            display_name=lambda player: self._player_display(player, group.group_id),
+        )
+        data = collector.build_entry(entry.display_name, entry.grouped, npcs, needs)
+        emojis = resolve_emoji_refs(hof_layout.emoji_refs(layout)) if layout else {}
         label = f"group={group.group_id} boss={entry.display_name}"
-        for max_entries in attempts:
-            components = render(max_entries)
-            if self._within_limits(components):
-                return components
-            log.warning("HOF: %s too large at %d entries/bracket, shrinking", label, max_entries)
-        log.error("HOF: %s exceeds Discord limits even at minimum size", label)
-        return None
-
-    def _render_individual_boss(
-        self, group: Group, npc: NpcList, directory_url: Optional[str], max_entries: int,
-    ) -> List[BaseComponent]:
-        pb_components, summary_content = self._build_pb_body(
-            group.group_id, npc, max_entries=max_entries, include_loot=True,
+        payload, _ = hof_layout.render_entry(
+            layout, data, common_tokens(directory_url), pb_count, emojis,
+            log=lambda msg: log.warning("HOF: %s — %s", label, msg),
         )
-        return [ContainerComponent(
-            SeparatorComponent(divider=True),
-            SectionComponent(
-                components=[TextDisplayComponent(
-                    content=f"## {self._get_linked_name(npc)} 🏆\n{summary_content}",
-                )],
-                accessory=ThumbnailComponent(
-                    media=UnfurledMediaItem(url=self._get_npc_img_url(npc)),
-                ),
-            ),
-            SeparatorComponent(divider=True),
-            *pb_components,
-            SeparatorComponent(divider=True),
-            *self._trailing_components(directory_url),
-        )]
-
-    def _render_grouped_boss(
-        self, group: Group, canonical_name: str, npcs: List[NpcList],
-        directory_url: Optional[str], max_entries: int,
-    ) -> List[BaseComponent]:
-        mode_order = {
-            "Entry": 0,
-            "Normal": 1,
-            "Hard Mode": 2,
-            "Challenge Mode": 2,
-            "Expert": 2,
-            "Nightmare": 0,
-            "Phosani's Nightmare": 1,
-            "Crystalline": 0,
-            "Corrupted": 1,
-        }
-        mode_npcs = [(self._get_variant_mode_name(canonical_name, npc.npc_name), npc) for npc in npcs]
-        # Alias NPC rows (e.g. "Nightmare" and "The Nightmare") map to the same
-        # mode — keep only the first so a mode section never renders twice.
-        seen_modes: set[str] = set()
-        mode_npcs = [
-            (mode, npc) for mode, npc in mode_npcs
-            if not (mode in seen_modes or seen_modes.add(mode))
-        ]
-        mode_npcs.sort(key=lambda item: (mode_order.get(item[0], 50), item[0].casefold()))
-
-        grouped_components: List[BaseComponent] = []
-        for mode_name, mode_npc in mode_npcs:
-            # Loot leaderboards are omitted per-mode to stay under the 4000-char cap.
-            pb_components, summary_content = self._build_pb_body(
-                group.group_id, mode_npc, max_entries=max_entries, include_loot=False,
-            )
-            grouped_components.append(TextDisplayComponent(content=f"### {mode_name}\n{summary_content}"))
-            grouped_components.extend(pb_components)
-            grouped_components.append(SeparatorComponent(divider=True))
-
-        return [ContainerComponent(
-            SeparatorComponent(divider=True),
-            SectionComponent(
-                components=[TextDisplayComponent(content=f"## {canonical_name} 🏆")],
-                accessory=ThumbnailComponent(
-                    media=UnfurledMediaItem(url=self._get_npc_img_url(self._group_thumbnail_npc(canonical_name, npcs))),
-                ),
-            ),
-            SeparatorComponent(divider=True),
-            *grouped_components,
-            *self._trailing_components(directory_url),
-        )]
-
-    def _group_thumbnail_npc(self, canonical_name: str, npcs: List[NpcList]) -> NpcList:
-        """Prefer the base/normal-mode NPC's artwork for a raid group's thumbnail
-        (e.g. plain 'Theatre of Blood' over 'Theatre of Blood: Hard Mode') —
-        it's the mode most groups configure first and the one most likely to
-        already have a cached image. `_get_npc_img_url` still falls back across
-        modes if this particular one's file is missing."""
-        for variant_name in RAID_GROUPS.get(canonical_name, []):
-            for npc in npcs:
-                if npc.npc_name == variant_name:
-                    return npc
-        return npcs[0]
-
-    def _trailing_components(self, directory_url: Optional[str]) -> List[BaseComponent]:
-        trailing: List[BaseComponent] = [TextDisplayComponent(content=_FOOTER_TEXT)]
-        if directory_url:
-            trailing.append(SeparatorComponent(divider=True))
-            trailing.append(TextDisplayComponent(content=f"-# 📋 [Back to Directory]({directory_url})"))
-        return trailing
-
-    def _build_pb_body(
-        self, group_id: int, npc: NpcList, max_entries: int, include_loot: bool,
-    ) -> Tuple[List[BaseComponent], str]:
-        """Build the leaderboard components + the overview summary for one NPC."""
-        pbs = self._get_pbs(group_id, npc.npc_name)
-        components: List[BaseComponent] = []
-
-        total_pbs = sum(len(entries) for entries in pbs.values())
-        fastest: Optional[PersonalBestEntry] = None
-        fastest_team_size = None
-        for team_size, entries in pbs.items():
-            for pb in entries:
-                if fastest is None or pb.personal_best < fastest.personal_best:
-                    fastest = pb
-                    fastest_team_size = team_size
-        fastest_kill_part = ""
-        if fastest is not None:
-            player = self._db.query(Player).filter(Player.player_id == fastest.player_id).first()
-            fastest_kill_part = (
-                f"-# • Fastest kill: `{convert_from_ms(fastest.personal_best)}` "
-                f"({self._get_team_size_string(fastest_team_size)})\n"
-                f"-# ↳ by {self._player_display(player, group_id)}"
-            )
-
-        most_loot_part = ""
-        total_loot_part = ""
-        month_looters: List[Tuple[Optional[Player], float]] = []
-        if include_loot:
-            try:
-                partition = get_current_partition()
-                if group_id != 2:
-                    month_key = f"leaderboard:group:{group_id}:npc:{npc.npc_id}:{partition}"
-                    all_key = f"leaderboard:group:{group_id}:npc:{npc.npc_id}"
-                else:
-                    month_key = f"leaderboard:npc:{npc.npc_id}:{partition}"
-                    all_key = f"leaderboard:npc:{npc.npc_id}"
-                for player_id, score in redis_client.client.zrevrange(month_key, 0, 4, withscores=True):
-                    player = self._db.query(Player).filter(Player.player_id == int(player_id)).first()
-                    month_looters.append((player, score))
-                if month_looters:
-                    top_player, top_score = month_looters[0]
-                    most_loot_part = (
-                        f"\n-# • Most Loot: `{format_number(top_score)}` gp (this month)\n"
-                        f"-# ↳ by {self._player_display(top_player, group_id)}"
-                    )
-                    total_loot = redis_client.zsum(all_key)
-                    if total_loot:
-                        total_loot_part = f"-# • Total loot tracked: `{format_number(total_loot)}` gp\n"
-            except Exception as e:
-                log.warning("HOF: loot lookup failed for group %d npc %d: %s", group_id, npc.npc_id, e)
-
-        summary_content = (
-            "📊 **__Overview__**\n"
-            f"-# • Total PBs tracked: `{total_pbs}`\n"
-            f"{total_loot_part}"
-            f"{fastest_kill_part}"
-            f"{most_loot_part}"
-        )
-
-        if month_looters:
-            loot_lines = ""
-            for i, (player, score) in enumerate(month_looters):
-                rank_prefix = _MEDAL_EMOJIS.get(i + 1, f"{i + 1}.")
-                loot_lines += f"-# {rank_prefix} {self._player_display(player, group_id)} - `{format_number(score)}` gp\n"
-            components.append(TextDisplayComponent(content=(
-                "💰 **__Loot Leaderboard__**\n"
-                "-# Top 5 players (this month):\n"
-                f"{loot_lines}"
-            )))
-            components.append(SeparatorComponent(divider=True))
-
-        components.append(TextDisplayComponent(content=":hourglass: **__Personal Best Leaderboards__**\n"))
-
-        # Each team-size bracket is one TextDisplayComponent (header + entries
-        # merged) to keep the component count low: two components per bracket
-        # across many brackets/raid modes quickly exceeds Discord's 40-component cap.
-        for team_size in sorted(pbs.keys(), key=self._team_size_sort_key):
-            team_size_string = self._get_team_size_string(team_size)
-            pb_text = f"-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n-# **{team_size_string}**\n"
-            for i, pb in enumerate(pbs[team_size][:max_entries]):
-                rank_prefix = _MEDAL_EMOJIS.get(i + 1, f"{i + 1}.")
-                player = getattr(pb, "player", None)
-                pb_text += (
-                    f"-# {rank_prefix} `{convert_from_ms(pb.personal_best)}` - "
-                    f"{self._player_display(player, group_id)}\n"
-                )
-            components.append(TextDisplayComponent(content=pb_text))
-        return components, summary_content
+        if payload is None:
+            log.error("HOF: %s exceeds Discord limits even at minimum size", label)
+            return None
+        return to_interactions_components(payload)
 
     def _group_player_ids(self, group_id: int) -> List[int]:
         """Member player_ids for a group, cached briefly so a full render pass
@@ -1725,58 +1554,6 @@ class HallOfFame(Extension):
         self._player_ids_cache[group_id] = (now, player_ids)
         return player_ids
 
-    def _get_pbs(self, group_id: int, npc_name: str) -> Dict[object, List[PersonalBestEntry]]:
-        """Personal bests for a group + npc name, bucketed by team size and
-        sorted fastest-first within each bucket."""
-        npc_ids = [row[0] for row in self._db.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).all()]
-        if not npc_ids:
-            return {}
-        player_ids = self._group_player_ids(group_id)
-        if not player_ids:
-            return {}
-        pbs = self._db.query(PersonalBestEntry).filter(
-            PersonalBestEntry.player_id.in_(player_ids),
-            PersonalBestEntry.npc_id.in_(npc_ids),
-        ).all()
-
-        buckets: Dict[object, List[PersonalBestEntry]] = {}
-        for pb in pbs:
-            buckets.setdefault(pb.team_size, []).append(pb)
-        # Cap at the 5 smallest team sizes so one boss can't flood the message.
-        if len(buckets) > 5:
-            keep = sorted(buckets.keys(), key=self._team_size_sort_key)[:5]
-            buckets = {k: buckets[k] for k in keep}
-        for entries in buckets.values():
-            entries.sort(key=lambda pb: pb.personal_best)
-        return buckets
-
-    def _team_size_sort_key(self, team_size) -> Tuple[int, str]:
-        value = str(team_size).strip()
-        if value.casefold() in ("solo", "1"):
-            return (1, "")
-        if value.casefold() == "duo":
-            return (2, "")
-        if value.casefold() == "trio":
-            return (3, "")
-        # A bracket sorts by its lowest member, so Chambers' "11-15" sits
-        # between "10" and "16-23" rather than after every exact size.
-        head = value.split("-", 1)[0].rstrip("+").strip()
-        try:
-            return (int(head), "")
-        except ValueError:
-            return (99, value.casefold())
-
-    def _get_team_size_string(self, team_size) -> str:
-        match team_size:
-            case 1 | "1" | "Solo":
-                return "Solo"
-            case 2 | "2" | "Duo":
-                return "Duo"
-            case 3 | "3" | "Trio":
-                return "Trio"
-            case _:
-                return f"{team_size} players"
-
     def _player_display(self, player: Optional[Player], group_id: int) -> str:
         if player is None:
             return "Unknown"
@@ -1785,117 +1562,9 @@ class HallOfFame(Extension):
         except Exception:
             return player.player_name or "Unknown"
 
-    def _get_variant_mode_name(self, canonical_name: str, npc_name: str) -> str:
-        if canonical_name == "Chambers of Xeric":
-            return "Challenge Mode" if ("Challenge" in npc_name or "CM" in npc_name) else "Normal"
-        if canonical_name == "Theatre of Blood":
-            if "Entry Mode" in npc_name:
-                return "Entry"
-            return "Hard Mode" if "Hard Mode" in npc_name else "Normal"
-        if canonical_name == "Tombs of Amascut":
-            if "Entry Mode" in npc_name:
-                return "Entry"
-            return "Expert" if "Expert" in npc_name else "Normal"
-        if canonical_name == "Nightmare of Ashihama":
-            return "Phosani's Nightmare" if "Phosani" in npc_name else "Nightmare"
-        if canonical_name == "The Gauntlet":
-            return "Corrupted" if "Corrupted" in npc_name else "Crystalline"
-        if canonical_name == SEPULCHRE_CANONICAL:
-            floor_match = re.search(r"Floor\s+(\d+)", npc_name)
-            if floor_match:
-                return f"Floor {floor_match.group(1)}"
-        return npc_name
-
-    def _get_linked_name(self, npc: NpcList) -> str:
-        npc_name = npc.npc_name
-        if "Theatre" in npc.npc_name:
-            if "Hard Mode" in npc.npc_name:
-                npc_name = "HM ToB"
-            elif "Entry Mode" in npc.npc_name:
-                npc_name = "EM ToB"
-            else:
-                npc_name = "ToB"
-        if "Chambers" in npc.npc_name:
-            npc_name = "CM CoX" if ("Challenge" in npc.npc_name or "CM" in npc.npc_name) else "CoX"
-        if "Tombs" in npc.npc_name:
-            if "Expert" in npc.npc_name:
-                npc_name = "Expert ToA"
-            elif "Entry Mode" in npc.npc_name:
-                npc_name = "Entry ToA"
-            else:
-                npc_name = "ToA"
-        if "Nightmare" in npc.npc_name:
-            npc_name = "Phosani's" if "Phosani" in npc.npc_name else "NM"
-        return f"[{npc_name}]({self._get_npc_url(npc)})"
-
-    def _get_npc_img_url(self, npc: NpcList) -> str:
-        if os.path.exists(f"{NPC_IMG_DIR}/{npc.npc_id}.png"):
-            return f"https://www.droptracker.io/img/npcdb/{npc.npc_id}.png"
-        fallback = self._raid_fallback_npc(npc.npc_name, exclude_npc_id=npc.npc_id)
-        if fallback:
-            return f"https://www.droptracker.io/img/npcdb/{fallback.npc_id}.png"
-        return f"https://www.droptracker.io/img/npcdb/{npc.npc_id}.png"
-
-    def _raid_fallback_npc(self, npc_name: str, exclude_npc_id: Optional[int] = None) -> Optional[NpcList]:
-        """If `npc_name` is a raid-mode variant and its own artwork is missing,
-        find another mode of the same raid (base/normal mode first) that already
-        has an image on disk, so the thumbnail isn't a broken image."""
-        canonical = canonical_display_name(npc_name)
-        variants = RAID_GROUPS.get(canonical)
-        if not variants:
-            return None
-        for variant_name in variants:
-            for candidate in npc_name_candidates(variant_name):
-                candidate_npc = self._db.query(NpcList).filter(NpcList.npc_name == candidate).first()
-                if not candidate_npc or candidate_npc.npc_id == exclude_npc_id:
-                    continue
-                if os.path.exists(f"{NPC_IMG_DIR}/{candidate_npc.npc_id}.png"):
-                    return candidate_npc
-        return None
-
-    def _get_npc_url(self, npc: NpcList) -> str:
-        return npc_url(npc.npc_id)
-
     # ------------------------------------------------------------------ #
     # Limits + hashing
     # ------------------------------------------------------------------ #
-
-    def _within_limits(self, components: List[BaseComponent]) -> bool:
-        try:
-            dicts = [c.to_dict() for c in components]
-        except Exception:
-            log.exception("HOF: failed to serialize components for limit check")
-            return False
-        return (
-            self._count_components(dicts) <= _MAX_COMPONENT_COUNT
-            and self._total_text(dicts) <= _MAX_TEXT_CHARS
-        )
-
-    def _count_components(self, obj) -> int:
-        if isinstance(obj, list):
-            return sum(self._count_components(item) for item in obj)
-        if isinstance(obj, dict):
-            count = 1 if "type" in obj else 0
-            for child_key in ("components", "accessory", "options"):
-                child = obj.get(child_key)
-                if child_key != "options" and child is not None:
-                    count += self._count_components(child)
-            return count
-        return 0
-
-    def _total_text(self, obj) -> int:
-        if isinstance(obj, list):
-            return sum(self._total_text(item) for item in obj)
-        if isinstance(obj, dict):
-            total = 0
-            content = obj.get("content")
-            if isinstance(content, str):
-                total += len(content)
-            for child in obj.values():
-                if isinstance(child, (list, dict)):
-                    total += self._total_text(child)
-            return total
-        return 0
 
     def _components_hash(self, components: List[BaseComponent]) -> str:
         try:

@@ -326,6 +326,44 @@ def prefix_npc(name, profile=None) -> str:
     return f"{glyph} {name}" if glyph else str(name or "")
 
 
+def emoji_by_name(emoji_name, profile=None) -> Optional[str]:
+    """The ``<:name:id>`` for an emoji *name* (``"npc_zulrah"``), or None.
+
+    For templates that let an author place any glyph in the set by name — the
+    Hall of Fame layout's ``{emoji:npc_zulrah}`` — rather than the glyph of
+    whatever entity a message happens to be about.
+    """
+    for entry in manifest_entries():
+        if entry.get("emoji") == emoji_name:
+            return _lookup(entry["kind"], entry["key"], profile)
+    return None
+
+
+_GLYPH_ID = re.compile(r"^<a?:[A-Za-z0-9_]+:(\d+)>$")
+
+
+def catalog(profile=None) -> list:
+    """Every glyph this application owns, for an editor's emoji picker.
+
+    ``[{"name": "npc_zulrah", "label": "Zulrah", "kind": "npc", "id": "123"}]``
+    — the id lets a browser draw it from Discord's CDN. Entries the manifest
+    lists but the application has not been seeded with are left out, since a
+    template could not render them.
+    """
+    out = []
+    for entry in manifest_entries():
+        glyph = _lookup(entry["kind"], entry["key"], profile)
+        match = _GLYPH_ID.match(glyph or "")
+        if match:
+            out.append({
+                "name": entry["emoji"],
+                "label": entry["name"],
+                "kind": entry["kind"],
+                "id": match.group(1),
+            })
+    return out
+
+
 def _int(value):
     try:
         return int(value)
