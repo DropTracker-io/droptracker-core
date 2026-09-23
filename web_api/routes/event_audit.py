@@ -183,6 +183,12 @@ async def event_audit(event_id: int):
     # ledger-shaped narrowing (a specific drop's source) means generic
     # non-completion audit rows can't match — but completion audit rows still
     # can, so we keep want_audit and post-filter after enrichment.
+    # Those post-filters (and q) are the only ones not pushed to SQL; the
+    # ledger stream applies every one of its filters in SQL, so its count is
+    # exact.
+    audit_post_filtered = (has_proof or source_type is not None
+                           or player_id is not None or team_id is not None
+                           or task_id is not None)
 
     def _load():
         with db_session() as s:
@@ -247,8 +253,11 @@ async def event_audit(event_id: int):
                 if date_to is not None:
                     aq = aq.filter(AuditLog.created_at <= _dt(date_to))
                 audit_total = aq.count()
-                # Same merge-window bound as the ledger stream above.
-                window = _CAP if q else min(_CAP, page * limit)
+                # Same merge-window bound as the ledger stream above — except
+                # under an audit post-filter, where the page total can only be
+                # counted after enrichment, so the whole (capped) stream loads.
+                window = (_CAP if q or audit_post_filtered
+                          else min(_CAP, page * limit))
                 audit_rows = (
                     aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
                     .limit(window).all()
@@ -330,7 +339,15 @@ async def event_audit(event_id: int):
             events = [e for e in events if _keep(e)]
             events.sort(key=lambda e: (e["created_at"] or 0, e["id"]), reverse=True)
 
-            total = len(events)
+            if q:
+                total = len(events)
+            else:
+                # The real totals, not the fetched page*limit window — with
+                # the window count every page looked like the last-but-one,
+                # so older rows seemed not to exist.
+                audit_kept = (sum(1 for e in events if e["source"] == "audit")
+                              if audit_post_filtered else min(audit_total, _CAP))
+                total = min(ledger_total, _CAP) + audit_kept
             start = (page - 1) * limit
             return {
                 "event_id": event_id,
