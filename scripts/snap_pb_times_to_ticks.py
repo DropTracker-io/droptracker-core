@@ -11,7 +11,9 @@ than assumed, and why inverting it is safe to apply to every row:
 
   * every tick-aligned value is a fixed point, so a time a precise client could
     have produced is never disturbed;
-  * nothing moves by more than 200ms;
+  * nothing moves by more than 400ms, and nothing moves downwards — a rounded
+    display is credited with the slowest duration it could stand for, never the
+    fastest (ticket #182);
   * the snap is monotonic, so it cannot reorder two times on a board.
 
 Intake snaps at the source now (``data/submissions/pb.py``,
@@ -103,8 +105,12 @@ def main():
         for delta in sorted(shifts):
             print(f"    {delta:+5d} ms : {shifts[delta]:>6} rows")
         worst = max(abs(d) for d in shifts)
+        backwards = [d for d in shifts if d < 0]
         print(f"[{mode}] largest displacement: {worst}ms "
-              f"({'OK' if worst <= TICK_MS // 3 else 'UNEXPECTED — investigate'})")
+              f"({'OK' if worst <= 2 * TICK_MS // 3 else 'UNEXPECTED — investigate'})")
+        if backwards:
+            print(f"[{mode}] {sum(shifts[d] for d in backwards)} rows moved DOWNWARDS "
+                  f"— UNEXPECTED, the snap must never credit an unearned time")
 
     if not changes:
         print(f"[{mode}] nothing to do.")

@@ -13,27 +13,44 @@ precise client's whole-second times are always multiples of 3000 (five ticks).
 Splitting those rows by their residue mod 3000 discriminates the two candidate
 rules: truncation predicts a 2:1 split between the 1000 and 2000 residues, while
 round-to-nearest predicts 1:1. Production showed 17,054 vs 17,291 — a ratio of
-0.99 across 34k rows, holding per boss and independently for ``kill_time``. A
-control confirmed the premise: the four residues that only a precise client can
-produce (600/1200/1800/2400) are uniform to within 0.7 points, and the whole
-excess sits on residue 0, exactly where the non-precise rows land.
+0.99 across 34k rows, holding per boss and independently for ``kill_time``.
 
-So the game rounds to the nearest second, and inverting it means snapping back
-to the nearest tick. Two properties make that safe to apply to every time,
-without needing to know which client sent it:
+A second, independent confirmation came out of ticket #182 (below): among
+same-raid pairs that disagree, 290 of 291 land on exactly the two residue
+signatures round-to-nearest allows, and 120 of those are a signature truncation
+cannot produce at all. So the game rounds a duration to the *nearest* second.
+
+**Inverting it is the part that needs care, and getting it wrong is what
+ticket #182 reported.** A display of ``S`` seconds means the true duration lay
+in ``[1000S - 500, 1000S + 500)``, and for two seconds out of every three that
+window holds *two* ticks, 600 ms apart. Picking the nearer one is the best
+guess for a single row, but it guesses low half the time, and a time recorded
+below the truth is a record the player did not earn. Two clan-mates on the same
+raid made that visible: identical raid, but the one with precise timing off
+came out 600 ms ahead. Across 2,339 same-raid pairs recorded in the month after
+tick snapping shipped, 291 disagreed when they had to be identical, and in 170
+of them the non-precise player held the unearned advantage.
+
+So the inverse here is deliberately **not** the nearest tick but the *slowest*
+tick the display is consistent with — a plain ceiling onto the grid. Three
+properties make that both safe and fair:
 
 * **Every tick-aligned value is a fixed point.** The snap therefore cannot
   disturb a time a precise client could have produced — only whole seconds that
   are not multiples of 3000 ever move, and those are provably non-precise.
-* **Nothing moves by more than 200 ms**, because a whole second sits 200 ms
-  from a tick boundary on one side or the other.
+* **It never moves a time downwards**, so a non-precise client cannot be
+  credited with a duration shorter than the one it actually achieved. A player
+  can no longer beat a raid-mate they did not beat.
+* **Nothing moves by more than 400 ms**, the widest gap between a whole second
+  and the next tick above it.
 
-The residual ambiguity is irreducible and worth being honest about: a displayed
-whole second has two tick preimages 600 ms apart, and they are equally likely.
-Snapping to the nearest picks one, which is exact about half the time and 600 ms
-out otherwise — erring slow for half the residues and fast for the other half,
-so it does not systematically advantage or penalise players who leave precise
-timing off.
+The residual ambiguity is irreducible and worth being honest about: the true
+time is the upper tick of the pair about half the time, and the lower tick the
+other half. Rounding up is exact in three tick-residues out of five and one
+tick pessimistic in the other two. That is a real cost, paid only by players
+who leave precise timing off, and it is the right way round for a leaderboard:
+a record is never credited to someone who did not set it, and turning precise
+timing on removes the penalty entirely.
 """
 
 #: One OSRS game tick, in milliseconds. Every real duration is a multiple.
@@ -41,7 +58,7 @@ TICK_MS = 600
 
 
 def snap_to_tick(ms) -> int:
-    """Round ``ms`` to the nearest whole game tick.
+    """Round ``ms`` up to the slowest game tick its display is consistent with.
 
     Non-positive values pass through unchanged: zero is the "no time recorded"
     sentinel throughout the PB pipeline and must not become a real duration.
@@ -54,10 +71,10 @@ def snap_to_tick(ms) -> int:
         return 0
     if value <= 0:
         return value
-    # Integer half-up: Python's round() is banker's rounding, which would send
-    # exact midpoints to the even tick and break the round-nearest rule.
-    snapped = ((value + TICK_MS // 2) // TICK_MS) * TICK_MS
-    return snapped or TICK_MS
+    # Ceiling division. Rounding to the *nearest* tick here is what ticket #182
+    # reported: it resolves the two-tick ambiguity downwards half the time, and
+    # a PB below the true duration is a record nobody earned.
+    return -(-value // TICK_MS) * TICK_MS
 
 
 def is_tick_aligned(ms) -> bool:

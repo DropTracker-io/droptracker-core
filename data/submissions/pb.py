@@ -51,7 +51,9 @@ def _time_to_ms(value) -> int:
     version of the real duration and cannot be compared against a precise
     client's on the same board. Snapping is a fixed point on every
     tick-aligned value, so it only ever moves a time that is provably
-    non-precise — see ``utils.pb_time``.
+    non-precise, and it only ever moves it *upwards* — a rounded display is
+    credited with the slowest duration it could stand for, never the fastest
+    (ticket #182). See ``utils.pb_time``.
     """
     from utils.pb_time import snap_to_tick
 

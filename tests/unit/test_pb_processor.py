@@ -183,11 +183,14 @@ class TestTickSnapping:
     precise-timing setting; intake puts both on the game's tick grid so one
     board never holds two quantizations (utils.pb_time)."""
 
-    def test_whole_second_times_snap_to_the_nearest_tick(self):
+    def test_whole_second_times_snap_up_to_the_slowest_consistent_tick(self):
+        """Ticket #182: snapping to the *nearest* tick credited non-precise
+        clients with times below the truth, so they out-ranked raid-mates they
+        had not beaten."""
         _, _notify = _run(_payload(current_ms=890000, pb_ms=890000, is_pb=True), row=None)
         kwargs = db.PersonalBestEntry.call_args.kwargs
-        assert kwargs["personal_best"] == 889800
-        assert kwargs["kill_time"] == 889800
+        assert kwargs["personal_best"] == 890400
+        assert kwargs["kill_time"] == 890400
 
     def test_tick_aligned_times_are_untouched(self):
         """The safety property: a time a precise client could have produced

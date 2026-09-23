@@ -14,17 +14,38 @@ def test_every_tick_aligned_time_is_a_fixed_point():
         assert snap_to_tick(ms) == ms, f"{ms} moved"
 
 
-def test_whole_seconds_snap_to_the_nearest_tick():
-    # A whole second sits 200ms from a tick on one side or the other, and
-    # multiples of 3000 sit exactly on one.
+def test_whole_seconds_snap_up_to_the_slowest_consistent_tick():
+    # The game rounds a duration to the nearest second, so a display of S
+    # seconds means the truth was in [1000S-500, 1000S+500). We record the
+    # slowest tick in that window, never the fastest.
     assert snap_to_tick(1000) == 1200
-    assert snap_to_tick(2000) == 1800
+    assert snap_to_tick(2000) == 2400
     assert snap_to_tick(3000) == 3000
     assert snap_to_tick(4000) == 4200
-    assert snap_to_tick(5000) == 4800
+    assert snap_to_tick(5000) == 5400
     assert snap_to_tick(6000) == 6000
-    # A real raid time: 20:02 -> 20:01.8
-    assert snap_to_tick(1_202_000) == 1_201_800
+    # A real raid time: 20:02 -> 20:02.4
+    assert snap_to_tick(1_202_000) == 1_202_400
+
+
+def test_a_non_precise_time_is_never_credited_as_faster_than_the_truth():
+    """Ticket #182: two clan-mates on one raid, and the one with precise timing
+    off came out ahead. For every true tick duration, what a non-precise client
+    displays must never snap below it."""
+    for ticks in range(1, 20_000):
+        true_ms = ticks * TICK_MS
+        # What the game prints with precise timing off: nearest whole second.
+        displayed = ((true_ms + 500) // 1000) * 1000
+        assert snap_to_tick(displayed) >= true_ms, f"{true_ms} recorded as faster"
+
+
+def test_the_pessimism_is_bounded_to_a_single_tick():
+    """The flip side of never crediting an unearned record: a non-precise time
+    may be recorded one tick slow, but never more."""
+    for ticks in range(1, 20_000):
+        true_ms = ticks * TICK_MS
+        displayed = ((true_ms + 500) // 1000) * 1000
+        assert snap_to_tick(displayed) - true_ms <= TICK_MS
 
 
 def test_multiples_of_three_seconds_never_move():
@@ -34,9 +55,14 @@ def test_multiples_of_three_seconds_never_move():
         assert snap_to_tick(k * 3000) == k * 3000
 
 
-def test_nothing_moves_by_more_than_two_hundred_ms():
+def test_nothing_moves_by_more_than_four_hundred_ms():
     for ms in range(1000, 4_000_000, 1000):
-        assert abs(snap_to_tick(ms) - ms) <= 200
+        assert 0 <= snap_to_tick(ms) - ms <= 400
+
+
+def test_snapping_never_moves_a_time_downwards():
+    for ms in range(1, 200_000, 7):
+        assert snap_to_tick(ms) >= ms
 
 
 def test_snapping_is_idempotent():
@@ -69,8 +95,8 @@ def test_a_positive_time_never_collapses_into_the_sentinel():
 
 
 def test_string_and_float_inputs_coerce():
-    assert snap_to_tick("2000") == 1800
-    assert snap_to_tick(2000.0) == 1800
+    assert snap_to_tick("2000") == 2400
+    assert snap_to_tick(2000.0) == 2400
 
 
 @pytest.mark.parametrize(
