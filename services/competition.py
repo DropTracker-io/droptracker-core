@@ -451,7 +451,11 @@ def fold_rows(rows: Iterable, config: CompetitionConfig) -> dict:
 
     Returns ``{player_id: {"gained": int, "bonus_points": int,
     "bonus": {rule_id: {"type", "count", "awarded", "points",
-    "progress", "need"}}}}``.
+    "progress", "need"}}, "by_npc": {npc: int}}}``.
+
+    ``by_npc`` splits a boss race's gained kills by the normalized boss name
+    in each row's ``matched_target``. Rows with no (or an unraced) boss land
+    under ``""`` so the parts always sum to ``gained``. Empty on skill races.
 
     Three dialects share the ledger, told apart by the note's type segment
     (see the module docstring) and folded in three passes:
@@ -473,16 +477,23 @@ def fold_rows(rows: Iterable, config: CompetitionConfig) -> dict:
     """
     per: dict = {}
     task_rows: dict = {}
+    split_npcs = config.metric_kind == "boss"
+    raced = set(config.npcs)
     for row in sorted(rows, key=_row_sort_key):
         player_id = getattr(row, "player_id", None)
         if player_id is None:
             continue
         entry = per.setdefault(player_id,
-                               {"gained": 0, "bonus_points": 0, "bonus": {}})
+                               {"gained": 0, "bonus_points": 0, "bonus": {},
+                                "by_npc": {}})
         quantity = max(_int(getattr(row, "quantity", 1), 1), 1)
         parsed = parse_bonus_note(getattr(row, "note", None))
         if parsed is None:
             entry["gained"] += quantity
+            if split_npcs:
+                npc = _norm(getattr(row, "matched_target", None))
+                npc = npc if npc in raced else ""
+                entry["by_npc"][npc] = entry["by_npc"].get(npc, 0) + quantity
             continue
         rule_type, rule_id = parsed
         rule = config.rules_by_id.get(rule_id)
@@ -634,6 +645,17 @@ def team_score(per_player: dict, config: CompetitionConfig,
     return round(total / members, 2) if members else 0
 
 
+def _sum_maps(maps: Iterable) -> dict:
+    """Key-wise integer sum of several ``{key: int}`` maps (zeros dropped)."""
+    out: dict = {}
+    for m in maps:
+        for key, value in (m or {}).items():
+            n = _int(value)
+            if n:
+                out[key] = out.get(key, 0) + n
+    return out
+
+
 def team_standings(teams: Iterable, folds: dict, config: CompetitionConfig,
                    names: dict) -> list:
     """Ranked team rows for a team race.
@@ -642,7 +664,10 @@ def team_standings(teams: Iterable, folds: dict, config: CompetitionConfig,
     maps team id -> that team's :func:`fold_rows` output; ``names`` maps
     player id -> display name (for each team's top player). ``score`` is the
     ranked number (:func:`team_score`); ``total`` and ``average`` are both
-    always present so a surface can show the other one alongside."""
+    always present so a surface can show the other one alongside.
+    ``by_npc`` (kills per boss) and ``bonus_by_rule`` (points per rule id)
+    sum the team's own fold, so a player who changed team counts on each
+    team for what they scored there."""
     rows = []
     for team in teams:
         team_id = team.get("team_id")
@@ -673,6 +698,10 @@ def team_standings(teams: Iterable, folds: dict, config: CompetitionConfig,
             "average": round(total / members, 2) if members else 0,
             "score": team_score(per, config, roster_ids),
             "top_player": top,
+            "by_npc": _sum_maps(e.get("by_npc") for e in per.values()),
+            "bonus_by_rule": _sum_maps(
+                {rid: slot.get("points") for rid, slot in (e.get("bonus") or {}).items()}
+                for e in per.values()),
         })
     rows.sort(key=lambda r: (-r["score"], -r["total"], -r["gained"],
                              _norm(r["name"]), r["team_id"] or 0))
@@ -730,6 +759,7 @@ def standings(per_player: dict, config: CompetitionConfig, names: dict,
             "bonus_points": _int(entry.get("bonus_points")),
             "points": player_points(entry, config),
             "bonus": entry.get("bonus") or {},
+            "by_npc": entry.get("by_npc") or {},
             "team_id": team_id,
             "team_name": team_name,
         })
@@ -757,6 +787,7 @@ def standings(per_player: dict, config: CompetitionConfig, names: dict,
             "bonus_points": 0,
             "points": player_points(entry, config),
             "bonus": {},
+            "by_npc": {},
             "team_id": team_id,
             "team_name": team_name,
         })

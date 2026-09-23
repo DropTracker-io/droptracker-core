@@ -148,8 +148,31 @@ class TestFold:
         per = comp.fold_rows(rows, cfg)
         assert per[5] == {"gained": 3, "bonus_points": 5,
                           "bonus": {2: {"type": "time_under", "count": 1,
-                                        "awarded": 1, "points": 5}}}
+                                        "awarded": 1, "points": 5}},
+                          "by_npc": {"": 3}}
         assert per[6]["gained"] == 10 and per[6]["bonus_points"] == 0
+
+    def test_gained_splits_by_boss(self):
+        """A multi-boss race splits kills by each row's boss. Untagged rows
+        (pre-tagging history) and unraced names fall under "" so the parts
+        always sum to gained; bonus rows never count as kills."""
+        cfg = comp.CompetitionConfig(BOTW_CFG)
+        rows = [
+            _row(5, 3, rid=1, matched_target="Zulrah"),
+            _row(5, 2, rid=2, matched_target="VORKATH"),
+            _row(5, 1, rid=3, matched_target="Zulrah"),
+            _row(5, 4, rid=4),
+            _row(5, 1, rid=5, matched_target="Hydra"),
+            _row(5, 100, note="bonus:pet:1", rid=6, matched_target="Pet snakeling"),
+        ]
+        per = comp.fold_rows(rows, cfg)
+        assert per[5]["by_npc"] == {"zulrah": 4, "vorkath": 2, "": 5}
+        assert sum(per[5]["by_npc"].values()) == per[5]["gained"] == 11
+
+    def test_skill_race_has_no_boss_split(self):
+        cfg = comp.CompetitionConfig(SOTW_CFG)
+        per = comp.fold_rows([_row(5, 50_000, rid=1, matched_target="x")], cfg)
+        assert per[5]["by_npc"] == {}
 
     def test_per_player_cap_enforced_in_fold(self):
         cfg = comp.CompetitionConfig(BOTW_CFG)  # rule 2: max_awards 2
@@ -627,6 +650,22 @@ class TestTeamStandings:
         assert red["top_player"] == {"player_id": 10, "player_name": "Alice", "value": 8}
         assert red["average"] == round(11 / 3, 2)
         assert rows[2]["top_player"] is None
+
+    def test_team_rows_break_down_by_boss_and_rule(self):
+        cfg = comp.CompetitionConfig(BOTW_CFG)
+        folds = {1: comp.fold_rows([
+            _row(10, 3, rid=1, matched_target="Zulrah"),
+            _row(11, 2, rid=2, matched_target="Vorkath"),
+            _row(11, 1, rid=3, matched_target="Zulrah"),
+            _row(10, 5, note="bonus:time_under:2 | 0:55", rid=4),
+            _row(11, 5, note="bonus:time_under:2 | 0:58", rid=5),
+            _row(11, 100, note="bonus:pet:1", rid=6),
+        ], cfg)}
+        teams = [{"team_id": 1, "name": "Red", "roster_ids": [10, 11]}]
+        (red,) = comp.team_standings(teams, folds, cfg, {})
+        assert red["by_npc"] == {"zulrah": 4, "vorkath": 2}
+        assert red["bonus_by_rule"] == {2: 10, 1: 100}
+        assert sum(red["bonus_by_rule"].values()) == red["bonus_points"]
 
     def test_average_scoring_can_reorder_the_teams(self):
         teams, folds, _cfg, names = self._teams()

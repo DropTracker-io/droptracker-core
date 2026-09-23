@@ -1339,14 +1339,22 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
                 return None
             if _norm(data.get("npc_name")) not in (comp.get("npcs") or ()):
                 return None
-            return {"mode": "kc", "quantity": 1}
+            # matched_target names the boss the kill was at, so a multi-boss
+            # race can show kills per boss (services/competition.fold_rows).
+            # Gained rows are untagged, so no item/echo logic reads it.
+            return {"mode": "kc", "quantity": 1,
+                    "matched_target": str(data.get("npc_name") or "").strip()[:120] or None}
         if kind == "wom_kc":
             if metric_kind != "boss":
                 return None
             metric = str(data.get("boss_metric") or "").strip().lower()
-            if not metric or metric not in _kc_wom_metrics(task):
+            npc_norm = _kc_wom_metrics(task).get(metric) if metric else None
+            if not npc_norm:
                 return None
-            return {"mode": "kc_abs", "quantity": 0}
+            return {"mode": "kc_abs", "quantity": 0,
+                    # Only the normalized name survives the metric map; the
+                    # fold compares normalized, so the casing is cosmetic.
+                    "matched_target": npc_norm.title()[:120]}
         if kind == "pet":
             raw_name = data.get("pet_name") or data.get("item_name")
             rule = (comp.get("pet_rules") or {}).get(_norm(raw_name))

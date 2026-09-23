@@ -111,13 +111,14 @@ class TestMatchTask:
         task = _task(BOTW_CONFIG)
         m = engine.match_task(task, _env("drop", npc_name="Zulrah", item_name="X",
                                          kill_count=51))
-        assert m == {"mode": "kc", "quantity": 1}
+        # The row names its boss so a multi-boss race can split kills.
+        assert m == {"mode": "kc", "quantity": 1, "matched_target": "Zulrah"}
         assert engine.match_task(task, _env("drop", npc_name="Vorkath")) is None
 
     def test_botw_wom_kc_matches_metric(self):
         task = _task(BOTW_CONFIG)
         m = engine.match_task(task, _env("wom_kc", boss_metric="zulrah", kc=312))
-        assert m == {"mode": "kc_abs", "quantity": 0}
+        assert m == {"mode": "kc_abs", "quantity": 0, "matched_target": "Zulrah"}
         assert engine.match_task(task, _env("wom_kc", boss_metric="vorkath")) is None
 
     def test_metric_kind_gates_envelope_kinds(self):
