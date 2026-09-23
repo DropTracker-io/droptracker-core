@@ -277,14 +277,10 @@ class DatabaseOperations:
                 return new_user
             except Exception as e:
                 session.rollback()
-            try:
-                droptracker_guild: interactions.Guild = await ctx.bot.fetch_guild(guild_id=1172737525069135962)
-                dt_member = droptracker_guild.get_member(member_id=discord_id)
-                if dt_member:
-                    registered_role = droptracker_guild.get_role(role_id=1210978844190711889)
-                    await dt_member.add_role(role=registered_role)
-            except Exception as e:
-                print("Couldn't add the user to the registered role:", e)
+            # The Registered / Unregistered roles follow claimed RSNs via the
+            # webhook bot's role sync (services/discord_roles.py); nudge it.
+            from services.discord_roles import request_sync
+            request_sync()
             # xf_user = await xf_api.try_create_xf_user(discord_id=str(discord_id),
             #                                 username=username,
             #                                 auth_key=str(auth_token))

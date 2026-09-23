@@ -15,6 +15,11 @@ The database is the source of truth and the roles follow it:
 * **Bug Tester** follows an active ``bug_tester_helper`` badge on any of the
   user's players. That badge also grants the complimentary supporter perks
   (``db/entitlements.py``). The Fanatic role is not granted with it.
+* **Registered** goes to a user who has claimed at least one RSN (a ``players``
+  row carries their user id). **Unregistered** goes to every other person on
+  the server, linked account or not. These two are the status roles
+  (:data:`STATUS_SPECS`): the seeder never restyles or moves Registered, and
+  only creates Unregistered directly beneath it.
 
 Role ids live in :data:`ROLE_MAP_PATH`, written by
 ``scripts/seed_discord_roles.py``. The seeder creates, renames, styles and
@@ -81,6 +86,10 @@ GROUP_PAYER = "group_payer"
 GROUP_MEMBER = "group_member"
 USER_SUBSCRIBER = "user_subscriber"
 BUG_TESTER = "bug_tester"
+REGISTERED = "registered"
+#: Everyone on the server not owed Registered. Worked out per member while
+#: planning, since the database has no row for someone it has never seen.
+UNREGISTERED = "unregistered"
 _TIER_GRANTS = (GROUP_PAYER, GROUP_MEMBER)
 
 
@@ -122,7 +131,17 @@ ROLE_SPECS: Tuple[RoleSpec, ...] = (
     RoleSpec("supporter_member", "Supporter (Member)", GROUP_MEMBER, "basic", 0xD99A5B,
              icon_from="supporter"),
 )
-SPECS_BY_KEY: Dict[str, RoleSpec] = {s.key: s for s in ROLE_SPECS}
+
+#: The claimed-RSN status roles. They are not part of the tier block: the
+#: seeder leaves the existing "Registered" as the server has it and puts
+#: "Unregistered" directly beneath it. Uncoloured and not hoisted, so they never
+#: change how a name is shown.
+STATUS_SPECS: Tuple[RoleSpec, ...] = (
+    RoleSpec("registered", "Registered", REGISTERED, adopt_role_id="1210978844190711889"),
+    RoleSpec("unregistered", "Unregistered", UNREGISTERED),
+)
+ALL_SPECS: Tuple[RoleSpec, ...] = ROLE_SPECS + STATUS_SPECS
+SPECS_BY_KEY: Dict[str, RoleSpec] = {s.key: s for s in ALL_SPECS}
 
 #: The divider role the block sits directly beneath ("━━━━━━━━", above the
 #: old Supporter role). Without it the seeder leaves the order alone.
@@ -191,7 +210,7 @@ def write_role_map(roles: Mapping[str, str], path: Path = ROLE_MAP_PATH,
     payload = {
         "guild_id": str(guild_id),
         "updated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        "roles": {s.key: str(roles[s.key]) for s in ROLE_SPECS if s.key in roles},
+        "roles": {s.key: str(roles[s.key]) for s in ALL_SPECS if s.key in roles},
     }
     Path(path).write_text(json.dumps(payload, indent=2) + "\n")
 
@@ -211,6 +230,8 @@ class RoleInputs:
     user_tier: Dict[int, str] = field(default_factory=dict)
     #: users holding an active Bug Tester badge
     bug_testers: Set[int] = field(default_factory=set)
+    #: users with at least one claimed RSN
+    registered: Set[int] = field(default_factory=set)
     #: user_id -> Discord id
     discord_ids: Dict[int, str] = field(default_factory=dict)
 
@@ -286,7 +307,12 @@ def load_role_inputs(session) -> RoleInputs:
     )
     inputs.bug_testers = {int(uid) for (uid,) in tester_rows}
 
-    wanted: Set[int] = set(inputs.user_tier) | inputs.bug_testers
+    inputs.registered = {
+        int(uid) for (uid,) in
+        session.query(Player.user_id).filter(Player.user_id.isnot(None)).distinct().all()
+    }
+
+    wanted: Set[int] = set(inputs.user_tier) | inputs.bug_testers | inputs.registered
     for users in list(inputs.group_payers.values()) + list(inputs.group_members.values()):
         wanted |= users
     ordered = sorted(wanted)
@@ -301,8 +327,12 @@ def load_role_inputs(session) -> RoleInputs:
 
 
 def desired_role_keys(inputs: RoleInputs,
-                      specs: Sequence[RoleSpec] = ROLE_SPECS) -> Dict[str, Set[str]]:
-    """``{discord_id: {role key}}`` — who should hold which managed role."""
+                      specs: Sequence[RoleSpec] = ALL_SPECS) -> Dict[str, Set[str]]:
+    """``{discord_id: {role key}}`` — who should hold which managed role.
+
+    Unregistered is never in here; :func:`plan_role_changes` gives it to every
+    member not owed Registered.
+    """
     tier_specs = [s for s in specs if s.grant in _TIER_GRANTS]
     rank = {s.key: index for index, s in enumerate(tier_specs)}
     payer_role = {s.tier_key: s.key for s in tier_specs if s.grant == GROUP_PAYER}
@@ -330,6 +360,9 @@ def desired_role_keys(inputs: RoleInputs,
                     by_user[uid].add(spec.key)
         elif spec.grant == BUG_TESTER:
             for uid in inputs.bug_testers:
+                by_user[uid].add(spec.key)
+        elif spec.grant == REGISTERED:
+            for uid in inputs.registered:
                 by_user[uid].add(spec.key)
 
     out: Dict[str, Set[str]] = {}
@@ -364,9 +397,18 @@ def plan_role_changes(desired: Mapping[str, Set[str]],
     member's other roles are never read beyond that. With ``max_removals``,
     a plan with more removals than that keeps its additions and holds every
     removal back.
+
+    Unregistered goes to every member not owed Registered. If nobody at all is
+    owed Registered, the read is treated as broken and Unregistered is not
+    planned, rather than handed to the whole server.
     """
     key_by_role_id = {str(rid): key for key, rid in role_map.items()}
-    order = {s.key: index for index, s in enumerate(ROLE_SPECS)}
+    order = {s.key: index for index, s in enumerate(ALL_SPECS)}
+    status_keys = {s.key for s in STATUS_SPECS}
+    complement = (
+        UNREGISTERED in role_map
+        and any(REGISTERED in keys for keys in desired.values())
+    )
     plan = RolePlan()
     seen: Set[str] = set()
     for member in members:
@@ -377,11 +419,17 @@ def plan_role_changes(desired: Mapping[str, Set[str]],
         seen.add(discord_id)
         held = {key_by_role_id[str(r)] for r in (member.get("roles") or ()) if str(r) in key_by_role_id}
         wanted = {key for key in desired.get(discord_id, ()) if key in role_map}
+        if complement and REGISTERED not in desired.get(discord_id, ()):
+            wanted.add(UNREGISTERED)
+        elif not complement:
+            held.discard(UNREGISTERED)  # leave it alone rather than strip it
         plan.adds.extend((discord_id, key) for key in sorted(wanted - held, key=order.__getitem__))
         plan.removes.extend((discord_id, key) for key in sorted(held - wanted, key=order.__getitem__))
+    # Most registered players never join the server; only count people owed
+    # something beyond that.
     plan.not_in_guild = sum(
         1 for discord_id, keys in desired.items()
-        if discord_id not in seen and any(k in role_map for k in keys)
+        if discord_id not in seen and any(k in role_map and k not in status_keys for k in keys)
     )
     if max_removals is not None and len(plan.removes) > max_removals:
         plan.held_back, plan.removes = plan.removes, []

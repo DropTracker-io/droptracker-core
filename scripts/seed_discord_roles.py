@@ -15,6 +15,8 @@ Converges the roles in ``services/discord_roles.ROLE_SPECS``:
 * moves the block directly beneath the "━━━━━━━━" divider above the old
   Supporter role, in spec order, so the colours show over "Registered" and
   "Clan Leader";
+* adopts "Registered" as it is and creates "Unregistered" directly beneath it
+  (``STATUS_SPECS``: uncoloured, not hoisted, no permissions);
 * writes ``data/discord_roles.json``, which switches the role sync on.
 
 Runs with the core bot's token (``BOT_TOKEN``): its role is the highest of
@@ -94,6 +96,43 @@ async def _modify(http, guild_id: str, role_id: str, patch: dict) -> dict:
             print(f"    gradient refused ({exc}); using a flat colour instead")
             return await http.modify_guild_role(guild_id, role_id, flat, reason=REASON)
         raise
+
+
+async def _seed_status_roles(http, guild_id: str, role_map: dict, top: int, apply: bool) -> dict:
+    """Adopt Registered untouched; create Unregistered and hold it directly beneath.
+
+    Returns ``{key: role id}`` for the status roles that exist.
+    """
+    roles = await http.get_roles(guild_id)
+    resolved = dr.resolve_spec_roles(roles, role_map, dr.STATUS_SPECS)
+    registered, unregistered = resolved["registered"], resolved["unregistered"]
+    if registered is None:
+        print("  status 'Registered' not found; the status roles are left out of the sync")
+        return {}
+    if int(registered["position"]) >= top:
+        print("  status 'Registered' is at or above the bot's highest role; left out of the sync")
+        return {}
+    print(f"  ok     {registered['name']!r} ({registered['id']}) adopted as is")
+    if unregistered is None:
+        spec = dr.SPECS_BY_KEY["unregistered"]
+        print(f"  create {spec.name!r} beneath {registered['name']!r}")
+        if not apply:
+            return {"registered": str(registered["id"])}
+        unregistered = await http.create_guild_role(guild_id, {
+            "name": spec.name, "permissions": "0", "hoist": False,
+            "mentionable": False, "color": 0,
+        }, reason=REASON)
+        roles = await http.get_roles(guild_id)
+    changes = dr.plan_role_order(roles, [str(unregistered["id"])], str(registered["id"]), top)
+    if changes is None:
+        print("  order  'Unregistered' cannot be placed; left as is")
+    elif not changes:
+        print("  order  'Unregistered' already beneath 'Registered'")
+    else:
+        print("  order  move 'Unregistered' directly beneath 'Registered'")
+        if apply:
+            await http.modify_guild_role_positions(guild_id, changes, reason=REASON)
+    return {"registered": str(registered["id"]), "unregistered": str(unregistered["id"])}
 
 
 async def seed(apply: bool) -> int:
@@ -199,15 +238,22 @@ async def seed(apply: bool) -> int:
         for spec in missing:
             resolved[spec.key] = None
 
-        # 4. Verify and record.
+        # 4. Registered / Unregistered: create Unregistered, keep it under Registered.
+        status = await _seed_status_roles(http, guild_id, role_map, top, apply)
+
+        # 5. Verify and record.
         if apply:
             roles = await http.get_roles(guild_id)
             final = {s.key: str(resolved[s.key]["id"]) for s in dr.ROLE_SPECS if resolved[s.key]}
+            final.update(status)
             dr.write_role_map(final)
             print(f"wrote {dr.ROLE_MAP_PATH}")
             by_id = {str(r["id"]): r for r in roles}
             after = dr.current_role_order(roles)
-            others_kept = [i for i in after if i not in set(block)] == [i for i in before if i not in set(block)]
+            # The status roles are placed separately (step 4) and Unregistered
+            # may not have existed when ``before`` was read.
+            moved = set(block) | set(status.values())
+            others_kept = [i for i in after if i not in moved] == [i for i in before if i not in moved]
             anchor = after.index(dr.ORDER_ANCHOR_ROLE_ID) if dr.ORDER_ANCHOR_ROLE_ID in after else None
             block_ok = anchor is not None and after[anchor + 1:anchor + 1 + len(block)] == block
             print("result (top to bottom, from the divider):")

@@ -390,6 +390,10 @@ def claim_player(
             message="A database error occurred while claiming this account.",
         )
 
+    # Registered / Unregistered follow claimed RSNs; ask the role sync for a pass.
+    from services.discord_roles import request_sync
+    request_sync()
+
     result = ClaimResult(status="claimed", **facts)
     if group:
         result["group_id"] = group.group_id
@@ -439,6 +443,10 @@ def unclaim_player(
             status="error",
             message="A database error occurred while unclaiming this account.",
         )
+
+    # Registered / Unregistered follow claimed RSNs; ask the role sync for a pass.
+    from services.discord_roles import request_sync
+    request_sync()
 
     return UnclaimResult(
         status="unclaimed",

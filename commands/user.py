@@ -412,8 +412,8 @@ class UserCommands(Extension):
         self._refresh_session()
         user = session.query(User).filter_by(discord_id=str(ctx.user.id)).first()
         if not user:
-            # Bot-side creation keeps the Discord "registered" role + DM flow;
-            # the shared service would only do the DB portion.
+            # Bot-side creation keeps the DM flow; the shared service would
+            # only do the DB portion.
             await try_create_user(ctx=ctx)
 
         # Shared mutation logic (also behind the website/Activity claim flow).

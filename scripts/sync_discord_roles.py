@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Run one pass of the tier and Bug Tester role sync by hand
-==========================================================
+Run one pass of the tier, Bug Tester and Registered role sync by hand
+=====================================================================
 
 The webhook bot runs this sync on its own (``services/discord_roles.py``). This
 script runs the same code once and prints every change, so the result can be
@@ -69,7 +69,7 @@ async def run(apply: bool, allow_mass_removal: bool) -> int:
         role_map = dr.load_role_map()
         missing = []
         if not role_map:
-            resolved = dr.resolve_spec_roles(await http.get_roles(dr.MAIN_GUILD_ID), {})
+            resolved = dr.resolve_spec_roles(await http.get_roles(dr.MAIN_GUILD_ID), {}, dr.ALL_SPECS)
             role_map = {key: str(role["id"]) for key, role in resolved.items() if role}
             missing = [key for key, role in resolved.items() if not role]
             print("note: no role map yet (run scripts/seed_discord_roles.py); using existing roles")
@@ -92,7 +92,7 @@ async def run(apply: bool, allow_mass_removal: bool) -> int:
         adds = Counter(key for _, key in plan.adds)
         removes = Counter(key for _, key in plan.removes + plan.held_back)
         print(f"{'role':<20} {'holders now':>11} {'add':>5} {'remove':>7}")
-        for spec in dr.ROLE_SPECS:
+        for spec in dr.ALL_SPECS:
             state = "" if spec.key in role_map else "  (role not created)"
             print(f"{spec.name:<20} {holders[spec.key]:>11} {adds[spec.key]:>5} {removes[spec.key]:>7}{state}")
 

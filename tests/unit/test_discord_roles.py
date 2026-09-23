@@ -30,12 +30,13 @@ sys.modules["services.discord_roles"] = dr
 _spec.loader.exec_module(dr)
 
 MAP = {s.key: str(9000 + i) for i, s in enumerate(dr.ROLE_SPECS)}
+FULL_MAP = {s.key: str(9000 + i) for i, s in enumerate(dr.ALL_SPECS)}
 
 
 def _inputs(**kwargs):
     inputs = dr.RoleInputs(**kwargs)
     if not inputs.discord_ids:
-        users = set(inputs.user_tier) | set(inputs.bug_testers)
+        users = set(inputs.user_tier) | set(inputs.bug_testers) | set(inputs.registered)
         for group in list(inputs.group_payers.values()) + list(inputs.group_members.values()):
             users |= set(group)
         inputs.discord_ids = {uid: str(100000 + uid) for uid in users}
@@ -125,6 +126,64 @@ class TestPlan:
         members = [_member(i, roles=[MAP["bug_tester"]]) for i in range(1, 4)]
         plan = dr.plan_role_changes({}, members, MAP, max_removals=3)
         assert len(plan.removes) == 3 and plan.held_back == []
+
+
+class TestRegistered:
+    """Registered = at least one claimed RSN; Unregistered = everyone else here."""
+
+    def test_a_claimed_rsn_makes_you_registered_alongside_other_roles(self):
+        inputs = _inputs(group_tier={10: "t3"}, group_members={10: {1}}, registered={1, 2})
+        assert dr.desired_role_keys(inputs) == {_d(1): {"patron_member", "registered"},
+                                                _d(2): {"registered"}}
+
+    def test_the_owner_user_zero_is_registered(self):
+        inputs = _inputs(registered={0})
+        assert dr.desired_role_keys(inputs) == {_d(0): {"registered"}}
+
+    def test_everyone_else_on_the_server_is_unregistered(self):
+        members = [_member(1), _member(2), _member(3, roles=[FULL_MAP["registered"]])]
+        desired = {"1": {"registered"}}
+        plan = dr.plan_role_changes(desired, members, FULL_MAP)
+        assert sorted(plan.adds) == [("1", "registered"), ("2", "unregistered"), ("3", "unregistered")]
+        assert plan.removes == [("3", "registered")]
+
+    def test_claiming_swaps_unregistered_for_registered(self):
+        members = [_member(1, roles=[FULL_MAP["unregistered"]])]
+        plan = dr.plan_role_changes({"1": {"registered"}}, members, FULL_MAP)
+        assert plan.adds == [("1", "registered")]
+        assert plan.removes == [("1", "unregistered")]
+
+    def test_a_converged_member_needs_nothing(self):
+        members = [_member(1, roles=[FULL_MAP["registered"]]), _member(2, roles=[FULL_MAP["unregistered"]])]
+        plan = dr.plan_role_changes({"1": {"registered"}}, members, FULL_MAP)
+        assert plan.adds == [] and plan.removes == []
+
+    def test_bots_are_never_unregistered(self):
+        plan = dr.plan_role_changes({"1": {"registered"}}, [_member(5, bot=True)], FULL_MAP)
+        assert plan.adds == []
+
+    def test_an_empty_read_never_hands_the_whole_server_unregistered(self):
+        members = [_member(1, roles=[FULL_MAP["unregistered"]]), _member(2)]
+        plan = dr.plan_role_changes({}, members, FULL_MAP)
+        assert plan.adds == [] and plan.removes == []
+
+    def test_without_the_status_roles_in_the_map_nothing_changes(self):
+        plan = dr.plan_role_changes({"1": {"registered"}}, [_member(1), _member(2)], MAP)
+        assert plan.adds == [] and plan.removes == []
+
+    def test_registered_players_off_the_server_are_not_counted_as_missing(self):
+        plan = dr.plan_role_changes({"1": {"registered"}, "2": {"registered", "fanatic"}},
+                                    [_member(3)], FULL_MAP)
+        assert plan.not_in_guild == 1
+
+    def test_the_status_roles_are_kept_out_of_the_tier_block(self):
+        assert not {"registered", "unregistered"} & {s.key for s in dr.ROLE_SPECS}
+        assert dr.SPECS_BY_KEY["registered"].adopt_role_id == "1210978844190711889"
+
+    def test_the_role_map_keeps_the_status_roles(self, tmp_path):
+        path = tmp_path / "roles.json"
+        dr.write_role_map(FULL_MAP, path)
+        assert dr.load_role_map(path) == FULL_MAP
 
 
 class _Status(Exception):

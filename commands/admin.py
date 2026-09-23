@@ -76,8 +76,8 @@ class ClanCommands(Extension):
         if await is_admin(ctx):
             user = session.query(User).filter(User.discord_id == ctx.author.id).first()
             if not user:
-                # Bot-side creation keeps the Discord "registered" role + DM
-                # flow; the shared service only mirrors the DB portion.
+                # Bot-side creation keeps the DM flow; the shared service
+                # only mirrors the DB portion.
                 await try_create_user(ctx=ctx)
 
             # Shared creation logic (also behind the website wizard + legacy
