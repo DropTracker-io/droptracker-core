@@ -398,12 +398,23 @@ async def confirm_completion(event_id: int, completion_id: int):
                     f"Completion {completion_id} is '{comp.status}'; only pending rows can be confirmed.",
                 )
             before = _snapshot(comp)
+            from services import event_credit_receipt
+
+            receipt_task = s.query(EventTask).filter(EventTask.id == comp.task_id).first()
+            receipt_task = _engine()._task_to_dict(receipt_task) if receipt_task else None
+            credit_before = (event_credit_receipt.capture(
+                s, event_id=event_id, task=receipt_task, team_id=comp.team_id,
+                player_id=comp.player_id) if receipt_task else None)
             comp.status = "confirmed"
             comp.acted_by_user_id = user_id
             # Single shared apply path with the worker: a confirmed row takes
             # effect exactly like an auto completion (progress fold, points,
             # bingo cells, SSE, notification).
             _engine().apply_completion(s, comp)
+            score_change = (event_credit_receipt.finish(
+                s, credit_before, event_id=event_id, task=receipt_task,
+                team_id=comp.team_id, player_id=comp.player_id)
+                if receipt_task else None)
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
@@ -415,10 +426,11 @@ async def confirm_completion(event_id: int, completion_id: int):
             ))
             s.commit()
             _publish_pending_update(s, ev, comp)
+            return score_change
 
-    await asyncio.to_thread(_apply)
+    score_change = await asyncio.to_thread(_apply)
     _bump(event_id)
-    return private_no_store(jsonify({"ok": True}))
+    return private_no_store(jsonify({"ok": True, "score_change": score_change}))
 
 
 # Cap one bulk-confirm request — a big review queue is a few hundred rows, and
@@ -699,6 +711,12 @@ async def award_completion(event_id: int):
                         "nothing to mark.")
                 done = int(current.progress or 0) if current else 0
                 quantity = max(threshold - done, 1)
+            from services import event_credit_receipt
+
+            receipt_task = eng._task_to_dict(task)
+            credit_before = event_credit_receipt.capture(
+                s, event_id=event_id, task=receipt_task, team_id=team_id,
+                player_id=None)
             comp = EventCompletion(
                 event_id=event_id,
                 task_id=task_id,
@@ -728,6 +746,11 @@ async def award_completion(event_id: int):
                     "seconds and try again.)")
             # Same shared apply path as auto/confirmed rows.
             _engine().apply_completion(s, comp)
+            # Before → after for the organizer, so they can see the credit
+            # landed without comparing the standings by hand.
+            score_change = event_credit_receipt.finish(
+                s, credit_before, event_id=event_id, task=receipt_task,
+                team_id=team_id, player_id=None)
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
@@ -738,11 +761,11 @@ async def award_completion(event_id: int):
                 after=_snapshot(comp),
             ))
             s.commit()
-            return comp.id
+            return comp.id, score_change
 
-    comp_id = await asyncio.to_thread(_apply)
+    comp_id, score_change = await asyncio.to_thread(_apply)
     _bump(event_id)
-    return private_no_store(jsonify({"id": comp_id}))
+    return private_no_store(jsonify({"id": comp_id, "score_change": score_change}))
 
 
 @event_admin_bp.post("/events/<int:event_id>/revoke")
