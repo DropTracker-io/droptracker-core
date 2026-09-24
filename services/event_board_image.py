@@ -253,6 +253,38 @@ def _competition_signature(session, event) -> Optional[dict]:
     return sig
 
 
+def _conquest_signature(session, event) -> Optional[dict]:
+    """State signature for a Conquest event's map image (web120a): every
+    tile's owner, defense and place, plus the teams' names, colours and
+    scores (the image is the map with the standings under it). ``None`` for a
+    map with no tiles yet."""
+    from db.models import ConquestRegion, ConquestTile, EventTeam
+
+    tiles = (session.query(ConquestTile.id, ConquestTile.owner_team_id,
+                           ConquestTile.defense, ConquestTile.x, ConquestTile.y,
+                           ConquestTile.label, ConquestTile.region_id)
+             .filter(ConquestTile.event_id == event.id)
+             .order_by(ConquestTile.id).all())
+    if not tiles:
+        return None
+    regions = (session.query(ConquestRegion.id, ConquestRegion.name,
+                             ConquestRegion.color, ConquestRegion.owner_team_id)
+               .filter(ConquestRegion.event_id == event.id)
+               .order_by(ConquestRegion.id).all())
+    teams = (session.query(EventTeam)
+             .filter(EventTeam.event_id == event.id)
+             .order_by(EventTeam.id).all())
+    return {
+        "kind": "conquest",
+        "name": event.name,
+        "status": event.status,
+        "tiles": [(t.id, t.owner_team_id, int(t.defense or 0), round(t.x or 0.0, 4),
+                   round(t.y or 0.0, 4), t.label, t.region_id) for t in tiles],
+        "regions": [tuple(r) for r in regions],
+        "teams": [(t.id, t.name, t.color, round(float(t.score or 0), 2)) for t in teams],
+    }
+
+
 def board_kept_to_admins(event) -> bool:
     """Board/task visibility (web112a): whether this event's board is for its
     organisers only. Competition events are exempt — their picture is a
@@ -287,6 +319,8 @@ def _collect_render_inputs(session, event, team_id=None, *,
         sig = _loot_sweep_signature(session, event)
     elif getattr(event, "kind", None) in ("sotw", "botw"):
         sig = _competition_signature(session, event)
+    elif getattr(event, "kind", None) == "conquest":
+        sig = _conquest_signature(session, event)
     else:
         return None
     if sig is None:

@@ -3126,7 +3126,11 @@ class NotificationService:
             # so the per-destination sends can each reopen it; the existing
             # finally-cleanup removes it. None — a standard task-list event, or
             # any render failure — just omits it (fail-open).
-            if notification_type in ('event_started', 'event_ended') and image_ref is None:
+            # Conquest's periodic map update (web120a) carries the map too:
+            # it is the post whose whole point is "here's the map now".
+            if (notification_type in ('event_started', 'event_ended',
+                                      'event_conquest_summary')
+                    and image_ref is None):
                 try:
                     from services.event_board_image import board_image_png
                     board_png = await board_image_png(db_session, event)

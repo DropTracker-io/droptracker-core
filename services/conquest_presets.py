@@ -32,41 +32,41 @@ PRESETS = {"gielinor": "Gielinor (45 bosses, 10 regions)"}
 #: tiles is centred on the schematic map (x east, y south, both 0..1, on a
 #: 16:10 canvas); ``color`` tints the region.
 GIELINOR_REGIONS: tuple = (
-    {"key": "kourend", "name": "Kourend & Kebos", "anchor": (0.11, 0.30),
+    {"key": "kourend", "name": "Kourend & Kebos", "anchor": (0.10, 0.31),
      "color": "#9b6a3c",
      "tiles": ("chambers_of_xeric", "alchemical_hydra", "sarachnis", "vardorvis", "yama")},
-    {"key": "varlamore", "name": "Varlamore", "anchor": (0.13, 0.76),
+    {"key": "varlamore", "name": "Varlamore", "anchor": (0.14, 0.80),
      "color": "#c9733a",
      "tiles": ("fortis_colosseum", "hueycoatl", "amoxliatl", "moons_of_peril",
                "doom_of_mokhaiotl")},
-    {"key": "fremennik", "name": "Fremennik Province", "anchor": (0.33, 0.15),
+    {"key": "fremennik", "name": "Fremennik Province", "anchor": (0.30, 0.17),
      "color": "#4f7fa6",
      "tiles": ("dagannoth_kings", "vorkath", "phantom_muspah", "duke_sucellus")},
-    {"key": "kandarin", "name": "Kandarin & Tirannwn", "anchor": (0.31, 0.53),
+    {"key": "kandarin", "name": "Kandarin & Tirannwn", "anchor": (0.29, 0.53),
      "color": "#2f8a67",
      "tiles": ("zulrah", "corrupted_gauntlet", "kraken", "thermonuclear_smoke_devil",
                "demonic_gorillas")},
-    {"key": "gwd", "name": "God Wars Dungeon", "anchor": (0.49, 0.19),
+    {"key": "gwd", "name": "God Wars Dungeon", "anchor": (0.47, 0.27),
      "color": "#7a63b0",
      "tiles": ("kree_arra", "general_graardor", "commander_zilyana", "kril_tsutsaroth",
                "nex")},
-    {"key": "wilderness", "name": "The Wilderness", "anchor": (0.69, 0.15),
+    {"key": "wilderness", "name": "The Wilderness", "anchor": (0.72, 0.19),
      "color": "#a33a32",
      "tiles": ("callisto_artio", "vetion_calvarion", "venenatis_spindel",
                "chaos_elemental", "wilderness_demi_bosses", "king_black_dragon",
                "corporeal_beast")},
-    {"key": "heartlands", "name": "Asgarnia & Misthalin", "anchor": (0.55, 0.52),
+    {"key": "heartlands", "name": "Asgarnia & Misthalin", "anchor": (0.55, 0.61),
      "color": "#5a9a3e",
      "tiles": ("cerberus", "the_whisperer", "royal_titans", "scurrius",
                "tormented_demon")},
-    {"key": "abyss", "name": "The Abyss", "anchor": (0.90, 0.15),
+    {"key": "abyss", "name": "The Abyss", "anchor": (0.93, 0.18),
      "color": "#4b4fa8",
      "tiles": ("abyssal_sire", "the_leviathan")},
-    {"key": "morytania", "name": "Morytania", "anchor": (0.85, 0.50),
+    {"key": "morytania", "name": "Morytania", "anchor": (0.845, 0.52),
      "color": "#6b5a7e",
      "tiles": ("barrows", "theatre_of_blood", "nightmare", "grotesque_guardians",
                "araxxor")},
-    {"key": "desert", "name": "Kharidian Desert", "anchor": (0.71, 0.80),
+    {"key": "desert", "name": "Kharidian Desert", "anchor": (0.735, 0.85),
      "color": "#c8a24a",
      "tiles": ("kalphite_queen", "tombs_of_amascut")},
 )
@@ -74,7 +74,7 @@ GIELINOR_REGIONS: tuple = (
 #: The schematic canvas (a 16:10 box) the preset positions assume.
 CANVAS = (1600, 1000)
 #: Centre-to-centre distance between neighbouring tiles in a cluster (px).
-TILE_SPACING = 78
+TILE_SPACING = 108
 
 #: Troop-cost bounds (hours of one player's efficient play per troop).
 TROOP_HOURS_CHOICES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)

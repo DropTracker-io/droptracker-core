@@ -516,3 +516,27 @@ class TestAdjust:
             engine_mod.adjust_tile(env.s, ev, tile.id, owner_team_id=None, defense=99)
         with pytest.raises(engine_mod.AdjustError):
             engine_mod.adjust_tile(env.s, ev, 9999, owner_team_id=None)
+
+
+class TestBoardImageSignature:
+    """services/event_board_image: a Conquest map gets a picture whose
+    signature moves with the map (so the cached Discord image re-renders)."""
+
+    def _image_module(self):
+        return _load("_conquest_board_image_ut", "services", "event_board_image.py")
+
+    def test_signature_follows_the_map(self, env):
+        img = self._image_module()
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        _r, (tile,), (task,) = _map(env.s, ev)
+        before = img._collect_render_inputs(env.s, ev)
+        assert before["kind"] == "conquest"
+        _apply(env, ev, task, red, 10)
+        after = img._collect_render_inputs(env.s, ev)
+        assert after["hash_src"] != before["hash_src"]
+
+    def test_empty_map_has_no_picture(self, env):
+        img = self._image_module()
+        ev = _event(env.s)
+        assert img._collect_render_inputs(env.s, ev) is None
