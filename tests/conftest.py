@@ -259,6 +259,19 @@ if "services.event_effort" not in sys.modules:
     sys.modules["services.event_effort"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/task_generator.py — the event "Fill for me" core. Pure by design
+# (stdlib-only, catalog injected), so load the real module: the generator
+# tests assert on its sizing and selection decisions directly.
+_TASK_GEN_PATH = _Path(__file__).resolve().parent.parent / "services" / "task_generator.py"
+if "services.task_generator" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.task_generator", _TASK_GEN_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.task_generator"] = _mod
+    _spec.loader.exec_module(_mod)
+    # ``from services import task_generator`` (the routes' lazy import) reads
+    # the attribute off the stub package, not sys.modules.
+    setattr(sys.modules["services"], "task_generator", _mod)
+
 # services/activity_launch_core.py — the Discord Activity launcher's pure half
 # (deliberately free of any `interactions` import; db access is lazy). web_api's
 # /events/by-channel deep-link fallback calls pick_channel_event, so the route

@@ -41,6 +41,7 @@ from web_api.routes.event_participants import event_participants_bp
 from web_api.routes.event_prizes import event_prizes_bp
 from web_api.routes.event_points import event_points_bp
 from web_api.routes.event_templates import event_templates_bp
+from web_api.routes.event_task_generator import event_task_generator_bp
 from web_api.routes.events import events_bp
 from web_api.routes.file_transfers import file_transfers_bp
 from web_api.routes.group_admin import group_admin_bp
@@ -216,6 +217,7 @@ def create_app() -> Quart:
     app.register_blueprint(event_prizes_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_points_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_templates_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(event_task_generator_bp, url_prefix=API_PREFIX)
     app.register_blueprint(events_bp, url_prefix=API_PREFIX)
     app.register_blueprint(file_transfers_bp, url_prefix=API_PREFIX)
     app.register_blueprint(group_admin_bp, url_prefix=API_PREFIX)
