@@ -118,6 +118,9 @@ def snapshot_event(s, ev: Event) -> dict:
             "requires_confirmation": bool(t.requires_confirmation),
             "visibility": t.visibility or "public",
             "config": _strip_bingo_auto(t.config),
+            # Board-game tier (web44a): a board's tiles roll from these pools,
+            # so a template that dropped it re-ran with every pool empty.
+            "difficulty": getattr(t, "difficulty", None) or None,
         })
 
     teams_out = [
@@ -379,6 +382,8 @@ def instantiate_template(
             requires_confirmation=bool(t.get("requires_confirmation")),
             visibility=visibility if visibility in EVENT_TASK_VISIBILITIES else "public",
             config=normalized["config"],
+            difficulty=(t.get("difficulty")
+                        if t.get("difficulty") in ("air", "water", "earth", "fire") else None),
         )
         s.add(task)
         s.flush()

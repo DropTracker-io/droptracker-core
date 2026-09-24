@@ -340,6 +340,15 @@ class TestSnapshot:
         assert "join_code" not in flat and "secret" not in flat
         assert "discord_guild_id" not in flat and "score" not in flat
 
+    def test_board_game_tier_travels_with_the_task(self):
+        # Board tiles roll from per-tier pools; a snapshot that dropped the
+        # tier re-ran the board with every pool empty.
+        tiered = _task(11, "Whip")
+        tiered.difficulty = "earth"
+        s = _S([tiered, _task(12, "Untiered")], [], [])
+        payload = etr.snapshot_event(s, _event(has_bingo=False))
+        assert [t["difficulty"] for t in payload["tasks"]] == ["earth", None]
+
     def test_no_bingo_skips_cell_query(self):
         s = _S([_task(11, "Whip")], [], [])  # tasks, teams, clan points
         payload = etr.snapshot_event(s, _event(has_bingo=False))
