@@ -484,8 +484,8 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     # Drop
     "item_name": {"help": "Item name (linked to the wiki)", "sample": "Twisted bow"},
     "item_emoji": {
-        # Optional in the real sense: ~1000 of 29k items have a glyph, so this
-        # resolves to nothing most of the time. Marked so the unresolved-token
+        # Optional in the real sense: ~1450 of 29k items have a glyph, so this
+        # resolves to nothing for rarely-notified items. Marked so the unresolved-token
         # rule does not read a blank as "this line is about missing data".
         #
         # Sample is deliberately blank. The value is a `<:name:id>` reference
@@ -493,7 +493,7 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
         # put a raw id in the editor preview (and trip the literal-emoji guard
         # in tests/unit/test_app_emojis.py, which cannot tell a sample from a
         # send). Blank previews as the no-glyph case, which is the common one.
-        "help": "The item's own icon, for the ~1000 items with an emoji",
+        "help": "The item's own icon, for the ~1450 most-notified items",
         "sample": "",
         "optional": True,
     },

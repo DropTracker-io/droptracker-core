@@ -85,9 +85,13 @@ RUNELITE_ICON_URL = "https://static.runelite.net/cache/item/icon/{item_id}.png"
 USER_AGENT = "DropTracker/1.0 (+https://www.droptracker.io; game emoji sync)"
 
 #: Slots to fill. The core app holds 270 rank_* + 8 UI emojis against Discord's
-#: 2000, so this is comfortably inside the ceiling; the seeder re-checks against
-#: the live count rather than trusting this number.
-DEFAULT_BUDGET = 1000
+#: 2000, so 1700 puts it at 1978 and leaves ~22 spare; the seeder re-checks
+#: against the live count rather than trusting this number. Raised from 1000 on
+#: 2026-09-24, which lifted item-glyph coverage of recent notifications from
+#: ~69% to ~93%. Do not lower it casually: a rerun at a smaller budget drops
+#: entries from the map, and --prune would then delete emojis that already-sent
+#: messages still reference.
+DEFAULT_BUDGET = 1700
 
 #: Ceiling on the NPC pool. Only ~490 NPC names ever appear, so this is a
 #: safety rail rather than the binding constraint — NPC_FLOOR is.
