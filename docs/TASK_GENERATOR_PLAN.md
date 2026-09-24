@@ -1,6 +1,6 @@
 # Event task generator ("Fill for me")
 
-Status: **built 2026-09-24** (disc `new-api` + web `main`), not yet deployed.
+Status: **live 2026-09-24** (disc `823d495`, web `acaf8a2`). Library tidy applied; starter templates not seeded yet.
 
 ## Why
 
