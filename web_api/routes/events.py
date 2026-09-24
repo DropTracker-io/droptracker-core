@@ -1150,6 +1150,7 @@ async def list_events():
                 if status and eff != status:
                     continue
                 out.append(_summary(ev))
+            _add_list_context(s, out)
             return out
 
     events = await asyncio.to_thread(_load)
@@ -1158,6 +1159,29 @@ async def list_events():
         # belongs to — viewer-specific, never shared-cacheable.
         return private_no_store(jsonify(events))
     return with_cache_headers(jsonify(events), max_age=30)
+
+
+def _add_list_context(s, rows: list) -> None:
+    """List-card context for GET /events: the owning group's name and each
+    event's team and player counts. Two grouped queries for the whole list,
+    so the staff overview (/admin/events) can say "Realists · 4 teams, 38
+    players" instead of "Group #7" without a request per row."""
+    if not rows:
+        return
+    ids = [r["id"] for r in rows]
+    gids = {r["group_id"] for r in rows if r.get("group_id")}
+    names = dict(s.query(Group.group_id, Group.group_name)
+                 .filter(Group.group_id.in_(gids)).all()) if gids else {}
+    teams = dict(s.query(EventTeam.event_id, func.count(EventTeam.id))
+                 .filter(EventTeam.event_id.in_(ids))
+                 .group_by(EventTeam.event_id).all())
+    players = dict(s.query(EventTeamMember.event_id, func.count(EventTeamMember.player_id))
+                   .filter(EventTeamMember.event_id.in_(ids))
+                   .group_by(EventTeamMember.event_id).all())
+    for r in rows:
+        r["group_name"] = names.get(r.get("group_id"))
+        r["team_count"] = int(teams.get(r["id"]) or 0)
+        r["player_count"] = int(players.get(r["id"]) or 0)
 
 
 @events_bp.get("/events/launch-intent")
