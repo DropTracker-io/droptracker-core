@@ -447,7 +447,8 @@ class TestReplacePlaceholdersTeamSizeField:
         caller supplies none — that must not abort the whole render."""
         embed = _embed_with_fields(("Team Size", "{team_size}"))
         out = replace_placeholders(embed, {"{player_name}": "Ron"})
-        assert out.fields[0].value == "{team_size}"
+        # No value means no field — never the raw token.
+        assert out.fields == []
 
     def test_two_team_size_fields_both_render_once(self):
         embed = _embed_with_fields(
@@ -489,3 +490,94 @@ class TestTidyTitle:
 
     def test_none_becomes_empty_rather_than_raising(self):
         assert tidy_title(None) == ""
+
+
+# ── derived + unresolved tokens ──────────────────────────────────────────────
+
+from services.component_layout import NOTIFICATION_TYPES  # noqa: E402
+
+class TestDerivedItemEmoji:
+    """{item_emoji} follows from {item_name}, so replace_placeholders fills it
+    for every sender. Only the new-drop sender used to, and the collection log
+    sender and the Modify Entry rebuild printed "{item_emoji} Elidinis' ward"."""
+
+    @pytest.fixture(autouse=True)
+    def _glyphs(self, monkeypatch):
+        import utils.game_emojis as ge
+        monkeypatch.setattr(ge, "emoji_for_item",
+                            lambda name, profile=None: "<:item_elidinis_ward:1>" if name == "Elidinis' ward" else None)
+        monkeypatch.setattr(ge, "emoji_for_item_id",
+                            lambda item_id, profile=None: "<:item_elidinis_ward:1>" if str(item_id) == "25985" else None)
+
+    def test_filled_from_item_name_when_the_sender_omits_it(self):
+        out = replace_placeholders(_embed("{item_emoji} {item_name}"), {"{item_name}": "Elidinis' ward"})
+        assert out.title == "<:item_elidinis_ward:1> Elidinis' ward"
+
+    def test_falls_back_to_item_id(self):
+        out = replace_placeholders(_embed("{item_emoji} {item_name}"),
+                                   {"{item_name}": "Odd spelling", "{item_id}": 25985})
+        assert out.title == "<:item_elidinis_ward:1> Odd spelling"
+
+    def test_item_outside_the_set_renders_bare(self):
+        out = replace_placeholders(_embed("{item_emoji} {item_name}"), {"{item_name}": "Bronze dagger"})
+        assert out.title == "Bronze dagger"
+
+    def test_a_value_the_sender_supplied_wins(self):
+        out = replace_placeholders(_embed("{item_emoji} {item_name}"),
+                                   {"{item_name}": "Elidinis' ward", "{item_emoji}": ""})
+        assert out.title == "Elidinis' ward"
+
+    def test_callers_dict_is_not_mutated(self):
+        values = {"{item_name}": "Elidinis' ward"}
+        replace_placeholders(_embed("{item_emoji} {item_name}"), values)
+        assert values == {"{item_name}": "Elidinis' ward"}
+
+    def test_component_layouts_fill_it_too(self):
+        from services.component_layout import render_layout
+
+        layout = {"blocks": [{"type": "text", "content": "## {item_emoji} {item_name}"}]}
+        payload = render_layout(layout, {"{item_name}": "Elidinis' ward"})
+        text = payload["components"][0]["components"][0]["content"]
+        assert text == "## <:item_elidinis_ward:1> Elidinis' ward"
+
+
+class TestUnresolvedKnownTokens:
+    def test_known_token_is_blanked_not_printed(self):
+        out = replace_placeholders(_embed("{npc_name} {item_name}"), {"{item_name}": "Twisted bow"})
+        assert out.title == "Twisted bow"
+
+    def test_unknown_brace_text_is_left_alone(self):
+        out = replace_placeholders(_embed("{not_a_token} {item_name}"), {"{item_name}": "Twisted bow"})
+        assert out.title == "{not_a_token} Twisted bow"
+
+    def test_group_points_field_still_dropped_by_its_own_rule(self):
+        embed = _embed_with_fields(("Points", "+{group_points_awarded}"), ("Item", "{item_name}"))
+        out = replace_placeholders(embed, {"{item_name}": "Twisted bow"})
+        assert [f.name for f in out.fields] == ["Item"]
+
+    def test_group_points_left_for_the_finalizer_outside_fields(self):
+        # _finalize_group_points_embed keys off the leftover token.
+        out = replace_placeholders(_embed("{item_name} {group_points_awarded}"), {"{item_name}": "Bow"})
+        assert "{group_points_awarded}" in out.title
+
+    def test_field_whose_name_was_only_a_token_keeps_a_valid_name(self):
+        embed = _embed_with_fields(("{collection_name}", "{item_name}"))
+        out = replace_placeholders(embed, {"{item_name}": "Bow"})
+        assert out.fields[0].name == "\u200b"
+        assert out.fields[0].value == "Bow"
+
+    @pytest.mark.parametrize("notification_type", NOTIFICATION_TYPES)
+    def test_no_documented_token_survives_an_empty_value_map(self, notification_type):
+        """Every token the editor offers for a type, with a sender that knows
+        none of them, must not reach Discord as raw text."""
+        from services.component_layout import tokens_for
+
+        tokens = [d["token"] for d in tokens_for(notification_type)
+                  if not d["token"].startswith("group_points_")]
+        line = " ".join("{%s}" % t for t in tokens)
+        embed = _StubEmbed(title=line, description=line)
+        embed.fields = [_StubField("x", line)]
+        out = replace_placeholders(embed, {})
+        for text in (out.title or "", out.description or "", *(f.value for f in out.fields)):
+            leaked = [t for t in tokens if "{%s}" % t in text]
+            assert not leaked, f"{notification_type}: {leaked}"

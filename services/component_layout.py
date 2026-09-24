@@ -277,6 +277,12 @@ def render_layout(layout: Dict[str, Any], replacements: Dict[str, Any]) -> Optio
     if not isinstance(blocks, list):
         return None
 
+    # Tokens that follow from others ({item_emoji} from {item_name}) are filled
+    # here rather than by each sender; a sender that forgot one would otherwise
+    # lose the whole line to the unresolved-token rule.
+    from utils.game_emojis import with_derived_tokens
+    replacements = with_derived_tokens(replacements)
+
     children: List[Dict[str, Any]] = []
 
     for block in blocks[:MAX_BLOCKS]:
@@ -487,7 +493,7 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
         # put a raw id in the editor preview (and trip the literal-emoji guard
         # in tests/unit/test_app_emojis.py, which cannot tell a sample from a
         # send). Blank previews as the no-glyph case, which is the common one.
-        "help": "The item's own icon, for the ~1000 items with an emoji (drops only)",
+        "help": "The item's own icon, for the ~1000 items with an emoji",
         "sample": "",
         "optional": True,
     },
@@ -663,7 +669,7 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Collection log",
         "group": "Loot",
         "description": "Posted when a member fills a collection log slot.",
-        "tokens": ("item_name", "item_id", "collection_name", "npc_name", "kc_received",
+        "tokens": ("item_name", "item_emoji", "item_id", "collection_name", "npc_name", "kc_received",
                    "player_loot_month", "total_tracked") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
     "pb": {

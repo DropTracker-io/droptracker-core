@@ -309,6 +309,29 @@ def emoji_for_npc_id(npc_id, profile=None) -> Optional[str]:
     return _lookup("npc", entry["key"], profile) if entry else None
 
 
+def with_derived_tokens(values: dict, profile=None) -> dict:
+    """``values`` plus the glyph tokens its sender did not fill in.
+
+    ``{item_emoji}`` follows from ``{item_name}`` (or ``{item_id}``) alone, so
+    it is filled here, at substitution time, rather than by each sender. The
+    token used to be filled only by the new-drop sender; the collection log
+    sender and the Modify Entry rebuild never did, so a group that used it in
+    those templates saw the raw ``{item_emoji}`` text. A value the sender did
+    supply is left alone. Returns a new dict; the caller's is not mutated.
+    """
+    if not isinstance(values, dict) or "{item_emoji}" in values:
+        return values
+    name = values.get("{item_name}")
+    item_id = values.get("{item_id}")
+    if not name and item_id in (None, ""):
+        return values
+    try:
+        glyph = emoji_for_item(name, profile) or emoji_for_item_id(item_id, profile) or ""
+    except Exception:
+        glyph = ""
+    return {**values, "{item_emoji}": glyph}
+
+
 def prefix_item(name, profile=None) -> str:
     """``"<:item_twisted_bow:123> Twisted bow"``, or just the name.
 

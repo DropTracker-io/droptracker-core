@@ -300,7 +300,84 @@ def tidy_title(text):
     return _TITLE_WHITESPACE.sub(" ", str(text or "")).strip()
 
 
+_known_token_re = None
+
+
+def _known_token_pattern():
+    """Every documented token except the ``{group_points_*}`` family.
+
+    Built lazily from ``services.component_layout.TOKEN_DOCS`` (the editor's
+    catalogue) so a token added there is covered here without a second list.
+    The group-points tokens are excluded on purpose: a leftover one is the
+    signal ``_finalize_group_points_embed`` and the Modify Entry rebuild use to
+    drop the whole field when no points were awarded.
+    """
+    global _known_token_re
+    if _known_token_re is None:
+        try:
+            from services.component_layout import TOKEN_DOCS
+            names = [n for n in TOKEN_DOCS if not n.startswith("group_points_")]
+        except Exception:
+            names = []
+        _known_token_re = (
+            re.compile("|".join(re.escape("{%s}" % n) for n in sorted(names, key=len, reverse=True)))
+            if names else re.compile(r"(?!)")
+        )
+    return _known_token_re
+
+
+def strip_known_tokens(text):
+    """Blank any documented token the sender left unresolved.
+
+    A template is shared across every path that sends its type, and not every
+    path knows every value. Sending the literal ``{kill_count}`` is never what
+    the group meant; an empty value is. Brace text that is not a documented
+    token (a group's own prose) is left alone.
+    """
+    if not text or "{" not in str(text):
+        return text
+    return _known_token_pattern().sub("", str(text))
+
+
 def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_server: bool = False):
+    from utils.game_emojis import with_derived_tokens
+
+    value_dict = with_derived_tokens(value_dict)
+    embed = _replace_placeholders(embed, value_dict, global_server)
+
+    # Safety net: whatever this sender could not fill renders as nothing rather
+    # than as the raw token (the Modify Entry rebuild once printed
+    # "{item_emoji} Elidinis' ward"). URLs are not touched here; a blanked
+    # token would leave a half-URL, and those have their own checks.
+    if embed.title:
+        stripped = strip_known_tokens(embed.title)
+        if stripped != embed.title:
+            embed.title = tidy_title(stripped) or None
+    if embed.description:
+        stripped = strip_known_tokens(embed.description)
+        if stripped != embed.description:
+            embed.description = stripped.strip() or None
+    if embed.footer and embed.footer.text:
+        embed.footer.text = strip_known_tokens(embed.footer.text)
+    author = getattr(embed, "author", None)
+    if author and getattr(author, "name", None):
+        author.name = strip_known_tokens(author.name)
+    if embed.fields:
+        kept = []
+        for field in embed.fields:
+            name = strip_known_tokens(field.name or "")
+            value = strip_known_tokens(field.value or "")
+            if str(value).strip() == "":
+                continue
+            # Discord rejects the whole embed for a field with an empty name.
+            field.name = name if str(name).strip() else "​"
+            field.value = value
+            kept.append(field)
+        embed.fields = kept
+    return embed
+
+
+def _replace_placeholders(embed: interactions.Embed, value_dict: dict, global_server: bool = False):
 
     # Replace placeholders in the embed title
     #print("replace_placeholders called with value_dict:", value_dict)
