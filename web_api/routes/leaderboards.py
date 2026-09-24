@@ -14,7 +14,10 @@ import asyncio
 
 from quart import Blueprint, jsonify, request
 
+from sqlalchemy import func
+
 from db import Player, Group
+from db.models import user_group_association
 from web_api.flair import group_flairs
 from web_api.common import (
     cache_get,
@@ -40,6 +43,14 @@ BADGES_TTL = 30.0
 # Chips sent per row; the frontend shows the first few and a "+N" overflow.
 _MAX_ROW_BADGES = 6
 IMG_BASE = "https://www.droptracker.io/img"
+CARD_TTL = 30.0
+# The model's constructor default. Nearly every group still carries it, so it
+# says nothing about the clan and is left off the cards.
+_DEFAULT_GROUP_DESCRIPTION = "An Old School RuneScape group."
+# Clans shown on a player card.
+_MAX_ROW_GROUPS = 3
+# Reserved/platform-wide groups every player is in; never shown as "their clan".
+_SYSTEM_GROUP_IDS = (0, 1, 2)
 
 
 def _ctx_recency(context) -> str:
@@ -158,6 +169,107 @@ def _compact_badges_for(ids: list[int]) -> dict[int, list[dict]]:
     return out
 
 
+def _group_card_details(gids: list[int], token) -> dict[int, dict]:
+    """Card extras for a page of group rows: icon, custom description, roster
+    size, members with loot this period, and the period's top earner.
+
+    Two indexed queries plus one Redis pipeline per page; cached ~30s per
+    (token, id-set). Best effort: the caller omits the fields on failure.
+    """
+    cache_key = f"lb:gcards:{token}:" + ",".join(map(str, gids))
+    cached = cache_get(cache_key, CARD_TTL)
+    if cached is not None:
+        return cached
+
+    out: dict[int, dict] = {gid: {} for gid in gids}
+
+    # Per-group boards for the same period: ZCARD = members with loot, the
+    # head of the set = top earner. A few extra rows cover hidden players.
+    top_raw: dict[int, list] = {}
+    conn = _rc()
+    if conn is not None:
+        pipe = conn.pipeline(transaction=False)
+        for gid in gids:
+            key = leaderboard_key(token, group_id=gid)
+            pipe.zcard(key)
+            pipe.zrevrange(key, 0, 9, withscores=True)
+        res = pipe.execute()
+        for i, gid in enumerate(gids):
+            out[gid]["active_count"] = int(res[2 * i] or 0)
+            top_raw[gid] = res[2 * i + 1] or []
+
+    hidden = hidden_player_ids()
+    top: dict[int, tuple[int, int]] = {}
+    for gid, raw in top_raw.items():
+        for member_raw, score in raw:
+            pid = decode_member(member_raw)
+            if pid is None or pid in hidden:
+                continue
+            top[gid] = (pid, int(float(score)))
+            break
+
+    with db_session() as s:
+        for gid, icon, desc in (
+            s.query(Group.group_id, Group.icon_url, Group.description)
+            .filter(Group.group_id.in_(gids))
+            .all()
+        ):
+            if icon:
+                out[gid]["icon_url"] = icon
+            desc = (desc or "").strip()
+            if desc and desc != _DEFAULT_GROUP_DESCRIPTION:
+                out[gid]["description"] = desc
+        for gid, n in (
+            s.query(user_group_association.c.group_id, func.count(user_group_association.c.player_id))
+            .filter(user_group_association.c.group_id.in_(gids))
+            .group_by(user_group_association.c.group_id)
+            .all()
+        ):
+            out[gid]["member_count"] = int(n)
+        pids = {pid for pid, _ in top.values()}
+        names = {}
+        if pids:
+            names = dict(
+                s.query(Player.player_id, Player.player_name)
+                .filter(Player.player_id.in_(pids))
+                .all()
+            )
+    for gid, (pid, loot) in top.items():
+        if names.get(pid):
+            out[gid]["top_player"] = {"id": pid, "name": names[pid], "loot": money(loot)}
+
+    cache_set(cache_key, out)
+    return out
+
+
+def _player_groups_for(ids: list[int], token) -> dict[int, list[dict]]:
+    """Clans each player on the page belongs to (system groups excluded),
+    biggest clan by this period's loot first. Cached ~30s per id-set."""
+    cache_key = f"lb:pgroups:{token}:" + ",".join(map(str, sorted(ids)))
+    cached = cache_get(cache_key, CARD_TTL)
+    if cached is not None:
+        return cached
+
+    with db_session() as s:
+        rows = (
+            s.query(user_group_association.c.player_id, Group.group_id, Group.group_name)
+            .join(Group, Group.group_id == user_group_association.c.group_id)
+            .filter(user_group_association.c.player_id.in_(ids))
+            .all()
+        )
+    order = {gid: i for i, (gid, _) in enumerate(_read_group_totals_precomputed(token) or [])}
+    out: dict[int, list[dict]] = {}
+    for pid, gid, name in rows:
+        if gid in _SYSTEM_GROUP_IDS:
+            continue
+        out.setdefault(int(pid), []).append({"id": int(gid), "name": name or f"Group {gid}"})
+    for pid, groups in out.items():
+        groups.sort(key=lambda g: (order.get(g["id"], len(order)), g["id"]))
+        out[pid] = groups[:_MAX_ROW_GROUPS]
+    cache_set(cache_key, out)
+    return out
+
+
 @leaderboards_bp.get("/leaderboards/players")
 async def leaderboards_players():
     # Default to the current month — the tracking system works month-to-month and
@@ -236,6 +348,13 @@ async def leaderboards_players():
             except Exception:
                 badge_map = {}
 
+        group_map: dict[int, list[dict]] = {}
+        if ids:
+            try:
+                group_map = await asyncio.to_thread(_player_groups_for, ids, token)
+            except Exception:
+                group_map = {}
+
         for rank, pid, loot in scored:
             row = {
                 "rank": rank,
@@ -246,6 +365,9 @@ async def leaderboards_players():
             chips = badge_map.get(pid)
             if chips:
                 row["badges"] = chips
+            groups = group_map.get(pid)
+            if groups:
+                row["groups"] = groups
             entries.append(row)
 
     resp = jsonify({
@@ -382,6 +504,17 @@ async def leaderboards_groups():
         return entries, len(totals)
 
     entries, total_count = await asyncio.to_thread(_load)
+
+    # Card extras (icon, members, top earner). Best effort, like badges.
+    if entries:
+        try:
+            details = await asyncio.to_thread(
+                _group_card_details, [e["id"] for e in entries], token
+            )
+            for e in entries:
+                e.update(details.get(e["id"], {}))
+        except Exception:
+            pass
 
     resp = jsonify({
         "period": token,
