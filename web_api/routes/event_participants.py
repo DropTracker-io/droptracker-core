@@ -26,6 +26,7 @@ from quart import Blueprint, jsonify
 
 from db import (
     AuditLog,
+    EventCompletion,
     Event,
     EventGroup,
     EventTeam,
@@ -50,12 +51,15 @@ from web_api.deps import (
     manageable_guild_ids,
     resolve_group_role,
 )
+from web_api.event_scope import is_staff_hosted
 from web_api.routes.events import (
     _assert_event_admin,
     _effective_status,
     _load_event_or_404,
+    _purge_team,
     _summary,
     _sync_event_guilds,
+    _sync_team_discord,
     _ts,
 )
 
@@ -139,6 +143,44 @@ def _require_clan_vs_clan(ev: Event) -> None:
 def _assert_event_not_over(ev: Event) -> None:
     if _effective_status(ev) == "past":
         abort_problem(409, "Event is over", "The participant roster can no longer change.")
+
+
+def _clan_team(s, event_id: int, group_id: int):
+    """The team a clan fields on a staff-hosted event (one per clan)."""
+    return (s.query(EventTeam)
+            .filter(EventTeam.event_id == event_id, EventTeam.group_id == group_id)
+            .first())
+
+
+def _ensure_clan_team(s, ev: Event, group_id: int) -> None:
+    """Staff-hosted events (web119a): an accepting clan gets its one team at
+    once, named after the clan, so its leaders can start building the roster.
+    Idempotent — a clan that somehow already has a team keeps it."""
+    if _clan_team(s, ev.id, group_id) is not None:
+        return
+    name = _group_name(s, group_id) or f"Clan {group_id}"
+    s.add(EventTeam(event_id=ev.id, name=name[:80], score=0, group_id=group_id))
+    s.flush()
+    _sync_team_discord(s, ev)
+
+
+def _purge_clan_teams(s, ev: Event, group_id: int) -> int:
+    """Delete every team a clan fields on the event, with its roster and
+    everything scoped to it, and drop the clan's sign-ups. Returns the number
+    of teams removed."""
+    from db import EventSignup
+
+    teams = (s.query(EventTeam)
+             .filter(EventTeam.event_id == ev.id, EventTeam.group_id == group_id)
+             .all())
+    for team in teams:
+        _purge_team(s, ev.id, team)
+    (s.query(EventSignup)
+     .filter(EventSignup.event_id == ev.id, EventSignup.group_id == group_id)
+     .delete(synchronize_session=False))
+    if teams:
+        _sync_team_discord(s, ev)
+    return len(teams)
 
 
 def _admin_group_ids(s, user_id: int) -> set[int] | None:
@@ -239,6 +281,9 @@ async def invite_participant(event_id: int):
 # Cap one bulk-invite request — enough for the 12+-clan case with headroom,
 # small enough to bound the roster/existence queries.
 MAX_BULK_INVITE = 30
+# Staff inviting clans site-wide to a staff-hosted event (web119a) pick from a
+# filtered list of every eligible clan, so one request can carry far more.
+MAX_STAFF_BULK_INVITE = 200
 
 
 @event_participants_bp.post("/events/<int:event_id>/participants/bulk")
@@ -262,9 +307,9 @@ async def invite_participants_bulk(event_id: int):
         if gid not in seen:
             seen.add(gid)
             requested.append(gid)
-    if len(requested) > MAX_BULK_INVITE:
+    if len(requested) > MAX_STAFF_BULK_INVITE:
         abort_problem(422, "Too many clans",
-                      f"At most {MAX_BULK_INVITE} clans per invite.")
+                      f"At most {MAX_STAFF_BULK_INVITE} clans per invite.")
 
     def _apply():
         with db_session() as s:
@@ -273,6 +318,9 @@ async def invite_participants_bulk(event_id: int):
             _assert_event_not_over(ev)
             # Host admin + events entitlement — the host "pays", opponents don't.
             _assert_event_admin(s, user_id, ev.group_id)
+            if not is_staff_hosted(ev) and len(requested) > MAX_BULK_INVITE:
+                abort_problem(422, "Too many clans",
+                              f"At most {MAX_BULK_INVITE} clans per invite.")
 
             existing = {
                 gid for (gid,) in
@@ -356,6 +404,21 @@ async def list_participants(event_id: int):
             # panel can chase a pending invite instead of just staring at it.
             threads = _threads_for_participant_rows(s, [r.id for r, _ in rows])
             unread = _unread_for_threads(s, [t.id for t in threads.values()], user_id)
+            # web119a: each clan's team + roster size, for the staff panel's
+            # "n / min–max" column. One grouped query for the whole list.
+            teams = {}
+            if is_staff_hosted(ev):
+                from sqlalchemy import func as _f
+
+                for gid, tid, n in (
+                    s.query(EventTeam.group_id, EventTeam.id,
+                            _f.count(EventTeamMember.player_id))
+                    .outerjoin(EventTeamMember, EventTeamMember.team_id == EventTeam.id)
+                    .filter(EventTeam.event_id == event_id)
+                    .group_by(EventTeam.group_id, EventTeam.id)
+                    .all()
+                ):
+                    teams[gid] = (tid, int(n or 0))
             return [
                 {
                     "group_id": r.group_id,
@@ -364,6 +427,8 @@ async def list_participants(event_id: int):
                     "status": r.status,
                     "invited_at": _ts(r.created_at),
                     "responded_at": _ts(r.responded_at),
+                    "team_id": teams.get(r.group_id, (None, None))[0],
+                    "roster_count": teams.get(r.group_id, (None, None))[1],
                     "thread_id": (
                         int(threads[int(r.id)].id) if int(r.id) in threads else None
                     ),
@@ -612,6 +677,9 @@ def _respond_to_invitation(event_id: int, group_id: int, user_id: int, accept: b
             # accepting must not create anything in the accepting clan's
             # server unasked.
             row.mirror_discord_event = bool(mirror_discord_event)
+            if is_staff_hosted(ev):
+                # web119a: one team per clan, ready for its roster.
+                _ensure_clan_team(s, ev, group_id)
         s.add(AuditLog(
             actor_user_id=user_id, group_id=group_id, event_id=event_id,
             action=f"event.participant.{'accept' if accept else 'decline'}",
@@ -668,8 +736,12 @@ async def remove_participant(event_id: int, group_id: int):
             _require_clan_vs_clan(ev)
             _assert_event_not_over(ev)
             # Plain host-admin check (no entitlement): a lapsed subscription
-            # must not lock the host out of cleaning up its own roster.
-            _assert_admin_of_group(s, user_id, ev.group_id)
+            # must not lock the host out of cleaning up its own roster. A
+            # staff-hosted event has no host group: staff only (web119a).
+            if is_staff_hosted(ev):
+                _assert_event_admin(s, user_id, ev)
+            else:
+                _assert_admin_of_group(s, user_id, ev.group_id)
             row = (
                 s.query(EventGroup)
                 .filter(EventGroup.event_id == event_id, EventGroup.group_id == group_id)
@@ -685,7 +757,23 @@ async def remove_participant(event_id: int, group_id: int):
                 .filter(EventTeam.event_id == event_id, EventTeam.group_id == group_id)
                 .first()
             )
-            if has_teams:
+            if has_teams and is_staff_hosted(ev):
+                # The clan's team was made for it on accept; removing the clan
+                # takes it along — unless it has already scored, which staff
+                # must settle deliberately (delete the team first).
+                scored = (
+                    s.query(EventCompletion.id)
+                    .join(EventTeam, EventTeam.id == EventCompletion.team_id)
+                    .filter(EventTeam.event_id == event_id,
+                            EventTeam.group_id == group_id)
+                    .first()
+                )
+                if scored:
+                    abort_problem(409, "Clan has scored",
+                                  "That clan's team already has completions. Delete "
+                                  "the team first if you really want to remove them.")
+                _purge_clan_teams(s, ev, group_id)
+            elif has_teams:
                 abort_problem(409, "Clan still has teams",
                               "Remove that clan's teams before removing the clan.")
             was_accepted = row.status == "accepted"
@@ -701,7 +789,7 @@ async def remove_participant(event_id: int, group_id: int):
             )
             s.delete(row)
             s.add(AuditLog(
-                actor_user_id=user_id, group_id=ev.group_id,
+                actor_user_id=user_id, group_id=ev.group_id or group_id,
                 event_id=ev.id,
                 action="event.participant.remove",
                 target=f"web_events.{event_id}.group.{group_id}",
@@ -710,6 +798,56 @@ async def remove_participant(event_id: int, group_id: int):
             if was_accepted:
                 _sync_event_guilds(s, ev)  # their guild leaves the desired set
             s.commit()
+
+    await asyncio.to_thread(_apply)
+    return private_no_store(jsonify({"ok": True}))
+
+
+@event_participants_bp.post("/events/<int:event_id>/participants/<int:group_id>/withdraw")
+async def withdraw_participant(event_id: int, group_id: int):
+    """A clan pulls out of a staff-hosted event it had accepted (web119a).
+    Before the start only — once the event runs, leaving is a staff decision.
+    The clan's team, roster and sign-ups go; the row stays as ``withdrawn`` so
+    staff can see who left, and the negotiation thread records it."""
+    user_id = current_user_id()
+
+    def _apply():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _require_clan_vs_clan(ev)
+            if not is_staff_hosted(ev):
+                abort_problem(422, "Not a global event",
+                              "Only global clan-vs-clan events support withdrawing. "
+                              "Ask the host clan to remove you.")
+            if _effective_status(ev) != "draft":
+                abort_problem(409, "Event has started",
+                              "The event has already started. Contact DropTracker "
+                              "staff to leave it.")
+            _assert_admin_of_group(s, user_id, group_id)
+            row = (
+                s.query(EventGroup)
+                .filter(EventGroup.event_id == event_id, EventGroup.group_id == group_id)
+                .first()
+            )
+            if not row or row.status != "accepted":
+                abort_problem(409, "Not taking part",
+                              "That clan hasn't accepted this event.")
+            _purge_clan_teams(s, ev, group_id)
+            row.status = "withdrawn"
+            row.responded_at = datetime.now()
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=group_id, event_id=event_id,
+                action="event.participant.withdraw",
+                target=f"web_events.{event_id}.group.{group_id}",
+                before="accepted", after="withdrawn",
+            ))
+            _sync_event_guilds(s, ev)  # their guild leaves the mirror set
+            s.commit()
+
+            from services.event_invites import announce_status_change
+
+            announce_status_change(s, event=ev, event_group=row,
+                                   actor_user_id=user_id)
 
     await asyncio.to_thread(_apply)
     return private_no_store(jsonify({"ok": True}))

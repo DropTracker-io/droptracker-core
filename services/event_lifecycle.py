@@ -322,6 +322,119 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
     return blockers
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Staff-hosted clan-vs-clan roster minimum (web119a)
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: Once per (event, clan, start time): the "your roster is under the minimum"
+#: warning a day before a staff-hosted event starts.
+ROSTER_WARNING_KEY = "events:remind:{event_id}:roster-min:{group_id}:{starts_at}"
+
+
+def _is_staff_hosted(event) -> bool:
+    """Mirror of web_api.event_scope.is_staff_hosted (the worker can't import
+    web_api)."""
+    return ((getattr(event, "mode", None) or "standard") == "clan_vs_clan"
+            and getattr(event, "group_id", None) is None)
+
+
+def underfilled_clans(session, event) -> list:
+    """``[(event_group_row, roster_count)]`` for every accepted clan whose
+    roster is below ``clan_roster_min`` on a staff-hosted event. Empty when
+    the event isn't staff-hosted or sets no minimum."""
+    minimum = getattr(event, "clan_roster_min", None)
+    if not _is_staff_hosted(event) or not minimum:
+        return []
+    from sqlalchemy import func
+
+    from db.models import EventGroup, EventTeam, EventTeamMember
+
+    counts = dict(
+        session.query(EventTeam.group_id, func.count(EventTeamMember.player_id))
+        .outerjoin(EventTeamMember, EventTeamMember.team_id == EventTeam.id)
+        .filter(EventTeam.event_id == event.id)
+        .group_by(EventTeam.group_id)
+        .all()
+    )
+    rows = (session.query(EventGroup)
+            .filter(EventGroup.event_id == event.id, EventGroup.status == "accepted")
+            .order_by(EventGroup.id.asc())
+            .all())
+    out = []
+    for row in rows:
+        n = int(counts.get(row.group_id) or 0)
+        if n < int(minimum):
+            out.append((row, n))
+    return out
+
+
+def drop_underfilled_clans(session, event, *, actor_user_id=None,
+                           now: Optional[datetime] = None) -> list:
+    """At the start of a staff-hosted event: leave out every accepted clan
+    whose roster is under the minimum. Their team, roster and sign-ups go
+    (services/event_team_purge.py), the participant row becomes ``dropped``,
+    and the clan's leaders get a note on their thread plus a DM. Returns the
+    dropped group ids. No commit — it rides in the activation transaction, so
+    a start that fails for another reason drops nobody."""
+    now = now or datetime.now()
+    from db.models import EventSignup, EventTeam
+    from services.event_team_purge import purge_team
+
+    dropped = []
+    for row, count in underfilled_clans(session, event):
+        for team in (session.query(EventTeam)
+                     .filter(EventTeam.event_id == event.id,
+                             EventTeam.group_id == row.group_id).all()):
+            purge_team(session, event.id, team)
+        (session.query(EventSignup)
+         .filter(EventSignup.event_id == event.id,
+                 EventSignup.group_id == row.group_id)
+         .delete(synchronize_session=False))
+        row.status = "dropped"
+        row.responded_at = now
+        dropped.append((row, count))
+    if not dropped:
+        return []
+    session.flush()
+    _audit(session, actor_user_id, event, "event.participant.drop_underfilled",
+           {"clans": []},
+           {"clans": [{"group_id": int(r.group_id), "roster": c} for r, c in dropped],
+            "minimum": getattr(event, "clan_roster_min", None)})
+    from services.event_invites import announce_status_change
+
+    for row, count in dropped:
+        announce_status_change(session, event=event, event_group=row,
+                               code="clan_dropped", roster_count=count,
+                               actor_user_id=actor_user_id, commit=False)
+    return [int(r.group_id) for r, _ in dropped]
+
+
+def _roster_min_warnings(session, redis_conn, event, now: datetime) -> None:
+    """A day before a staff-hosted draft starts, warn each clan still under
+    the roster minimum (thread note + DM to its leaders). Once per (event,
+    clan, start time) via a Redis NX flag; skipped without Redis, like the
+    other reminders."""
+    if redis_conn is None or event.starts_at is None:
+        return
+    from services import event_alerts
+
+    starts_at = _ts(event.starts_at)
+    if not event_alerts.autostart_heads_up_due(starts_at, _ts(now)):
+        return
+    from services.event_invites import announce_status_change
+
+    for row, count in underfilled_clans(session, event):
+        try:
+            key = ROSTER_WARNING_KEY.format(event_id=event.id, group_id=row.group_id,
+                                            starts_at=starts_at)
+            if not redis_conn.set(key, "1", nx=True, ex=_REMINDER_SENT_TTL):
+                continue
+        except Exception:
+            return
+        announce_status_change(session, event=event, event_group=row,
+                               code="roster_below_min", roster_count=count)
+
+
 def activation_blockers(session, event, now: Optional[datetime] = None) -> list:
     """Legacy list-of-strings contract — the human-readable messages from
     :func:`activation_blocker_items`."""
@@ -349,8 +462,37 @@ def readiness_report(session, event, now: Optional[datetime] = None) -> dict:
                 "code": "tier_rate_limit", "target": "subscription",
                 "message": describe_violation(violation),
             })
+    # Staff-hosted clan-vs-clan (web119a): clans under the roster minimum are
+    # dropped at the start. Say who, and whether enough clans are left.
+    warnings = []
+    short = underfilled_clans(session, event) if status == "draft" else []
+    if short:
+        from db.models import EventGroup, Group
+
+        names = dict(session.query(Group.group_id, Group.group_name)
+                     .filter(Group.group_id.in_([r.group_id for r, _ in short])).all())
+        minimum = int(getattr(event, "clan_roster_min", 0) or 0)
+        for row, count in short:
+            warnings.append({
+                "code": "clan_roster_under_min", "target": "teams",
+                "group_id": int(row.group_id),
+                "message": (f"{names.get(row.group_id) or f'Clan {row.group_id}'} has "
+                            f"{count} of {minimum} players and will be left out "
+                            f"if that doesn't change before the start."),
+            })
+        accepted = (session.query(EventGroup.id)
+                    .filter(EventGroup.event_id == event.id,
+                            EventGroup.status == "accepted").count())
+        remaining = accepted - len(short)
+        if accepted >= 2 and remaining < 2:
+            items.append({
+                "code": "cvc_too_few_full_rosters", "target": "teams",
+                "message": (f"Only {remaining} {'clan has' if remaining == 1 else 'clans have'} "
+                            f"a full enough roster to play. At least two are needed."),
+            })
     starts_at = getattr(event, "starts_at", None)
     return {
+        "warnings": warnings,
         "status": status,
         "ready": not items,
         "blockers": items,
@@ -1113,6 +1255,11 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
 
     from services import event_engine
 
+    # Staff-hosted clan-vs-clan (web119a): clans under the roster minimum sit
+    # this one out. Before the blockers, so "needs two clans" counts the
+    # clans that are actually playing.
+    drop_underfilled_clans(session, event, actor_user_id=actor_user_id, now=now)
+
     blockers = activation_blockers(session, event, now=now)
     if blockers:
         raise LifecycleError(422, "Event is not ready to start", " ".join(blockers))
@@ -1705,6 +1852,13 @@ def run_reminder_sweep(session, redis_conn, rows, due, now: datetime) -> None:
     for event in rows:
         if event.status == "draft":
             _autostart_heads_up(session, redis_conn, event, now)
+            if _is_staff_hosted(event):
+                try:
+                    _roster_min_warnings(session, redis_conn, event, now)
+                except Exception:
+                    session.rollback()
+                    log.error("Reminder sweep: roster warning failed for event %s",
+                              event.id, exc_info=True)
 
         # "Starting soon": a draft with a future scheduled start (an event
         # activated early is already running — nothing to tease).

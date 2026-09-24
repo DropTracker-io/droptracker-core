@@ -231,6 +231,10 @@ async def my_pending_reviews():
                     continue
                 if superadmin:
                     is_admin = True
+                elif ev.group_id is None:
+                    # Global and staff-hosted clan-vs-clan (web119a): staff
+                    # review; participating clans never do.
+                    is_admin = False
                 elif (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
                     is_admin = any(_admin_of_group(g)
                                    for g in participating_group_ids(s, ev))

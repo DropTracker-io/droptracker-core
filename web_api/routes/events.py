@@ -90,6 +90,8 @@ from web_api.common import (abort_problem, db_session, hidden_player_ids, money,
                             parse_page, player_month_totals, private_no_store,
                             score_num, with_cache_headers)
 from web_api.event_loot import loot_gp_by_player
+from web_api.event_scope import (capacity_problem, clan_roster_locked, is_staff_hosted,
+                                 roster_limits, validate_roster_limits)
 from web_api.event_players import (
     count_contributions,
     is_metric_task,
@@ -309,6 +311,13 @@ def _summary(ev: Event) -> dict:
         # (_schedule_state), which costs a query per event.
         "has_schedule": bool(getattr(ev, "schedule_config", None)),
         "schedule_summary": _schedule_summary(ev),
+        # Staff-hosted clan-vs-clan (web119a): staff run the event, each clan
+        # fields one team of clan_roster_min..clan_roster_max players.
+        "staff_hosted": is_staff_hosted(ev),
+        "clan_roster_min": getattr(ev, "clan_roster_min", None),
+        "clan_roster_max": getattr(ev, "clan_roster_max", None),
+        "clan_roster_locked_at_start": bool(
+            getattr(ev, "clan_roster_locked_at_start", True)),
         "activated_at": _ts(ev.activated_at),
         "ended_at": _ts(ev.ended_at),
     }
@@ -379,6 +388,10 @@ def _is_event_admin(s, viewer_id, ev: Event) -> bool:
     user = load_user(s, viewer_id)
     if is_superadmin(user):
         return True
+    if is_staff_hosted(ev):
+        # web119a: staff own a staff-hosted event outright. Participating
+        # clans manage only their own side (_clan_manager_group_ids).
+        return False
     if (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
         mgids = manageable_guild_ids(viewer_id)
         return any(
@@ -391,6 +404,109 @@ def _is_event_admin(s, viewer_id, ev: Event) -> bool:
     role = resolve_group_role(s, viewer_id, ev.group_id, manageable_guild_ids(viewer_id), user=user)
     # web64a: group event managers administer the group's events too.
     return role in ("owner", "admin") or is_event_manager(s, viewer_id, ev.group_id)
+
+
+def _clan_manager_group_ids(s, viewer_id, ev: Event) -> set[int]:
+    """Accepted participating clans ``viewer_id`` may act for on a
+    clan_vs_clan event: owner/admin of the clan, or its event manager.
+    Superadmins act for every participant. Empty for other modes."""
+    if viewer_id is None or (getattr(ev, "mode", None) or "standard") != "clan_vs_clan":
+        return set()
+    participants = participating_group_ids(s, ev)
+    user = load_user(s, viewer_id)
+    if is_superadmin(user):
+        return participants
+    mgids = manageable_guild_ids(viewer_id)
+    return {
+        gid for gid in participants
+        if resolve_group_role(s, viewer_id, gid, mgids, user=user) in ("owner", "admin")
+        or is_event_manager(s, viewer_id, gid)
+    }
+
+
+def _assert_clan_manager(s, user_id, ev: Event, group_id, *, roster: bool = False) -> bool:
+    """Gate for a clan's OWN side of an event (web119a). Returns True when the
+    caller is acting as event staff/admin, False when as the clan's manager.
+
+    Outside staff-hosted events this is exactly ``_assert_event_admin`` —
+    nothing changes for group-hosted events. On a staff-hosted event,
+    superadmins pass, and otherwise the caller must manage ``group_id``, an
+    accepted participant. ``roster=True`` also applies the start-of-event
+    roster lock to clan managers (staff are never locked out)."""
+    if not is_staff_hosted(ev):
+        _assert_event_admin(s, user_id, ev)
+        return True
+    if is_superadmin(load_user(s, user_id)):
+        return True
+    if group_id is None or int(group_id) not in _clan_manager_group_ids(s, user_id, ev):
+        abort_problem(403, "Not your clan",
+                      "You can only manage the clan you lead in this event.",
+                      extra={"code": "not_clan_manager"})
+    if roster and clan_roster_locked(ev, _effective_status(ev)):
+        abort_problem(409, "Roster locked",
+                      "Rosters are locked now that the event has started. "
+                      "Contact DropTracker staff if a change is needed.",
+                      extra={"code": "clan_roster_locked"})
+    return False
+
+
+def _assert_team_manager(s, user_id, ev: Event, team, *, roster: bool = True) -> bool:
+    """``_assert_clan_manager`` for the clan a team represents."""
+    return _assert_clan_manager(s, user_id, ev, getattr(team, "group_id", None),
+                                roster=roster)
+
+
+def _manages_team(s, user_id, ev: Event, team) -> bool:
+    """Non-raising: event admin, or (staff-hosted) a manager of the clan the
+    team represents. No roster-lock check — for leadership and team details."""
+    if _is_event_admin(s, user_id, ev):
+        return True
+    gid = getattr(team, "group_id", None)
+    return bool(is_staff_hosted(ev) and gid is not None
+                and int(gid) in _clan_manager_group_ids(s, user_id, ev))
+
+
+def _signup_clan_id(s, ev: Event, player_id: int):
+    """The clan a signed-up (or placed) player belongs to on this event: the
+    sign-up's clan, else the clan of the team they're on. None if neither."""
+    row = (s.query(EventSignup.group_id)
+           .filter(EventSignup.event_id == ev.id, EventSignup.player_id == player_id)
+           .first())
+    if row and row[0] is not None:
+        return row[0]
+    row = (s.query(EventTeam.group_id)
+           .join(EventTeamMember, EventTeamMember.team_id == EventTeam.id)
+           .filter(EventTeam.event_id == ev.id, EventTeamMember.player_id == player_id)
+           .first())
+    return row[0] if row else None
+
+
+def _team_member_count(s, team_id: int) -> int:
+    return (s.query(func.count(EventTeamMember.player_id))
+            .filter(EventTeamMember.team_id == team_id).scalar() or 0)
+
+
+def _assert_roster_capacity(s, ev: Event, team_id: int, player_ids, *,
+                            override: bool = False) -> None:
+    """Refuse to take a staff-hosted clan's roster past ``clan_roster_max``.
+    Players already on this team don't count as additions (a no-op or a
+    re-add), and a move from another team only counts against THIS one.
+    ``override`` (staff only — the caller checks) skips the limit."""
+    if override or not is_staff_hosted(ev):
+        return
+    pids = {int(p) for p in player_ids}
+    if not pids:
+        return
+    already = {
+        pid for (pid,) in s.query(EventTeamMember.player_id)
+        .filter(EventTeamMember.team_id == team_id,
+                EventTeamMember.player_id.in_(pids)).all()
+    }
+    problem = capacity_problem(ev, _team_member_count(s, team_id), len(pids - already))
+    if problem:
+        _, hi = roster_limits(ev)
+        abort_problem(409, "Roster full", problem,
+                      extra={"code": "roster_full", "max": hi})
 
 
 def _member_group_ids(s, viewer_id) -> set[int]:
@@ -720,6 +836,10 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             # Leadership role any of the viewer's players holds on their team
             # (web48a) — the client-side gate for board roll/shop buttons.
             "team_role": my_roles[0] if my_roles else None,
+            # web119a: clans the viewer runs their side of this staff-hosted
+            # event for (roster, leaders, Discord). Empty elsewhere.
+            "managed_clan_ids": (sorted(_clan_manager_group_ids(s, viewer_id, ev))
+                                 if is_staff_hosted(ev) else []),
         }
 
     bingo = None
@@ -3387,6 +3507,11 @@ def _assert_event_admin(s, user_id, ev_or_group_id):
     time, and an accepting opponent never needs a tier.
     """
     ev = ev_or_group_id if hasattr(ev_or_group_id, "group_id") else None
+    if ev is not None and is_staff_hosted(ev):
+        # web119a: setup, tasks, scoring and lifecycle of a staff-hosted event
+        # are staff-only. Clan-scoped routes gate on _assert_clan_manager.
+        assert_superadmin(load_user(s, user_id))
+        return
     if ev is not None and (getattr(ev, "mode", None) or "standard") == "clan_vs_clan":
         user = load_user(s, user_id)
         if is_superadmin(user):
@@ -4366,15 +4491,24 @@ async def create_event():
             f"discord_event_policy must be one of {list(EVENT_DISCORD_POLICIES)}.",
         )
     ping_config = _parse_ping_config(body.get("pings"))
-    if mode == "clan_vs_clan" and not group_id:
-        abort_problem(
-            422,
-            "Host group required",
-            "A clan-vs-clan event needs a host group_id (global clan-vs-clan "
-            "events are not a thing).",
-        )
     if mode == "clan_vs_clan" and kind in COMPETITION_EVENT_KINDS:
         abort_problem(*_COMPETITION_CLAN_LOCK)
+    # web119a: clan-vs-clan with no host group = staff-hosted (superadmins
+    # only — _assert_event_admin(None) below enforces it). Every clan fields
+    # one team whose roster its leaders pick from the sign-up pool, and each
+    # clan configures its own Discord channels.
+    staff_hosted = mode == "clan_vs_clan" and group_id is None
+    roster_min = roster_max = None
+    roster_locked = True
+    if staff_hosted:
+        formation_mode = "signup_pool"
+        roster_min = body.get("clan_roster_min")
+        roster_max = body.get("clan_roster_max")
+        problem = validate_roster_limits(roster_min, roster_max)
+        if problem:
+            abort_problem(422, "Invalid roster limits", problem)
+        if "clan_roster_locked_at_start" in body:
+            roster_locked = bool(body.get("clan_roster_locked_at_start"))
 
     def _apply():
         with db_session() as s:
@@ -4433,6 +4567,10 @@ async def create_event():
                 kind=kind,
                 discord_event_policy=discord_event_policy,
                 ping_config=ping_config,
+                per_group_discord=staff_hosted,
+                clan_roster_min=roster_min,
+                clan_roster_max=roster_max,
+                clan_roster_locked_at_start=roster_locked,
             )
             s.add(ev)
             s.commit()
@@ -4443,7 +4581,7 @@ async def create_event():
             if body.get("schedule"):
                 _apply_schedule(s, ev, body.get("schedule"), kind=kind)
                 s.commit()
-            if mode == "clan_vs_clan":
+            if mode == "clan_vs_clan" and not staff_hosted:
                 # Seed the host as an accepted participant; opponents are
                 # invited via POST /events/{id}/participants.
                 s.add(EventGroup(
@@ -4565,6 +4703,11 @@ def _event_settings_snapshot(ev) -> dict:
         # web82a — a schedule change moves when submissions count, which is
         # exactly the kind of edit a manager needs to be able to trace.
         "schedule": _schedule_summary(ev),
+        # web119a — staff-hosted clan-vs-clan roster limits.
+        "clan_roster_min": getattr(ev, "clan_roster_min", None),
+        "clan_roster_max": getattr(ev, "clan_roster_max", None),
+        "clan_roster_locked_at_start": bool(
+            getattr(ev, "clan_roster_locked_at_start", True)),
     }
 
 
@@ -4625,6 +4768,11 @@ async def update_event(event_id: int):
                         "Invalid formation mode",
                         f"formation_mode must be one of {list(EVENT_FORMATION_MODES)}.",
                     )
+                if is_staff_hosted(ev) and mode != "signup_pool":
+                    abort_problem(
+                        422, "Sign-up pool only",
+                        "Global clan-vs-clan events always use the sign-up pool: "
+                        "members sign up and their clan picks the roster.")
                 ev.formation_mode = mode
             if "join_code" in body:
                 code = body.get("join_code")
@@ -4656,10 +4804,13 @@ async def update_event(event_id: int):
                             .filter(EventTeam.event_id == ev.id).first()):
                         abort_problem(409, "Teams exist",
                                       "Remove the event's teams before changing its mode.")
-                    if new_mode == "clan_vs_clan":
-                        if not ev.group_id:
-                            abort_problem(422, "Host group required",
-                                          "A global event cannot become clan-vs-clan.")
+                    if new_mode == "clan_vs_clan" and not ev.group_id:
+                        # web119a: a global draft becomes staff-hosted
+                        # clan-vs-clan (only superadmins reach this — they
+                        # alone administer global events). No host row.
+                        ev.formation_mode = "signup_pool"
+                        ev.per_group_discord = True
+                    elif new_mode == "clan_vs_clan":
                         s.add(EventGroup(
                             event_id=ev.id, group_id=ev.group_id, role="host",
                             status="accepted", invited_by_user_id=user_id,
@@ -4670,6 +4821,19 @@ async def update_event(event_id: int):
                             EventGroup.event_id == ev.id
                         ).delete(synchronize_session=False)
                     ev.mode = new_mode
+            roster_keys = ("clan_roster_min", "clan_roster_max")
+            if any(k in body for k in roster_keys) or "clan_roster_locked_at_start" in body:
+                if not is_staff_hosted(ev):
+                    abort_problem(422, "Not a global clan-vs-clan event",
+                                  "Roster limits only apply to global clan-vs-clan events.")
+                lo = body["clan_roster_min"] if "clan_roster_min" in body else ev.clan_roster_min
+                hi = body["clan_roster_max"] if "clan_roster_max" in body else ev.clan_roster_max
+                problem = validate_roster_limits(lo, hi)
+                if problem:
+                    abort_problem(422, "Invalid roster limits", problem)
+                ev.clan_roster_min, ev.clan_roster_max = lo, hi
+                if "clan_roster_locked_at_start" in body:
+                    ev.clan_roster_locked_at_start = bool(body["clan_roster_locked_at_start"])
             if "kind" in body:
                 new_kind = body.get("kind") or "standard"
                 if new_kind not in EVENT_KINDS:
@@ -5097,27 +5261,12 @@ def _sync_buyin_team(s, event_id: int, player_id: int, team_id: int | None) -> N
     sync_buyin_team(s, event_id, player_id, team_id)
 
 
-def _drop_team_discord_rows(s, event_id: int, team_id: int) -> None:
-    """Team hard delete: queue live role/channel teardown for the bot, then
-    drop the rows themselves (their team FK is about to go away)."""
-    try:
-        from db import EventTeamDiscord
-        from services.event_team_discord import (
-            enqueue_team_discord_orphans,
-            orphan_team_discord_payloads,
-        )
-    except ImportError:
-        return
-    try:
-        from utils.redis import redis_client
+def _purge_team(s, event_id: int, team) -> None:
+    """Delete a team and every row scoped to it (services/event_team_purge.py
+    — shared with clan withdrawal/removal and the start-of-event drop)."""
+    from services.event_team_purge import purge_team
 
-        enqueue_team_discord_orphans(
-            redis_client, orphan_team_discord_payloads(s, event_id, team_id))
-    except Exception:
-        pass  # teardown loss is tolerable; the row wipe below is not
-    s.query(EventTeamDiscord).filter(
-        EventTeamDiscord.team_id == team_id
-    ).delete(synchronize_session=False)
+    purge_team(s, event_id, team)
 
 
 def _cascade_delete_event(s, ev: Event) -> None:
@@ -6600,7 +6749,7 @@ async def add_team(event_id: int):
 @events_bp.patch("/events/<int:event_id>/teams/<int:team_id>")
 async def update_team(event_id: int, team_id: int):
     """Edit a team's cosmetics: rename (fix a typo), set its accent color
-    and/or its in-game chat tag. Admin-only; audit-logged. The clan a
+    and/or its in-game chat tag. Event admins (or, on a staff-hosted event, the managers of the clan it represents); audit-logged. The clan a
     clan_vs_clan team represents is fixed at create time. Allowed in any
     lifecycle state (cosmetic only).
 
@@ -6647,7 +6796,6 @@ async def update_team(event_id: int, team_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
             team = (
                 s.query(EventTeam)
                 .filter(EventTeam.id == team_id, EventTeam.event_id == event_id)
@@ -6655,6 +6803,8 @@ async def update_team(event_id: int, team_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            # web119a: a staff-hosted clan styles its own team (cosmetic only).
+            _assert_team_manager(s, user_id, ev, team, roster=False)
             before = {"name": team.name, "color": team.color,
                       "short_tag": getattr(team, "short_tag", None),
                       "piece_item_id": getattr(team, "piece_item_id", None)}
@@ -6678,7 +6828,7 @@ async def update_team(event_id: int, team_id: int):
             s.add(
                 AuditLog(
                     actor_user_id=user_id,
-                    group_id=ev.group_id,
+                    group_id=ev.group_id or team.group_id,
                     event_id=ev.id,
                     action="event.team.update",
                     target=f"web_events.{event_id}.team.{team_id}",
@@ -6715,72 +6865,8 @@ async def delete_team(event_id: int, team_id: int):
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
             team_name = team.name
-
-            # Per-team Discord (web53a): the rows are about to be FK-wiped —
-            # queue any live role/channel for bot teardown first, then drop
-            # the rows with the other children below.
-            _drop_team_discord_rows(s, event_id, team_id)
-
-            # No ORM cascade is configured on these FKs, so clear the children
-            # first — EventProgress.team_id is NOT NULL, so a dangling row would
-            # violate the constraint. Deleting the team's ledger/progress is
-            # correct: standings recompute from the remaining teams.
-            s.query(EventBingoCompletion).filter(
-                EventBingoCompletion.team_id == team_id
-            ).delete(synchronize_session=False)
-            s.query(EventCompletion).filter(
-                EventCompletion.team_id == team_id
-            ).delete(synchronize_session=False)
-            s.query(EventProgress).filter(
-                EventProgress.team_id == team_id
-            ).delete(synchronize_session=False)
-            s.query(EventTeamMember).filter(
-                EventTeamMember.team_id == team_id
-            ).delete(synchronize_session=False)
-
-            # web71a: buy-ins are NOT wiped with the team — that GP was
-            # contributed to the *event* and may already be paid. Return the
-            # rows to the unassigned bucket (which also clears the FK that
-            # would otherwise block this delete outright).
-            from services.event_buyins import release_team_buyins
-
-            release_team_buyins(s, event_id, team_id)
-
-            # P0-5: points/vote + board-game children whose FKs (web45a–web48a)
-            # postdate the original 4-table cascade. Several are NOT NULL
-            # (board position, inventory, cooldown, coin ledger,
-            # effect.source_team_id), so without these the delete raised an
-            # opaque IntegrityError 500 on every pointed or board-game event —
-            # board positions are seeded at activation, so their teams were
-            # simply undeletable.
-            from db import (
-                EventBoardEffect,
-                EventBoardPosition,
-                EventCoinLedger,
-                EventTeamCooldown,
-                EventTeamInventory,
-            )
-
-            for _child in (
-                EventPlayerPoints,
-                EventLeaderVote,
-                EventBoardPosition,
-                EventTeamInventory,
-                EventTeamCooldown,
-                EventCoinLedger,
-            ):
-                s.query(_child).filter(_child.team_id == team_id).delete(
-                    synchronize_session=False
-                )
-            # Effects reference a team from either side (source_team_id NOT NULL).
-            s.query(EventBoardEffect).filter(
-                sa_or(
-                    EventBoardEffect.source_team_id == team_id,
-                    EventBoardEffect.target_team_id == team_id,
-                )
-            ).delete(synchronize_session=False)
-            s.delete(team)
-            s.flush()
+            # One cascade for every way a team disappears (web119a).
+            _purge_team(s, event_id, team)
             # Every team after this one moves up an ordinal, and a colorless
             # team's default color follows its ordinal (on the site and in
             # Discord alike): re-pend the surviving teams' Discord rows so the
@@ -7148,11 +7234,11 @@ async def admin_add_member(event_id: int, team_id: int):
     user_id = current_user_id()
     body = await json_body()
     player_id = body.get("player_id")
+    override = body.get("override") is True
 
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
             _assert_roster_open(ev)
             team = (
                 s.query(EventTeam)
@@ -7161,6 +7247,8 @@ async def admin_add_member(event_id: int, team_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            # web119a: a staff-hosted clan's leaders manage their own roster.
+            as_staff = _assert_team_manager(s, user_id, ev, team)
             if not isinstance(player_id, int):
                 abort_problem(422, "Invalid player_id", "'player_id' must be an integer.")
             player = s.query(Player).filter(Player.player_id == player_id).first()
@@ -7188,6 +7276,12 @@ async def admin_add_member(event_id: int, team_id: int):
             if existing:
                 if existing.team_id == team_id:
                     return  # already on this team — no-op
+                if not as_staff:
+                    # A clan can't pull a player off a rival clan's team.
+                    _assert_team_manager(s, user_id, ev, s.get(EventTeam, existing.team_id))
+            _assert_roster_capacity(s, ev, team_id, [player_id],
+                                    override=override and as_staff)
+            if existing:
                 s.delete(existing)  # move: joined_at resets on the new row
                 # Votes don't cross teams: drop the mover's vote and any
                 # votes cast for them on the old team.
@@ -7205,7 +7299,7 @@ async def admin_add_member(event_id: int, team_id: int):
             s.add(
                 AuditLog(
                     actor_user_id=user_id,
-                    group_id=ev.group_id,
+                    group_id=ev.group_id or team.group_id,
                     event_id=ev.id,
                     action="event.member.add",
                     target=f"web_events.{event_id}.player.{player_id}",
@@ -7243,6 +7337,7 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
     user_id = current_user_id()
     body = await json_body()
     names = body.get("names")
+    override = body.get("override") is True
     if not isinstance(names, list) or not names:
         abort_problem(422, "Invalid names", "'names' must be a non-empty list of player names.")
     if len(names) > MAX_BULK_ADD_NAMES:
@@ -7268,7 +7363,6 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
             _assert_roster_open(ev)
             team = (
                 s.query(EventTeam)
@@ -7277,6 +7371,7 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            as_staff = _assert_team_manager(s, user_id, ev, team)
 
             # Resolve the whole list in one query on the indexed folded name;
             # keep the DB's canonical capitalization for the response. OSRS
@@ -7367,6 +7462,10 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                 added.append({"id": pid, "name": canonical})
 
             if added:
+                # web119a: all-or-nothing against the clan's roster limit, so
+                # a pasted list never half-lands.
+                _assert_roster_capacity(s, ev, team_id, [a["id"] for a in added],
+                                        override=override and as_staff)
                 # web71a: one UPDATE for the whole batch's sign-up buy-ins.
                 from services.event_buyins import sync_buyin_teams
 
@@ -7376,7 +7475,7 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                 s.add(
                     AuditLog(
                         actor_user_id=user_id,
-                        group_id=ev.group_id,
+                        group_id=ev.group_id or team.group_id,
                         event_id=ev.id,
                         action="event.member.bulk_add",
                         target=f"web_events.{event_id}.team.{team_id}",
@@ -7414,7 +7513,6 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
     def _apply():
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
             _assert_roster_open(ev)
             team = (
                 s.query(EventTeam)
@@ -7423,6 +7521,7 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            _assert_team_manager(s, user_id, ev, team)
             membership = (
                 s.query(EventTeamMember)
                 .filter(
@@ -7442,7 +7541,7 @@ async def admin_remove_member(event_id: int, team_id: int, player_id: int):
                 s.add(
                     AuditLog(
                         actor_user_id=user_id,
-                        group_id=ev.group_id,
+                        group_id=ev.group_id or team.group_id,
                         event_id=ev.id,
                         action="event.member.remove",
                         target=f"web_events.{event_id}.player.{player_id}",
@@ -7501,8 +7600,8 @@ async def set_team_leadership(event_id: int, team_id: int):
                               "This event does not use co-leaders.")
             if not isinstance(player_id, int):
                 abort_problem(422, "Invalid player_id", "'player_id' must be an integer.")
-            _load_team_or_404(s, event_id, team_id)
-            if not _is_event_admin(s, user_id, ev):
+            team = _load_team_or_404(s, event_id, team_id)
+            if not _manages_team(s, user_id, ev, team):
                 if not (role == "co_leader"
                         and team_role_for_user(s, team_id, user_id) == "leader"):
                     abort_problem(403, "Not allowed",
@@ -7512,7 +7611,7 @@ async def set_team_leadership(event_id: int, team_id: int):
                 abort_problem(404, "Not a member",
                               "That player is not on this team.")
             s.add(AuditLog(
-                actor_user_id=user_id, group_id=ev.group_id,
+                actor_user_id=user_id, group_id=ev.group_id or team.group_id,
                 event_id=ev.id,
                 action="event.leadership.assign",
                 target=f"web_events.{event_id}.team.{team_id}",
@@ -7537,7 +7636,7 @@ async def clear_team_leadership(event_id: int, team_id: int, player_id: int):
 
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _load_team_or_404(s, event_id, team_id)
+            team = _load_team_or_404(s, event_id, team_id)
             member = (s.query(EventTeamMember)
                       .filter(EventTeamMember.team_id == team_id,
                               EventTeamMember.player_id == player_id)
@@ -7550,7 +7649,7 @@ async def clear_team_leadership(event_id: int, team_id: int, player_id: int):
                 .first()
             )
             allowed = (
-                _is_event_admin(s, user_id, ev)
+                _manages_team(s, user_id, ev, team)
                 or owns_player
                 or (member.role == "co_leader"
                     and team_role_for_user(s, team_id, user_id) == "leader")
@@ -7562,7 +7661,7 @@ async def clear_team_leadership(event_id: int, team_id: int, player_id: int):
             before = f"{member.role}:{player_id}"
             member.role = None
             s.add(AuditLog(
-                actor_user_id=user_id, group_id=ev.group_id,
+                actor_user_id=user_id, group_id=ev.group_id or team.group_id,
                 event_id=ev.id,
                 action="event.leadership.remove",
                 target=f"web_events.{event_id}.team.{team_id}",
@@ -7653,8 +7752,19 @@ async def list_event_signups(event_id: int):
 
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
+            clan_ids = None
+            if is_staff_hosted(ev) and not _is_event_admin(s, user_id, ev):
+                # web119a: a clan's managers see only their own clan's pool.
+                clan_ids = _clan_manager_group_ids(s, user_id, ev)
+                if not clan_ids:
+                    abort_problem(403, "Not your clan",
+                                  "You can only manage the clan you lead in this event.",
+                                  extra={"code": "not_clan_manager"})
+            else:
+                _assert_event_admin(s, user_id, ev)
             rows = list_pool(s, ev)
+            if clan_ids is not None:
+                rows = [r for r in rows if r.get("group_id") in clan_ids]
         # Enrich with each player's current-month loot from Redis (batched,
         # outside the DB session so no connection is held during Redis I/O).
         # Pairs with the EHB / total-level joined by list_pool so admins can
@@ -7676,6 +7786,7 @@ async def assign_signup(event_id: int):
     body = await json_body()
     player_id = body.get("player_id")
     team_id = body.get("team_id")
+    override = body.get("override") is True
     if not isinstance(player_id, int) or not isinstance(team_id, int):
         abort_problem(422, "Invalid body", "'player_id' and 'team_id' must be integers.")
 
@@ -7684,14 +7795,17 @@ async def assign_signup(event_id: int):
 
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
             _assert_roster_open(ev)
+            team = _load_team_or_404(s, event_id, team_id)
+            as_staff = _assert_team_manager(s, user_id, ev, team)
+            _assert_roster_capacity(s, ev, team_id, [player_id],
+                                    override=override and as_staff)
             try:
                 assign_from_pool(s, ev, player_id, team_id)
             except SignupError as exc:
                 abort_problem(exc.status, exc.title, exc.detail)
             s.add(AuditLog(
-                actor_user_id=user_id, group_id=ev.group_id,
+                actor_user_id=user_id, group_id=ev.group_id or team.group_id,
                 event_id=ev.id,
                 action="event.signup.assign",
                 target=f"web_events.{event_id}.player.{player_id}",
@@ -7720,14 +7834,15 @@ async def unassign_signup(event_id: int):
 
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
             _assert_roster_open(ev)
+            clan_id = _signup_clan_id(s, ev, player_id)
+            _assert_clan_manager(s, user_id, ev, clan_id, roster=True)
             try:
                 unassign_from_pool(s, ev, player_id)
             except SignupError as exc:
                 abort_problem(exc.status, exc.title, exc.detail)
             s.add(AuditLog(
-                actor_user_id=user_id, group_id=ev.group_id,
+                actor_user_id=user_id, group_id=ev.group_id or clan_id,
                 event_id=ev.id,
                 action="event.signup.unassign",
                 target=f"web_events.{event_id}.player.{player_id}",
@@ -7757,11 +7872,40 @@ async def randomize_signups(event_id: int):
 
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
             _assert_roster_open(ev)
-            result = randomize_pool(s, ev, group_id=group_id)
+            scope_gid = group_id
+            if is_staff_hosted(ev):
+                # web119a: one team per clan, so "randomize" fills a clan's
+                # team from its sign-ups. Clan managers only ever touch their
+                # own clan, and the whole pool must fit the roster limit.
+                if scope_gid is None and not _is_event_admin(s, user_id, ev):
+                    mine = _clan_manager_group_ids(s, user_id, ev)
+                    if len(mine) == 1:
+                        scope_gid = next(iter(mine))
+                if scope_gid is None:
+                    _assert_event_admin(s, user_id, ev)  # whole pool: staff
+                else:
+                    _assert_clan_manager(s, user_id, ev, scope_gid, roster=True)
+                teams_q = s.query(EventTeam).filter(EventTeam.event_id == event_id)
+                if scope_gid is not None:
+                    teams_q = teams_q.filter(EventTeam.group_id == scope_gid)
+                for t in teams_q.all():
+                    pool = [pid for (pid,) in s.query(EventSignup.player_id)
+                            .filter(EventSignup.event_id == event_id,
+                                    EventSignup.group_id == t.group_id).all()]
+                    # Counts from zero: the shuffle replaces every placement.
+                    problem = capacity_problem(ev, 0, len(pool))
+                    if problem:
+                        abort_problem(
+                            409, "Roster full",
+                            f"{len(pool)} players signed up but the limit is "
+                            f"{roster_limits(ev)[1]}. Pick the roster by hand.",
+                            extra={"code": "roster_full"})
+            else:
+                _assert_event_admin(s, user_id, ev)
+            result = randomize_pool(s, ev, group_id=scope_gid)
             s.add(AuditLog(
-                actor_user_id=user_id, group_id=ev.group_id,
+                actor_user_id=user_id, group_id=ev.group_id or scope_gid,
                 event_id=ev.id,
                 action="event.signup.randomize",
                 target=f"web_events.{event_id}",
@@ -7824,8 +7968,18 @@ async def populate_random_members(event_id: int):
 async def post_signup_message(event_id: int):
     """Post an interactive "Sign up" button to the event's Discord announcements
     channel. Event admin; self-signup events only; requires the announcements
-    channel to be configured (Event → Discord)."""
+    channel to be configured (Event → Discord).
+
+    Optional body ``{group_id}`` (web119a, clan-vs-clan with per-clan Discord):
+    post only to THAT clan's own channels. On a staff-hosted event this is how
+    a clan's leaders advertise sign-ups in their server — they may only post
+    for a clan they manage; staff may post for any clan or, without a
+    group_id, to every clan at once."""
     user_id = current_user_id()
+    body = await json_body(required=False)
+    scope_gid = (body or {}).get("group_id")
+    if scope_gid is not None and (not isinstance(scope_gid, int) or isinstance(scope_gid, bool)):
+        abort_problem(422, "Invalid group_id", "'group_id' must be an integer or omitted.")
 
     def _apply():
         import json as _json
@@ -7837,7 +7991,16 @@ async def post_signup_message(event_id: int):
 
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
+            if scope_gid is None:
+                _assert_event_admin(s, user_id, ev)
+            else:
+                if not getattr(ev, "per_group_discord", False):
+                    abort_problem(409, "No per-clan Discord",
+                                  "This event doesn't use per-clan Discord channels.")
+                if scope_gid not in participating_group_ids(s, ev):
+                    abort_problem(404, "Not a participant",
+                                  "That clan is not taking part in this event.")
+                _assert_clan_manager(s, user_id, ev, scope_gid)
             if (ev.formation_mode or "admin_assign") not in EVENT_SELF_SIGNUP_MODES:
                 abort_problem(422, "Sign-ups closed",
                               "Set the event to let players sign up first "
@@ -7847,12 +8010,14 @@ async def post_signup_message(event_id: int):
             if shut:
                 abort_problem(409, "Sign-ups closed", shut,
                               extra={"code": "signups_closed"})
-            channel = (
-                s.query(EventChannel)
-                .filter(EventChannel.event_id == event_id,
-                        EventChannel.kind == "announcements")
-                .first()
-            )
+            channel_q = s.query(EventChannel).filter(
+                EventChannel.event_id == event_id,
+                EventChannel.kind == "announcements")
+            if scope_gid is not None:
+                # The clan's own channel, or the shared set it falls back to.
+                channel_q = channel_q.filter(sa_or(EventChannel.group_id == scope_gid,
+                                                   EventChannel.group_id.is_(None)))
+            channel = channel_q.first()
             if not channel:
                 abort_problem(422, "No Discord channel",
                               "Configure this event's Discord announcements "
@@ -7874,6 +8039,9 @@ async def post_signup_message(event_id: int):
                 # queue's unique (type, player, group, data) index.
                 "posted_at": int(_dt2.now().timestamp()),
             }
+            if scope_gid is not None:
+                # The sender posts to this clan's destination only.
+                payload["only_group_id"] = scope_gid
             s.add(NotificationQueue(
                 notification_type="event_signup_prompt",
                 player_id=rep,
@@ -7882,7 +8050,7 @@ async def post_signup_message(event_id: int):
                 status="pending",
             ))
             s.add(AuditLog(
-                actor_user_id=user_id, group_id=ev.group_id,
+                actor_user_id=user_id, group_id=ev.group_id or scope_gid,
                 event_id=ev.id,
                 action="event.signup.message",
                 target=f"web_events.{event_id}", before=None, after="posted",
@@ -7919,11 +8087,12 @@ async def remove_event_signup(event_id: int, player_id: int):
 
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
-            _assert_event_admin(s, user_id, ev)
             _assert_roster_open(ev)
+            clan_id = _signup_clan_id(s, ev, player_id)
+            _assert_clan_manager(s, user_id, ev, clan_id, roster=True)
             remove_signup(s, ev, player_id)
             s.add(AuditLog(
-                actor_user_id=user_id, group_id=ev.group_id,
+                actor_user_id=user_id, group_id=ev.group_id or clan_id,
                 event_id=ev.id,
                 action="event.signup.remove",
                 target=f"web_events.{event_id}.player.{player_id}",

@@ -2946,9 +2946,14 @@ class NotificationService:
                 return True
 
             destinations = []  # [{channel_id, ping, team_role?}]
+            # A clan-scoped post (web119a: a clan's leaders advertising
+            # sign-ups in their own server) reaches that clan only.
+            only_group_id = data.get('only_group_id')
             if per_group_discord_enabled(event):
                 seen_channels = set()
                 for dest in load_group_destinations(db_session, event):
+                    if only_group_id is not None and dest["group_id"] != only_group_id:
+                        continue
                     if not _wants(dest["message_config"]):
                         continue
                     cid = resolve_event_channel(dest["channels"], notification_type)

@@ -45,6 +45,10 @@ SYSTEM_CODES = (
     "invite_accepted",
     "invite_declined",
     "invite_withdrawn",
+    # Staff-hosted clan-vs-clan (web119a).
+    "clan_withdrew",
+    "roster_below_min",
+    "clan_dropped",
     "event_activated",
     "event_ended",
     # staff_dm (web102a)

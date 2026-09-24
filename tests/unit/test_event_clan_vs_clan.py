@@ -216,15 +216,21 @@ class TestCreateEventMode:
             evr, "EVENT_PING_KEYS", ("event_created", "event_started", "event_ended")
         )
 
-    async def test_clan_vs_clan_requires_host_group(self, client, monkeypatch):
+    async def test_clan_vs_clan_without_host_is_staff_only(self, client, monkeypatch):
+        # web119a: no host group = a staff-hosted event. Only superadmins may
+        # create one (the global-event gate); everyone else gets a 403.
         self._patch_constants(monkeypatch)
-        monkeypatch.setattr(evr, "current_user_id", lambda: 7)
+        _wire_events(monkeypatch, _S())
+        monkeypatch.setattr(evr, "load_user", lambda s, uid: "USER")
+
+        def _deny(user):
+            evr.abort_problem(403, "Forbidden", "Superadmins only.")
+
+        monkeypatch.setattr(evr, "assert_superadmin", _deny)
         r = await client.post(
             "/api/v1/events", json={"name": "Clash", "mode": "clan_vs_clan"}
         )
-        assert r.status_code == 422
-        body = await r.get_json()
-        assert "Host group" in body.get("title", "")
+        assert r.status_code == 403
 
     async def test_invalid_mode_rejected(self, client, monkeypatch):
         self._patch_constants(monkeypatch)

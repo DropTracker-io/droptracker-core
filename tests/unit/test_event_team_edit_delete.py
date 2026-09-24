@@ -156,15 +156,21 @@ class TestUpdateTeam:
 
 class TestDeleteTeam:
     def _script(self, team, *, event=None):
-        # Query order: event, team, then the child-row bulk deletes — the
-        # original four (bingo completions, completions, progress, members),
-        # the web71a buy-in release (an UPDATE to team_id=NULL, not a delete —
-        # paid pot GP outlives the team), then the P0-5 additions (player
-        # points, leader votes, board positions, team inventory, team
-        # cooldowns, coin ledger, effects): 2 lookups + 12 writes = 14 queries.
-        return _S([event or _event()], [team], *([[]] * 12))
+        # Query order: event, team. The child-row cascade itself lives in
+        # services/event_team_purge.py (web119a, shared with clan withdrawal
+        # and the start-of-event drop) and is pinned table-by-table in
+        # test_event_staff_hosted.py::TestPurgeTeam.
+        return _S([event or _event()], [team])
 
-    async def test_delete_clears_children_then_team_and_audits(self, client, monkeypatch):
+    @pytest.fixture(autouse=True)
+    def _purged(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(evr, "_purge_team",
+                            lambda s, event_id, team: calls.append((event_id, team.id)))
+        return calls
+
+    async def test_delete_clears_children_then_team_and_audits(self, client, monkeypatch,
+                                                               _purged):
         team = _team(4, name="Mistake")
         s = self._script(team)
         _wire(monkeypatch, s)
@@ -174,7 +180,8 @@ class TestDeleteTeam:
         assert s.committed
         # Exactly the scripted queries were consumed (no more, no fewer).
         assert s._batches == []
-        # One audit row for the deletion.
+        # The shared cascade ran for this team, then one audit row.
+        assert _purged == [(1, 4)]
         assert len(s.added) == 1
 
     async def test_delete_repends_the_surviving_teams(self, client, monkeypatch):

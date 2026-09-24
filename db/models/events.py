@@ -139,7 +139,10 @@ COMPETITION_EVENT_KINDS = ("sotw", "botw")
 
 # web_event_groups participant roles / invite lifecycle.
 EVENT_GROUP_ROLES = ("host", "opponent")
-EVENT_GROUP_STATUSES = ("invited", "accepted", "declined")
+# "withdrawn" = the clan pulled out before the start; "dropped" = a
+# staff-hosted event started with the clan's roster under clan_roster_min.
+# Both only ever follow "accepted"; neither counts as a participant.
+EVENT_GROUP_STATUSES = ("invited", "accepted", "declined", "withdrawn", "dropped")
 
 # Ledger row lifecycle for web_event_completions.
 EVENT_COMPLETION_STATUSES = ("auto", "pending", "confirmed", "rejected", "manual", "revoked")
@@ -491,6 +494,18 @@ class Event(Base):
     # Not available for kind='board_game' (its turn/shop clocks are wall-clock
     # and would keep ticking while scoring is closed).
     schedule_config = Column(Text, nullable=True)
+    # Staff-hosted clan-vs-clan (web119a): a clan_vs_clan event with NO host
+    # group (group_id NULL) is run by DropTracker staff. Each accepted clan
+    # fields exactly one team and picks its roster from its own sign-ups,
+    # within these per-clan player limits (NULL = no limit). A clan still under
+    # the minimum when the event starts is dropped. With
+    # clan_roster_locked_at_start on, clan leaders can't change their roster
+    # once the event is active (staff always can). Ignored on other events.
+    clan_roster_min = Column(Integer, nullable=True)
+    clan_roster_max = Column(Integer, nullable=True)
+    clan_roster_locked_at_start = Column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
     activated_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)

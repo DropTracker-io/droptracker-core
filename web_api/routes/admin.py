@@ -3425,3 +3425,109 @@ async def admin_split_policy_remove(npc_id: int):
     label = ", ".join(result.get("removed_names", [])) or str(npc_id)
     _audit(actor, "split_policy.remove", label)
     return jsonify({"ok": True, **result})
+
+
+# --------------------------------------------------------------------------- #
+# Staff-hosted clan-vs-clan: who to invite (web119a)
+# --------------------------------------------------------------------------- #
+_INVITE_STATS_KEY = "admin:event-invite-stats:{partition}"
+_INVITE_STATS_TTL = 300
+
+
+def _invite_candidate_stats(s) -> list[dict]:
+    """Per-group numbers for the invite finder, cached in Redis for five
+    minutes: one pass over the association table, the admin grants, the
+    month's global player board (who has loot = active) and the lootboard's
+    own group totals. Deleted groups still lingering in the Redis board drop
+    out because rows are driven by the ``groups`` table."""
+    from sqlalchemy import func as _f
+
+    from db import user_group_association as uga
+    from web_api.common import (_rc, get_current_partition, group_totals_key,
+                                leaderboard_key)
+    from web_api.event_invite_candidates import count_members
+
+    partition = get_current_partition()
+    conn = _rc()
+    key = _INVITE_STATS_KEY.format(partition=partition)
+    if conn is not None:
+        try:
+            cached = conn.get(key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+    active_ids: set[int] = set()
+    loot: dict[int, int] = {}
+    if conn is not None:
+        try:
+            active_ids = {int(m) for m in
+                          conn.zrangebyscore(leaderboard_key(partition), "(0", "+inf")}
+            loot = {int(m): int(float(v)) for m, v in
+                    conn.zrange(group_totals_key(partition), 0, -1, withscores=True)}
+        except Exception:
+            active_ids, loot = set(), {}
+
+    counts = count_members(
+        s.query(uga.c.group_id, uga.c.player_id)
+        .filter(uga.c.player_id.isnot(None)).all(),
+        active_ids,
+    )
+    admins = dict(s.query(GroupAdmin.group_id, _f.count(GroupAdmin.id))
+                  .group_by(GroupAdmin.group_id).all())
+    rows = []
+    for gid, name, icon, guild_id in s.query(
+            Group.group_id, Group.group_name, Group.icon_url, Group.guild_id).all():
+        members, active = counts.get(int(gid), (0, 0))
+        rows.append({
+            "group_id": int(gid),
+            "group_name": name,
+            "icon_url": icon,
+            "members": members,
+            "active": active,
+            "monthly_loot": loot.get(int(gid), 0),
+            "admins": int(admins.get(gid) or 0),
+            "has_guild": bool(guild_id),
+        })
+    if conn is not None:
+        try:
+            conn.set(key, json.dumps(rows), ex=_INVITE_STATS_TTL)
+        except Exception:
+            pass
+    return rows
+
+
+@admin_bp.get("/admin/event-invite-candidates")
+async def admin_event_invite_candidates():
+    """Clans staff could invite to a staff-hosted clan-vs-clan event, with the
+    numbers to filter on. Query: ``event_id`` (marks/excludes clans already on
+    it), ``min_members``, ``min_active``, ``min_monthly_loot``,
+    ``require_admins`` (default on), ``require_guild``, ``exclude_on_event``
+    (default on), ``q``, ``sort`` (active|members|loot|name), ``limit``."""
+    await _require_superadmin()
+    from web_api.event_invite_candidates import parse_filters, select_candidates
+
+    filters = parse_filters(request.args)
+    event_id = request.args.get("event_id")
+    try:
+        event_id = int(event_id) if event_id else None
+    except ValueError:
+        abort_problem(422, "Invalid event_id", "'event_id' must be an integer.")
+
+    def _load():
+        from db import EventGroup
+        from web_api.common import money
+
+        with db_session() as s:
+            stats = _invite_candidate_stats(s)
+            status = {}
+            if event_id is not None:
+                status = dict(s.query(EventGroup.group_id, EventGroup.status)
+                              .filter(EventGroup.event_id == event_id).all())
+            result = select_candidates(stats, filters, status)
+        for row in result["rows"]:
+            row["monthly_loot"] = money(row["monthly_loot"])
+        return result
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
