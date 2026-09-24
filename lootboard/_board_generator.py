@@ -9,8 +9,28 @@ init_sentry("droptracker-lootboards")
 """
 Lootboard Generator
 
-This process runs as a systemd service to call the actual `board_generator.py` script every 2 minutes.
+This process runs as a systemd service and runs `board_generator.py` in a
+fresh subprocess once a minute, or within ~10 seconds when an instant redraw
+is waiting (lootboard/schedule.py). The subprocess works out which boards are
+due, so a pass with nothing to do is cheap.
 """
+
+import time
+
+# A full pass at least this often; tiers' intervals are whole minutes.
+PASS_INTERVAL_SECONDS = 60
+# How often to look for instant redraws between passes.
+POLL_SECONDS = 10
+
+
+def _instant_waiting() -> bool:
+    try:
+        from lootboard.schedule import ready_dirty_group_ids
+
+        return bool(ready_dirty_group_ids())
+    except Exception as e:
+        print(f"Instant lootboard check failed: {e}")
+        return False
 
 
 
@@ -41,7 +61,15 @@ def setup_signal_handlers():
     signal.signal(signal.SIGHUP, signal_handler)
 
 async def board_loop():
+    last_pass = 0.0
     while not shutdown_event.is_set():
+        if time.monotonic() - last_pass < PASS_INTERVAL_SECONDS and not await asyncio.to_thread(_instant_waiting):
+            for _ in range(POLL_SECONDS):
+                if shutdown_event.is_set():
+                    break
+                await asyncio.sleep(1)
+            continue
+        last_pass = time.monotonic()
         try:
             print("Starting board generation process...")
             # Use asyncio subprocess to avoid blocking the watchdog
@@ -81,13 +109,7 @@ async def board_loop():
         except Exception as e:
             print(f"Error in board generation: {e}")
         
-        print("Board generation process completed & exited. Sleeping for 2 minutes")
-        
-        # Sleep with interruption check
-        for _ in range(120):  # 2 minutes = 120 seconds
-            if shutdown_event.is_set():
-                break
-            await asyncio.sleep(1)
+        print("Board generation process completed & exited.")
 
 async def main():
     """Main function with systemd watchdog integration"""

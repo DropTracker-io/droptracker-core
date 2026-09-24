@@ -862,6 +862,11 @@ class NotificationService:
 
         if not message:
             return
+        # The drop is in Discord: tiers with instant lootboards redraw theirs
+        # shortly (lootboard/schedule.py debounces bursts). Never raises.
+        from lootboard.schedule import mark_dirty
+
+        mark_dirty(group_id)
         drop = db_session.query(Drop).filter(Drop.drop_id == data.get('drop_id')).first()
         if not drop:
             return

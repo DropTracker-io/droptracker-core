@@ -1021,20 +1021,30 @@ def _save_public_image(image, file_path: str, *args, **kwargs) -> str:
     account create a file there, but not overwrite one the other account already
     created — a 0644 PNG written by the bots (as `user`) is unwritable by the web
     API's timeframe generator (as `debian`), which failed with EPERM on the
-    second render of any given range. So drop an existing file we can't write
-    (permitted: the 0777 parent has no sticky bit) and chmod what we write to
-    0666 so the next render from either account can replace it.
+    second render of any given range. So write to a temp file in the same
+    directory, chmod it 0666, and rename it over the target: the rename needs
+    only the 0777 parent (no sticky bit), not write access to the old file.
+
+    The rename also means a reader never sees a half-written PNG (the core
+    bot posts a board seconds after it is drawn).
     """
-    if os.path.exists(file_path) and not os.access(file_path, os.W_OK):
-        try:
-            os.unlink(file_path)
-        except OSError:
-            pass  # let image.save raise the real error below
-    image.save(file_path, *args, **kwargs)
+    directory, name = os.path.split(file_path)
+    stem, ext = os.path.splitext(name)
+    # Keep the extension: PIL picks the format from it when none is passed.
+    tmp_path = os.path.join(directory, f".{stem}.{os.getpid()}.tmp{ext}")
     try:
-        os.chmod(file_path, 0o666)
-    except OSError:
-        pass  # not the owner — already group/other-writable from whoever wrote it
+        image.save(tmp_path, *args, **kwargs)
+        try:
+            os.chmod(tmp_path, 0o666)
+        except OSError:
+            pass
+        os.replace(tmp_path, file_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     return file_path
 
 

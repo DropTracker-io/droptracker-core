@@ -49,6 +49,7 @@ from interactions import Intents, Message, user_context_menu, ContextMenuContext
     ScheduledEventStatus
 from interactions.api.events import GuildJoin, GuildLeft, MessageCreate, Component, Startup
 from lootboard.generator import generate_server_board, get_generated_board_path
+from lootboard import schedule as lootboard_schedule
 from utils.cloudflare_update import CloudflareIPUpdater
 from utils.msg_logger import HighThroughputLogger
 from utils.wiseoldman import fetch_group_members
@@ -734,16 +735,68 @@ def _lootboard_targets() -> dict:
         session.close()
 
 
-@Task.create(IntervalTrigger(minutes=8))
-async def lootboard_updates():
+# Set while a posting pass runs: interactions.py fires interval tasks as new
+# asyncio tasks, so a slow pass would otherwise overlap the next tick.
+_lootboard_posting = False
+_lootboard_policies: dict = {"at": 0.0, "by_group": {}}
+
+
+def _lootboard_due() -> list:
+    """Boards whose image is newer than the one last posted. Runs off the loop.
+
+    The lootboards service redraws each board on its tier's schedule (plus
+    instant redraws after drops for tiers that have them; see
+    lootboard/schedule.py), so "a newer image exists" is the whole posting
+    rule: Discord updates exactly as often as the tier says, and a board
+    whose image has not changed is never re-uploaded.
+    """
+    targets = _lootboard_targets()
+    now = time.time()
+    if now - _lootboard_policies["at"] > 60:
+        with Session() as s:
+            _lootboard_policies["by_group"] = lootboard_schedule.load_policies(s, targets.keys())
+        _lootboard_policies["at"] = now
+    by_group = _lootboard_policies["by_group"]
+    posted = lootboard_schedule.posted_mtimes(targets.keys())
+    due = []
+    for group_id, group in targets.items():
+        drawn_at = lootboard_schedule.board_mtime(group_id)
+        if lootboard_schedule.needs_post(drawn_at, posted.get(group_id, 0.0)):
+            policy = by_group.get(group_id, lootboard_schedule.DEFAULT_POLICY)
+            due.append((group_id, group, drawn_at, policy))
+    # Instant and faster tiers first, so a backlog (e.g. right after a
+    # restart with Redis empty) never delays the boards meant to be quickest.
+    due.sort(key=lambda d: (not d[3].instant, d[3].refresh_minutes, d[2]))
+    return due
+
+
+def _record_lootboard_posted(group_id: int, drawn_at: float) -> None:
     try:
-        print("Updating loot leaderboards...")
+        lootboard_schedule.record_posted(group_id, drawn_at)
+    except Exception as e:
+        print(f"Couldn't record the posted lootboard for group {group_id}: {e}")
+
+
+@Task.create(IntervalTrigger(seconds=15))
+async def lootboard_updates():
+    global _lootboard_posting
+    if _lootboard_posting:
+        return
+    _lootboard_posting = True
+    try:
         session = None
         try:
-            groups_to_update = await asyncio.to_thread(_lootboard_targets)
+            groups_to_update = await asyncio.to_thread(_lootboard_due)
+            if not groups_to_update:
+                return
+            print(f"Posting {len(groups_to_update)} updated loot leaderboard(s)...")
             session = Session()
 
-            for group_id, group in groups_to_update.items():
+            for group_id, group, drawn_at, policy in groups_to_update:
+                # Recorded up front, whatever happens below: a board that
+                # cannot be posted (missing channel, no permission) is retried
+                # with its next image, not every 15 seconds.
+                _record_lootboard_posted(group_id, drawn_at)
                 try:
                     channel: interactions.Channel = await bot.fetch_channel(channel_id=group['channel'])
                     if not channel:
@@ -760,11 +813,11 @@ async def lootboard_updates():
                     # it used to be unbound on the "no saved message" path.
                     message = None
                     group_obj = session.query(Group).filter(Group.group_id == group_id).first()
-                    
+
                     # Check if we should repost (create new message) or edit existing
                     should_repost_value = group['repost'] if group['repost'] else "false"
                     repost_enabled = should_repost_value.lower() in ['true', '1', 'yes', 'on']
-                    
+
                     if repost_enabled:
                         # Check if there's an existing message to delete first
                         if group['message'] and group['message'] != '' and group['message'] != "0" and group['message'] != 0:
@@ -775,7 +828,7 @@ async def lootboard_updates():
                             except Exception as e:
                                 print(f"Couldn't delete previous message for group {group_id} ({group_obj.group_name}): {e}")
                                 # Continue anyway, we'll try to post a new message
-                        
+
                         # Always create a new message when repost is enabled
                         try:
                             message = await channel.send(f"{app_emoji('loading')} Please wait while we initialize this Loot Leaderboard....")
@@ -795,7 +848,7 @@ async def lootboard_updates():
                             except Exception as e:
                                 #print("Couldn't fetch the message for this lootboard...:", e)
                                 continue
-                                
+
                         else:
                             print(f"No message ID found for group {group_id} ({group_obj.group_name}). We would have sent a new one right now...")
                             try:
@@ -814,7 +867,7 @@ async def lootboard_updates():
                             group_obj = session.query(Group).filter(Group.group_id == group_id).first()
                             configured_message = session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id,
                                                                                     GroupConfiguration.config_key == 'lootboard_message_id').first()
-                            
+
                         if not message:
                             print(f"Couldn't get the message to update the loot leaderboard with...")
                             try:
@@ -826,7 +879,7 @@ async def lootboard_updates():
                             except Exception as e:
                                 print(f"Couldn't send a new message to the channel: {e}")
                             continue
-                    
+
                     wom_id = group['wom_id']
                     if not wom_id:
                         wom_id = 0
@@ -835,7 +888,7 @@ async def lootboard_updates():
                     if not os.path.exists(image_path):
                         print(f"Lootboard image not found for group {group_id} ({group_obj.group_name}).")
                         continue
-                    
+
                     try:
                         # Custom lootboard embeds are a subscription perk; everyone
                         # else gets the template group's default embed.
@@ -848,8 +901,7 @@ async def lootboard_updates():
                         total_tracked = group_obj.get_player_count()
                     else:
                         total_tracked = session.query(Player.wom_id).count()
-                    next_update = datetime.now() + timedelta(seconds=615)
-                    future_timestamp = int(time.mktime(next_update.timetuple()))
+                    future_timestamp = int(lootboard_schedule.next_refresh_at(policy, drawn_at, time.time()))
                     value_dict = {
                         "{next_refresh}": f"<t:{future_timestamp}:R>",
                         "{tracked_members}": total_tracked
@@ -886,7 +938,7 @@ async def lootboard_updates():
                                                                             GroupConfiguration.config_key == 'loot_board_type').first()
                     except:
                         pass
-                        
+
                     if configured_style:
                         # app_logger.log(log_type="error", data=f"Loot leaderboards -- Couldn't create/send {group_obj.group_name} (#{group_id})'s embed: {e}\n" + 
                         #                  "Board style is:" + configured_style.config_value, app_name="core", description="update_loot_leaderboards")
@@ -908,11 +960,11 @@ async def lootboard_updates():
                     session.close()
                 except:
                     pass
-        
-        print("Completed loot leaderboard update. Waiting 5 minutes before the next update.")
     except Exception as e:
         print(f"Critical error in loot leaderboard update loop: {e}")
-    
+    finally:
+        _lootboard_posting = False
+
 
 async def create_tasks():
     # Interval tasks first — they only *schedule* here (first fire is one
@@ -940,7 +992,7 @@ async def create_tasks():
     # + `await cache_bot_guilds()`; when that guild sweep (228 DB guilds, many
     # 404, heavy 429 backoff) ballooned to ~25min per startup, restart churn
     # meant `.start()` was never reached and every group's board went stale for
-    # hours. Schedule it now; it fires on its own 8-min interval.
+    # hours. Schedule it now; it checks for newly drawn boards every 15 s.
     print("Starting lootboards")
     lootboard_updates.start()
     # Kick an immediate first pass WITHOUT blocking the rest of startup (the old

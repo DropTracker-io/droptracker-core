@@ -19,7 +19,7 @@ from sqlalchemy.sql import text
 
 from api.core import logger, get_db_session, metrics, reset_db_connections
 from db import Player
-from db.entitlements import group_has_entitlement, user_has_entitlement
+from db.entitlements import group_entitlements, group_has_entitlement, user_has_entitlement
 from db.models import Group, user_group_association
 from db.models.video_upload import VideoUpload
 from utils.b2_storage import (
@@ -39,7 +39,6 @@ video_bp = Blueprint("video", __name__)
 
 # Daily video limits from environment (with sensible defaults)
 VIDEO_DAILY_LIMIT_FREE = int(os.getenv("VIDEO_DAILY_LIMIT_FREE", "50"))
-VIDEO_DAILY_LIMIT_PREMIUM = int(os.getenv("VIDEO_DAILY_LIMIT_PREMIUM", "100"))
 # Per-player daily cap for personal supporters (user-level video_submissions).
 VIDEO_DAILY_LIMIT_SUPPORTER = int(os.getenv("VIDEO_DAILY_LIMIT_SUPPORTER", "50"))
 # Hard cap for local test upload payloads to protect API memory/disk.
@@ -80,11 +79,14 @@ def _get_daily_limit_for_group(group_id: int, db_session) -> int:
     """
     Determine the daily video upload limit for a group.
 
-    Groups that unlock video uploads get the premium daily limit; anything
-    else falls back to the free tier limit.
+    Groups that unlock video uploads get their tier's ``video_daily_limit``
+    entitlement; anything else falls back to the free tier limit.
     """
     if _group_grants_video_uploads(group_id, db_session):
-        return VIDEO_DAILY_LIMIT_PREMIUM
+        try:
+            return int(group_entitlements(group_id).get("video_daily_limit"))
+        except (TypeError, ValueError):
+            return 100  # the registry default
     return VIDEO_DAILY_LIMIT_FREE
 
 

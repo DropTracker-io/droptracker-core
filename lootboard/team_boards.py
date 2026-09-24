@@ -52,8 +52,7 @@ IMG_ROOT = "/store/droptracker/disc/static/assets/img"
 # Env switch. Off by default — see the module docstring.
 FEATURE_FLAG_ENV = "EVENT_TEAM_LOOTBOARDS"
 
-# A team board regenerates at most once an hour per target, same cadence the
-# non-premium group boards settled on (see board_generator.NON_PREMIUM_*).
+# A team board regenerates at most once an hour per target.
 # State lives in the PNG's mtime: the driver runs in a fresh subprocess.
 REFRESH_SECONDS = 3600
 # Cap boards per sweep so one run can't grow unbounded with active events.
@@ -422,8 +421,8 @@ def collect_targets(session, *, event_id: Optional[int] = None,
     ACTIVE, PUBLIC event whose board is due, most stale first. Ids, not ORM
     objects — the render pass re-reads each row in its own short-lived session.
 
-    Events, not groups: ``board_generator.update_boards`` throttles by premium
-    tier, which is a group concept with no meaning for a team.
+    Events, not groups: group boards follow the group's subscription tier
+    (lootboard/schedule.py), which has no meaning for a team.
 
     The :func:`event_is_public` filter applies to the explicit ``event_id``
     lookup too — asking for one event by id is not consent to publish it."""

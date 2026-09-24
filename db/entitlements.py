@@ -56,6 +56,33 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "default": False,
     },
     {
+        # Per-group daily cap on uploads for groups with video_submissions
+        # (api/routes/video.py). Was the VIDEO_DAILY_LIMIT_PREMIUM env var.
+        "key": "video_daily_limit",
+        "label": "Video uploads / day",
+        "category": "features",
+        "help": "How many video clips the group's members may upload per day in total, when video submissions are enabled.",
+        "kind": "int",
+        "default": 100,
+    },
+    {
+        # Scheduled redraw interval for the group's Discord lootboard
+        # (lootboard/schedule.py). Lower is better; 0 means the default.
+        "key": "lootboard_refresh_minutes",
+        "label": "Lootboard refresh (minutes)",
+        "category": "features",
+        "help": "How often the group's Discord lootboard is redrawn and updated, in minutes. 0 uses the default of 30.",
+        "kind": "int",
+        "default": 30,
+    },
+    {
+        "key": "lootboard_instant",
+        "label": "Instant lootboard updates",
+        "category": "features",
+        "help": "Also update the Discord lootboard within about a minute of every drop notification the group receives.",
+        "default": False,
+    },
+    {
         "key": "custom_points",
         "label": "Custom points system",
         "category": "features",

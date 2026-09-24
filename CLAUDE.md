@@ -50,7 +50,7 @@ Production runs as **systemd units** (`/etc/systemd/system/droptracker-*.service
 | `droptracker-node` | **Deploy trigger** — oneshot that runs web `scripts/deploy.sh`; `systemctl restart droptracker-node` = full zero-downtime deploy. NOT a server. | Web deploy | — |
 | `droptracker-core` | `bots/main.py` | Primary Discord bot (slash commands, notifications, lootboard + event-board updates, outbox drain) | — |
 | `droptracker-webhooks` | `bots/webhook_bot.py` | Webhook-channel reader bot (legacy fallback) + suggestion-forum sync | — |
-| `droptracker-lootboards` | `lootboard/_board_generator.py` | Generates lootboard images every 2 min | — |
+| `droptracker-lootboards` | `lootboard/_board_generator.py` | Redraws lootboard images on each tier's schedule (`lootboard/schedule.py`); the core bot posts any board newer than the last one it posted | — |
 | `droptracker-hof` | `bots/hall_of_fame.py` | Hall of Fame image bot | — |
 | `droptracker-player-updates` | `data/player_total_updater.py` | Background WOM sync + Redis leaderboard maintenance | — |
 | `droptracker-video-worker` | `services/video_worker.py` | MJPEG→MP4 conversion via FFmpeg + Backblaze B2 | — |
@@ -190,8 +190,10 @@ droptracker/
 │   └── ...
 │
 ├── lootboard/              # Lootboard image generation
-│   ├── _board_generator.py # Watchdog loop (subprocess every 2 min)
-│   ├── board_generator.py  # Generates boards for all groups
+│   ├── _board_generator.py # Watchdog loop (subprocess every minute, sooner for instant redraws)
+│   ├── board_generator.py  # One pass: redraws the boards that are due
+│   ├── schedule.py         # Per-tier cadence (lootboard_refresh_minutes / lootboard_instant
+│   │                       #   entitlements), instant-redraw debounce, posted markers
 │   ├── generator.py        # generate_server_board()
 │   ├── flexible_generator.py, player_board.py, timeframe.py
 │   └── themes/             # PNG asset sets (gitignored)
