@@ -195,6 +195,12 @@ def _apply_schedule(s, ev: Event, raw, *, kind: str | None = None) -> None:
             raise ScheduleError(
                 "Board-game events can't use a recurring schedule yet — their "
                 "turn timers keep running between scoring windows.")
+        if config and effective_kind == "conquest":
+            # Hold-time scoring accrues on the wall clock: tiles would keep
+            # paying between windows while nobody can take them back.
+            raise ScheduleError(
+                "Conquest events can't use a recurring schedule yet: held tiles "
+                "would keep scoring between windows.")
         apply_schedule(s, ev, config)
     except ScheduleError as exc:
         abort_problem(422, "Invalid schedule", exc.detail,
@@ -4889,6 +4895,14 @@ async def update_event(event_id: int):
                             "Board-game events can't use a recurring schedule — "
                             "clear the schedule before switching the event type.",
                             extra={"code": "invalid_schedule", "target": "dates"})
+                    if (new_kind == "conquest"
+                            and getattr(ev, "schedule_config", None)
+                            and not body.get("schedule")):
+                        abort_problem(
+                            409, "Schedule not supported",
+                            "Conquest events can't use a recurring schedule yet. "
+                            "Clear the schedule before switching the event type.",
+                            extra={"code": "invalid_schedule", "target": "dates"})
                     if (new_kind in COMPETITION_EVENT_KINDS
                             and getattr(ev, "schedule_config", None)
                             and not body.get("schedule")):
@@ -5337,6 +5351,18 @@ def _cascade_delete_event(s, ev: Event) -> None:
     _wipe(EventBoardPosition, EventBoardPosition.event_id == event_id)
     _wipe(EventBoardConfig, EventBoardConfig.event_id == event_id)
     _wipe(EventBoardTile, EventBoardTile.event_id == event_id)
+
+    # Conquest map + live state (web120a). Its event FKs cascade as well; wiped
+    # explicitly like everything else here, but only for a Conquest event —
+    # the tables don't exist before the web120a migration. Children of the
+    # tiles first; rules also hang off the tasks deleted below.
+    if (getattr(ev, "kind", None) or "standard") == "conquest":
+        from db.models import (ConquestBattle, ConquestEdge, ConquestHold,
+                               ConquestMap, ConquestRegion, ConquestRule,
+                               ConquestTile, ConquestTroops)
+        for model in (ConquestBattle, ConquestHold, ConquestTroops, ConquestEdge,
+                      ConquestRule, ConquestTile, ConquestRegion, ConquestMap):
+            _wipe(model, model.event_id == event_id)
 
     # Points / progress / completion ledger + prize-pot ledger (web52a).
     _wipe(EventPlayerPoints, EventPlayerPoints.event_id == event_id)

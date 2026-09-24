@@ -570,6 +570,43 @@ DEFAULT_LAYOUTS = {
             _EVENT_BUTTON,
         ],
     },
+    # Conquest (web120a). Every line is pre-composed at enqueue
+    # (services/conquest_engine), so a custom layout only arranges them.
+    "event_conquest_capture": {
+        "accent_color": "#E67E22",
+        "blocks": [
+            {"type": "section",
+             "content": "### {conquest_headline}\n{conquest_detail_line}",
+             "thumbnail": "{conquest_icon}"},
+            _EVENT_BUTTON,
+        ],
+    },
+    "event_conquest_battle": {
+        "accent_color": "#E74C3C",
+        "blocks": [
+            {"type": "section",
+             "content": "### {conquest_headline}\n{conquest_dice_line}\n"
+                        "{conquest_detail_line}",
+             "thumbnail": "{conquest_icon}"},
+        ],
+    },
+    "event_conquest_region": {
+        "accent_color": "#FFD700",
+        "blocks": [
+            {"type": "text", "content": "## {conquest_headline}"},
+            {"type": "text", "content": "{conquest_detail_line}"},
+            _EVENT_BUTTON,
+        ],
+    },
+    "event_conquest_summary": {
+        "accent_color": "#5865F2",
+        "blocks": [
+            {"type": "text", "content": "## {conquest_headline}: {event_name}"},
+            {"type": "text", "content": "{conquest_summary_block}"},
+            {"type": "text", "content": "{conquest_detail_line}"},
+            _EVENT_BUTTON,
+        ],
+    },
 }
 
 
@@ -669,6 +706,23 @@ TOKEN_DOCS = {
     "coin_balance": {"help": "The team's coin wallet after the turn", "sample": "11"},
     "action_line": {"help": "What happened in the board skirmish",
                     "sample": "**Team Bandos** froze **Team Zamorak** for 2 turns"},
+    "conquest_headline": {"help": "Conquest: what happened, in one line",
+                          "sample": "⚔️ **Team Bandos** captured **Zulrah** from "
+                                    "**Team Zamorak**"},
+    "conquest_detail_line": {"help": "Conquest: who earned the troop and the team's "
+                                     "new position",
+                             "sample": "-# 1 troop earned by **Zezima** (35 Zulrah "
+                                       "kills)\n-# Team Bandos now holds 12 tiles"},
+    "conquest_dice_line": {"help": "Conquest: the dice of each attack",
+                           "sample": "\U0001F3B2 `6 · 3` vs `5 · 4`, defense 2 → 1"},
+    "conquest_summary_block": {"help": "Conquest map update: one line per team "
+                                       "(points, tiles, regions, tiles taken)",
+                               "sample": "\U0001F947 **Team Bandos** 1,240 pts · 18 "
+                                         "tiles · 2 regions · +5 taken"},
+    "conquest_icon": {"help": "Conquest: the tile's boss or item icon",
+                      "sample": "https://www.droptracker.io/img/npcdb/2042.png"},
+    "tile_label": {"help": "Conquest: the tile's name", "sample": "Zulrah"},
+    "region_name": {"help": "Conquest: the tile's region", "sample": "Tirannwn"},
     "roll_thanks_line": {"help": "\" (thanks **player**)\" credit on the roll prompt",
                          "sample": " (thanks **Zezima**)"},
     "reason": {"help": "Why the lifecycle step failed", "sample": "no team has any members"},
@@ -922,6 +976,36 @@ TYPE_META = {
         "label": "Competition milestone", "group": "Competition",
         "description": "Reserved — nothing sends this yet.",
         "tokens": ("player_name", "milestone_line"), "standings": False,
+    },
+    "event_conquest_capture": {
+        "label": "Conquest: tile taken", "group": "Conquest",
+        "description": "A team claimed an empty tile or captured a rival's.",
+        "tokens": ("conquest_headline", "conquest_detail_line", "conquest_icon",
+                   "team_name", "player_name", "tile_label", "region_name"),
+        "standings": False,
+    },
+    "event_conquest_battle": {
+        "label": "Conquest: battle", "group": "Conquest",
+        "description": "A troop attacked a defended tile (the dice rolls). Off by "
+                       "default: busy events roll a lot of dice.",
+        "tokens": ("conquest_headline", "conquest_dice_line", "conquest_detail_line",
+                   "conquest_icon", "team_name", "player_name", "tile_label"),
+        "standings": False,
+    },
+    "event_conquest_region": {
+        "label": "Conquest: region control", "group": "Conquest",
+        "description": "A team took (or lost) control of a whole region.",
+        "tokens": ("conquest_headline", "conquest_detail_line", "team_name",
+                   "region_name"),
+        "standings": False,
+    },
+    "event_conquest_summary": {
+        "label": "Conquest: map update", "group": "Conquest",
+        "description": "The periodic standings post (every 6, 12, 24 or 48 hours, "
+                       "set per event).",
+        "tokens": ("conquest_headline", "conquest_summary_block",
+                   "conquest_detail_line"),
+        "standings": False,
     },
 }
 
@@ -1558,6 +1642,16 @@ def notification_context(notification_type: str, data: dict) -> dict:
     # Chutes & ladders / required tiles / exact finish (2026-09): pre-composed
     # at enqueue (boardgame_engine.turn_notification_data); absent = no line.
     for key in ("jump_line", "required_line", "overshoot_line", "finish_line"):
+        put(key, data.get(key))
+    # Board skirmish (web61a): pre-composed at enqueue by the use-item route.
+    # The default event_board_action layout's only body line — without this
+    # the V2 message rendered its title alone.
+    put("action_line", data.get("action_line"))
+    # Conquest (web120a): every line is pre-composed at enqueue
+    # (services/conquest_engine) — pass-throughs that drop cleanly elsewhere.
+    for key in ("conquest_headline", "conquest_detail_line", "conquest_dice_line",
+                "conquest_summary_block", "conquest_icon", "tile_label",
+                "region_name"):
         put(key, data.get(key))
     if notification_type == "event_board_turn":
         team = (data.get("team_name")

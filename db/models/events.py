@@ -126,11 +126,18 @@ EVENT_MODES = ("standard", "clan_vs_clan")
 #                  creates one (web_event_competitions carries the linkage).
 #                  One hidden 'competition' task + one roster team; standings
 #                  are per player. See services/competition.py.
+# - "conquest"   — a Risk-style territory map (web120a): tiles are bosses or
+#                  activities grouped into regions; playing a tile's tasks
+#                  earns troops that claim, fortify or attack it (automatic
+#                  dice battles), and teams score for the tiles and whole
+#                  regions they hold. Tasks never complete. Rules:
+#                  services/conquest.py; state: db/models/event_conquest.py.
 # Which kinds a non-superadmin may CREATE is governed site-wide by the
 # ``web_event_types`` registry (enabled/admin_only + per-type test-group
 # allowlist) — see services/event_types.py. Existing events of a disabled
 # kind keep running; the gate binds at creation only.
-EVENT_KINDS = ("standard", "bingo", "board_game", "loot_sweep", "sotw", "botw")
+EVENT_KINDS = ("standard", "bingo", "board_game", "loot_sweep", "sotw", "botw",
+               "conquest")
 
 # The kinds implemented by services/competition.py (one hidden "competition"
 # task, individual standings, optional WOM linkage). Kept here so the model
@@ -322,6 +329,14 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
     # Reserved for gained-milestone chatter (e.g. "10M XP club"); no sender
     # emits it yet. Default OFF.
     "event_competition_milestone",
+    # Conquest (web120a): a team claimed/captured a tile (default ON); a troop
+    # attacked a defended tile (dice rolls; default OFF, it is the chatty
+    # one); a team took or lost control of a whole region (default ON); the
+    # periodic "map update" standings post (settings.summary_hours).
+    "event_conquest_capture",
+    "event_conquest_battle",
+    "event_conquest_region",
+    "event_conquest_summary",
 )
 
 # Message types that have a component-layout row in web_event_message_layouts:

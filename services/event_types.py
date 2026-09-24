@@ -101,10 +101,20 @@ def is_event_type_creatable(
 
 def creatable_kinds(s, *, is_superadmin: bool, group_id: int | None) -> list[dict]:
     """Registry rows annotated with a ``creatable`` flag for the create-form
-    picker: every kind is listed (so the UI can show 'staff only' states),
-    with ``creatable`` resolved for this viewer/group."""
+    picker, with ``creatable`` resolved for this viewer/group.
+
+    Every ENABLED kind is listed, so an ``admin_only`` one can show its
+    "staff testing" teaser. A DISABLED kind is listed only to the viewers who
+    can create it (superadmins and its test groups): switched off means
+    invisible, which is how a format still being built stays out of public
+    view (web120a, Conquest)."""
     out = []
     for row in sorted(get_registry(s).values(), key=lambda r: (r["sort"], r["key"])):
+        creatable = is_event_type_creatable(
+            s, row["key"], is_superadmin=is_superadmin, group_id=group_id
+        )
+        if not row["enabled"] and not creatable:
+            continue
         out.append(
             {
                 "key": row["key"],
@@ -112,9 +122,7 @@ def creatable_kinds(s, *, is_superadmin: bool, group_id: int | None) -> list[dic
                 "description": row["description"],
                 "enabled": row["enabled"],
                 "admin_only": row["admin_only"],
-                "creatable": is_event_type_creatable(
-                    s, row["key"], is_superadmin=is_superadmin, group_id=group_id
-                ),
+                "creatable": creatable,
             }
         )
     return out

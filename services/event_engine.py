@@ -4592,6 +4592,14 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     """
     from db.models import EventProgress, EventTeam
 
+    # Conquest (web120a): a tile's task never completes — its running total
+    # turns into troops on the tile, resolved as claims/fortifies/attacks.
+    # Its own path (services/conquest_engine.py); team scores are written by
+    # the lifecycle sweep, never here.
+    if event.get("kind") == "conquest":
+        from services.conquest_engine import apply_conquest
+        return apply_conquest(session, redis_conn, event, task, completion,
+                              player_name=player_name)
     # Loot Sweep scores continuously off the ledger (decaying per-receipt
     # item points + set bonuses) instead of completing once — its own path.
     if _list_kind(task) == "loot_sweep":
@@ -5620,6 +5628,13 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         return {"progress": None, "completed": None, "team_score": team_score,
                 "revoked_bonuses": [completion.note]}
 
+    if event.get("kind") == "conquest":
+        # Dice can't be un-rolled: troops the row earned become debt on the
+        # tile. No score write here (the sweep re-derives scores), so there is
+        # no lead change to announce either.
+        from services.conquest_engine import revoke_conquest
+        return revoke_conquest(session, event, task, team_id, completion)
+
     if _list_kind(task) == "loot_sweep":
         summary = _revoke_loot_sweep(session, event, task, team_id, completion)
         _announce_lead_change(session, event, lead_before, completion.player_id,
@@ -5962,9 +5977,10 @@ def recompute_task_rollups(session, event_row, task_row, *,
     its summary rides back under ``"duplicate_pets"``.
 
     Raises ``ValueError("forward_only")`` for kinds with no recomputable
-    ledger: manual-only types (custom/ehp_target/ehb_target) and board-game
+    ledger: manual-only types (custom/ehp_target/ehb_target), board-game
     events (progress is entangled with turn state — coins/rolls must never
-    be retro-granted).
+    be retro-granted) and Conquest events (troops already fought battles; a
+    new target only changes what the NEXT troop costs).
 
     Concurrency: the same ``with_for_update`` progress/team locks as
     ``apply_ledger_row``/``revoke_ledger_row``, iterated in ascending team
@@ -5983,7 +5999,7 @@ def recompute_task_rollups(session, event_row, task_row, *,
     task = _task_to_dict(task_row)
 
     if task.get("type") in ("custom", "ehp_target", "ehb_target") or \
-            (event.get("kind") or "standard") == "board_game":
+            (event.get("kind") or "standard") in ("board_game", "conquest"):
         raise ValueError("forward_only")
     if task.get("type") == "competition":
         # The managed race task is never editable through the task routes and

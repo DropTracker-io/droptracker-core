@@ -319,6 +319,10 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
 
     if (getattr(event, "kind", None) or "standard") == "board_game":
         blockers.extend(_board_game_blocker_items(session, event))
+    if (getattr(event, "kind", None) or "standard") == "conquest":
+        from services.conquest_engine import conquest_blockers
+
+        blockers.extend(conquest_blockers(session, event))
     return blockers
 
 
@@ -927,8 +931,9 @@ def frozen_competition_standings(raw) -> Optional[dict]:
 def final_standings(session, event_id: int, limit: int = 5) -> list:
     """[{team_id, name, score}] best-first. Board-game events rank by the
     finish-line race (see :func:`_board_final_standings`); competition events
-    rank PLAYERS (see :func:`_competition_final_standings`); every other event
-    ranks by task score."""
+    rank PLAYERS (see :func:`_competition_final_standings`); Conquest events
+    rank by map score, then tiles and regions held; every other event ranks
+    by task score."""
     from db.models import COMPETITION_EVENT_KINDS, Event, EventTeam
 
     event = session.query(Event).filter(Event.id == event_id).first()
@@ -936,6 +941,11 @@ def final_standings(session, event_id: int, limit: int = 5) -> list:
         return _board_final_standings(session, event, limit)
     if event is not None and getattr(event, "kind", None) in COMPETITION_EVENT_KINDS:
         return _competition_final_standings(session, event, limit)
+    if event is not None and getattr(event, "kind", None) == "conquest":
+        # Score first, then tiles held, then regions held.
+        from services.conquest_engine import conquest_final_standings
+
+        return conquest_final_standings(session, event, limit)
 
     rows = (
         session.query(EventTeam)
@@ -1332,6 +1342,15 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
 
         seed_positions(session, event)
 
+    # Conquest (web120a): deal the starting map (all unowned, or dealt out
+    # evenly between the teams). Idempotent via the map's seeded_at, so a
+    # re-run after a failed activation is safe. Runs after the whole-clan
+    # teams exist, so a dealt clan-vs-clan map includes them.
+    if (getattr(event, "kind", None) or "standard") == "conquest":
+        from services.conquest_engine import seed_conquest
+
+        seed_conquest(session, event, now=now)
+
     from db.models import EventTeam
 
     team_count = (
@@ -1464,6 +1483,20 @@ def end_event(session, event, *, actor_user_id=None,
         failed_steps.append("team channel retirement")
         log.error("end_event(%s): team-discord retirement failed",
                   event.id, exc_info=True)
+
+    # Conquest: settle the scores up to the end (the sweep only runs while
+    # the event is live) before anything reads the standings.
+    if (getattr(event, "kind", None) or "standard") == "conquest":
+        try:
+            from services.conquest_engine import finalize_conquest
+
+            finalize_conquest(session, event, now=event.ended_at or now)
+            session.commit()
+        except Exception:
+            session.rollback()
+            failed_steps.append("conquest final scores")
+            log.error("end_event(%s): conquest finalize failed",
+                      event.id, exc_info=True)
 
     standings: list = []
     try:
@@ -2123,6 +2156,25 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
         except Exception:
             session.rollback()
             log.error("Sweep: shop refresh failed for event %s",
+                      event.id, exc_info=True)
+
+    # Conquest (web120a): materialize team scores from the map (hold-time
+    # scoring accrues continuously), announce lead changes and post the
+    # periodic map update. The apply path never writes scores, so this tick
+    # is the only writer; one commit per event.
+    for event in rows:
+        if event.status != "active" or event.id in due["end"]:
+            continue
+        if (getattr(event, "kind", None) or "standard") != "conquest":
+            continue
+        try:
+            from services.conquest_engine import settle_conquest
+
+            settle_conquest(session, redis_conn, event, now=now)
+            session.commit()
+        except Exception:
+            session.rollback()
+            log.error("Sweep: conquest settle failed for event %s",
                       event.id, exc_info=True)
 
     # One-shot "starting soon" / "ending soon" reminders (kind-agnostic).

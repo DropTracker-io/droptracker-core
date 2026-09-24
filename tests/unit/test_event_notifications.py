@@ -32,6 +32,9 @@ ALL_TYPES = (
     # Lifecycle reminders + SOTW/BOTW competition messages (web105a).
     "event_starting_soon", "event_ending_soon",
     "event_competition_bonus", "event_competition_milestone",
+    # Conquest (web120a).
+    "event_conquest_capture", "event_conquest_battle",
+    "event_conquest_region", "event_conquest_summary",
 )
 
 
@@ -67,6 +70,11 @@ class TestKindMapping:
             "event_ending_soon": "announcements",
             "event_competition_bonus": "completions",
             "event_competition_milestone": "completions",
+            # Conquest (web120a): the map update is a standings post.
+            "event_conquest_capture": "completions",
+            "event_conquest_battle": "completions",
+            "event_conquest_region": "completions",
+            "event_conquest_summary": "leaderboard",
         }
 
     def test_all_families_covered(self):

@@ -84,5 +84,14 @@ def purge_team(session, event_id: int, team) -> None:
         or_(EventBoardEffect.source_team_id == team_id,
             EventBoardEffect.target_team_id == team_id)
     ).delete(synchronize_session=False)
+    # Conquest (web120a): its tables deliberately carry no team FK (lock
+    # ordering), so nothing would stop a deleted team from still owning tiles.
+    # Hand them back to nobody; a no-op for every other kind.
+    try:
+        from services.conquest_engine import forget_team_if_conquest
+    except ImportError:  # unit-test stubs
+        forget_team_if_conquest = None
+    if forget_team_if_conquest is not None:
+        forget_team_if_conquest(session, event_id, team_id)
     session.delete(team)
     session.flush()

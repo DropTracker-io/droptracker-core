@@ -78,6 +78,13 @@ KIND_FOR_TYPE = {
     "event_competition_bonus": "completions",
     # Reserved for gained-milestone chatter; no sender emits it yet.
     "event_competition_milestone": "completions",
+    # Conquest (web120a): a tile claimed/captured, a dice battle on a defended
+    # tile, a whole region won or lost, and the periodic map update (the
+    # summary is a standings post, so it goes where lead changes go).
+    "event_conquest_capture": "completions",
+    "event_conquest_battle": "completions",
+    "event_conquest_region": "completions",
+    "event_conquest_summary": "leaderboard",
 }
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
@@ -125,6 +132,10 @@ _COLORS = {
     "event_ending_soon": 0xFAA61A,    # amber — the clock is running out
     "event_competition_bonus": 0x57F287,  # green — points just landed
     "event_competition_milestone": 0x3498DB,  # informational blue (reserved)
+    "event_conquest_capture": 0xE67E22,  # banner orange — territory changed hands
+    "event_conquest_battle": 0xE74C3C,   # combat red — dice were rolled
+    "event_conquest_region": 0xFFD700,   # crown gold — a whole region held
+    "event_conquest_summary": 0x5865F2,  # blurple — the periodic map update
 }
 
 
@@ -169,6 +180,13 @@ DEFAULT_MESSAGE_TOGGLES = {
     "event_ending_soon": True,
     "event_competition_bonus": True,
     "event_competition_milestone": False,  # reserved; nothing emits it yet
+    # Conquest: captures and region changes are the story; every dice roll on
+    # a defended tile would flood a busy event's channel, so battles are
+    # opt-in. The map update is its own cadence (settings.summary_hours).
+    "event_conquest_capture": True,
+    "event_conquest_battle": False,
+    "event_conquest_region": True,
+    "event_conquest_summary": True,
 }
 
 # Loot Sweep messaging sub-config defaults (message_config["loot_sweep"]).
@@ -1025,6 +1043,24 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         if url:
             lines.append(f"[View the leaderboard]({url})")
         spec["description"] = "\n".join(lines)
+
+    elif notification_type in ("event_conquest_capture", "event_conquest_battle",
+                               "event_conquest_region", "event_conquest_summary"):
+        # Conquest (web120a): every line is pre-composed at enqueue
+        # (services/conquest_engine) so the embed and the V2 layout read the
+        # same text.
+        spec["title"] = {
+            "event_conquest_capture": "\U0001F6A9 Territory taken",
+            "event_conquest_battle": "\U0001F3B2 Battle",
+            "event_conquest_region": "\U0001F451 Region control",
+            "event_conquest_summary": f"\U0001F5FA️ {event_name}: map update",
+        }[notification_type]
+        lines = [data.get(k) for k in ("conquest_headline", "conquest_dice_line",
+                                        "conquest_summary_block",
+                                        "conquest_detail_line")]
+        spec["description"] = "\n".join(str(v) for v in lines if v) or None
+        if data.get("conquest_icon"):
+            spec["thumbnail"] = data["conquest_icon"]
 
     else:
         # Unknown event type — generic card so nothing crashes.

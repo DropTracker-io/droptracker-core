@@ -999,6 +999,13 @@ def compose_event_state(session, player_id) -> dict:
                         "completed": bool(p.completed)}
             for p in progress_rows
         }
+        if event.kind == "conquest":
+            # Conquest tile tasks never complete: every multiple of the target
+            # is a troop. Show progress toward the NEXT troop, not a running
+            # total far past the target.
+            targets = {t.id: max(int(t.target_value or 0), 1) for t in task_rows}
+            for task_id, state in progress_by_task.items():
+                state["progress"] = state["progress"] % targets.get(task_id, 1)
         tasks_total = len(task_rows)
         tasks_completed = sum(1 for p in progress_rows if p.completed)
         tiles = _batch_task_tiles(session, task_rows)

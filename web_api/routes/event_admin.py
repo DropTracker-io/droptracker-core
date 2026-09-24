@@ -670,6 +670,13 @@ async def award_completion(event_id: int):
                     409, "Event has ended",
                     "This event is over — completions can no longer be awarded.",
                 )
+            if complete and (getattr(ev, "kind", None) or "standard") == "conquest":
+                # A Conquest tile's task never completes; every multiple of
+                # its target is a troop. Awarding progress is the manual path.
+                abort_problem(
+                    422, "Conquest tasks never complete",
+                    "Award progress instead: the task's target in progress "
+                    "grants the team one troop on its tile.")
             task = (
                 s.query(EventTask)
                 .filter(EventTask.id == task_id, EventTask.event_id == event_id)

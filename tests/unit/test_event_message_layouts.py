@@ -309,6 +309,9 @@ class TestDefaultLayouts:
             # Lifecycle reminders + SOTW/BOTW competition messages (web105a).
             "event_starting_soon", "event_ending_soon",
             "event_competition_bonus", "event_competition_milestone",
+            # Conquest (web120a).
+            "event_conquest_capture", "event_conquest_battle",
+            "event_conquest_region", "event_conquest_summary",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected
 
@@ -391,6 +394,26 @@ class TestDefaultLayouts:
             "event_competition_milestone": {"event_id": 7, "event_name": "E",
                                             "player_name": "Zed",
                                             "milestone_line": "10M XP gained"},
+            # Conquest (web120a): lines are pre-composed at enqueue.
+            "event_conquest_capture": {
+                "event_id": 7, "event_name": "E", "team_name": "Reds",
+                "conquest_headline": "⚔️ **Reds** captured **Zulrah** from **Blues**",
+                "conquest_detail_line": "-# 1 troop earned by **Zed**",
+                "conquest_icon": "https://x/img/npcdb/2042.png"},
+            "event_conquest_battle": {
+                "event_id": 7, "event_name": "E", "team_name": "Reds",
+                "conquest_headline": "\U0001F3B2 **Reds** attacked **Zulrah**",
+                "conquest_dice_line": "\U0001F3B2 `6 · 3` vs `5 · 4`, defense 2 → 1",
+                "conquest_detail_line": "-# 1 troop earned by **Zed**"},
+            "event_conquest_region": {
+                "event_id": 7, "event_name": "E", "team_name": "Reds",
+                "conquest_headline": "\U0001F451 **Reds** now controls **Morytania**",
+                "conquest_detail_line": "-# Worth +3 points per hour held"},
+            "event_conquest_summary": {
+                "event_id": 7, "event_name": "E",
+                "conquest_headline": "\U0001F5FA️ Map update",
+                "conquest_summary_block": "\U0001F947 **Reds** 120 pts · 9 tiles",
+                "conquest_detail_line": "-# 4 tiles changed hands in the last 24h"},
         }
         standings = [{"name": "Reds", "score": 30}, {"name": "Blues", "score": 20}]
         for message_type, data in payloads.items():
@@ -401,6 +424,25 @@ class TestDefaultLayouts:
             joined = " ".join(
                 b.get("content", "") for b in spec["blocks"] if b["type"] in ("text", "section"))
             assert not ml._TOKEN_RE.search(joined), (message_type, joined)
+
+    def test_board_action_renders_its_action_line(self):
+        # The skirmish layout's only body line: it used to be missing from the
+        # context, so the V2 message showed its title alone.
+        data = {"event_id": 7, "team_name": "Reds",
+                "action_line": "**Reds** froze **Blues** for 2 turns"}
+        spec = ml.render_message_spec(
+            ml.DEFAULT_LAYOUTS["event_board_action"],
+            ml.notification_context("event_board_action", data))
+        joined = " ".join(b.get("content", "") for b in spec["blocks"] if "content" in b)
+        assert "froze **Blues**" in joined
+
+    def test_conquest_capture_without_icon_falls_back_to_text(self):
+        data = {"event_id": 7, "conquest_headline": "\U0001F6A9 **Reds** claimed **Zulrah**"}
+        spec = ml.render_message_spec(
+            ml.DEFAULT_LAYOUTS["event_conquest_capture"],
+            ml.notification_context("event_conquest_capture", data))
+        first = spec["blocks"][0]
+        assert first["type"] == "text" and "claimed **Zulrah**" in first["content"]
 
     def test_board_default_renders(self):
         context = {

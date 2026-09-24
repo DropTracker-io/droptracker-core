@@ -561,6 +561,14 @@ async def save_event_template(event_id: int):
                     422, "Templates not supported",
                     "Skill/Boss of the Week events can't be saved as templates "
                     "yet — their setup is quick to recreate from the wizard.")
+            if (getattr(ev, "kind", None) or "standard") == "conquest":
+                # The map (regions, tiles, rules) isn't part of the snapshot
+                # yet, so a template would come back as a map-less Conquest
+                # with a pile of loose tile tasks.
+                abort_problem(
+                    422, "Templates not supported",
+                    "Conquest events can't be saved as templates yet. Start a new "
+                    "one from the Gielinor preset instead.")
 
             payload = snapshot_event(s, ev)
             if not include_teams:

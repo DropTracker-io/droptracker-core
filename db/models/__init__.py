@@ -218,6 +218,16 @@ from .events import (
     COMPETITION_EVENT_KINDS,
     COMPETITION_SOURCE_MODES,
 )
+from .event_conquest import (
+    ConquestMap,
+    ConquestRegion,
+    ConquestTile,
+    ConquestRule,
+    ConquestEdge,
+    ConquestHold,
+    ConquestBattle,
+    ConquestTroops,
+)
 
 
 def get_current_partition() -> int:
@@ -420,6 +430,14 @@ __all__ = [
     "EVENT_RATE_LIMIT_ALL_TYPES",
     "EventBoardTile",
     "EventBoardConfig",
+    "ConquestMap",
+    "ConquestRegion",
+    "ConquestTile",
+    "ConquestRule",
+    "ConquestEdge",
+    "ConquestHold",
+    "ConquestBattle",
+    "ConquestTroops",
     "EventBoardPosition",
     "EventCoinLedger",
     "BoardgameShopItem",

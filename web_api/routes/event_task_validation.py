@@ -183,7 +183,9 @@ MAX_PB_NEED = 500
 
 # Non-semantic config keys preserved verbatim across validation (the bingo
 # designer's auto-created marker — see event_admin._BINGO_AUTO_KEY).
-_PASSTHROUGH_KEYS = ("bingo_auto",)
+# ``conquest_auto`` (web120a) marks tasks the Conquest designer created for a
+# tile, so a later map save can garbage-collect the ones it dropped.
+_PASSTHROUGH_KEYS = ("bingo_auto", "conquest_auto")
 
 # Per-task progress-notification override (``config.progress_notify``) —
 # replaces the event/team ``task_progress`` verbosity for this one task, on

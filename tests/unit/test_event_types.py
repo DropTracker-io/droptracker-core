@@ -110,6 +110,25 @@ class TestCreatableKinds:
         assert by_key["board_game"]["creatable"] is False
         assert by_key["board_game"]["admin_only"] is True
 
+    def test_disabled_kind_hidden_from_groups_that_cannot_create_it(self):
+        _warm({
+            "standard": _row("standard"),
+            "conquest": _row("conquest", enabled=False, admin_only=True, sort=8),
+        })
+        out = et.creatable_kinds(S, is_superadmin=False, group_id=5)
+        assert [r["key"] for r in out] == ["standard"]
+
+    def test_disabled_kind_listed_for_its_test_group(self):
+        _warm({"conquest": _row("conquest", enabled=False, admin_only=True,
+                                test_groups={5})})
+        out = et.creatable_kinds(S, is_superadmin=False, group_id=5)
+        assert [(r["key"], r["creatable"]) for r in out] == [("conquest", True)]
+
+    def test_enabled_admin_only_kind_still_teased(self):
+        _warm({"botw": _row("botw", admin_only=True)})
+        out = et.creatable_kinds(S, is_superadmin=False, group_id=5)
+        assert [(r["key"], r["creatable"]) for r in out] == [("botw", False)]
+
     def test_superadmin_sees_everything_creatable(self):
         _warm({
             "standard": _row("standard"),
