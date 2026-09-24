@@ -218,6 +218,45 @@ class TestFold:
         assert comp.bonus_award_count(rows, 6, 3) == 0
 
 
+class TestManualBonus:
+    """Organiser bonus points from the Review tab (``bonus:manual:0``)."""
+
+    def test_manual_bonus_pays_quantity_uncapped(self):
+        cfg = comp.CompetitionConfig(BOTW_CFG)
+        tag = comp.bonus_note(comp.MANUAL_RULE_TYPE, comp.MANUAL_RULE_ID)
+        rows = [
+            _row(5, 3, rid=1),
+            _row(5, 25, note=f"{tag} | missed pet", rid=2),
+            _row(5, 10, note=tag, rid=3),
+        ]
+        per = comp.fold_rows(rows, cfg)
+        assert per[5]["gained"] == 3
+        assert per[5]["bonus_points"] == 35
+        assert per[5]["bonus"][0] == {"type": "manual", "count": 2,
+                                      "awarded": 2, "points": 35}
+
+    def test_manual_gained_row_is_ranked_metric(self):
+        cfg = comp.CompetitionConfig(BOTW_CFG)
+        per = comp.fold_rows([_row(5, 40, note="manual | WOM missed it",
+                                   rid=1, matched_target="Vorkath")], cfg)
+        assert per[5]["gained"] == 40 and per[5]["bonus_points"] == 0
+        assert per[5]["by_npc"] == {"vorkath": 40}
+
+    def test_team_only_row_counts_for_no_one(self):
+        """Why the award route requires a player on a race."""
+        cfg = comp.CompetitionConfig(BOTW_CFG)
+        assert comp.fold_rows([_row(None, 50, rid=1)], cfg) == {}
+
+    def test_manual_bonus_detail(self):
+        cfg = comp.CompetitionConfig(BOTW_CFG)
+        detail = comp.bonus_detail(comp.MANUAL_RULE_ID, cfg, 3,
+                                   time_text="missed pet", points=25)
+        assert detail["type"] == "manual"
+        assert detail["reason"] == "Manual award: missed pet"
+        assert detail["points"] == 25
+        assert detail["awarded_n"] <= detail["max_awards"]
+
+
 # ── ranking / totals ─────────────────────────────────────────────────────────
 
 class TestRanking:

@@ -4400,7 +4400,8 @@ def _competition_side_effects(session, event: dict, task: dict, completion,
     """Result dict, SSE frame and announcements for one applied competition
     row (split out of :func:`_apply_competition` so the lead-change compare
     runs on every exit path)."""
-    from services.competition import bonus_detail, player_points
+    from services.competition import (MANUAL_RULE_TYPE, bonus_detail,
+                                      player_points)
 
     team_id = completion.team_id
     player_id = completion.player_id
@@ -4453,6 +4454,10 @@ def _competition_side_effects(session, event: dict, task: dict, completion,
         from services.competition import rank_value, score_text
 
         rule_type, rule_id = parsed_bonus
+        if rule_type == MANUAL_RULE_TYPE:
+            # An organiser's correction from the Review tab — the standings
+            # and the SSE frame above carry it; it is not a race moment.
+            return result
         awarded_n = (entry.get("bonus") or {}).get(rule_id, {}).get("awarded", 0)
         prev_awarded = (prev_entry.get("bonus") or {}).get(rule_id, {}).get("awarded", 0)
         # Announce a rule's AWARD, not every row it recorded. A "collect all

@@ -60,6 +60,7 @@ from db import (
     EventTask,
     EventTaskLibraryItem,
     EventTeam,
+    EventTeamMember,
     EVENT_BOARD_SIZES,
     EVENT_COMPLETION_STATUSES,
     EVENT_TASK_TYPES,
@@ -575,7 +576,14 @@ async def reject_completion(event_id: int, completion_id: int):
 @event_admin_bp.post("/events/<int:event_id>/award")
 async def award_completion(event_id: int):
     """Insert a ``manual`` ledger row and apply it immediately — the escape
-    hatch for pre-join credit (D10) and custom/ehp/ehb tasks."""
+    hatch for pre-join credit (D10) and custom/ehp/ehb tasks.
+
+    ``player_id`` (optional; must be on the team's roster) attributes the row
+    to one player, like an automatic submission. A sotw/botw ``competition``
+    task REQUIRES it — its standings fold per player, and a team-only row
+    counts for nobody. There ``credit`` picks what the row adds: ``gained``
+    (default — XP/kills, the ranked metric; ``matched_target`` may name the
+    raced boss) or ``bonus`` (bonus points, uncapped)."""
     user_id = current_user_id()
     body = await json_body()
     task_id = body.get("task_id")
@@ -584,6 +592,13 @@ async def award_completion(event_id: int):
         abort_problem(422, "Invalid task_id", "'task_id' must be an integer.")
     if not isinstance(team_id, int):
         abort_problem(422, "Invalid team_id", "'team_id' must be an integer.")
+    player_id = body.get("player_id")
+    if player_id is not None and (not isinstance(player_id, int)
+                                  or isinstance(player_id, bool)):
+        abort_problem(422, "Invalid player_id", "'player_id' must be an integer.")
+    credit = body.get("credit")
+    if credit is not None and credit not in ("gained", "bonus"):
+        abort_problem(422, "Invalid credit", "'credit' must be 'gained' or 'bonus'.")
     quantity = body.get("quantity", 1)
     if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity < 1:
         abort_problem(422, "Invalid quantity", "'quantity' must be a positive integer.")
@@ -629,7 +644,8 @@ async def award_completion(event_id: int):
         try:
             from utils.redis import redis_client
 
-            claim = f"events:{event_id}:awardclick:{task_id}:{team_id}:{user_id}"
+            claim = (f"events:{event_id}:awardclick:{task_id}:{team_id}:"
+                     f"{player_id}:{credit}:{user_id}")
             conn = getattr(redis_client, "client", None) or redis_client
             fresh_click = bool(conn.set(claim, 1, nx=True, ex=5))
         except Exception:
@@ -664,8 +680,26 @@ async def award_completion(event_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            if player_id is not None:
+                on_team = (
+                    s.query(EventTeamMember.id)
+                    .filter(EventTeamMember.team_id == team_id,
+                            EventTeamMember.player_id == player_id)
+                    .first()
+                )
+                if on_team is None:
+                    abort_problem(
+                        422, "Player not on team",
+                        f"Player {player_id} is not on {team.name}'s roster.")
             eng = _engine()
-            if matched_target is not None:
+            if task.type == "competition":
+                matched_target, note = _competition_award_fields(
+                    task, player_id=player_id, credit=credit, complete=complete,
+                    path_idx=path_idx, matched_target=matched_target, note=note)
+            elif credit is not None:
+                abort_problem(422, "Invalid credit",
+                              "'credit' only applies to a Skill/Boss of the Week race.")
+            elif matched_target is not None:
                 # Validate against the task's config exactly like an automatic
                 # submission would match — this also converts quantity into
                 # point credit for point_collection tasks (weight × qty), so
@@ -720,12 +754,12 @@ async def award_completion(event_id: int):
             receipt_task = eng._task_to_dict(task)
             credit_before = event_credit_receipt.capture(
                 s, event_id=event_id, task=receipt_task, team_id=team_id,
-                player_id=None)
+                player_id=player_id)
             comp = EventCompletion(
                 event_id=event_id,
                 task_id=task_id,
                 team_id=team_id,
-                player_id=None,
+                player_id=player_id,
                 status="manual",
                 quantity=quantity,
                 source_type="manual",
@@ -733,7 +767,12 @@ async def award_completion(event_id: int):
                 # the ledger's unique (task, team, guid) index never collides
                 # on — this is the DB-level double-click backstop behind the
                 # Redis claim above (works even with Redis down).
-                submission_guid=f"manual:{task_id}:{team_id}:{user_id}:{int(time.time()) // 5}",
+                # The player rides in the guid so awarding two players of one
+                # team back to back isn't mistaken for a double click.
+                submission_guid=(f"manual:{task_id}:{team_id}:{user_id}:"
+                                 f"{player_id if player_id is not None else ''}"
+                                 f"{'b' if credit == 'bonus' else ''}:"
+                                 f"{int(time.time()) // 5}"),
                 acted_by_user_id=user_id,
                 note=note,
                 matched_target=matched_target,
@@ -754,7 +793,7 @@ async def award_completion(event_id: int):
             # landed without comparing the standings by hand.
             score_change = event_credit_receipt.finish(
                 s, credit_before, event_id=event_id, task=receipt_task,
-                team_id=team_id, player_id=None)
+                team_id=team_id, player_id=player_id)
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,
@@ -770,6 +809,50 @@ async def award_completion(event_id: int):
     comp_id, score_change = await asyncio.to_thread(_apply)
     _bump(event_id)
     return private_no_store(jsonify({"id": comp_id, "score_change": score_change}))
+
+
+def _competition_award_fields(task, *, player_id, credit, complete, path_idx,
+                              matched_target, note):
+    """Validate a manual award on a sotw/botw race task and shape its ledger
+    row. Returns ``(matched_target, note)``.
+
+    Gained credit is an ordinary untagged row (``matched_target`` = the raced
+    boss it counts under, for the per-boss split). Bonus credit is tagged
+    ``bonus:manual:0`` so the fold reads its quantity as points — see
+    :data:`services.competition.MANUAL_RULE_ID`."""
+    from services.competition import (MANUAL_RULE_ID, MANUAL_RULE_TYPE,
+                                      CompetitionConfig, bonus_note,
+                                      parse_bonus_note)
+
+    if player_id is None:
+        abort_problem(
+            422, "Choose a player",
+            "Skill/Boss of the Week standings are per player — choose which "
+            "participant this award is for. A team-only award counts for no one.")
+    if complete or path_idx is not None:
+        abort_problem(
+            422, "Not supported on a race",
+            "A Skill/Boss of the Week race has no completion or paths — add "
+            "XP/kills gained or bonus points instead.")
+    if credit == "bonus":
+        if matched_target is not None:
+            abort_problem(422, "Invalid matched_target",
+                          "Bonus points don't take a boss — leave it empty.")
+        tag = bonus_note(MANUAL_RULE_TYPE, MANUAL_RULE_ID)
+        # The note column is 255; the tag takes its share of the admin's text.
+        return None, (f"{tag} | {note}"[:255] if note else tag)
+    config = CompetitionConfig(task.config)
+    if matched_target is not None:
+        # config.npcs is already folded the way the fold keys the split.
+        if (config.metric_kind != "boss"
+                or " ".join(matched_target.lower().split()) not in config.npcs):
+            abort_problem(422, "Invalid matched_target",
+                          f"'{matched_target}' is not a boss raced in this event.")
+    if note and parse_bonus_note(note) is not None:
+        # An admin note that happens to read as a bonus tag would turn this
+        # gained row into a bonus row at fold time.
+        note = f"manual | {note}"[:255]
+    return matched_target, note
 
 
 @event_admin_bp.post("/events/<int:event_id>/revoke")

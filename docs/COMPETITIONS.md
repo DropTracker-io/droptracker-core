@@ -153,6 +153,15 @@ test_competition_validation.py::TestBoundsMirror` keeps the copies honest).
   **`_award_contribution_points` is deliberately not called per row** (an
   XP-snapshot stream would rewrite the roster thousands of times a day) —
   `finalize_competition` writes `EventPlayerPoints` once at end.
+- **Manual awards** (Review tab → `POST /events/{id}/award`) must name a
+  `player_id` on the team's roster: `fold_rows` skips player-less rows, so a
+  team-only award counted for no one (the route used to write
+  `player_id=NULL` unconditionally — leaders saw "points added" do nothing).
+  `credit: "gained"` (default) is an untagged row, optionally under a raced
+  boss via `matched_target`; `credit: "bonus"` is tagged
+  `bonus:manual:0 | reason` — rule id 0 is never a configured rule, pays its
+  quantity uncapped, and is not announced (a correction, not a race moment).
+  `complete`/`path` 422 on a race. Any other kind may pass `player_id` too.
 - Standings are a ledger aggregation (`GET /events/{id}/competition`),
   never a stored rollup; past events serve the frozen `final_standings`.
 

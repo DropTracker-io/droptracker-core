@@ -48,6 +48,9 @@ without loading the config:
 - ``pet`` / ``time_under`` — one row IS one award; ``quantity`` is the points.
 - ``task`` — one row is one unit of PROGRESS (a drop, a kill, GP, a clog slot);
   ``quantity`` is credit units and the points come from the rule at fold time.
+- ``manual`` (rule id :data:`MANUAL_RULE_ID`, never a configured rule) — an
+  organiser's manual bonus from the Review tab; ``quantity`` is the points,
+  uncapped. A manual GAINED correction is an ordinary untagged row.
 
 The task never "completes".
 
@@ -109,6 +112,11 @@ MIN_RACE_TEAMS = 2
 # points) rather than units of progress. The note's type segment is the only
 # thing a reader needs to tell the two ledger dialects apart.
 DISCRETE_RULE_TYPES = ("pet", "time_under")
+# Manual bonus points an organiser awards a player from the Review tab
+# (POST /events/{id}/award, credit="bonus"). Not a configurable rule type:
+# configured rule ids start at 1, so id 0 can never collide with one.
+MANUAL_RULE_TYPE = "manual"
+MANUAL_RULE_ID = 0
 
 # Task types the ``task`` rule may embed. ``kc_target``/``xp_target`` are
 # deliberately absent: the race ALREADY scores those kills and that XP, and
@@ -505,6 +513,12 @@ def fold_rows(rows: Iterable, config: CompetitionConfig) -> dict:
             rule_id, {"type": effective_type, "count": 0,
                       "awarded": 0, "points": 0})
         slot["count"] += 1
+        if effective_type == MANUAL_RULE_TYPE and rule is None:
+            # One row = one organiser award; quantity is the points, no cap.
+            slot["awarded"] += 1
+            slot["points"] += quantity
+            entry["bonus_points"] += quantity
+            continue
         if effective_type == "task":
             task_rows.setdefault((player_id, rule_id), []).append(row)
             continue
@@ -959,6 +973,16 @@ def bonus_detail(rule_id: int, config: CompetitionConfig,
     (task rules pay ``points`` per completed ``need``, which is not the same as
     one row's quantity)."""
     rule = config.rules_by_id.get(int(rule_id))
+    if rule is None and int(rule_id) == MANUAL_RULE_ID:
+        # ``time_text`` is the note's human half — for a manual award, the
+        # organiser's reason.
+        reason = f"Manual award: {time_text}" if time_text else "Manual award"
+        return {"rule_id": MANUAL_RULE_ID, "type": MANUAL_RULE_TYPE,
+                "points": _int(points), "label": "Manual award",
+                "reason": reason, "scope_line": None,
+                "cap_line": f"{_ordinal(awarded_n)} award",
+                "max_awards": UNLIMITED_AWARDS, "unlimited": True,
+                "awarded_n": awarded_n}
     if rule is None:
         return {"rule_id": int(rule_id), "label": "Bonus",
                 "points": _int(points), "cap_line": None, "type": None,
