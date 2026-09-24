@@ -53,9 +53,11 @@ def _tile_fk():
 
 def upgrade() -> None:
     bind = op.get_bind()
-    # Fail fast instead of queueing behind a long metadata lock on web_events
-    # (a CREATE TABLE with a foreign key briefly locks the parent's metadata).
-    bind.execute(sa.text("SET SESSION lock_wait_timeout = 30"))
+    if bind.dialect.name == "mysql":
+        # Fail fast instead of queueing behind a long metadata lock on
+        # web_events (a CREATE TABLE with a foreign key briefly locks the
+        # parent's metadata).
+        bind.execute(sa.text("SET SESSION lock_wait_timeout = 30"))
     existing = set(sa.inspect(bind).get_table_names())
 
     if "web_conquest_maps" not in existing:
