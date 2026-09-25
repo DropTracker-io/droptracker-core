@@ -99,16 +99,16 @@ ABYSS = {"center": (3560, 3950), "radius": 80, "tether": (3104, 3560)}
 
 # Each region's ground: the real kingdom's extent (game coordinates), as
 # polygons. Where two overlap, the earlier region in AREA_PRIORITY wins.
-# Land inside no region (Karamja, east Kandarin, Feldip, the Sailing
-# islands) is scenery nobody can claim. Borders are wobbled when rasterised
-# so no straight edge survives.
+# Land inside no polygon (Karamja, Feldip, the Sailing islands) joins the
+# nearest kingdom, so the whole map is in play. Borders are wobbled when
+# rasterised so no straight edge survives.
 AREAS = {
     "kourend": [[(1080, 3345), (1990, 3345), (1990, 4140), (1080, 4140)]],
     "varlamore": [[(1080, 2620), (1990, 2620), (1990, 3345), (1080, 3345)]],
-    "kandarin": [[(2120, 2995), (2560, 2995), (2560, 3690), (2120, 3690)]],
-    "fremennik": [[(2120, 3690), (2560, 3690), (2560, 3570), (2830, 3570), (2830, 3890),
+    "kandarin": [[(2120, 2995), (2830, 2995), (2830, 3570), (2560, 3570), (2560, 3690), (2120, 3690)]],
+    "fremennik": [[(2120, 3690), (2560, 3690), (2560, 3570), (2770, 3570), (2770, 3890),
                    (3010, 3890), (3010, 4140), (2120, 4140)]],
-    "gwd": [[(2820, 3570), (2950, 3570), (2950, 3890), (2820, 3890)]],
+    "gwd": [[(2770, 3520), (2950, 3520), (2950, 3890), (2770, 3890)]],
     "wilderness": [[(2950, 3520), (3400, 3520), (3400, 3985), (2950, 3985)]],
     "heartlands": [[(2800, 3190), (3000, 3190), (3000, 3090), (3130, 3090), (3130, 3140),
                     (3290, 3140), (3290, 3230), (3395, 3230), (3395, 3520), (2800, 3520)]],
@@ -123,21 +123,21 @@ MIN_ISLAND = 22
 
 # Names that fit on a medallion's scroll.
 LABELS = {
-    "chambers_of_xeric": "Chambers of Xeric", "theatre_of_blood": "Theatre of Blood",
-    "tombs_of_amascut": "Tombs of Amascut", "thermonuclear_smoke_devil": "Thermy",
+    "chambers_of_xeric": "CoX", "theatre_of_blood": "ToB",
+    "tombs_of_amascut": "ToA", "thermonuclear_smoke_devil": "Thermy",
     "corrupted_gauntlet": "The Gauntlet", "wilderness_demi_bosses": "Demi-bosses",
     "callisto_artio": "Callisto", "vetion_calvarion": "Vet'ion",
     "venenatis_spindel": "Venenatis", "moons_of_peril": "Moons of Peril",
     "doom_of_mokhaiotl": "Doom", "fortis_colosseum": "Colosseum",
     "demonic_gorillas": "Demonics", "grotesque_guardians": "Grotesques",
-    "alchemical_hydra": "Hydra", "dagannoth_kings": "Dagannoth Kings",
+    "alchemical_hydra": "Hydra", "dagannoth_kings": "DKs",
     "general_graardor": "Graardor", "commander_zilyana": "Zilyana",
     "kril_tsutsaroth": "K'ril", "kree_arra": "Kree'arra", "the_whisperer": "Whisperer",
     "the_leviathan": "Leviathan", "phantom_muspah": "Muspah", "duke_sucellus": "Duke",
-    "king_black_dragon": "King Black Dragon", "corporeal_beast": "Corp",
+    "king_black_dragon": "KBD", "corporeal_beast": "Corp",
     "abyssal_sire": "Abyssal Sire", "tormented_demon": "Tormented Demons",
     "royal_titans": "Royal Titans", "kalphite_queen": "Kalphite Queen",
-    "chaos_elemental": "Chaos Elemental", "nightmare": "Nightmare",
+    "chaos_elemental": "Chaos Ele", "nightmare": "Nightmare",
 }
 
 

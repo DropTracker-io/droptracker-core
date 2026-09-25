@@ -101,7 +101,7 @@ def land_mask(base: np.ndarray) -> np.ndarray:
         land |= np.isin(lab, 1 + np.nonzero(sizes < 90)[0])
     lab, n = ndi.label(land)
     sizes = ndi.sum(land, lab, range(1, n + 1))
-    return np.isin(lab, 1 + np.nonzero(sizes >= 110)[0])
+    return np.isin(lab, 1 + np.nonzero(sizes >= 160)[0])
 
 
 def disk(shape, cx, cy, r) -> np.ndarray:
@@ -210,39 +210,85 @@ def build(world_png: str) -> dict:
     area_w = ndi.map_coordinates(area, [np.clip(YY, 0, h - 1), np.clip(XX, 0, w - 1)],
                                  order=0, mode="nearest")
     region_keys = [r["key"] for r in geo.REGIONS]
+    # Every bit of land belongs to a region: a kingdom's own ground first,
+    # then anything outside every kingdom (Karamja, Feldip, the islands) goes
+    # to whichever kingdom is nearest.
+    ground_all = reach & ~disk((h, w), ax, ay, ar + 6)
+    rid = np.where(ground_all, area_w, -1)
+    rid = _fill_by_landmass(rid, ground_all)
+    rid[reach & disk((h, w), ax, ay, ar + 3)] = region_keys.index("abyss")
+
     label = np.full((h, w), -1)
-    for rk in region_keys:
+    for k, rk in enumerate(region_keys):
         idx = [i for i, m in enumerate(meta) if m["region"] == rk]
-        if not idx:
+        ground = rid == k
+        if not idx or not ground.any():
             continue
-        if rk == "abyss":
-            ground = reach & disk((h, w), ax, ay, ar + 3)
-        else:
-            ground = reach & (area_w == region_keys.index(rk)) & ~disk((h, w), ax, ay, ar + 6)
-        d = np.stack([np.hypot(XX - seeds[i][0], YY - seeds[i][1]) for i in idx])
-        near = np.array(idx)[d.argmin(0)]
-        label[ground] = near[ground]
-    # Drop specks: bits of a territory too small to matter go neutral.
+        # Carve only the landmasses a boss stands on; the kingdom's other
+        # islands join whichever territory is nearest afterwards.
+        comps, _n = ndi.label(ground)
+        _, (cri, cci) = ndi.distance_transform_edt(comps == 0, return_indices=True)
+        seeded = set()
+        for i in idx:
+            r0, c0 = int(round(seeds[i][1])), int(round(seeds[i][0]))
+            seeded.add(int(comps[cri[r0, c0], cci[r0, c0]]))
+        main = np.isin(comps, list(seeded))
+        gy, gx = np.nonzero(main)
+        wgx, wgy = XX[gy, gx], YY[gy, gx]
+        pts = np.array([seeds[i] for i in idx], float)
+        # Lloyd relaxation from the bosses' real spots: territories even out
+        # in size while keeping their place in the kingdom.
+        # Each round is pulled partway back to the real spot, so a boss's
+        # territory grows around where it lives instead of wandering off.
+        true = pts.copy()
+        for _ in range(LLOYD_ROUNDS):
+            own = np.hypot(wgx[None] - pts[:, :1], wgy[None] - pts[:, 1:]).argmin(0)
+            for n in range(len(idx)):
+                sel = own == n
+                if sel.any():
+                    centre = np.array((gx[sel].mean(), gy[sel].mean()))
+                    pts[n] = (1 - LLOYD_ANCHOR) * centre + LLOYD_ANCHOR * true[n]
+        own = np.hypot(wgx[None] - pts[:, :1], wgy[None] - pts[:, 1:]).argmin(0)
+        label[gy, gx] = np.array(idx)[own]
+        rest = ground & ~main
+        if rest.any():
+            _, (iri, ici) = ndi.distance_transform_edt(~main, return_indices=True)
+            label[rest] = label[iri, ici][rest]
+    # Slivers the border wobble cuts off go to their neighbour, so every
+    # territory is one piece of land (plus whole islands).
     for i in range(len(seeds)):
         m = label == i
         lab, n = ndi.label(m)
         if n > 1:
             sizes = ndi.sum(m, lab, range(1, n + 1))
-            label[m & np.isin(lab, 1 + np.nonzero(sizes < 40)[0])] = -1
+            label[m & np.isin(lab, 1 + np.nonzero(sizes < 60)[0])] = -1
+    hole = reach & (label < 0)
+    _, (ri, ci) = ndi.distance_transform_edt(label < 0, return_indices=True)
+    label[hole] = label[ri, ci][hole]
 
-    # Badge anchors: the boss's true spot, nudged inward if it sits on an edge.
-    anchors = []
-    for i, (cx, cy) in enumerate(seeds):
-        cell = (label == i) & land
-        inside = ndi.distance_transform_edt(cell)
-        near = disk(cell.shape, cx, cy, 16 / G * 2)
-        score = np.minimum(inside, 22 / G) - 0.08 * np.hypot(xx - cx, yy - cy)
-        score[~near | ~cell] = -1e9
-        r, c = np.unravel_index(score.argmax(), score.shape)
-        anchors.append((float(c * G), float(r * G)))
     labels = [geo.label_for(m["key"]) for m in meta]
     halfw = [max(len(t) * 4.2 + 17, BADGE_R + 4) for t in labels]
-    anchors = _relax(anchors, seeds, [(label == i) & land for i in range(len(seeds))], halfw)
+    anchors = [_badge_spot(label, land, reach, i, halfw[i], seeds[i]) for i in range(len(seeds))]
+    anchors = _separate(anchors, halfw)
+    # Bend the borders around every medallion and its scroll: the ground
+    # under each one belongs to its own territory, so no border (between
+    # territories or regions) ever runs underneath a name.
+    for i, (x, y) in enumerate(anchors):
+        a, b = (halfw[i] + 12) / G, ((BADGE_UP + BADGE_DOWN) / 2 + 10) / G
+        cy_ = (y + (BADGE_DOWN - BADGE_UP) / 2) / G
+        cx_ = x / G
+        box = (np.abs((xx - cx_) / a) ** 4 + np.abs((yy - cy_) / b) ** 4) <= 1
+        label[box & reach] = i
+    for i in range(len(seeds)):
+        m = label == i
+        lab, n = ndi.label(m)
+        if n > 1:
+            sizes = ndi.sum(m, lab, range(1, n + 1))
+            label[m & np.isin(lab, 1 + np.nonzero(sizes < 60)[0])] = -1
+    hole = reach & (label < 0)
+    if hole.any():
+        _, (ri, ci) = ndi.distance_transform_edt(label < 0, return_indices=True)
+        label[hole] = label[ri, ci][hole]
 
     # Neighbours: territories sharing a border.
     pairs = {}
@@ -270,8 +316,6 @@ def build(world_png: str) -> dict:
             union & land, region["name"], anchors, halfw, placed)
         regions.append({"key": region["key"], "name": region["name"], "color": region["color"],
                         "path": mask_path(union, sigma=1.2), "label": spot})
-    # Land in play vs scenery nobody can claim.
-    neutral = land & (label < 0)
 
     biome_paths = {}
     grow = ndi.binary_dilation(land, iterations=2)
@@ -290,7 +334,7 @@ def build(world_png: str) -> dict:
         "name": "Gielinor", "units": "game tiles",
         "width": e["x1"] - e["x0"], "height": e["y1"] - e["y0"], "extent": e,
         "land": mask_path(land, sigma=1.0, tol=0.4),
-        "neutral": mask_path(neutral, sigma=1.2), "biomes": biome_paths,
+        "biomes": biome_paths,
         "regions": regions, "tiles": tiles, "edges": edges,
         "abyss": {"x": round(ax * G, 1), "y": round(ay * G, 1), "r": geo.ABYSS["radius"],
                   "tether": [round(v * G, 1) for v in to_grid(*geo.ABYSS["tether"])]},
@@ -310,35 +354,88 @@ def _area_raster(h, w) -> np.ndarray:
     return np.asarray(img).astype(int)
 
 
+LLOYD_ROUNDS = 12
+LLOYD_ANCHOR = 0.4
+
+
+def _fill_by_landmass(rid, ground):
+    """Give every unassigned bit of land a region. Land joined to a kingdom
+    takes the nearest kingdom on the same landmass; an island with no
+    kingdom on it goes whole to the nearest kingdom across the water."""
+    lab, n = ndi.label(ground)
+    known = rid >= 0
+    _, (ri, ci) = ndi.distance_transform_edt(~known, return_indices=True)
+    dist_known = ndi.distance_transform_edt(~known)
+    out = rid.copy()
+    objs = ndi.find_objects(lab)
+    for k, sl in enumerate(objs, start=1):
+        comp = lab[sl] == k
+        sub_known = known[sl] & comp
+        todo = comp & ~sub_known
+        if not todo.any():
+            continue
+        if sub_known.any():
+            _, (sri, sci) = ndi.distance_transform_edt(~sub_known, return_indices=True)
+            vals = rid[sl][sri, sci]
+            out[sl][todo] = vals[todo]
+        else:
+            d = np.where(comp, dist_known[sl], np.inf)
+            r, c = np.unravel_index(d.argmin(), d.shape)
+            out[sl][todo] = rid[ri[sl][r, c], ci[sl][r, c]]
+    return out
+
+
+def _badge_spot(label, land, reach, i, halfw, home):
+    """Where tile i's medallion goes: somewhere the whole medallion and its
+    name scroll fit inside the territory (or hang over open sea), with as
+    much room around it as possible, so no border ever runs underneath."""
+    cell = (label == i) & land
+    lab, n = ndi.label(cell)
+    if n > 1:
+        # The piece of land the boss stands on, never an island it was
+        # handed across the water.
+        _, (ri, ci) = ndi.distance_transform_edt(lab == 0, return_indices=True)
+        r0 = int(np.clip(round(home[1]), 0, cell.shape[0] - 1))
+        c0 = int(np.clip(round(home[0]), 0, cell.shape[1] - 1))
+        cell = lab == lab[ri[r0, c0], ci[r0, c0]]
+    dt = ndi.distance_transform_edt(np.pad(cell, 1))[1:-1, 1:-1]
+    allowed = (label == i) | ~reach
+    for margin in (44, 32, 22, 14, 8, 3):
+        cols = int(math.ceil(2 * (halfw + margin) / G)) | 1
+        rows = int(math.ceil((BADGE_UP + BADGE_DOWN + 2 * margin) / G)) | 1
+        fit = ndi.minimum_filter(allowed.astype(np.uint8), size=(rows, cols), mode="constant") > 0
+        # fit[r, c] says a box centred on (r, c) fits; the medallion's anchor
+        # sits (BADGE_DOWN - BADGE_UP) / 2 above the box's centre.
+        off = int(round((BADGE_DOWN - BADGE_UP) / 2 / G))
+        fit = np.roll(fit, -off, axis=0)
+        fit[-off:] = False
+        cand = fit & cell
+        if cand.any():
+            r, c = np.unravel_index(np.where(cand, dt, -1).argmax(), dt.shape)
+            return (float(c * G), float(r * G))
+    r, c = np.unravel_index(dt.argmax(), dt.shape)
+    return (float(c * G), float(r * G))
+
+
 # Space a boss medallion and its name scroll take up around its anchor
 # (board units): the medallion's radius, then BADGE_UP above the anchor and
 # BADGE_DOWN below (the scroll hangs underneath). Width comes from the name.
 BADGE_R, BADGE_UP, BADGE_DOWN = 30, 34, 58
 
 
-def _relax(anchors, seeds, cells, halfw, iters=300):
-    """Push overlapping medallions apart, keeping each on its own territory
-    and within 90 tiles of where the boss really is."""
+def _separate(anchors, halfw, iters=200, limit=50):
+    """Last resort for territories too small to hold a whole medallion:
+    nudge any medallions that still overlap apart (at most ``limit``)."""
     P = np.array(anchors, float)
-    T = np.array(seeds, float) * G
-    snap = []
-    for cell in cells:
-        core = ndi.binary_erosion(cell, iterations=4)
-        if not core.any():
-            core = cell
-        _, (ri, ci) = ndi.distance_transform_edt(~core, return_indices=True)
-        snap.append((core, ri, ci))
-    pad = 4
+    start = P.copy()
     for _ in range(iters):
         moved = False
         for i in range(len(P)):
             for j in range(i + 1, len(P)):
                 dx, dy = P[j, 0] - P[i, 0], P[j, 1] - P[i, 1]
-                ox = halfw[i] + halfw[j] + pad - abs(dx)
-                if ox <= 0:
-                    continue
-                oy = (min(P[i, 1], P[j, 1]) + BADGE_DOWN) - (max(P[i, 1], P[j, 1]) - BADGE_UP) + pad
-                if oy <= 0:
+                ox = halfw[i] + halfw[j] + 4 - abs(dx)
+                oy = (min(P[i, 1], P[j, 1]) + BADGE_DOWN) - (max(P[i, 1], P[j, 1]) - BADGE_UP) + 4
+                if ox <= 0 or oy <= 0:
                     continue
                 moved = True
                 if ox < oy:
@@ -350,15 +447,10 @@ def _relax(anchors, seeds, cells, halfw, iters=300):
                     P[i, 1] -= step
                     P[j, 1] += step
         for i in range(len(P)):
-            v = P[i] - T[i]
+            v = P[i] - start[i]
             d = math.hypot(*v)
-            if d > 90:
-                P[i] = T[i] + v / d * 90
-            core, ri, ci = snap[i]
-            r = int(np.clip(P[i, 1] / G, 0, core.shape[0] - 1))
-            c = int(np.clip(P[i, 0] / G, 0, core.shape[1] - 1))
-            if not core[r, c]:
-                P[i] = (ci[r, c] * G, ri[r, c] * G)
+            if d > limit:
+                P[i] = start[i] + v / d * limit
         if not moved:
             break
     return [(round(float(x), 1), round(float(y), 1)) for x, y in P]

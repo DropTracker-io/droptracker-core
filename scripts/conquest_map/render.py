@@ -22,7 +22,7 @@ HEADER = 70  # title band above the map
 THEMES = {
     "vivid": {
         "sea": ("#3a7fb4", "#1f4f7c"), "shallow": "#8fd0ec", "wave": "#d8f1fb",
-        "beach": "#f1dc9c", "coast": "#3a2a17", "ink": "#2b1d0e", "fog": "#eee3c6",
+        "beach": "#f1dc9c", "coast": "#3a2a17", "ink": "#2b1d0e",
         "biomes": {
             "grass": "#8cb54c", "lowland": "#9fae57", "plains": "#cdb968", "forest": "#4f8d3d",
             "hills": "#a08a5a", "mountain": "#8a6d4c", "rock": "#a8a191", "dark": "#5d534a",
@@ -33,7 +33,7 @@ THEMES = {
     },
     "parchment": {
         "sea": ("#b9c7c0", "#8fa5a0"), "shallow": "#dfe6d6", "wave": "#6f8580",
-        "beach": "#eadcb5", "coast": "#4a3520", "ink": "#3a2814", "fog": "#f3ead3",
+        "beach": "#eadcb5", "coast": "#4a3520", "ink": "#3a2814",
         "biomes": {
             "grass": "#d9c9a0", "lowland": "#d4c399", "plains": "#e3d3a8", "forest": "#bfae84",
             "hills": "#cdb98f", "mountain": "#bca780", "rock": "#cfc3a5", "dark": "#a8977a",
@@ -119,7 +119,6 @@ def _defs(font_b64: Optional[str], theme: dict) -> str:
 <filter id="paper" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".035" numOctaves="3" seed="4"/>
  <feColorMatrix values="0 0 0 0 .2 0 0 0 0 .15 0 0 0 0 .05 0 0 0 .55 -.18"/></filter>
 <filter id="drop" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="2.5" stdDeviation="2" flood-color="#000" flood-opacity=".45"/></filter>
-<pattern id="hatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(40)"><line x1="0" y1="0" x2="0" y2="12" stroke="#5b4a2e" stroke-width="1.6" opacity=".28"/></pattern>
 <filter id="soft"><feGaussianBlur stdDeviation="6"/></filter>
 {sepia}
 {SPRITES}
@@ -178,12 +177,6 @@ def render_board(geom: dict, state: dict, *, theme: str = "vivid",
                f'stroke-linejoin="round"/>')
     for kind, x, y, s in geom["decor"]:
         out.append(f'<use href="#s-{kind}" transform="translate({x} {y}) scale({s})"/>')
-    # Land outside every region is scenery: washed out and hatched so the
-    # kingdoms in play stand out.
-    if geom.get("neutral"):
-        out.append(f'<g clip-path="url(#landclip)"><path d="{geom["neutral"]}" fill="{th["fog"]}" '
-                   f'fill-opacity=".5" fill-rule="evenodd"/>'
-                   f'<path d="{geom["neutral"]}" fill="url(#hatch)" fill-rule="evenodd"/></g>')
     out.append('</g>')  # terrain filter
 
     # ---- the Abyss rift -------------------------------------------------
@@ -207,9 +200,14 @@ def render_board(geom: dict, state: dict, *, theme: str = "vivid",
 
     # ---- territories ----------------------------------------------------
     out.append('<g clip-path="url(#landclip)">')
+    region_color = {r["key"]: r["color"] for r in geom["regions"]}
     for t in geom["tiles"]:
         tid = owner.get(t["key"])
         if tid is None or tid not in teams:
+            # Unclaimed ground keeps a faint wash of its region's colour, so
+            # each kingdom reads as one piece before anyone owns it.
+            out.append(f'<path d="{t["path"]}" fill="{region_color.get(t["region"], "#fff")}" '
+                       f'fill-opacity=".3"/>')
             continue
         col = teams[tid]["color"]
         cid = f'c-{t["key"]}'
@@ -220,8 +218,14 @@ def render_board(geom: dict, state: dict, *, theme: str = "vivid",
     for t in geom["tiles"]:
         out.append(f'<path d="{t["path"]}" fill="none" stroke="{th["ink"]}" stroke-width="2" '
                    f'stroke-dasharray="7 5" stroke-opacity=".55"/>')
+    # Each kingdom is edged inside with a band of its own colour.
     for r in geom["regions"]:
-        out.append(f'<path d="{r["path"]}" fill="none" stroke="{th["ink"]}" stroke-width="6" '
+        cid = f'r-{r["key"]}'
+        out.append(f'<clipPath id="{cid}"><path d="{r["path"]}"/></clipPath>')
+        out.append(f'<path d="{r["path"]}" fill="none" stroke="{r["color"]}" stroke-width="20" '
+                   f'stroke-opacity=".75" stroke-linejoin="round" clip-path="url(#{cid})"/>')
+    for r in geom["regions"]:
+        out.append(f'<path d="{r["path"]}" fill="none" stroke="{th["ink"]}" stroke-width="7" '
                    f'stroke-opacity=".75" stroke-linejoin="round"/>')
         out.append(f'<path d="{r["path"]}" fill="none" stroke="#f6e7b8" stroke-width="1.6" '
                    f'stroke-opacity=".9" stroke-linejoin="round"/>')
