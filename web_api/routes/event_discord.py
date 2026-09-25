@@ -1123,7 +1123,7 @@ def _assert_team_notifications_access(s, user_id: int, ev: Event, team,
         return
     except Exception:
         pass
-    from services.event_leadership import effective_leadership
+    from web_api.event_leadership import effective_leadership
 
     leadership = effective_leadership(getattr(ev, "leadership_config", None))
     if not leadership.get("enabled"):
