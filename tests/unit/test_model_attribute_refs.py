@@ -23,7 +23,9 @@ MODELS_DIR = REPO_ROOT / "db" / "models"
 SCANNED_DIRS = ("api", "bots", "commands", "data", "data_api", "db", "games",
                 "lootboard", "monitor", "osrs_api", "services", "utils",
                 "web_api", "workers")
-# Modules a model name is imported from (`api.core` re-exports db's models).
+# Modules a model name is imported from. (`api.core` does not actually
+# re-export db's models: the removed `notified` purge imported one from it and
+# died on the import.)
 MODEL_MODULES = ("db", "api.core")
 # Names every declarative class has without declaring them.
 IMPLICIT_ATTRS = {"__table__", "__tablename__", "__table_args__", "__mapper__",
@@ -31,14 +33,10 @@ IMPLICIT_ATTRS = {"__table__", "__tablename__", "__table_args__", "__mapper__",
                   "__module__", "__init__", "__class__", "metadata",
                   "registry", "query"}
 
-# References known to be broken, each awaiting its own fix. Delete the entry
-# with the fix: test_known_entries_are_still_broken fails once it is stale.
-KNOWN_MISSING = {
-    # cleanup_tracking_dicts filters on a column that doesn't exist (it's
-    # `date_added`), so its 30-day purge has never run. Correcting the name
-    # would start a bulk delete of `notified` rows — an owner decision.
-    ("services/notification_service.py", "NotifiedSubmission", "created_at"),
-}
+# References known to be broken, each awaiting its own fix, as
+# (path, Model, attr). Delete the entry with the fix:
+# test_known_entries_are_still_broken fails once it is stale.
+KNOWN_MISSING: set[tuple[str, str, str]] = set()
 
 
 def _base_name(node: ast.expr):

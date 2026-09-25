@@ -1350,12 +1350,11 @@ class NotificationService:
                     # Reset error counter on successful processing
                     consecutive_errors = 0
                     
-                    # Clean up tracking dictionaries and stuck notifications every 1000 iterations
+                    # Reset stuck notifications every 1000 iterations
                     # Only run cleanup if we've actually processed some notifications
                     cleanup_counter += 1
                     if cleanup_counter >= 1000 and self.processed_count > 0:
                         app_logger.log(log_type="info", data="Starting cleanup cycle", app_name="notification_service", description="process_notifications_loop")
-                        await self.cleanup_tracking_dicts()
                         await self.cleanup_stuck_notifications()
                         cleanup_counter = 0
                         app_logger.log(log_type="info", data=f"Cleanup completed. Total processed: {self.processed_count}", app_name="notification_service", description="process_notifications_loop")
@@ -5058,32 +5057,6 @@ class NotificationService:
                          app_name="notification_service", 
                          description="_is_not_sent")
             return True  # On error, allow sending to be safe
-
-    async def cleanup_tracking_dicts(self):
-        """Clean up old NotifiedSubmission entries to prevent database bloat"""
-        try:
-            from api.core import get_db_session, NotifiedSubmission
-            with get_db_session() as db_session:
-                # Delete NotifiedSubmission entries older than 30 days
-                cutoff_date = datetime.now() - timedelta(days=30)
-                old_entries = db_session.query(NotifiedSubmission).filter(
-                    NotifiedSubmission.created_at < cutoff_date
-                ).all()
-                
-                if old_entries:
-                    for entry in old_entries:
-                        db_session.delete(entry)
-                    db_session.commit()
-                    app_logger.log(log_type="info", 
-                                 data=f"Cleaned up {len(old_entries)} old notification entries", 
-                                 app_name="notification_service", 
-                                 description="cleanup_tracking_dicts")
-                
-        except Exception as e:
-            app_logger.log(log_type="error", 
-                         data=f"Error cleaning up old notification entries: {e}", 
-                         app_name="notification_service", 
-                         description="cleanup_tracking_dicts")
 
     async def cleanup_stuck_notifications(self):
         """Reset notifications that have been stuck in 'processing' status for too long"""

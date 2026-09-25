@@ -6,6 +6,15 @@ from .base import Base
 
 
 class NotifiedSubmission(Base):
+    """One row per announcement posted to a group's Discord channel.
+
+    Kept indefinitely, deliberately. ``message_id`` is the only handle on an
+    old post: Modify Entry, the manual-submission undo and
+    ``scripts/remove_bogus_drop.py`` find the message through it. Old rows
+    also feed the "recent submissions" lists, the 90-day diagnostics chart
+    and ``scripts/rank_game_emojis.py``. At ~250 bytes a row the table is
+    small (54 MB in Sept 2026), so don't add a retention purge.
+    """
     __tablename__ = 'notified'
     __table_args__ = (
         UniqueConstraint('drop_id', 'clog_id', 'ca_id', 'pb_id', name='uix_notified_single_assoc'),
