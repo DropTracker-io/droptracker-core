@@ -1267,7 +1267,7 @@ def mercy_sweep(session, redis_conn, now: Optional[datetime] = None) -> list:
         # team gets clobbered: current_task_id is nulled and the team is handed
         # a second roll.
         pos = (session.query(EventBoardPosition)
-               .filter(EventBoardPosition.id == pos.id)
+               .filter(EventBoardPosition.team_id == pos.team_id)
                .with_for_update()
                .first())
         if pos is None or pos.status != "active":
