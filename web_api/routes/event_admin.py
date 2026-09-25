@@ -635,7 +635,11 @@ async def award_completion(event_id: int):
                       "part as progress instead.")
 
     def _apply():
-        nonlocal quantity, note
+        # Every enclosing name this closure rebinds must be listed here —
+        # rebinding one that isn't makes it local to the whole closure, and
+        # the reads above the assignment raise UnboundLocalError (every award
+        # 500'd that way from 2026-09-24). ``credit`` is read-only in here.
+        nonlocal quantity, note, matched_target
         # P0-10: manual rows have no submission_guid, so the ledger's unique
         # (task, team, guid) index can't dedupe them — an organizer's double
         # click would insert and apply two identical awards. A short one-shot
@@ -681,8 +685,10 @@ async def award_completion(event_id: int):
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
             if player_id is not None:
+                # EventTeamMember's primary key is (team_id, player_id) — it
+                # has no ``id`` column.
                 on_team = (
-                    s.query(EventTeamMember.id)
+                    s.query(EventTeamMember.player_id)
                     .filter(EventTeamMember.team_id == team_id,
                             EventTeamMember.player_id == player_id)
                     .first()
@@ -704,14 +710,14 @@ async def award_completion(event_id: int):
                 # submission would match — this also converts quantity into
                 # point credit for point_collection tasks (weight × qty), so
                 # the ledger row folds identically to an auto row.
-                credit = eng.item_match_quantity(
+                part_quantity = eng.item_match_quantity(
                     eng._task_to_dict(task), matched_target, quantity)
-                if credit is None:
+                if part_quantity is None:
                     abort_problem(
                         422, "Item not part of task",
                         f"'{matched_target}' is not one of this task's "
                         "configured items or its target.")
-                quantity = credit
+                quantity = part_quantity
             if path_idx is not None:
                 config = eng.parse_task_config(task.config)
                 paths = (config.get("paths") or []) if config.get("kind") == "any_path" else []
