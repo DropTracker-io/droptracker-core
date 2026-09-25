@@ -475,6 +475,20 @@ class TestPayload:
         assert out["battles"][0]["player_name"] == "Zed"
         assert out["regions"][0]["tile_ids"] == [tile.id]
 
+    def test_territory_shapes(self, env):
+        ev = _event(env.s)
+        _teams(env.s, ev, "Red")
+        region, (tile,), _tasks = _map(env.s, ev)
+        tile.shape = "M0 0l10 0 0 10z"
+        env.s.query(M.ConquestRegion).update({"shape": "M0 0L20 0L20 20Z"})
+        map_row = engine_mod.ensure_map(env.s, ev.id)
+        map_row.shape_width, map_row.shape_height = 2880, 1500
+        env.s.flush()
+        out = engine_mod.conquest_payload(env.s, ev)
+        assert out["tiles"][0]["shape"] == "M0 0l10 0 0 10z"
+        assert out["regions"][0]["shape"] == "M0 0L20 0L20 20Z"
+        assert (out["shape_width"], out["shape_height"]) == (2880, 1500)
+
     def test_conceal_hides_rules(self, env):
         ev = _event(env.s)
         _teams(env.s, ev, "Red")

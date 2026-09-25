@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable, Optional
@@ -101,6 +102,10 @@ MAX_TILE_VALUE = 100
 MAX_REGION_BONUS = 1000
 MAX_LABEL_LEN = 80
 MAX_REGION_NAME_LEN = 60
+# Territory / region outlines (web121a): SVG path data, moves and lines only.
+# The Gielinor preset's biggest region outline is ~4 KB; this leaves room.
+MAX_SHAPE_LEN = 20000
+_SHAPE_RE = re.compile(r"^[MmLlZz0-9 .,\-]+$")
 
 DEFAULT_SETTINGS = {
     "scoring_mode": "hold_time",
@@ -526,6 +531,18 @@ def _clean_color(value) -> Optional[str]:
     return None
 
 
+def clean_shape(value) -> Optional[str]:
+    """A territory outline as the site will draw it, or None. Only move /
+    line / close commands and numbers get through (it is written straight
+    into an SVG ``d`` attribute), and nothing oversized."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    if not v or len(v) > MAX_SHAPE_LEN or not _SHAPE_RE.match(v) or v[0] not in "Mm":
+        return None
+    return v
+
+
 def _frac(value) -> Optional[float]:
     if isinstance(value, bool):
         return None
@@ -586,6 +603,7 @@ def validate_map(body) -> tuple[dict, list]:
             "key": key, "name": name, "bonus": round(bonus, 2),
             "color": _clean_color(r.get("color")),
             "label_x": _frac(r.get("label_x")), "label_y": _frac(r.get("label_y")),
+            "shape": clean_shape(r.get("shape")),
         })
 
     tiles = []
@@ -668,6 +686,7 @@ def validate_map(body) -> tuple[dict, list]:
             "key": key, "label": label, "x": x, "y": y, "kind": kind,
             "value": round(value, 2), "region_key": region_key,
             "icon_item_id": icon_item_id, "icon_npc_id": icon_npc_id,
+            "shape": clean_shape(t.get("shape")),
             "rules": rules,
         })
     return {"regions": regions, "tiles": tiles}, errors

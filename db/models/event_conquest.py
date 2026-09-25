@@ -59,6 +59,11 @@ class ConquestMap(Base):
     bg_height = Column(Integer, nullable=True)
     # Which built-in map the designer started from (e.g. "gielinor"), if any.
     preset = Column(String(40), nullable=True)
+    # The coordinate space tile/region ``shape`` paths are drawn in (web121a),
+    # kept apart from the background's size so replacing or removing the art
+    # never shifts the territories.
+    shape_width = Column(Integer, nullable=True)
+    shape_height = Column(Integer, nullable=True)
     # Bumped by every designer save; a save carrying an older revision is
     # refused so two open editors can't silently overwrite each other.
     revision = Column(Integer, nullable=False, default=0, server_default="0")
@@ -96,6 +101,9 @@ class ConquestRegion(Base):
     label_y = Column(Float, nullable=True)
     owner_team_id = Column(Integer, nullable=True)  # no FK on purpose (module doc)
     owner_since = Column(DateTime, nullable=True)
+    # Outline of the whole region as an SVG path in the map's shape space
+    # (web121a); NULL on hand-built maps, which draw soft blobs instead.
+    shape = Column(Text, nullable=True)
 
 
 class ConquestTile(Base):
@@ -125,6 +133,9 @@ class ConquestTile(Base):
     # Icon: an NPC portrait (/img/npcdb) or an item (/img/itemdb); item wins.
     icon_npc_id = Column(Integer, nullable=True)
     icon_item_id = Column(Integer, nullable=True)
+    # The territory this tile covers, an SVG path in the map's shape space
+    # (web121a). NULL = drawn as a badge only.
+    shape = Column(Text, nullable=True)
     # --- live state ---
     owner_team_id = Column(Integer, nullable=True)  # no FK on purpose (module doc)
     defense = Column(Integer, nullable=False, default=0, server_default="0")

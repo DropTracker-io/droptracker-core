@@ -207,7 +207,8 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
     for i, r in enumerate(regions_in):
         row = ConquestRegion(event_id=ev.id, name=r["name"], color=r["color"],
                              bonus=r["bonus"], sort=i,
-                             label_x=r["label_x"], label_y=r["label_y"])
+                             label_x=r["label_x"], label_y=r["label_y"],
+                             shape=r.get("shape"))
         s.add(row)
         s.flush()
         region_ids[r["key"]] = row.id
@@ -218,7 +219,7 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
             event_id=ev.id, region_id=region_ids.get(t["region_key"]), idx=i,
             label=t["label"], x=t["x"], y=t["y"], kind=t["kind"], value=t["value"],
             icon_npc_id=t["icon_npc_id"], icon_item_id=t["icon_item_id"],
-            owner_team_id=None, defense=0, captures=0,
+            shape=t.get("shape"), owner_team_id=None, defense=0, captures=0,
         )
         s.add(tile)
         s.flush()
@@ -274,6 +275,21 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
     s.flush()
     return {"regions": len(regions_in), "tiles": len(tiles_in),
             "tasks_removed": removed}
+
+
+def _apply_preset_art(s, ev, art) -> None:
+    """A drawn preset brings its backdrop and the coordinate space of its
+    territory outlines; a schematic one clears the outline space (it drew
+    none) and leaves any uploaded art alone."""
+    from services.conquest_engine import ensure_map
+
+    map_row = ensure_map(s, ev.id)
+    if not art:
+        map_row.shape_width = map_row.shape_height = None
+        return
+    map_row.background_url = art["background_url"]
+    map_row.bg_width = map_row.shape_width = int(art["width"])
+    map_row.bg_height = map_row.shape_height = int(art["height"])
 
 
 def _suggested_troop_hours(s, ev, tile_count: int) -> float:
@@ -471,6 +487,7 @@ async def apply_conquest_preset(event_id: int):
             if errors:  # a catalog row the validator rejects: say so, don't half-build
                 abort_problem(500, "Preset failed validation", " ".join(errors[:5]))
             summary = _write_map(s, ev, user_id, clean, preset=preset)
+            _apply_preset_art(s, ev, body_map.get("art"))
             s.commit()
             payload = conquest_payload(s, ev)
             payload["preset_summary"] = dict(summary, skipped=skipped,

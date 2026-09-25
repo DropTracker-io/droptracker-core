@@ -106,9 +106,9 @@ AREAS = {
     "kourend": [[(1080, 3345), (1990, 3345), (1990, 4140), (1080, 4140)]],
     "varlamore": [[(1080, 2620), (1990, 2620), (1990, 3345), (1080, 3345)]],
     "kandarin": [[(2120, 2995), (2830, 2995), (2830, 3570), (2560, 3570), (2560, 3690), (2120, 3690)]],
-    "fremennik": [[(2120, 3690), (2560, 3690), (2560, 3570), (2770, 3570), (2770, 3890),
+    "fremennik": [[(2120, 3690), (2560, 3690), (2560, 3570), (2700, 3570), (2700, 3890),
                    (3010, 3890), (3010, 4140), (2120, 4140)]],
-    "gwd": [[(2770, 3520), (2950, 3520), (2950, 3890), (2770, 3890)]],
+    "gwd": [[(2700, 3445), (2950, 3445), (2950, 3890), (2700, 3890)]],
     "wilderness": [[(2950, 3520), (3400, 3520), (3400, 3985), (2950, 3985)]],
     "heartlands": [[(2800, 3190), (3000, 3190), (3000, 3090), (3130, 3090), (3130, 3140),
                     (3290, 3140), (3290, 3230), (3395, 3230), (3395, 3520), (2800, 3520)]],
@@ -117,6 +117,33 @@ AREAS = {
 }
 AREA_PRIORITY = ("gwd", "fremennik", "wilderness", "morytania", "heartlands", "desert",
                  "kandarin", "kourend", "varlamore")
+# Medallion metrics in board units (1 unit = 1 game tile). The site draws
+# each boss badge at exactly these sizes (scaled with the map), so the room
+# mapgen keeps clear around a badge is the room it really takes.
+BADGE = {
+    "r": 36,          # medallion radius
+    "font": 21,       # name scroll font size
+    "char_w": 10.3,   # average RuneScape UF glyph width at that size
+    "pad": 22,        # scroll padding, both sides together
+    "tail": 9,        # ribbon tail beyond each end of the scroll
+    "scroll_y": 52,   # scroll centre below the medallion centre
+    "scroll_h": 26,
+    "up": 40,         # clear space above the medallion centre
+    "down": 72,       # and below it (the scroll hangs underneath)
+}
+REGION_FONT = 34
+
+
+def badge_half_width(label: str) -> float:
+    """Half the width a badge takes: its scroll, or the medallion if wider."""
+    scroll = (len(label) * BADGE["char_w"] + BADGE["pad"]) / 2 + BADGE["tail"]
+    return max(scroll, BADGE["r"] + 4)
+
+
+def region_label_half_width(name: str) -> float:
+    return len(name) * REGION_FONT * 0.28 + 12
+
+
 # Tiny islands are grown to at least this radius so they stay clickable.
 MIN_ISLAND = 22
 

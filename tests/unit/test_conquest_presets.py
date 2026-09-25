@@ -90,9 +90,42 @@ class TestBuildPresetMap:
 
     def test_tiles_on_canvas_and_apart(self):
         body, _ = presets.build_preset_map("gielinor", _catalog())
+        assert all(0 < t["x"] < 1 and 0 < t["y"] < 1 for t in body["tiles"])
+        # No two badges (medallion + name scroll) overlap on the drawn map.
+        art = presets.preset_art("gielinor")
+        b = art["badge"]
+
+        def box(t):
+            x, y = t["x"] * art["width"], t["y"] * art["height"]
+            half = max((len(t["label"]) * b["char_w"] + b["pad"]) / 2 + b["tail"], b["r"] + 4)
+            return (x - half, x + half, y - b["up"], y + b["down"])
+
+        for s1, s2 in itertools.combinations([box(t) for t in body["tiles"]], 2):
+            assert s1[1] <= s2[0] or s2[1] <= s1[0] or s1[3] <= s2[2] or s2[3] <= s1[2]
+
+    def test_drawn_map_matches_the_preset(self):
+        """The art pack (scripts/conquest_map) and the preset agree on every
+        tile and region, so every territory gets drawn."""
+        art = presets.preset_art("gielinor")
+        body, _ = presets.build_preset_map("gielinor", _catalog())
+        assert set(art["tiles"]) == {t["key"] for t in body["tiles"]}
+        assert {k: r["name"] for k, r in art["regions"].items()} == {
+            r["key"]: r["name"] for r in presets.GIELINOR_REGIONS}
+        assert body["art"] == {"background_url": art["background"],
+                               "width": art["width"], "height": art["height"]}
+        clean, errors = cq.validate_map(body)
+        assert errors == []
+        assert all(t["shape"] for t in clean["tiles"])
+        assert all(r["shape"] for r in clean["regions"])
+        assert all(0 < r["label_x"] < 1 and 0 < r["label_y"] < 1 for r in clean["regions"])
+
+    def test_schematic_fallback_without_art(self, monkeypatch):
+        monkeypatch.setattr(presets, "preset_art", lambda preset: None)
+        body, _ = presets.build_preset_map("gielinor", _catalog())
+        assert "art" not in body
+        assert all(t["shape"] is None for t in body["tiles"])
         w, h = presets.CANVAS
         pts = [(t["x"] * w, t["y"] * h) for t in body["tiles"]]
-        assert all(0 < t["x"] < 1 and 0 < t["y"] < 1 for t in body["tiles"])
         closest = min(math.dist(a, b) for a, b in itertools.combinations(pts, 2))
         assert closest >= presets.TILE_SPACING * 0.95
 

@@ -384,6 +384,25 @@ class TestValidateMap:
         _clean, errors = cq.validate_map(body)
         assert any(fragment in e for e in errors), errors
 
+    def test_shapes_pass_through(self):
+        body = _good_map()
+        body["tiles"][0]["shape"] = "M10 20l5 0 0 5-5 0z"
+        body["regions"][0]["shape"] = "M0 0L10 0L10 10Z"
+        clean, errors = cq.validate_map(body)
+        assert errors == []
+        assert clean["tiles"][0]["shape"] == "M10 20l5 0 0 5-5 0z"
+        assert clean["regions"][0]["shape"] == "M0 0L10 0L10 10Z"
+        assert clean["tiles"][1]["shape"] is None
+
+    @pytest.mark.parametrize("shape", [
+        '"/><script>alert(1)</script>', "M0 0 C1 1 2 2 3 3", "10 10 20 20",
+        "M" + "1 " * cq.MAX_SHAPE_LEN, 42, "",
+    ])
+    def test_bad_shapes_dropped(self, shape):
+        # Written straight into an SVG d attribute: anything but plain
+        # move/line path data is dropped, never an error that blocks a save.
+        assert cq.clean_shape(shape) is None
+
     def test_rule_task_problem(self):
         assert cq.rule_task_problem("kc_target", {}) is None
         assert cq.rule_task_problem("item_collection", {"kind": "any_of"}) is None

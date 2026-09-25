@@ -102,7 +102,7 @@ SPRITES = """
 """
 
 
-def _defs(font_b64: Optional[str], theme: dict) -> str:
+def _defs(font_b64: Optional[str], theme: dict, region_font: float = 34) -> str:
     font = (f"@font-face{{font-family:'RSUF';src:url(data:font/ttf;base64,{font_b64}) format('truetype');}}"
             if font_b64 else "")
     sea_a, sea_b = theme["sea"]
@@ -110,7 +110,7 @@ def _defs(font_b64: Optional[str], theme: dict) -> str:
              '0.35 0.69 0.17 0 0.01 0.27 0.53 0.13 0 0 0 0 0 1 0"/></filter>')
     return f"""<defs><style>{font}
 .rs{{font-family:{FONT_STACK};}}
-.region-name{{font-size:34px;fill:#ff981f;stroke:#000;stroke-width:5px;paint-order:stroke;stroke-linejoin:round;letter-spacing:1px}}
+.region-name{{font-size:{region_font}px;fill:#ff981f;stroke:#000;stroke-width:5px;paint-order:stroke;stroke-linejoin:round;letter-spacing:1px}}
 .scroll-text{{font-size:17px;fill:{theme['ink']}}}
 </style>
 <radialGradient id="sea" cx="50%" cy="45%" r="75%"><stop offset="0" stop-color="{sea_a}"/><stop offset="1" stop-color="{sea_b}"/></radialGradient>
@@ -129,9 +129,13 @@ def _defs(font_b64: Optional[str], theme: dict) -> str:
 
 def render_board(geom: dict, state: dict, *, theme: str = "vivid",
                  portrait: Callable[[str], Optional[str]] = lambda key: None,
-                 font_b64: Optional[str] = None) -> str:
+                 font_b64: Optional[str] = None, layers: str = "all") -> str:
+    """The board as one SVG. ``layers="terrain"`` draws only the static
+    art (sea, land, terrain, the Abyss rift) with no frame: the backdrop the
+    site lays its live territories and badges over."""
     th = THEMES[theme]
     W, H = geom["width"], geom["height"]
+    terrain_only = layers == "terrain"
     teams = {t["id"]: t for t in state.get("teams", [])}
     tstate = state.get("tiles", {})
     owner = {k: v.get("owner") for k, v in tstate.items()}
@@ -144,10 +148,13 @@ def render_board(geom: dict, state: dict, *, theme: str = "vivid",
         if len(owners) == 1 and None not in owners:
             region_owner[rk] = owners.pop()
 
+    if terrain_only:
+        box = (0, 0, W, H)
+    else:
+        box = (-FRAME, -FRAME - HEADER, W + 2 * FRAME, H + 2 * FRAME + HEADER)
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
-           f'viewBox="{-FRAME} {-FRAME - HEADER} {W + 2 * FRAME} {H + 2 * FRAME + HEADER}" '
-           f'width="{W + 2 * FRAME}" height="{H + 2 * FRAME + HEADER}">']
-    out.append(_defs(font_b64, th))
+           f'viewBox="{box[0]} {box[1]} {box[2]} {box[3]}" width="{box[2]}" height="{box[3]}">']
+    out.append(_defs(font_b64, th, geom.get("region_font", 34)))
     out.append(f'<clipPath id="landclip"><path d="{geom["land"]}" clip-rule="evenodd"/></clipPath>')
     out.append(f'<clipPath id="boardclip"><rect x="0" y="0" width="{W}" height="{H}"/></clipPath>')
 
@@ -198,6 +205,10 @@ def render_board(geom: dict, state: dict, *, theme: str = "vivid",
         spiral.append("M" + " L".join(pts))
     out.append(f'<path d="{"".join(spiral)}" fill="none" stroke="#d9c7ff" stroke-width="2" opacity=".35"/>')
 
+    if terrain_only:
+        out.append('</g></svg>')
+        return "\n".join(out)
+
     # ---- territories ----------------------------------------------------
     out.append('<g clip-path="url(#landclip)">')
     region_color = {r["key"]: r["color"] for r in geom["regions"]}
@@ -247,7 +258,8 @@ def render_board(geom: dict, state: dict, *, theme: str = "vivid",
 
     # ---- medallions -----------------------------------------------------
     for t in sorted(geom["tiles"], key=lambda t: t["y"]):
-        out.append(_medallion(t, tstate.get(t["key"], {}), teams, th, portrait(t["key"])))
+        out.append(_medallion(t, tstate.get(t["key"], {}), teams, th, portrait(t["key"]),
+                              geom.get("badge", {}).get("r", 30) / 30))
 
     # ---- region names ---------------------------------------------------
     for r in geom["regions"]:
@@ -284,12 +296,13 @@ def geom_region(geom, key):
     return None
 
 
-def _medallion(t, st, teams, th, img_uri) -> str:
+def _medallion(t, st, teams, th, img_uri, k: float = 1.0) -> str:
+    """Drawn at a 30-unit radius, scaled by ``k`` to the geometry's size."""
     x, y = t["x"], t["y"]
     tid = st.get("owner")
     team = teams.get(tid) if tid is not None else None
     ring = team["color"] if team else "url(#gold)"
-    out = [f'<g transform="translate({x} {y})">']
+    out = [f'<g transform="translate({x} {y}) scale({k:.3f})">']
     out.append('<g filter="url(#drop)">')
     out.append(f'<circle r="30" fill="{ring}" stroke="{th["ink"]}" stroke-width="2.6"/>')
     if team:  # a thin gold bevel inside a team ring keeps it looking like a token
