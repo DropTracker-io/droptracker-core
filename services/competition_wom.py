@@ -553,7 +553,10 @@ def sync_linked_team_rosters_db(event_id: int, comp: dict, *, force: bool = Fals
         current = {m.player_id: m for m in
                    session.query(EventTeamMember)
                    .filter(EventTeamMember.event_id == event_id).all()}
-        joined_at = event.activated_at or event.starts_at or datetime.now()
+        from utils.event_window import effective_window_start
+
+        joined_at = (effective_window_start(event.starts_at, event.activated_at)
+                     or datetime.now())
         placements: dict = {}
         departed: list = []
         for pid, member in current.items():

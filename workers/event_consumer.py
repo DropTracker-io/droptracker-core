@@ -182,8 +182,20 @@ def _refresh_state(r):
     finally:
         db_session.close()
         reset_db_connections()
-    event_engine.set_active_events(r, list(state.events.keys()))
+    # Due drafts open the producer gate too, so their members' submissions
+    # reach the queue to be parked even when nothing else is running.
+    event_engine.set_active_events(
+        r, list(state.events.keys()) + list(state.prestart.keys()))
     return state
+
+
+def _replay_prestart(r, state) -> dict:
+    """Requeue envelopes parked for drafts that are now active. Runs only
+    after ``shared["state"]`` holds ``state``, so the lanes judge the replay
+    against a snapshot that already has the event live."""
+    from services import event_engine
+
+    return event_engine.replay_prestart(r, list(state.events.keys()))
 
 
 def _reconcile_effort(state) -> int:
@@ -301,6 +313,12 @@ def _process_entry(r, state, entry_bytes) -> list:
             db_session, r, state, envelope, staged=staged)
         db_session.commit()
         staged.flush(r)
+        # After the commit, so a requeued retry of this envelope can't park
+        # it twice. Best-effort: never fails the apply.
+        try:
+            event_engine.park_prestart(r, state, envelope)
+        except Exception:
+            log.warning("Pre-start parking failed:\n%s", traceback.format_exc())
         return results
     except Exception:
         db_session.rollback()
@@ -624,6 +642,14 @@ async def run_consumer() -> None:
                     len(state.events), len(state.participants),
                     " (admin bump)" if bumped else "",
                 )
+                # Envelopes parked while a scheduled draft waited on the
+                # sweep go back on the queue now that the event is live.
+                try:
+                    replayed = await asyncio.to_thread(_replay_prestart, r, state)
+                    if replayed:
+                        log.info("Pre-start replay requeued: %s", replayed)
+                except Exception:
+                    log.error("Pre-start replay failed:\n%s", traceback.format_exc())
                 # Bingo EHB: catch the `frozen_at` reporting flag up to the
                 # freeze gate (accrual already stopped at completion time).
                 try:

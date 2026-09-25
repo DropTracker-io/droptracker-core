@@ -86,9 +86,10 @@ def event_window(event, now: Optional[datetime] = None) -> tuple:
     """``(start, end)`` of an Event row's scoring window — scheduled dates
     narrowed by the explicit activate/end stamps (the engine's rule), with
     the end clamped to ``now``. Either side may be None."""
-    starts = [d for d in (event.starts_at, event.activated_at) if d is not None]
+    from utils.event_window import effective_window_start
+
     ends = [d for d in (event.ends_at, event.ended_at) if d is not None]
-    start = max(starts) if starts else None
+    start = effective_window_start(event.starts_at, event.activated_at)
     end = min(ends) if ends else None
     if now is not None:
         end = min(end, now) if end is not None else now

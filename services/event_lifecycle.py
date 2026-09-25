@@ -1199,7 +1199,12 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
         .filter(EventTeamMember.team_id.in_([t.id for t in teams]))
         .all()
     }
-    joined_at = event.activated_at or event.starts_at or now or datetime.now()
+    # The window's opening, not the activation stamp: a sweep that goes live
+    # a minute late must not cut whole-clan members out of that minute.
+    from utils.event_window import effective_window_start
+
+    joined_at = (effective_window_start(event.starts_at, event.activated_at)
+                 or now or datetime.now())
     added = 0
     placements: dict = {}   # player_id -> team_id, for the buy-in carry-over
     for team in auto_teams:

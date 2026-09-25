@@ -111,6 +111,8 @@ from typing import Optional
 from sqlalchemy.exc import DataError, IntegrityError
 
 from utils import duplicate_pets as _dp
+from utils.event_window import (LATE_START_GRACE_SECONDS,  # noqa: F401 — re-exported
+                                effective_window_start)
 from utils import task_progress as _tp
 from utils import vestige_rings as _vr
 
@@ -144,6 +146,21 @@ ENDED_TOMBSTONE_TTL_SECONDS = 48 * 3600
 # announces, so expiry costs nothing.
 LEAD_WATERMARK_KEY = "events:{event_id}:leadteam"
 LEAD_WATERMARK_TTL_SECONDS = 30 * 24 * 3600
+# Pre-start parking (2026-09-25). A scheduled draft goes live on the
+# lifecycle sweep, up to a minute after its starts_at — and until then it is
+# not in the matcher state, so a roster member's drop in that gap used to be
+# consumed and discarded (event 81: a Verac's plateskirt 26s after the start,
+# 26s before the sweep). While a draft is due, a copy of each of its members'
+# envelopes is parked here, pinned to that event (``only_event_id``), and the
+# consumer requeues the list once the event shows up active.
+PRESTART_KEY = "events:prestart:{event_id}"
+# Load due drafts this far ahead of starts_at, so a refresh just before the
+# start already knows to park. Covers the 30s state-refresh cadence twice.
+PRESTART_LOOKAHEAD_SECONDS = 120
+# LATE_START_GRACE_SECONDS (utils.event_window) bounds what gets parked: an
+# activation within it still opens the window at starts_at.
+PRESTART_MAX_ENTRIES = 20000
+PRESTART_TTL_SECONDS = 6 * 3600
 ADMIN_BUMP_CHANNEL = "rt:event-admin"      # pubsub bump on event/task/roster mutations
 
 _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe keys
@@ -1548,13 +1565,17 @@ class MatcherState:
     # (event_id, team_id) -> set of task ids already complete. The effort
     # freeze gate, mirrored into Redis for the hot path.
     completed_tasks_by_team: dict = field(default_factory=dict)
+    # Pre-start parking: scheduled drafts that are due (or about to be) but
+    # not active yet. event_id -> starts_at, and
+    # player_id -> [(event_id, joined_at)]. Never evaluated, only parked.
+    prestart: dict = field(default_factory=dict)
+    prestart_participants: dict = field(default_factory=dict)
     loaded_at: float = 0.0
 
 
 def _event_to_dict(event) -> dict:
     # Effective window (PRD D10/A5): scheduled dates narrowed by explicit
     # activate/end actions. Evaluation is frozen outside it.
-    starts = [d for d in (event.starts_at, event.activated_at) if d is not None]
     ends = [d for d in (event.ends_at, event.ended_at) if d is not None]
     return {
         "id": event.id,
@@ -1568,7 +1589,7 @@ def _event_to_dict(event) -> dict:
         "board_size": int(event.board_size or 5),
         "bonus_line_points": int(event.bonus_line_points or 0),
         "bonus_blackout_points": int(event.bonus_blackout_points or 0),
-        "window_start": max(starts) if starts else None,
+        "window_start": effective_window_start(event.starts_at, event.activated_at),
         "window_end": min(ends) if ends else None,
         # Recurring schedules (web82a): set truthy when schedule_config is
         # present; load_matcher_state attaches the materialized "windows"
@@ -1802,12 +1823,162 @@ def multi_clan_players(members_by_gid: dict, gids) -> set:
     return {pid for pid, n in counts.items() if n > 1}
 
 
+def _load_prestart(session, state: "MatcherState", now: datetime) -> None:
+    """Fill ``state.prestart`` / ``state.prestart_participants`` with the
+    scheduled drafts the lifecycle sweep is about to activate.
+
+    A draft counts from :data:`PRESTART_LOOKAHEAD_SECONDS` before its start
+    until :data:`LATE_START_GRACE_SECONDS` after it (a draft still blocked
+    past that will run from its real activation, so parking stops). The
+    roster is the explicit team members; a clan-vs-clan draft also takes
+    every member of its accepted clans, because whole-clan teams only
+    materialize at activation. Parking a non-member is harmless: the replay
+    finds no membership and does nothing."""
+    from db.models import Event, EventGroup, EventTeamMember
+
+    drafts = (
+        session.query(Event.id, Event.starts_at, Event.mode)
+        .filter(Event.status == "draft",
+                Event.starts_at.isnot(None),
+                Event.starts_at <= now + timedelta(seconds=PRESTART_LOOKAHEAD_SECONDS),
+                Event.starts_at >= now - timedelta(seconds=LATE_START_GRACE_SECONDS))
+        .all()
+    )
+    if not drafts:
+        return
+    state.prestart = {eid: starts_at for eid, starts_at, _mode in drafts}
+    ids = list(state.prestart)
+    seen = set()
+    for pid, eid, joined_at in (
+            session.query(EventTeamMember.player_id, EventTeamMember.event_id,
+                          EventTeamMember.joined_at)
+            .filter(EventTeamMember.event_id.in_(ids)).all()):
+        state.prestart_participants.setdefault(pid, []).append((eid, joined_at))
+        seen.add((pid, eid))
+    cvc_ids = [eid for eid, _s, mode in drafts if mode == "clan_vs_clan"]
+    if not cvc_ids:
+        return
+    from db.models.associations import user_group_association
+
+    gids_by_event: dict = {}
+    for eid, gid in (session.query(EventGroup.event_id, EventGroup.group_id)
+                     .filter(EventGroup.event_id.in_(cvc_ids),
+                             EventGroup.status == "accepted").all()):
+        gids_by_event.setdefault(gid, set()).add(eid)
+    if not gids_by_event:
+        return
+    for gid, pid in (
+            session.query(user_group_association.c.group_id,
+                          user_group_association.c.player_id)
+            .filter(user_group_association.c.group_id.in_(list(gids_by_event)),
+                    user_group_association.c.player_id.isnot(None)).all()):
+        for eid in gids_by_event.get(gid, ()):
+            if (pid, eid) not in seen:
+                seen.add((pid, eid))
+                state.prestart_participants.setdefault(pid, []).append((eid, None))
+
+
+def park_prestart(redis_conn, state: "MatcherState", envelope: dict) -> list:
+    """Park a copy of ``envelope`` for every due draft its player is on.
+
+    Only submissions timestamped inside ``[starts_at, starts_at + grace]``
+    and after the member's own ``joined_at`` are kept — exactly what the
+    event will accept once live. The copy carries ``only_event_id`` so the
+    replay scores that one event and never re-scores the player's other,
+    already-live events. WOM synthetic envelopes are not parked: the
+    reconciler measures gains from the window start by itself. Best-effort;
+    returns the event ids parked for."""
+    if not state.prestart or redis_conn is None:
+        return []
+    if envelope.get("only_event_id") is not None:
+        return []
+    data = envelope.get("data") or {}
+    if data.get("source") == "wom" or envelope.get("source") == "wom":
+        return []
+    try:
+        memberships = state.prestart_participants.get(int(envelope.get("player_id"))) or []
+    except (TypeError, ValueError):
+        return []
+    if not memberships:
+        return []
+    try:
+        submitted_at = datetime.fromtimestamp(int(envelope.get("ts") or time.time()))
+    except (TypeError, ValueError, OSError, OverflowError):
+        submitted_at = datetime.now()
+    grace = timedelta(seconds=LATE_START_GRACE_SECONDS)
+    parked = []
+    for event_id, joined_at in memberships:
+        starts_at = state.prestart.get(event_id)
+        if starts_at is None or event_id in parked:
+            continue
+        if not (starts_at <= submitted_at <= starts_at + grace):
+            continue
+        if joined_at is not None and submitted_at < joined_at:
+            continue
+        copy = dict(envelope)
+        copy["only_event_id"] = int(event_id)
+        copy.pop("_attempts", None)
+        key = PRESTART_KEY.format(event_id=int(event_id))
+        try:
+            pipe = redis_conn.pipeline()
+            pipe.rpush(key, json.dumps(copy, default=str))
+            pipe.ltrim(key, -PRESTART_MAX_ENTRIES, -1)
+            pipe.expire(key, PRESTART_TTL_SECONDS)
+            pipe.execute()
+            parked.append(event_id)
+        except Exception:
+            pass
+    return parked
+
+
+def replay_prestart(redis_conn, event_ids) -> dict:
+    """Requeue the parked envelopes of every now-active event in
+    ``event_ids``. Call only once the consumer's matcher state already holds
+    those events as active, or the replay is judged against a snapshot that
+    doesn't know them. The list is renamed away first, so an envelope parked
+    concurrently lands in a fresh list and goes on the next pass. Entries go
+    to the consuming (right) end of the queue, oldest last-pushed, so they
+    are applied next and in submission order. Returns {event_id: count}."""
+    replayed: dict = {}
+    if redis_conn is None:
+        return replayed
+    ids = [int(i) for i in (event_ids or [])]
+    if not ids:
+        return replayed
+    try:
+        pipe = redis_conn.pipeline()
+        for eid in ids:
+            pipe.exists(PRESTART_KEY.format(event_id=eid))
+        present = [eid for eid, hit in zip(ids, pipe.execute()) if hit]
+    except Exception:
+        return replayed
+    for eid in present:
+        key = PRESTART_KEY.format(event_id=eid)
+        claim = f"{key}:replaying:{int(time.time() * 1000)}"
+        try:
+            redis_conn.rename(key, claim)
+        except Exception:
+            continue  # vanished (TTL / another replayer) since the EXISTS
+        try:
+            entries = redis_conn.lrange(claim, 0, -1) or []
+            if entries:
+                redis_conn.rpush(QUEUE_KEY, *reversed(entries))
+            redis_conn.delete(claim)
+            replayed[eid] = len(entries)
+        except Exception:
+            # Leave the claim to expire with the parked list's TTL rather than
+            # risk a double replay; the ledger dedupes item rows anyway.
+            pass
+    return replayed
+
+
 def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
     """Load all active events + tasks + bingo cells + rosters into a
     :class:`MatcherState`. One query burst per refresh, not per submission."""
     from db.models import Event, EventTask, EventTeam, EventTeamMember, EventBingoCell
 
     state = MatcherState(loaded_at=time.time())
+    _load_prestart(session, state, now or datetime.now())
     events = session.query(Event).filter(Event.status == "active").all()
     if not events:
         return state
@@ -5318,8 +5489,13 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
     except (TypeError, ValueError, OSError, OverflowError):
         submitted_at = datetime.now()
     effort_done_cache: dict = {}
+    # Pre-start replays (park_prestart) are pinned to the one event they were
+    # parked for; the player's other events already saw the original.
+    only_event_id = envelope.get("only_event_id")
 
     for event_id, team_id, joined_at in memberships:
+        if only_event_id is not None and event_id != only_event_id:
+            continue
         event = state.events.get(event_id)
         if event is None:
             continue
