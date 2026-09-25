@@ -6,6 +6,7 @@ import pytest
 from utils.format import (
     convert_from_ms,
     convert_to_ms,
+    fill_url_template,
     format_number,
     get_current_partition,
     get_extension_from_content_type,
@@ -414,7 +415,12 @@ class TestReplacePlaceholdersTitle:
         # Discord rejects the whole embed on a malformed url.
         embed = _embed("A new drop!", url="https://www.droptracker.io/npcs/{npc_id}")
         out = replace_placeholders(embed, {})
-        assert out.url == "https://www.droptracker.io/npcs/{npc_id}"
+        assert out.url is None
+
+    def test_unresolved_url_placeholder_falls_back_to_the_wiki_link(self):
+        embed = _embed("{item_name}", url="https://www.droptracker.io/npcs/{npc_id}")
+        out = replace_placeholders(embed, {"{item_name}": "Abyssal whip"})
+        assert out.url == "https://oldschool.runescape.wiki/w/Abyssal_whip"
 
     def test_junk_url_is_dropped(self):
         embed = _embed("A new drop!", url="{image_url}")
@@ -425,6 +431,116 @@ class TestReplacePlaceholdersTitle:
         embed = _embed("New Combat Achievement")
         out = replace_placeholders(embed, {})
         assert out.url is None
+
+    def test_multi_word_name_in_custom_url_is_encoded(self):
+        # AstralStar (group 126): Discord refused every drop embed with
+        # "embeds->0->url URL_TYPE_INVALID_URL" once their Title URL filled in
+        # names like "Bandos chestplate", so none of their drops posted.
+        embed = _embed(
+            "{item_name}", url="https://oldschool.runescape.wiki/w/{item_name}"
+        )
+        out = replace_placeholders(embed, {"{item_name}": "Bandos chestplate"})
+        assert out.url == "https://oldschool.runescape.wiki/w/Bandos%20chestplate"
+
+    def test_player_link_in_custom_url_contributes_its_name(self):
+        embed = _embed(
+            "A new drop!", url="https://www.droptracker.io/players/{player_name}"
+        )
+        out = replace_placeholders(
+            embed, {"{player_name}": "[brudda fett](https://www.droptracker.io/players/7)"}
+        )
+        assert out.url == "https://www.droptracker.io/players/brudda%20fett"
+
+    def test_screenshot_url_as_the_whole_link_is_kept(self):
+        url = "https://cdn.droptracker.io/dt_img/user-upload/1/drop/Yama/Oathplate_legs.jpg"
+        embed = _embed("{item_name}", url="{image_url}")
+        out = replace_placeholders(
+            embed, {"{image_url}": url, "{item_name}": "Oathplate legs"}
+        )
+        assert out.url == url
+
+    def test_url_without_a_title_is_still_resolved(self):
+        embed = _embed(None, url="https://oldschool.runescape.wiki/w/{npc_name}")
+        out = replace_placeholders(embed, {"{npc_name}": "General Graardor"})
+        assert out.url == "https://oldschool.runescape.wiki/w/General%20Graardor"
+
+
+class _StubThumbnail:
+    def __init__(self, url):
+        self.url = url
+
+
+class TestReplacePlaceholdersThumbnail:
+    def _thumb(self, url):
+        embed = _embed("A new drop!")
+        embed.thumbnail = _StubThumbnail(url)
+        return embed
+
+    def test_screenshot_thumbnail_is_kept(self):
+        url = "https://cdn.droptracker.io/dt_img/user-upload/1/drop/Yama/x.jpg"
+        out = replace_placeholders(self._thumb("{image_url}"), {"{image_url}": url})
+        assert out.thumbnail.url == url
+
+    def test_empty_screenshot_thumbnail_is_removed(self):
+        out = replace_placeholders(self._thumb("{image_url}"), {"{image_url}": ""})
+        assert out.thumbnail is None
+
+    def test_name_in_thumbnail_is_encoded(self):
+        out = replace_placeholders(
+            self._thumb("https://oldschool.runescape.wiki/images/{item_name}.png"),
+            {"{item_name}": "Masori body"},
+        )
+        assert out.thumbnail.url == "https://oldschool.runescape.wiki/images/Masori%20body.png"
+
+    def test_item_icon_thumbnail_unchanged(self):
+        out = replace_placeholders(
+            self._thumb("https://static.runelite.net/cache/item/icon/{item_id}.png"),
+            {"{item_id}": "4151"},
+        )
+        assert out.thumbnail.url == "https://static.runelite.net/cache/item/icon/4151.png"
+
+
+class TestFillUrlTemplate:
+    @pytest.mark.parametrize("value", [
+        "Bandos chestplate",
+        "Chest (Tombs of Amascut)",
+        "Tumeken's shadow (uncharged)",
+        "`1.2M` (3 x `400K`)",
+        "<:item_masori_body:123>",
+        "a/b?c#d&e=f 100%",
+        "Æther",
+    ])
+    def test_any_value_yields_a_well_formed_url(self, value):
+        url = fill_url_template("https://example.com/x/{v}?q={v}", {"{v}": value})
+        assert url.startswith("https://example.com/x/")
+        assert not any(c in url for c in " `<>{}\"|^\\")
+        assert url.isascii()
+        # A value can never add path or query structure of its own.
+        assert url.count("/") == 4 and url.count("?") == 1
+
+    def test_literal_space_in_template_is_escaped(self):
+        assert (fill_url_template("https://example.com/my page", {})
+                == "https://example.com/my%20page")
+
+    def test_existing_escapes_are_left_alone(self):
+        assert (fill_url_template("https://example.com/a%20b", {})
+                == "https://example.com/a%20b")
+
+    def test_none_value_drops_the_url(self):
+        assert fill_url_template("https://example.com/{kill_count}",
+                                 {"{kill_count}": None}) == ""
+
+    def test_scheme_must_be_allowed(self):
+        assert fill_url_template("javascript:alert(1)", {}) == ""
+        assert fill_url_template("attachment://board.png", {}) == ""
+        assert (fill_url_template("attachment://board.png", {},
+                                  schemes=("http", "https", "attachment"))
+                == "attachment://board.png")
+
+    def test_url_value_mid_template_is_fully_encoded(self):
+        assert (fill_url_template("https://example.com/?img={image_url}",
+                                  {"{image_url}": "https://cdn.example.com/a b.png"})
+                == "https://example.com/?img=https%3A%2F%2Fcdn.example.com%2Fa%20b.png")
 
 
 # ── replace_placeholders (fields / {team_size}) ───────────────────────────────

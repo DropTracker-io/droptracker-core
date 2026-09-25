@@ -285,6 +285,63 @@ def _wiki_url(name) -> str:
     return f"https://oldschool.runescape.wiki/w/{str(name or '').replace(' ', '_')}"
 
 
+_URL_TOKEN = re.compile(r"\{[A-Za-z0-9_]+\}")
+# Reserved characters a template's own text may use as URL syntax. Anything
+# else that cannot appear in a URL (a space, a quote, a backtick) is escaped.
+_URL_TEMPLATE_SAFE = "!#$%&'()*+,/:;=?@[]~"
+_STRAY_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
+def _escape_url_text(text) -> str:
+    from urllib.parse import quote
+
+    return quote(_STRAY_PERCENT.sub("%25", str(text)), safe=_URL_TEMPLATE_SAFE)
+
+
+def fill_url_template(template, value_dict, schemes=("http", "https")) -> str:
+    """Substitute placeholders into an embed URL, keeping the result a URL.
+
+    Returns a well-formed URL, or "" when there is none to send: an empty
+    ``{image_url}``, a token this sender has no value for, a scheme outside
+    ``schemes``. Discord refuses the whole message for an embed URL it cannot
+    parse (400 URL_TYPE_INVALID_URL), so a bad link must cost only the link.
+
+    Values are percent-encoded: ``{item_name}`` is "Bandos chestplate", and a
+    space in the link is exactly that 400. A group's edited drop Title URL
+    kept every one of its drops out of Discord from 2026-09-23 this way
+    (AstralStar, group 126). A value that is itself the whole URL
+    (``{image_url}`` on its own) goes in as it is.
+    """
+    from urllib.parse import quote, urlparse
+
+    template = str(template or "").strip()
+    if not template:
+        return ""
+    parts = []
+    pos = 0
+    for match in _URL_TOKEN.finditer(template):
+        parts.append(_escape_url_text(template[pos:match.start()]))
+        value = value_dict.get(match.group(0))
+        if value is None:
+            return ""
+        value = str(value).strip()
+        if match.start() == 0 and value.lower().startswith(("http://", "https://")):
+            parts.append(_escape_url_text(value))
+        else:
+            # A markdown value ({player_name} is a link) contributes its text.
+            parts.append(quote(strip_title_markdown(value) or "", safe=""))
+        pos = match.end()
+    parts.append(_escape_url_text(template[pos:]))
+    url = "".join(parts)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in schemes or not parsed.netloc:
+        return ""
+    return url
+
+
 _TITLE_WHITESPACE = re.compile(r"\s+")
 
 
@@ -394,13 +451,9 @@ def _replace_placeholders(embed: interactions.Embed, value_dict: dict, global_se
             strip_title_markdown(replace_placeholders_in_text(embed.title, value_dict))
         )
 
-        resolved_url = ""
-        if custom_url:
-            resolved_url = replace_placeholders_in_text(custom_url, value_dict).strip()
-            # An unresolved placeholder leaves a non-URL behind; Discord rejects
-            # the whole embed for a malformed url, so drop it rather than send it.
-            if not resolved_url.lower().startswith(("http://", "https://")):
-                resolved_url = ""
+        # Discord rejects the whole embed for a malformed url, so a template
+        # url that does not come out as one is dropped rather than sent.
+        resolved_url = fill_url_template(custom_url, value_dict) if custom_url else ""
 
         if resolved_url:
             embed.url = resolved_url
@@ -410,6 +463,9 @@ def _replace_placeholders(embed: interactions.Embed, value_dict: dict, global_se
             embed.url = _wiki_url(value_dict.get("{item_name}", ""))
         else:
             embed.url = None
+    elif embed.url:
+        # No title to hang it on, but Discord still validates it.
+        embed.url = fill_url_template(embed.url, value_dict) or None
 
     # Replace placeholders in the embed description
     if embed.description:
@@ -481,8 +537,14 @@ def _replace_placeholders(embed: interactions.Embed, value_dict: dict, global_se
             if item_id: 
                 embed.thumbnail.url = f"https://static.runelite.net/cache/item/icon/{item_id}.png"
         else:
-            embed.thumbnail.url = replace_placeholders_in_text(embed.thumbnail.url, value_dict)
-    
+            thumbnail_url = fill_url_template(
+                embed.thumbnail.url, value_dict, schemes=("http", "https", "attachment")
+            )
+            if thumbnail_url:
+                embed.thumbnail.url = thumbnail_url
+            else:
+                embed.thumbnail = None
+
     # Replace placeholders in the embed's image URL
     if embed.image and embed.image.url:
         embed.image = None
