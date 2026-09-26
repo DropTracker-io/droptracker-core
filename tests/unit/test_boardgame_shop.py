@@ -969,3 +969,47 @@ class TestAdvanceHeldByRequiredTile:
         item = SimpleNamespace(effect="advance", effect_config='{"dice_sides": 6}')
         res = shop._use_advance(s, None, E, 1, pos, item, _fixed(6), rng=random.Random(1))
         assert res["teleport"] is True and res["to"] > 2
+
+
+# =========================================================================== #
+# reroll_move: the FK on the position must be released before the GC delete
+# =========================================================================== #
+class TestRerollMove:
+    def test_position_fk_released_and_flushed_before_discard(self, monkeypatch):
+        # Live 2026-09-26 (event 81): the old instance was deleted while
+        # web_event_board_positions.current_task_id still referenced it, so
+        # MySQL raised IntegrityError 1451 and every Reroll failed.
+        pos = _pos(team=1, tile=7, status="active", task=100)
+        pos.last_roll = json.dumps({"dice": [3], "from": 4, "to": 7})
+        flushed = []
+
+        class FKSession(FakeSession):
+            def flush(self):
+                flushed.append(pos.current_task_id)
+
+        def discard(session, event_id, task_id):
+            assert task_id == 100
+            assert pos.current_task_id is None
+            assert flushed and flushed[-1] is None, "FK change not flushed"
+
+        calls = []
+        monkeypatch.setattr(shop, "_discard_task_instance",
+                            lambda *a: (calls.append(a), discard(*a)))
+        monkeypatch.setattr(bg, "load_tiles", lambda s, e: _tiles())
+        monkeypatch.setattr(bg, "roll_dice", lambda settings, rng=None: [2])
+
+        def move(session, event_id, team_id, p, tiles, start, steps, settings,
+                 rng=None):
+            assert start == 4 and p.tile_idx == 4
+            p.tile_idx = start + steps
+            p.current_task_id = 200
+            return {"from": start, "to": p.tile_idx, "won": False}
+
+        monkeypatch.setattr(bg, "_move_piece", move)
+        res = shop._use_reroll_move(FKSession(), None, E, 1, pos,
+                                    SimpleNamespace(effect_config=None),
+                                    _fixed(1))
+        assert len(calls) == 1
+        assert res["rerolled"] is True and res["to"] == 6
+        assert pos.current_task_id == 200
+        assert json.loads(pos.last_roll)["from"] == 4

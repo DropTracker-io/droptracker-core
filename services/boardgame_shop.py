@@ -1185,10 +1185,15 @@ def _use_reroll_move(session, redis_conn, event_id, team_id, pos, item,
         raise ShopError(409, "Cannot reroll move",
                         "The previous origin tile no longer exists.")
 
-    # Drop the not-yet-completed instance the prior landing assigned.
-    _discard_task_instance(session, event_id, pos.current_task_id)
+    # Drop the not-yet-completed instance the prior landing assigned. The
+    # position's FK (fk_webp_task) must stop pointing at it — and be flushed —
+    # before the row is deleted, or MySQL refuses the delete (IntegrityError
+    # 1451; every Reroll failed this way until 2026-09-26).
+    old_task_id = pos.current_task_id
     pos.current_task_id = None
     pos.tile_idx = origin
+    session.flush()
+    _discard_task_instance(session, event_id, old_task_id)
 
     faces = roll_dice(settings, rng)
     steps = sum(faces)
