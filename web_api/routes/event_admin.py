@@ -979,17 +979,8 @@ async def update_task(event_id: int, task_id: int):
                     "config": config,
                 })
                 if "config" in body and task.config:
-                    # A replacement config from the form must not strip the
-                    # designer's auto-created marker off a board task.
-                    try:
-                        old_cfg = json.loads(task.config)
-                        if isinstance(old_cfg, dict) and old_cfg.get(_BINGO_AUTO_KEY):
-                            new_cfg = json.loads(normalized["config"]) if normalized["config"] else {}
-                            if isinstance(new_cfg, dict) and _BINGO_AUTO_KEY not in new_cfg:
-                                new_cfg[_BINGO_AUTO_KEY] = old_cfg[_BINGO_AUTO_KEY]
-                                normalized["config"] = json.dumps(new_cfg)
-                    except (TypeError, ValueError):
-                        pass
+                    normalized["config"] = _keep_system_markers(
+                        task.config, normalized["config"])
                 task.target = normalized["target"]
                 task.target_value = normalized["target_value"]
                 task.config = normalized["config"]
@@ -1147,6 +1138,46 @@ async def update_task(event_id: int, task_id: int):
 # can tell designer-created tasks (safe to garbage-collect once orphaned)
 # from hand-added ones.
 _BINGO_AUTO_KEY = "bingo_auto"
+
+# Keys services/boardgame_engine._materialize_instance stamps on a team's
+# per-landing copy of a pool task. ``board_instance`` is what keeps the copy
+# OUT of the draw pool (_task_pool); without it the copy becomes a second pool
+# entry and doubles that task's odds. Seen live 2026-09-26 (event 81): an
+# admin edit of a team's current task stripped them.
+_BOARD_INSTANCE_KEYS = ("board_instance", "source_task_id", "team_id", "turn",
+                        "tile_idx")
+
+
+def _keep_system_markers(old_raw, new_raw):
+    """Carry system-owned markers from a task's stored config onto the
+    replacement config the task form sent (the form never echoes them):
+    the bingo designer's auto-created marker, and a board-game instance's
+    identity keys. Returns the config JSON to store."""
+    try:
+        old_cfg = json.loads(old_raw) if old_raw else None
+    except (TypeError, ValueError):
+        return new_raw
+    if not isinstance(old_cfg, dict):
+        return new_raw
+    keys = []
+    if old_cfg.get(_BINGO_AUTO_KEY):
+        keys.append(_BINGO_AUTO_KEY)
+    if old_cfg.get("board_instance"):
+        keys.extend(k for k in _BOARD_INSTANCE_KEYS if k in old_cfg)
+    if not keys:
+        return new_raw
+    try:
+        new_cfg = json.loads(new_raw) if new_raw else {}
+    except (TypeError, ValueError):
+        return new_raw
+    if not isinstance(new_cfg, dict):
+        return new_raw
+    missing = [k for k in keys if k not in new_cfg]
+    if not missing:
+        return new_raw
+    for k in missing:
+        new_cfg[k] = old_cfg[k]
+    return json.dumps(new_cfg)
 
 
 def _assert_board_editable(ev) -> None:

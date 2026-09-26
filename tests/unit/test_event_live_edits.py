@@ -819,3 +819,37 @@ class TestUpdateTaskDuplicatePets:
                                json={"points": 25, "retro": "recompute"})
         assert r.status_code == 200
         assert calls == [{"old_points": 10, "task_id": 9}]
+
+
+class TestKeepSystemMarkers:
+    """The task form never echoes system-owned config keys, so a config edit
+    must carry them over (2026-09-26, event 81: editing a team's board copy
+    stripped ``board_instance`` and the copy joined the draw pool, doubling
+    that task's odds)."""
+
+    _INSTANCE = {"kind": "any_of", "items": [{"item_name": "Virtus mask"}],
+                 "board_instance": True, "source_task_id": 1030, "team_id": 200,
+                 "turn": 22, "tile_idx": 85}
+
+    def test_board_instance_keys_survive_a_form_config(self):
+        form = json.dumps({"kind": "any_of",
+                           "items": [{"item_name": "Virtus robe top"}]})
+        out = json.loads(ea._keep_system_markers(json.dumps(self._INSTANCE), form))
+        assert out["items"] == [{"item_name": "Virtus robe top"}]
+        for k in ("board_instance", "source_task_id", "team_id", "turn", "tile_idx"):
+            assert out[k] == self._INSTANCE[k]
+
+    def test_bingo_auto_marker_survives(self):
+        out = ea._keep_system_markers('{"bingo_auto": true, "kind": "any_of"}',
+                                      '{"kind": "all_of"}')
+        assert json.loads(out) == {"kind": "all_of", "bingo_auto": True}
+
+    def test_pool_task_config_passes_through_untouched(self):
+        # team_id etc. are only carried for an actual instance.
+        form = '{"kind": "all_of"}'
+        assert ea._keep_system_markers('{"kind": "any_of", "team_id": 5}', form) == form
+        assert ea._keep_system_markers(None, form) == form
+
+    def test_null_config_on_an_instance_keeps_the_identity(self):
+        out = json.loads(ea._keep_system_markers(json.dumps(self._INSTANCE), None))
+        assert out["board_instance"] is True and out["source_task_id"] == 1030
