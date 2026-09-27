@@ -1689,9 +1689,9 @@ async def get_event_team_contributions(event_id: int, team_id: int):
     Visibility is deliberately the SAME rule as the event-wide completion
     history (:func:`get_completion_history`), so the platform can't disagree
     with itself about one ledger row: applied rows (``auto``/``confirmed``/
-    ``manual``) on **public** tasks are public, a hidden player reads as
-    "Hidden player" to non-admins, and event admins additionally see hidden
-    tasks and real RSNs. ``proof_url`` rides along because that history already
+    ``manual``) are visible to anyone who can view the event, a hidden player
+    reads as "Hidden player" to non-admins, and event admins additionally see
+    real RSNs (and task names on a tasks-kept-to-admins event). ``proof_url`` rides along because that history already
     publishes it for these exact rows (as do loot-sweep receipts and prize-pot
     buy-ins) — a submission log without the screenshot is the very thing this
     replaces. Admin-only material still stays out: ``note`` is only ever the
@@ -1737,10 +1737,12 @@ async def get_event_team_contributions(event_id: int, team_id: int):
 
             task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
             tasks = {t.id: t for t in task_rows}
-            visible_task_ids = (
-                set(tasks) if is_admin
-                else {t.id for t in task_rows if (t.visibility or "public") == "public"}
-            )
+            # Every task counts, for every viewer who got past the event gate
+            # above. EventTask.visibility is task-LIBRARY sharing (may other
+            # clans reuse it?), not an audience — filtering on it emptied the
+            # log for non-admins wherever tasks were library-private, which is
+            # every board-game landing copy (2026-09-27, event 81).
+            visible_task_ids = set(tasks)
             base = {
                 "event_id": event_id,
                 "team_id": team_id,
@@ -1769,9 +1771,9 @@ async def get_event_team_contributions(event_id: int, team_id: int):
                             EventCompletion.team_id == team_id)
                     .scalar() or 0
                 )
-                # v2 = entries carry ``completed``; a pre-fix blob still inside
-                # its TTL would read as all-progress.
-                cache_key = (f"events:{event_id}:teamlog:v2:{team_id}:"
+                # v2 = entries carry ``completed``; v3 = no task-library
+                # filter (a v2 public blob is missing library-private rows).
+                cache_key = (f"events:{event_id}:teamlog:v3:{team_id}:"
                              f"{'admin' if is_admin else 'pub'}:{version}")
                 cached = _rc.client.get(cache_key)
                 if cached:
@@ -3220,9 +3222,10 @@ async def get_completion_history(event_id: int):
     """Public, read-only timeline of applied task completions — the centralized
     "where the points came from" view for loot_sweep and every other kind.
 
-    Only applied rows (``auto``/``confirmed``/``manual``) for **public** tasks
-    are visible to the general public; event admins additionally see hidden
-    tasks and the real RSN behind a hidden player (whose identity is otherwise
+    Applied rows (``auto``/``confirmed``/``manual``) on every task are visible
+    to anyone who can view the event (task names blanked when the event keeps
+    its tasks to admins); event admins additionally see the real RSN behind a
+    hidden player (whose identity is otherwise
     masked to "Hidden player" — the completion itself always stays visible so
     public point totals reconcile, which is what keeps an event auditable and
     fair). Filter with ``teamId``, ``taskId``, ``player``, ``sourceType`` and
@@ -3280,12 +3283,10 @@ async def get_completion_history(event_id: int):
 
             task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
             tasks = {t.id: t for t in task_rows}
-            if is_admin:
-                visible_task_ids = set(tasks)
-            else:
-                visible_task_ids = {
-                    t.id for t in task_rows if (t.visibility or "public") == "public"
-                }
+            # All tasks, for every viewer past the event gate — see the same
+            # note in get_event_team_contributions (EventTask.visibility is
+            # library sharing, not an audience).
+            visible_task_ids = set(tasks)
             # Board/task visibility (web112a): the history keeps its rows —
             # who scored, for which team, when — minus the task names.
             hide_labels = not is_admin and _tasks_kept_to_admins(ev)
@@ -3323,10 +3324,10 @@ async def get_completion_history(event_id: int):
                         .filter(EventCompletion.event_id == event_id)
                         .scalar() or 0
                     )
-                    # v2 = entries carry ``completed``; a pre-fix blob still
-                    # inside its TTL would read as all-progress.
+                    # v2 = entries carry ``completed``; v3 = no task-library
+                    # filter (a v2 public blob is missing library-private rows).
                     cache_key = (
-                        f"events:{event_id}:history:v2:"
+                        f"events:{event_id}:history:v3:"
                         f"{'admin' if is_admin else 'blind' if hide_labels else 'pub'}"
                         f":{version}")
                     cached = _rc.client.get(cache_key)

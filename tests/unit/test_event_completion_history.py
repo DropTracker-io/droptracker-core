@@ -222,3 +222,44 @@ class TestHistoryModeCompletions:
             "/api/v1/events/1/completions/history?mode=progress&teamId=1&collapse=0")
         body = await r.get_json()
         assert [e["completion_id"] for e in body["entries"]] == [4, 2, 1]
+
+
+# --------------------------------------------------------------------------- #
+# Audience: EventTask.visibility is task-LIBRARY sharing, not who may look
+# --------------------------------------------------------------------------- #
+class TestLibraryPrivateTasksArePublicRows:
+    """2026-09-27, event 81: a signed-in non-admin saw an empty submission log
+    because every board-game landing copy is library-private and both read
+    surfaces filtered non-admins to ``visibility == 'public'`` tasks."""
+
+    async def test_history_shows_a_library_private_task(self, client, monkeypatch):
+        _wire(monkeypatch, [_task(points=0, visibility="private")],
+              [_row(i) for i in (1, 2, 3)])
+        r = await client.get(
+            "/api/v1/events/1/completions/history?mode=completions&teamId=1")
+        assert r.status_code == 200
+        body = await r.get_json()
+        assert [e["completion_id"] for e in body["entries"]] == [3]
+        assert body["entries"][0]["task_label"] == "Kill 3 Vorkath"
+
+    async def test_team_log_shows_a_library_private_task(self, client, monkeypatch):
+        session = _S(
+            [SimpleNamespace(id=1, kind="board_game", tasks_visibility="public")],
+            [SimpleNamespace(id=1, event_id=1, name="Team A")],
+            [_task(task_type="item_collection", target_value=1, visibility="private")],
+            [(0,)],                                   # ledger version (cache key)
+            [_row(1, matched_target=None)],
+            [(7, "Zezima", False)],
+        )
+        monkeypatch.setattr(evr, "db_session", lambda: _SessionCM(session))
+        monkeypatch.setattr(evr, "optional_user_id", lambda: 42)
+        monkeypatch.setattr(evr, "_is_restricted", lambda ev: False)
+        monkeypatch.setattr(evr, "_is_event_admin", lambda *a, **k: False)
+        monkeypatch.setattr(evr, "hidden_player_ids", lambda: set())
+        monkeypatch.setattr(evr, "_resolve_item_ids", lambda *a, **k: {})
+        r = await client.get("/api/v1/events/1/teams/1/contributions")
+        assert r.status_code == 200
+        body = await r.get_json()
+        assert body["is_admin"] is False
+        assert [e["completion_id"] for e in body["entries"]] == [1]
+        assert body["entries"][0]["player_name"] == "Zezima"
