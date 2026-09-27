@@ -321,6 +321,50 @@ def _task_pool(session, event_id: int, difficulty: Optional[str]) -> list:
     return pool
 
 
+def _team_draw_history(session, event_id: int, team_id: int) -> list:
+    """Source-task ids this team has drawn, oldest first — read off its
+    surviving board instances (a rerolled-away instance is GC'd, so it no
+    longer counts as drawn)."""
+    from db.models import EventTask
+
+    rows = (session.query(EventTask)
+            .filter(EventTask.event_id == event_id,
+                    EventTask.type.in_(_ROLLABLE_TYPES))
+            .all())
+    drawn = []
+    for t in rows:
+        try:
+            cfg = json.loads(t.config) if t.config else {}
+        except (TypeError, ValueError):
+            continue
+        if (isinstance(cfg, dict) and cfg.get("board_instance")
+                and cfg.get("team_id") == team_id
+                and cfg.get("source_task_id") is not None):
+            drawn.append((int(t.id or 0), cfg["source_task_id"]))
+    return [src for _, src in sorted(drawn)]
+
+
+def _prefer_fresh(pool: list, history: list, exclude=()) -> list:
+    """Narrow a tier's pool to the tasks this team should draw from next:
+    never one in ``exclude`` or the task it drew last (no back-to-back
+    repeats), and among the rest only the least-drawn — so every task in the
+    tier comes up once before any comes up twice. Each rule is dropped when
+    it would leave nothing (a one-task tier still repeats)."""
+    cands = [t for t in pool if t.id not in set(exclude)] or list(pool)
+    if history:
+        last = history[-1]
+        others = [t for t in cands if t.id != last]
+        if others:
+            cands = others
+    if len(cands) > 1:
+        counts: dict = {}
+        for src in history:
+            counts[src] = counts.get(src, 0) + 1
+        fewest = min(counts.get(t.id, 0) for t in cands)
+        cands = [t for t in cands if counts.get(t.id, 0) == fewest]
+    return cands
+
+
 def _materialize_instance(session, event_id: int, team_id: int, source_task,
                           turn_number: int, tile_idx: Optional[int] = None):
     """Clone a pool/pinned task into this team's per-landing instance so its
@@ -378,6 +422,8 @@ def assign_tile_task(session, event_id: int, team_id: int, tile, position,
     elif tile is not None and tile.difficulty:
         pool = _task_pool(session, event_id, tile.difficulty)
         if pool:
+            pool = _prefer_fresh(
+                pool, _team_draw_history(session, event_id, team_id))
             source = (rng or random).choice(pool)
 
     if source is None:

@@ -752,7 +752,9 @@ def _reroll_current_task(session, redis_conn, event_id, team_id, pos, settings,
     from services.boardgame_engine import (
         _materialize_instance,
         _mercy_deadline,
+        _prefer_fresh,
         _task_pool,
+        _team_draw_history,
     )
 
     if pos.status != "active" or not pos.current_task_id:
@@ -781,6 +783,10 @@ def _reroll_current_task(session, redis_conn, event_id, team_id, pos, settings,
     pool = _task_pool(session, event_id, difficulty)
     if old_source is not None and len(pool) > 1:
         pool = [t for t in pool if t.id != old_source]
+    if pool:
+        # History still holds the instance being replaced; the redraw then
+        # favours tasks the team hasn't had yet, like a landing does.
+        pool = _prefer_fresh(pool, _team_draw_history(session, event_id, team_id))
     if not pool:
         raise ShopError(409, "Cannot reroll", "No other tasks in this tile's pool.")
     choice = (rng or random).choice(pool)

@@ -1013,3 +1013,81 @@ class TestRerollMove:
         assert res["rerolled"] is True and res["to"] == 6
         assert pos.current_task_id == 200
         assert json.loads(pos.last_roll)["from"] == 4
+
+
+# =========================================================================== #
+# Task draws: no back-to-back repeats, least-drawn first (2026-09-27)
+# =========================================================================== #
+def _src(i, tier="water"):
+    return EventTask(id=i, event_id=E, type="item_collection", label=f"T{i}",
+                     target=None, target_value=1, points=0,
+                     requires_confirmation=False, config=None,
+                     visibility="private", difficulty=tier)
+
+
+class _IdSession(FakeSession):
+    """FakeSession that numbers added rows, so draw order is recoverable."""
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        self._next = 1000
+
+    def add(self, obj):
+        if obj.__dict__.get("id") is None:  # class attr is the column stand-in
+            obj.id = self._next
+            self._next += 1
+        super().add(obj)
+
+
+class TestPreferFresh:
+    P = [SimpleNamespace(id=i) for i in (1, 2, 3)]
+
+    def ids(self, pool, history, exclude=()):
+        return sorted(t.id for t in bg._prefer_fresh(pool, history, exclude))
+
+    def test_no_history_is_the_whole_pool(self):
+        assert self.ids(self.P, []) == [1, 2, 3]
+
+    def test_unused_tasks_come_first(self):
+        assert self.ids(self.P, [1]) == [2, 3]
+        assert self.ids(self.P, [1, 2]) == [3]
+
+    def test_exhausted_tier_still_never_repeats_back_to_back(self):
+        # All drawn once, 3 last → 1 and 2 (tied on count) remain.
+        assert self.ids(self.P, [1, 2, 3]) == [1, 2]
+
+    def test_one_task_tier_repeats(self):
+        assert self.ids(self.P[:1], [1, 1]) == [1]
+
+    def test_two_task_tier_alternates(self):
+        assert self.ids(self.P[:2], [1, 2, 1]) == [2]
+
+    def test_exclude_is_dropped_when_it_empties_the_pool(self):
+        assert self.ids(self.P[:1], [], exclude=[1]) == [1]
+
+
+class TestLandingDraws:
+    def test_a_team_sees_every_tier_task_before_a_repeat(self, monkeypatch):
+        monkeypatch.setattr(bg, "_mercy_deadline", lambda *a, **k: None)
+        s = _IdSession(EventTask=[_src(i) for i in (1, 2, 3, 4)])
+        tile = SimpleNamespace(idx=5, task_id=None, difficulty="water")
+        pos = _pos(team=1, tile=5, status="active")
+        rng = random.Random(7)
+        drawn = []
+        for _ in range(12):
+            inst = bg.assign_tile_task(s, E, 1, tile, pos, _fixed(1), rng=rng)
+            drawn.append(json.loads(inst.config)["source_task_id"])
+        for i in range(0, 12, 4):
+            assert sorted(drawn[i:i + 4]) == [1, 2, 3, 4]
+        assert all(a != b for a, b in zip(drawn, drawn[1:]))
+
+    def test_other_teams_draws_do_not_count(self, monkeypatch):
+        monkeypatch.setattr(bg, "_mercy_deadline", lambda *a, **k: None)
+        s = _IdSession(EventTask=[_src(1), _src(2)])
+        tile = SimpleNamespace(idx=5, task_id=None, difficulty="water")
+        rival = _pos(team=2, tile=5, status="active")
+        bg.assign_tile_task(s, E, 2, tile, rival, _fixed(1), rng=random.Random(0))
+        rival_src = json.loads(s.data[EventTask][-1].config)["source_task_id"]
+        # Team 1 has drawn nothing, so both tasks stay open to it.
+        assert bg._team_draw_history(s, E, 1) == []
+        assert bg._team_draw_history(s, E, 2) == [rival_src]
