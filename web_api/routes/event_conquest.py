@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime
 
@@ -194,6 +195,16 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
                               f"{t['label']}: every new task needs a label.")
             prepared[(t["key"], j)] = (label[:255], validate_task_payload(s, nt), nt)
 
+    # Home tiles must name this event's teams.
+    homes = {t["home_team_id"] for t in tiles_in if t.get("home_team_id") is not None}
+    if homes:
+        known_teams = {tid for (tid,) in s.query(EventTeam.id)
+                       .filter(EventTeam.event_id == ev.id,
+                               EventTeam.id.in_(homes)).all()}
+        if homes - known_teams:
+            abort_problem(422, "Unknown team",
+                          "A home tile names a team that isn't in this event.")
+
     # Replace. Nothing holds state yet (the map is draft-only), so the old
     # rows simply go; rules first (they reference tiles and tasks).
     old_rule_task_ids = {tid for (tid,) in s.query(ConquestRule.task_id)
@@ -214,15 +225,19 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
         region_ids[r["key"]] = row.id
 
     used_task_ids = set()
+    tile_ids = {}
     for i, t in enumerate(tiles_in):
         tile = ConquestTile(
             event_id=ev.id, region_id=region_ids.get(t["region_key"]), idx=i,
             label=t["label"], x=t["x"], y=t["y"], kind=t["kind"], value=t["value"],
             icon_npc_id=t["icon_npc_id"], icon_item_id=t["icon_item_id"],
-            shape=t.get("shape"), owner_team_id=None, defense=0, captures=0,
+            shape=t.get("shape"), max_defense=t.get("max_defense"),
+            garrison=t.get("garrison"), home_team_id=t.get("home_team_id"),
+            owner_team_id=None, defense=0, captures=0,
         )
         s.add(tile)
         s.flush()
+        tile_ids[t["key"]] = tile.id
         for j, rule in enumerate(t["rules"]):
             if rule["task_id"]:
                 task_id = rule["task_id"]
@@ -243,7 +258,11 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
                 task_id = task.id
             used_task_ids.add(task_id)
             s.add(ConquestRule(event_id=ev.id, tile_id=tile.id, task_id=task_id,
-                               troops=rule["troops"], sort=j))
+                               troops=rule["troops"], once=1 if rule.get("once") else 0,
+                               sort=j))
+    for a_key, b_key in clean.get("edges") or []:
+        a, b = sorted((tile_ids[a_key], tile_ids[b_key]))
+        s.add(ConquestEdge(event_id=ev.id, tile_a_id=a, tile_b_id=b))
     s.flush()
 
     # Garbage-collect designer tasks no tile uses any more (never ones that
@@ -270,11 +289,12 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
         actor_user_id=user_id, group_id=ev.group_id, event_id=ev.id,
         action="event.conquest.map", target=str(ev.id),
         after=json.dumps({"regions": len(regions_in), "tiles": len(tiles_in),
+                          "edges": len(clean.get("edges") or []),
                           "preset": preset, "tasks_removed": removed})[:250],
     ))
     s.flush()
     return {"regions": len(regions_in), "tiles": len(tiles_in),
-            "tasks_removed": removed}
+            "edges": len(clean.get("edges") or []), "tasks_removed": removed}
 
 
 def _apply_preset_art(s, ev, art) -> None:
@@ -292,10 +312,82 @@ def _apply_preset_art(s, ev, art) -> None:
     map_row.bg_height = map_row.shape_height = int(art["height"])
 
 
-def _suggested_troop_hours(s, ev, tile_count: int) -> float:
-    """The preset dialog's default troop cost for this event's size."""
-    from services.conquest_presets import suggest_troop_hours
+# The preset's own tiles (services.conquest_presets.EXTRA_TILES) resolved
+# against this database; like the task generator's catalog, it changes weekly
+# at most, so it is cached in-process.
+_EXTRA_TILES_TTL_SECONDS = 900.0
+_extra_tiles_cache: dict = {"ts": 0.0, "rows": None}
 
+
+def _resolve_extra_tiles(s) -> list:
+    """Look up everything EXTRA_TILES names (NPCs, WOM rates, collection-log
+    pages, Clan Log sections, item spellings and ids) and resolve the rows."""
+    from sqlalchemy import bindparam, text
+
+    from services.conquest_presets import EXTRA_TILES, resolve_extra_tiles
+    from web_api.routes.player_state import _collection_log_structure
+    from web_api.task_generator_catalog import _wom_rates
+
+    def expanding(sql, name):
+        return text(sql).bindparams(bindparam(name, expanding=True))
+
+    npc_names = sorted({n for t in EXTRA_TILES for n in t.get("kc_npcs") or []})
+    npc_ids: dict = {}
+    if npc_names:
+        for nid, name in s.execute(
+                expanding("SELECT npc_id, npc_name FROM npc_list WHERE npc_name IN :n", "n"),
+                {"n": npc_names}):
+            npc_ids.setdefault(str(name), []).append(int(nid))
+
+    wanted_pages = {p for t in EXTRA_TILES for p in t.get("clog_pages") or []}
+    clog_pages: dict = {}
+    for tab in _collection_log_structure(s) or []:
+        for page in (tab or {}).get("pages") or []:
+            if page.get("name") in wanted_pages:
+                clog_pages.setdefault(page["name"], []).extend(page.get("names") or [])
+
+    slugs = sorted({slug for t in EXTRA_TILES for slug in t.get("sections") or []})
+    sections: dict = {}
+    if slugs:
+        for slug, name in s.execute(
+                expanding("SELECT c.slug, i.item_name FROM clan_log_items i "
+                          "JOIN clan_log_sections c ON c.id = i.section_id "
+                          "WHERE c.slug IN :s AND c.enabled = 1 AND i.enabled = 1 "
+                          "ORDER BY c.sort_order, i.sort_order, i.id", "s"),
+                {"s": slugs}):
+            sections.setdefault(str(slug), []).append(str(name))
+
+    names = {n for v in clog_pages.values() for n in v}
+    names |= {n for v in sections.values() for n in v}
+    names |= {n for t in EXTRA_TILES for n in t.get("uniques") or []}
+    names |= {t["icon_item"] for t in EXTRA_TILES if t.get("icon_item")}
+    items: dict = {}
+    if names:
+        for name, item_id in s.execute(
+                expanding("SELECT item_name, MIN(item_id) FROM items "
+                          "WHERE item_name IN :n GROUP BY item_name", "n"),
+                {"n": sorted(names)}):
+            items[str(name).lower()] = (str(name), int(item_id))
+
+    return resolve_extra_tiles(npc_ids=npc_ids, wom_rates=_wom_rates(),
+                               clog_pages=clog_pages, sections=sections, items=items)
+
+
+def _preset_catalog(s) -> list:
+    """The task generator's encounter rows plus the preset's own tiles."""
+    from web_api.task_generator_catalog import load_catalog
+
+    now = time.monotonic()
+    extras = _extra_tiles_cache["rows"]
+    if extras is None or now - _extra_tiles_cache["ts"] >= _EXTRA_TILES_TTL_SECONDS:
+        extras = _resolve_extra_tiles(s)
+        if extras:  # never cache an empty read (a mid-migration DB)
+            _extra_tiles_cache.update(ts=now, rows=extras)
+    return list(load_catalog(s)) + list(extras)
+
+
+def _event_size(s, ev) -> tuple:
+    """``(teams, players per team, days)`` for the troop-cost suggestion."""
     team_ids = [tid for (tid,) in s.query(EventTeam.id)
                 .filter(EventTeam.event_id == ev.id).all()]
     team_count = len(team_ids)
@@ -314,7 +406,14 @@ def _suggested_troop_hours(s, ev, tile_count: int) -> float:
     days = 7.0
     if ev.starts_at and ev.ends_at and ev.ends_at > ev.starts_at:
         days = (ev.ends_at - ev.starts_at).total_seconds() / 86400.0
-    return suggest_troop_hours(max(team_count, 2), team_size, days, tile_count)
+    return max(team_count, 2), team_size, days
+
+
+def _suggested_troop_hours(s, ev, tile_count: int) -> float:
+    """The preset dialog's default troop cost for this event's size."""
+    from services.conquest_presets import suggest_troop_hours
+
+    return suggest_troop_hours(*_event_size(s, ev), tile_count)
 
 
 # --------------------------------------------------------------------------- #
@@ -361,28 +460,37 @@ async def get_conquest_battles(event_id: int):
 
 @event_conquest_bp.get("/events/<int:event_id>/conquest/presets")
 async def get_conquest_presets(event_id: int):
-    """What the designer's "start from a preset" panel offers, with a troop
-    cost suggested for this event's size (teams × roster × days)."""
+    """What the designer's "start from a preset" panel offers: the preset's
+    regions and tiles to pick from (and which this database can build), and a
+    troop cost suggested for this event's size (teams × roster × days) at
+    every tile count, so the dialog can follow the organiser's picks."""
     user_id = current_user_id()
 
     def _read():
         from services.conquest_presets import (
             DEFAULT_TROOP_HOURS,
             DEFAULT_UNIQUE_TROOPS,
-            GIELINOR_REGIONS,
             PRESETS,
             TROOP_HOURS_CHOICES,
+            preset_regions,
+            suggest_troop_hours,
         )
 
         with db_session() as s:
             ev = _load_conquest_event(s, event_id)
             _assert_event_admin(s, user_id, ev)
-            tiles = sum(len(r["tiles"]) for r in GIELINOR_REGIONS)
+            regions = preset_regions("gielinor", _preset_catalog(s))
+            size = _event_size(s, ev)
+            available = sum(t["available"] for r in regions for t in r["tiles"])
+            by_tiles = [suggest_troop_hours(*size, n)
+                        for n in range(sum(len(r["tiles"]) for r in regions) + 1)]
             return {
                 "presets": [{"key": k, "label": v} for k, v in PRESETS.items()],
+                "regions": regions,
                 "troop_hours_choices": list(TROOP_HOURS_CHOICES),
                 "default_troop_hours": DEFAULT_TROOP_HOURS,
-                "suggested_troop_hours": _suggested_troop_hours(s, ev, tiles),
+                "suggested_troop_hours": by_tiles[available],
+                "suggested_troop_hours_by_tiles": by_tiles,
                 "default_unique_troops": DEFAULT_UNIQUE_TROOPS,
             }
 
@@ -397,7 +505,9 @@ async def put_conquest_map(event_id: int):
     """Replace the whole map (the designer's save). Body:
     ``{revision?, regions: [{key, name, color?, bonus?, label_x?, label_y?}],
     tiles: [{key, label, x, y, kind?, value?, region_key?, icon_npc_id?,
-    icon_item_id?, rules: [{task_id | new_task, troops?}]}]}``.
+    icon_item_id?, max_defense?, garrison?, home_team_id?,
+    rules: [{task_id | new_task, troops?, once?}]}],
+    edges: [[tile key, tile key]]}``.
     ``revision`` (the payload's last-read value) guards against two open
     editors overwriting each other: a stale one gets a 409."""
     user_id = current_user_id()
@@ -435,13 +545,22 @@ async def put_conquest_map(event_id: int):
 @event_conquest_bp.post("/events/<int:event_id>/conquest/preset")
 async def apply_conquest_preset(event_id: int):
     """Build the map from a preset, replacing the current one. Body:
-    ``{preset: "gielinor", troop_hours?: number, unique_troops?: int}``.
-    Every tile gets a kill rule sized to ``troop_hours`` of efficient kills
-    and an any-unique rule worth ``unique_troops``."""
+    ``{preset: "gielinor", troop_hours?: number, unique_troops?: int,
+    regions?: [key], exclude_tiles?: [key]}``. Every boss tile gets a kill
+    rule sized to ``troop_hours`` of efficient kills and an any-unique rule
+    worth ``unique_troops`` (see services.conquest_presets). ``regions``
+    (default: all) picks the regions to build and ``exclude_tiles`` leaves
+    tiles out of them.
+
+    Anything short of the whole preset is drawn fresh for that pick
+    (services.conquest_mapgen, ~20 s, cached per pick). Until it's ready
+    this answers **202** ``{status: "generating" | "queued"}`` and nothing is
+    written; the designer asks again every few seconds with the same body."""
     user_id = current_user_id()
     body = await json_body()
     from services.conquest_presets import (
         DEFAULT_UNIQUE_TROOPS,
+        GIELINOR_REGIONS,
         PRESETS,
         TROOP_HOURS_CHOICES,
     )
@@ -463,11 +582,25 @@ async def apply_conquest_preset(event_id: int):
             or not 0 <= unique_troops <= _cq().MAX_TROOPS_PER_RULE):
         abort_problem(422, "Invalid unique troops",
                       f"unique_troops must be 0 to {_cq().MAX_TROOPS_PER_RULE}.")
+    region_keys = [r["key"] for r in GIELINOR_REGIONS]
+    tile_keys = {k for r in GIELINOR_REGIONS for k in r["tiles"]}
+    regions = body.get("regions")
+    if regions is not None and (not isinstance(regions, list)
+                                or not all(isinstance(k, str) for k in regions)
+                                or set(regions) - set(region_keys)):
+        abort_problem(422, "Invalid regions",
+                      f"regions must be a list drawn from {region_keys}.")
+    exclude = body.get("exclude_tiles") or []
+    if (not isinstance(exclude, list) or not all(isinstance(k, str) for k in exclude)
+            or set(exclude) - tile_keys):
+        abort_problem(422, "Invalid tiles", "exclude_tiles must list the preset's tile keys.")
+    picked = [k for r in GIELINOR_REGIONS if regions is None or r["key"] in regions
+              for k in r["tiles"] if k not in exclude]
+    if not picked:
+        abort_problem(422, "Nothing to build", "Pick at least one tile.")
 
-    def _apply():
-        from services.conquest_engine import conquest_payload
-        from services.conquest_presets import GIELINOR_REGIONS, build_preset_map
-        from web_api.task_generator_catalog import load_catalog
+    def _plan():
+        from services.conquest_presets import plan_selection
 
         with db_session() as s:
             ev = _load_conquest_event(s, event_id)
@@ -475,14 +608,54 @@ async def apply_conquest_preset(event_id: int):
             _assert_map_editable(ev)
             hours = troop_hours
             if hours is None:
-                tiles = sum(len(r["tiles"]) for r in GIELINOR_REGIONS)
-                hours = _suggested_troop_hours(s, ev, tiles)
+                hours = _suggested_troop_hours(s, ev, len(picked))
+            kept, drop, _skipped = plan_selection(
+                _preset_catalog(s), troop_hours=hours, unique_troops=unique_troops,
+                regions=regions, exclude=exclude)
+            return hours, kept, drop
+
+    hours, kept, drop = await asyncio.to_thread(_plan)
+    if not kept:
+        abort_problem(422, "Nothing to build",
+                      "None of the picked tiles can be built on this server.")
+    from services.conquest_presets import is_full_selection
+
+    art = None
+    if not is_full_selection(kept, drop):
+        from services import conquest_mapgen
+
+        status, art = await conquest_mapgen.ensure_art(kept, drop)
+        if status == "unavailable":
+            abort_problem(503, "Map drawing unavailable",
+                          "This server can't redraw the map for a smaller pick right now. "
+                          "Use every region and tile, or build the map by hand.")
+        if status == "failed":
+            key = conquest_mapgen.selection_key(kept, drop)
+            abort_problem(502, "Map drawing failed",
+                          "The map couldn't be drawn for this pick. Try again in a minute."
+                          + (f" ({conquest_mapgen.failure_reason(key)})"
+                             if conquest_mapgen.failure_reason(key) else ""))
+        if art is None:
+            return private_no_store(jsonify({
+                "status": status,
+                "message": ("Drawing your map…" if status == "generating"
+                            else "Another map is being drawn. Yours is next…"),
+            })), 202
+
+    def _apply():
+        from services.conquest_engine import conquest_payload
+        from services.conquest_presets import build_preset_map
+
+        with db_session() as s:
+            ev = _load_conquest_event(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            _assert_map_editable(ev)
             body_map, skipped = build_preset_map(
-                preset, load_catalog(s), troop_hours=hours,
-                unique_troops=max(unique_troops, 1))
-            if unique_troops == 0:
-                for tile in body_map["tiles"]:
-                    tile["rules"] = tile["rules"][:1]
+                preset, _preset_catalog(s), troop_hours=hours,
+                unique_troops=unique_troops, regions=regions, exclude=exclude, art=art)
+            if not body_map["tiles"]:
+                abort_problem(422, "Nothing to build",
+                              "None of the picked tiles can be built on this server.")
             clean, errors = _cq().validate_map(body_map)
             if errors:  # a catalog row the validator rejects: say so, don't half-build
                 abort_problem(500, "Preset failed validation", " ".join(errors[:5]))
@@ -492,6 +665,7 @@ async def apply_conquest_preset(event_id: int):
             payload = conquest_payload(s, ev)
             payload["preset_summary"] = dict(summary, skipped=skipped,
                                              troop_hours=hours)
+            payload["status"] = "ready"
             return payload
 
     payload = await asyncio.to_thread(_apply)

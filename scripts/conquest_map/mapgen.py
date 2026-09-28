@@ -80,9 +80,13 @@ def load_base(path: str) -> np.ndarray:
     return np.asarray(im.crop(box).resize((w, h), Image.BOX)).astype(int)
 
 
+# (row, col) where the cropped board starts in the full grid (build sets it).
+_OFF = [0, 0]
+
+
 def to_grid(x: float, y: float) -> tuple:
     e = geo.EXTENT
-    return (x - e["x0"]) / G, (e["y1"] - y) / G  # (col, row)
+    return (x - e["x0"]) / G - _OFF[1], (e["y1"] - y) / G - _OFF[0]  # (col, row)
 
 
 def land_mask(base: np.ndarray) -> np.ndarray:
@@ -154,10 +158,12 @@ def _chaikin(pts: np.ndarray, rounds: int = 2) -> np.ndarray:
 
 
 def mask_path(mask: np.ndarray, sigma: float = 1.1, tol: float = 0.45,
-              min_len: int = 10, compact: bool = False) -> str:
+              min_len: int = 10, compact: bool = False, origin=(0, 0)) -> str:
     """Smooth outline(s) of a boolean mask as one SVG path (evenodd holes).
     ``compact`` trades a little smoothness for size: whole units and relative
-    moves, for the territory shapes the site loads with every map."""
+    moves, for the territory shapes the site loads with every map. ``origin``
+    is the (row, col) a cropped mask starts at in the full grid."""
+    r0, c0 = origin
     f = ndi.gaussian_filter(np.pad(mask.astype(float), 2), sigma)
     parts = []
     for c in measure.find_contours(f, 0.5):
@@ -169,7 +175,7 @@ def mask_path(mask: np.ndarray, sigma: float = 1.1, tol: float = 0.45,
         c = c[:-1] if np.allclose(c[0], c[-1]) else c
         if compact:
             c = _chaikin(c, rounds=1)
-            pts = [(int(round((col - 2) * G)), int(round((row - 2) * G))) for row, col in c]
+            pts = [(int(round((col - 2 + c0) * G)), int(round((row - 2 + r0) * G))) for row, col in c]
             pts = [p for i, p in enumerate(pts) if i == 0 or p != pts[i - 1]]
             if len(pts) < 3:
                 continue
@@ -177,7 +183,7 @@ def mask_path(mask: np.ndarray, sigma: float = 1.1, tol: float = 0.45,
             parts.append(f"M{pts[0][0]} {pts[0][1]}l{rel}z")
             continue
         c = _chaikin(c)
-        xy = [((col - 2) * G, (row - 2) * G) for row, col in c]
+        xy = [((col - 2 + c0) * G, (row - 2 + r0) * G) for row, col in c]
         parts.append("M" + " ".join(f"{x:.1f} {y:.1f}" for x, y in xy) + "Z")
     return "".join(parts)
 
@@ -185,36 +191,88 @@ def mask_path(mask: np.ndarray, sigma: float = 1.1, tol: float = 0.45,
 # --------------------------------------------------------------------------
 # territories
 
-def build(world_png: str) -> dict:
+def build(world_png: str, regions=None, drop_tiles=(), variants: bool = False) -> dict:
+    """The board's geometry. ``regions`` (None = all) are the region keys to
+    keep and ``drop_tiles`` the tile keys to leave out of them.
+
+    Leaving things out regenerates the whole board: land of a removed region
+    goes to the kept regions on the same landmass, a landmass with no kept
+    region left is dropped (drawn as sea), and the frame is cropped to what
+    is left. Open water is shared out between the sea tiles, so crossing
+    water always means going through a sea tile; parts of the map that still
+    can't reach each other (no sea tiles kept) are linked by their shortest
+    crossing (``edges``)."""
+    keep = {r["key"] for r in geo.REGIONS} if regions is None else set(regions)
+    drop = set(drop_tiles)
+    bosses = [b for b in geo.all_bosses() if b[0]["key"] in keep and b[1] not in drop]
+    kept_regions = {b[0]["key"] for b in bosses}
+    land_bosses = [b for b in bosses if not b[0].get("inset") and not b[0].get("sea")]
+    abyss_bosses = [b for b in bosses if b[0].get("inset")]
+    sea_bosses = [b for b in bosses if b[0].get("sea")]
+    region_keys = [r["key"] for r in geo.REGIONS]
+    grass = BIOMES.index("grass")
+
+    # ---- phase A: the whole map, to decide what stays and crop to it ----
+    _OFF[0] = _OFF[1] = 0
     base = load_base(world_png)
-    h, w = base.shape[:2]
+    H0, W0 = base.shape[:2]
     land = land_mask(base)
     biomes = biome_map(base, land)
+    for _r, _k, x, y in land_bosses:
+        d = disk(land.shape, *to_grid(x, y), geo.MIN_ISLAND / G)
+        biomes[d & ~land] = grass
+        land |= d
+    ax0, ay0 = to_grid(*geo.ABYSS["center"])
+    ar = geo.ABYSS["radius"] / G
+    rift_full = disk(land.shape, ax0, ay0, ar)
+    reach = ndi.binary_dilation(land, iterations=3)
+    ground_all = reach & ~disk((H0, W0), ax0, ay0, ar + 6)
+    # Which kingdom every bit of land belongs to on the full map; a landmass
+    # none of whose land is in a kept region goes.
+    rid_full = _fill_by_landmass(np.where(ground_all, _area_raster(H0, W0), -1), ground_all)
+    kept_idx = [region_keys.index(k) for k in kept_regions
+                if not geo.REGION_BY_KEY[k].get("sea") and not geo.REGION_BY_KEY[k].get("inset")]
+    # Landmasses by the land itself, rivers bridged (the sea strait to an
+    # island is far wider than a river).
+    comps, _n = ndi.label(ndi.binary_dilation(land, iterations=RIVER_BRIDGE))
+    live = np.unique(comps[np.isin(rid_full, kept_idx) & land & (comps > 0)])
+    gone = reach & ~np.isin(comps, live)
+    land &= ~gone
+    reach &= ~gone
+    biomes[gone] = -1
+    keep_box = land.copy()
+    if abyss_bosses:
+        keep_box |= rift_full
+    if not keep_box.any():  # only the seas: frame their spots
+        for _r, _k, x, y in sea_bosses:
+            keep_box |= disk(land.shape, *to_grid(x, y), 60 / G)
+    rows, cols = np.nonzero(keep_box)
+    margin = CROP_MARGIN / G
+    r0, r1 = max(int(rows.min() - margin), 0), min(int(rows.max() + margin), H0)
+    c0, c1 = max(int(cols.min() - margin), 0), min(int(cols.max() + margin), W0)
+
+    # ---- phase B: the cropped board ----
+    land, biomes, reach = land[r0:r1, c0:c1], biomes[r0:r1, c0:c1], reach[r0:r1, c0:c1]
+    _OFF[0], _OFF[1] = r0, c0
+    h, w = land.shape
 
     seeds, meta = [], []
-    for region, key, x, y in geo.all_bosses():
-        if region.get("inset"):
-            continue
+    for region, key, x, y in land_bosses:
         seeds.append(to_grid(x, y))
         meta.append({"key": key, "region": region["key"]})
-    # Grow every boss's patch of ground to a clickable island.
-    for (cx, cy) in seeds:
-        d = disk(land.shape, cx, cy, geo.MIN_ISLAND / G)
-        biomes[d & ~land] = BIOMES.index("grass")
-        land |= d
 
-    # The Abyss rift island, two territories side by side.
+    # The Abyss rift island, two territories side by side (or one).
     ax, ay = to_grid(*geo.ABYSS["center"])
-    ar = geo.ABYSS["radius"] / G
-    rift = disk(land.shape, ax, ay, ar)
-    land |= rift
-    biomes[rift] = BIOMES.index("abyss")
-    for i, (region, key, _x, _y) in enumerate(
-            [b for b in geo.all_bosses() if b[0].get("inset")]):
-        seeds.append((ax + (-0.42 if i == 0 else 0.42) * ar, ay + (0.1 if i else -0.1) * ar))
-        meta.append({"key": key, "region": region["key"]})
+    if abyss_bosses:
+        rift = disk(land.shape, ax, ay, ar)
+        land |= rift
+        reach |= ndi.binary_dilation(rift, iterations=3)
+        biomes[rift] = BIOMES.index("abyss")
+        for i, (region, key, _x, _y) in enumerate(abyss_bosses):
+            dx = 0.0 if len(abyss_bosses) == 1 else (-0.42 if i == 0 else 0.42)
+            seeds.append((ax + dx * ar, ay + (0.0 if dx == 0 else (0.1 if i else -0.1)) * ar))
+            meta.append({"key": key, "region": region["key"]})
 
-    reach = ndi.binary_dilation(land, iterations=3)
     yy, xx = np.mgrid[:h, :w]
     # One smooth random warp shared by kingdom edges and territory borders,
     # so every border meanders like a hand-drawn one.
@@ -229,21 +287,21 @@ def build(world_png: str) -> dict:
     area = _area_raster(h, w)
     area_w = ndi.map_coordinates(area, [np.clip(YY, 0, h - 1), np.clip(XX, 0, w - 1)],
                                  order=0, mode="nearest")
-    region_keys = [r["key"] for r in geo.REGIONS]
-    # Every bit of land belongs to a region: a kingdom's own ground first,
-    # then anything outside every kingdom (Karamja, Feldip, the islands) goes
-    # to whichever kingdom is nearest.
+    # Every bit of land belongs to a kept region: a kingdom's own ground
+    # first, then anything outside every kept kingdom (a removed region's
+    # land, Feldip, the islands) goes to the nearest kept kingdom on it.
     ground_all = reach & ~disk((h, w), ax, ay, ar + 6)
-    rid = np.where(ground_all, area_w, -1)
+    rid = np.where(ground_all & np.isin(area_w, kept_idx), area_w, -1)
     rid = _fill_by_landmass(rid, ground_all)
-    rid[reach & disk((h, w), ax, ay, ar + 3)] = region_keys.index("abyss")
+    if abyss_bosses:
+        rid[reach & disk((h, w), ax, ay, ar + 3)] = region_keys.index("abyss")
 
     # 1. Where each boss's territory should centre: Lloyd relaxation inside
     #    its region from the real spots, so territories even out in size.
     #    Each round is pulled partway back to the real spot, so a territory
     #    grows around where its boss lives instead of wandering off. Only the
     #    landmasses a boss stands on are carved; a region's other islands
-    #    join the nearest territory at the end.
+    #    join the sea around them (or the nearest territory, with no seas).
     targets = list(seeds)
     mains, home_comp = {}, {}
     for k, rk in enumerate(region_keys):
@@ -254,8 +312,9 @@ def build(world_png: str) -> dict:
         comps, _n = ndi.label(ground)
         _, (cri, cci) = ndi.distance_transform_edt(comps == 0, return_indices=True)
         for i in idx:
-            r0, c0 = int(round(seeds[i][1])), int(round(seeds[i][0]))
-            home_comp[i] = comps == comps[cri[r0, c0], cci[r0, c0]]
+            rr = min(max(int(round(seeds[i][1])), 0), h - 1)
+            cc = min(max(int(round(seeds[i][0])), 0), w - 1)
+            home_comp[i] = comps == comps[cri[rr, cc], cci[rr, cc]]
         mains[k] = np.any([home_comp[i] for i in idx], axis=0)
         # Each landmass is balanced on its own, between the bosses on it.
         for piece in {id(home_comp[i]): home_comp[i] for i in idx}.values():
@@ -277,7 +336,7 @@ def build(world_png: str) -> dict:
     # 2. Region names: each gets the roomiest spot near its region's middle.
     name_spots, reserved = {}, np.zeros((h, w), bool)
     for k, region in enumerate(geo.REGIONS):
-        if region.get("inset"):
+        if region["key"] not in kept_regions or region.get("inset") or region.get("sea"):
             continue
         spot, box = _name_spot((rid == k) & land, region["name"], reserved)
         name_spots[region["key"]] = spot
@@ -299,9 +358,10 @@ def build(world_png: str) -> dict:
 
     # 4. Territories around the badges: every region split between its
     #    badges (so each badge is always inside its own territory, near its
-    #    middle), islands to the nearest territory.
+    #    middle).
     label = np.full((h, w), -1)
-    drop = (BADGE_DOWN - BADGE_UP) / 2  # a badge's middle sits below its medallion
+    drop_ = (BADGE_DOWN - BADGE_UP) / 2  # a badge's middle sits below its medallion
+    rest_all = np.zeros((h, w), bool)
     for k, rk in enumerate(region_keys):
         idx = [i for i, m in enumerate(meta) if m["region"] == rk]
         if not idx or k not in mains:
@@ -311,21 +371,22 @@ def build(world_png: str) -> dict:
             on = [i for i in idx if np.array_equal(home_comp[i], piece)]
             gy, gx = np.nonzero(piece)
             wgx, wgy = XX[gy, gx], YY[gy, gx]
-            pts = np.array([(anchors[i][0] / G, (anchors[i][1] + drop) / G) for i in on])
+            pts = np.array([(anchors[i][0] / G, (anchors[i][1] + drop_) / G) for i in on])
             own = np.hypot(wgx[None] - pts[:, :1], wgy[None] - pts[:, 1:]).argmin(0)
             label[gy, gx] = np.array(on)[own]
-        rest = ground & ~main
-        if rest.any():
-            _, (iri, ici) = ndi.distance_transform_edt(~main, return_indices=True)
-            label[rest] = label[iri, ici][rest]
+        rest_all |= ground & ~main
+    if not sea_bosses and rest_all.any():
+        owned = label >= 0
+        _, (iri, ici) = ndi.distance_transform_edt(~owned, return_indices=True)
+        label[rest_all] = label[iri, ici][rest_all]
 
     # 5. Bend the borders around every medallion and its scroll: the ground
     #    under each one belongs to its own territory, so no border (between
     #    territories or regions) ever runs underneath a name.
     for i, (x, y) in enumerate(anchors):
         a, b = (halfw[i] + 12) / G, ((BADGE_UP + BADGE_DOWN) / 2 + 10) / G
-        box = (np.abs((xx - x / G) / a) ** 4 + np.abs((yy - (y + drop) / G) / b) ** 4) <= 1
-        label[box & reach] = i
+        box = (np.abs((xx - x / G) / a) ** 4 + np.abs((yy - (y + drop_) / G) / b) ** 4) <= 1
+        label[box & reach & ~rest_all] = i
     # Slivers the wobble or a stamp cuts off go to their neighbour, so every
     # territory is one piece of land (plus whole islands).
     for i in range(len(seeds)):
@@ -334,37 +395,106 @@ def build(world_png: str) -> dict:
         if n > 1:
             sizes = ndi.sum(m, lab, range(1, n + 1))
             label[m & np.isin(lab, 1 + np.nonzero(sizes < 60)[0])] = -1
-    hole = reach & (label < 0)
-    if hole.any():
+    hole = reach & (label < 0) & ~(rest_all if sea_bosses else np.zeros_like(rest_all))
+    if hole.any() and (label >= 0).any():
         _, (ri, ci) = ndi.distance_transform_edt(label < 0, return_indices=True)
         label[hole] = label[ri, ci][hole]
 
-    # Neighbours: territories sharing a border.
+    # 6. The seas: all the open water (and the islands no boss stands on) is
+    #    shared out between the sea tiles, each growing out through the water
+    #    from its spot, so a sea never jumps across land. Rivers and narrow
+    #    channels stay out (they'd snake a sea deep inland); what the seas
+    #    touch is what they border, so every crossing goes through one.
+    sea_labels = {}
+    if sea_bosses:
+        from skimage.segmentation import watershed
+
+        water = ~reach | rest_all
+        core = ndi.binary_opening(~reach, iterations=SEA_OPEN) | rest_all
+        lab, _count = ndi.label(core)
+        _, (wri, wci) = ndi.distance_transform_edt(~core, return_indices=True)
+        markers = np.zeros((h, w), np.int32)
+        centres, reached = [], set()
+        for n, (_r, _k, x, y) in enumerate(sea_bosses):
+            cx, cy = to_grid(x, y)
+            rr = min(max(int(round(cy)), 0), h - 1)
+            cc = min(max(int(round(cx)), 0), w - 1)
+            rr, cc = int(wri[rr, cc]), int(wci[rr, cc])
+            while markers[rr, cc]:  # two spots on one pixel: nudge
+                cc = min(cc + 1, w - 1)
+            markers[rr, cc] = n + 1
+            reached.add(lab[rr, cc])
+            centres.append((cc, rr))
+        sea = watershed(np.zeros((h, w)), markers, mask=core & np.isin(lab, list(reached)))
+        for n, (region, key, _x, _y) in enumerate(sea_bosses):
+            patch = sea == n + 1
+            i = len(meta)
+            meta.append({"key": key, "region": region["key"]})
+            seeds.append(centres[n])
+            labels.append(geo.label_for(key))
+            halfw.append(geo.badge_half_width(labels[i]))
+            anchors.append(_place_badge(centres[n], halfw[i], reserved, patch & ~reach,
+                                        patch & ~reach, reach))
+            reserved |= _badge_box(anchors[i], halfw[i], xx, yy, pad=6)
+            label[patch] = i
+        for n, (region, key, _x, _y) in enumerate(sea_bosses):
+            spot, _box = _name_spot((sea == n + 1) & water, region["name"], reserved)
+            if spot:
+                sea_labels.setdefault(region["key"], {})[key] = spot
+        for rk, spots in sea_labels.items():
+            name_spots[rk] = next(iter(spots.values()))
+
+    # Neighbours: territories sharing a border, then the shortest crossing
+    # between any parts of the map that still can't reach each other.
     pairs = {}
     for a, b in ((label[:, :-1], label[:, 1:]), (label[:-1, :], label[1:, :])):
         edge = (a != b) & (a >= 0) & (b >= 0)
         for u, v in zip(a[edge], b[edge]):
             k = (min(u, v), max(u, v))
             pairs[k] = pairs.get(k, 0) + 1
-    edges = sorted((meta[u]["key"], meta[v]["key"]) for (u, v), n in pairs.items() if n >= 4)
+    links = {k for k, n in pairs.items() if n >= 4}
+    # The Abyss is entered from the Wilderness (the tether on the map): its
+    # nearest tile borders whatever territory holds the tether's end.
+    abyss_ids = [i for i, m in enumerate(meta) if geo.REGION_BY_KEY[m["region"]].get("inset")]
+    if abyss_ids:
+        tx, ty = to_grid(*geo.ABYSS["tether"])
+        tr = min(max(int(round(ty)), 0), h - 1)
+        tc = min(max(int(round(tx)), 0), w - 1)
+        owned = label >= 0
+        if owned.any():
+            _, (tri, tci) = ndi.distance_transform_edt(~owned, return_indices=True)
+            at = int(label[tri[tr, tc], tci[tr, tc]])
+            if at not in abyss_ids:
+                near = min(abyss_ids, key=lambda i: math.hypot(anchors[i][0] / G - tx,
+                                                             anchors[i][1] / G - ty))
+                links.add((min(at, near), max(at, near)))
+    links |= _bridges(label, len(meta), links)
+    edges = sorted(tuple(sorted((meta[u]["key"], meta[v]["key"]))) for u, v in links)
 
     tiles = []
     for i, m in enumerate(meta):
         cell = label == i
-        area = int(cell.sum()) * G * G
+        area_px = int(cell.sum()) * G * G
         tiles.append({**m, "label": labels[i], "path": mask_path(cell, sigma=1.2, tol=0.7, compact=True),
                       "x": round(anchors[i][0], 1), "y": round(anchors[i][1], 1),
                       "true": [round(float(seeds[i][0]) * G, 1), round(float(seeds[i][1]) * G, 1)],
-                      "area": area})
+                      "area": area_px})
 
-    regions = []
+    regions_out = []
     for region in geo.REGIONS:
+        if region["key"] not in kept_regions:
+            continue
         idx = [i for i, m in enumerate(meta) if m["region"] == region["key"]]
         union = np.isin(label, idx)
         spot = name_spots.get(region["key"])
-        regions.append({"key": region["key"], "name": region["name"], "color": region["color"],
-                        "path": mask_path(union, sigma=1.2, tol=0.7, compact=True),
-                        "label": spot})
+        regions_out.append({"key": region["key"], "name": region["name"], "color": region["color"],
+                            "path": mask_path(union, sigma=1.2, tol=0.7, compact=True),
+                            "label": spot, "sea": bool(region.get("sea")),
+                            **({"labels": sea_labels[region["key"]]}
+                               if region["key"] in sea_labels else {})})
+    var, shapes = ({}, [])
+    if variants:
+        var, shapes = _variants(label, meta, {r["key"] for r in geo.REGIONS if r.get("sea")})
 
     biome_paths = {}
     grow = ndi.binary_dilation(land, iterations=2)
@@ -376,20 +506,56 @@ def build(world_png: str) -> dict:
         m = m | (grow & ~land & (ndi.grey_dilation(np.where(biomes == bi, 1, 0), size=5) > 0))
         biome_paths[name] = mask_path(m, sigma=1.4, tol=0.6, min_len=14)
 
-    decor = _decorations(biomes, land, anchors, halfw, regions, h, w)
+    decor = _decorations(biomes, land, anchors, halfw, regions_out, h, w)
     waves = _waves(land, h, w)
     e = geo.EXTENT
+    extent = {"x0": e["x0"] + c0 * G, "x1": e["x0"] + c1 * G,
+              "y0": e["y1"] - r1 * G, "y1": e["y1"] - r0 * G}
+    abyss = None
+    if abyss_bosses:
+        abyss = {"x": round(ax * G, 1), "y": round(ay * G, 1), "r": geo.ABYSS["radius"],
+                 "tether": [round(v * G, 1) for v in to_grid(*geo.ABYSS["tether"])]}
     return {
         "name": "Gielinor", "units": "game tiles",
         "badge": geo.BADGE, "region_font": geo.REGION_FONT,
-        "width": e["x1"] - e["x0"], "height": e["y1"] - e["y0"], "extent": e,
+        "width": w * G, "height": h * G, "extent": extent,
+        "selection": {"regions": sorted(kept_regions), "drop": sorted(drop)},
         "land": mask_path(land, sigma=1.0, tol=0.4),
         "biomes": biome_paths,
-        "regions": regions, "tiles": tiles, "edges": edges,
-        "abyss": {"x": round(ax * G, 1), "y": round(ay * G, 1), "r": geo.ABYSS["radius"],
-                  "tether": [round(v * G, 1) for v in to_grid(*geo.ABYSS["tether"])]},
+        "regions": regions_out, "tiles": tiles, "edges": [list(e_) for e_ in edges],
+        "variants": var, "shapes": shapes,
+        "abyss": abyss,
         "decor": decor, "waves": waves,
     }
+
+
+def _bridges(label, count, links) -> set:
+    """Extra links joining parts of the map that can't reach each other:
+    repeatedly link the part holding the first tile to the nearest other
+    part, through the closest pair of territories (the shortest crossing)."""
+    parent = list(range(count))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for u, v in links:
+        parent[find(u)] = find(v)
+    present = [i for i in range(count) if (label == i).any()]
+    out = set()
+    while len({find(i) for i in present}) > 1:
+        root = find(present[0])
+        mine = np.isin(label, [i for i in present if find(i) == root])
+        dist, (ri, ci) = ndi.distance_transform_edt(~mine, return_indices=True)
+        other = (label >= 0) & ~mine
+        d = np.where(other, dist, np.inf)
+        r, c = np.unravel_index(d.argmin(), d.shape)
+        u, v = int(label[ri[r, c], ci[r, c]]), int(label[r, c])
+        out.add((min(u, v), max(u, v)))
+        parent[find(u)] = find(v)
+    return out
 
 
 def _area_raster(h, w) -> np.ndarray:
@@ -404,8 +570,89 @@ def _area_raster(h, w) -> np.ndarray:
     return np.asarray(img).astype(int)
 
 
+def _variants(label, meta, sea_regions):
+    """Every region re-cut for every way of leaving some of its tiles out.
+
+    ``({region: {"tiles": [keys], "masks": {bits: {tile key: shape index}}}},
+    shapes)``: ``bits`` says which of the region's tiles stay (bit n = its nth
+    tile); only the tiles whose territory changed are listed, pointing into
+    the shared ``shapes`` list. A kept tile keeps every bit of ground it had
+    and grows into the ground of the tiles left out, nearest first (with a
+    little wobble so the new borders meander like the old ones), so the
+    region's outline, and every other region, stays exactly as drawn.
+
+    Sea regions have no variants: their patches never touch, so a left-out
+    patch is just open sea and the outline is the kept patches'. Leaving a
+    region out entirely needs none either: it is simply not drawn."""
+    h, w = label.shape
+    rng = np.random.default_rng(13)
+    noise = ndi.gaussian_filter(rng.standard_normal((h, w)), 10)
+    noise *= 4 / noise.std()
+    shapes, index = [], {}
+
+    def shape_id(mask, origin):
+        path = mask_path(mask, sigma=1.2, tol=0.7, compact=True, origin=origin)
+        if path not in index:
+            index[path] = len(shapes)
+            shapes.append(path)
+        return index[path]
+
+    out = {}
+    region_keys = []
+    for m in meta:
+        if m["region"] not in region_keys:
+            region_keys.append(m["region"])
+    for rk in region_keys:
+        idx = [i for i, m in enumerate(meta) if m["region"] == rk]
+        n = len(idx)
+        if n < 2 or rk in sea_regions:
+            continue
+        ground = np.isin(label, idx)
+        rows, cols = np.nonzero(ground)
+        r0, c0 = max(int(rows.min()) - 6, 0), max(int(cols.min()) - 6, 0)
+        r1, c1 = min(int(rows.max()) + 7, h), min(int(cols.max()) + 7, w)
+        sub, g = label[r0:r1, c0:c1], ground[r0:r1, c0:c1]
+        base = {i: sub == i for i in idx}
+        dist = np.stack([ndi.distance_transform_edt(~base[i]) for i in idx])
+        dist += noise[r0:r1, c0:c1][None]
+        masks = {}
+        for bits in range(1, (1 << n) - 1):
+            keep = [b for b in range(n) if bits >> b & 1]
+            kept = [idx[b] for b in keep]
+            grow = np.array(kept)[dist[keep].argmin(0)]
+            new = np.where(g, np.where(np.isin(sub, kept), sub, grow), -1)
+            # A grown piece cut off from its tile that is only a sliver goes
+            # to whoever surrounds it, as in the full map.
+            for i in kept:
+                lab, count = ndi.label(new == i)
+                if count > 1:
+                    sizes = ndi.sum(new == i, lab, range(1, count + 1))
+                    small = 1 + np.nonzero(sizes < 60)[0]
+                    new[np.isin(lab, small) & ~base[i]] = -1
+            hole = g & (new < 0)
+            if hole.any():
+                _, (ri, ci) = ndi.distance_transform_edt(new < 0, return_indices=True)
+                new[hole] = new[ri, ci][hole]
+            entry = {}
+            for i in kept:
+                cell = new == i
+                if not np.array_equal(cell, base[i]):
+                    entry[meta[i]["key"]] = shape_id(cell, (r0, c0))
+            masks[str(bits)] = entry
+        out[rk] = {"tiles": [meta[i]["key"] for i in idx], "masks": masks}
+    return out, shapes
+
+
 LLOYD_ROUNDS = 12
 LLOYD_ANCHOR = 0.55
+# Water narrower than about twice this (working pixels) is a river or a
+# channel, not open sea: the seas stay out of it.
+SEA_OPEN = 3
+# Open sea kept around the land when the board is cropped (game tiles).
+CROP_MARGIN = 70
+# Water this narrow (working pixels, each side) still joins two pieces of
+# land into one landmass when deciding what a removed region leaves behind.
+RIVER_BRIDGE = 2
 
 
 def _fill_by_landmass(rid, ground):
@@ -578,8 +825,19 @@ def _waves(land, h, w):
 
 
 if __name__ == "__main__":
-    data = build(sys.argv[1])
-    with open(sys.argv[2], "w") as fh:
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("world")
+    ap.add_argument("out")
+    ap.add_argument("--regions", help="comma-separated region keys to keep (default: all)")
+    ap.add_argument("--drop", default="", help="comma-separated tile keys to leave out")
+    args = ap.parse_args()
+    data = build(args.world,
+                 regions=args.regions.split(",") if args.regions else None,
+                 drop_tiles=[k for k in args.drop.split(",") if k])
+    with open(args.out, "w") as fh:
         json.dump(data, fh, separators=(",", ":"))
     print(f"{len(data['tiles'])} tiles, {len(data['edges'])} borders, "
-          f"{len(data['decor'])} decorations, {sum(len(v) for v in data['biomes'].values()) // 1024} KiB biomes")
+          f"{data['width']}x{data['height']}, {len(data['decor'])} decorations, "
+          f"{sum(len(v) for v in data['biomes'].values()) // 1024} KiB biomes")

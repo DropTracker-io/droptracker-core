@@ -210,6 +210,34 @@ def _tile_counts(session, event_id: int) -> dict:
         .group_by(ConquestTile.owner_team_id).all())}
 
 
+def front_state(session, event_id: int) -> tuple:
+    """``(tiles, adjacency, homes)`` for the fronts rule: tile dicts (id,
+    kind, owner), services.conquest.adjacency over the map's connections and
+    {team id: home tile id}. Unlocked reads: a map is at most 120 tiles."""
+    from db.models import ConquestEdge, ConquestTile
+
+    tiles, homes = [], {}
+    for tid, kind, owner, home in (
+            session.query(ConquestTile.id, ConquestTile.kind, ConquestTile.owner_team_id,
+                          ConquestTile.home_team_id)
+            .filter(ConquestTile.event_id == event_id).all()):
+        tiles.append({"id": tid, "kind": kind or "normal", "owner_team_id": owner})
+        if home is not None:
+            homes[int(home)] = tid
+    edges = (session.query(ConquestEdge.tile_a_id, ConquestEdge.tile_b_id)
+             .filter(ConquestEdge.event_id == event_id).all())
+    return tiles, _cq().adjacency(edges), homes
+
+
+def can_reach(session, event_id: int, team_id: int, tile_id: int, settings: dict) -> bool:
+    """Whether ``team_id``'s troops count on ``tile_id`` right now."""
+    if settings.get("attack_range") == "anywhere":
+        return True
+    tiles, adj, homes = front_state(session, event_id)
+    return tile_id in _cq().reachable_tiles(team_id, tiles, adj, settings,
+                                            homes.get(team_id))
+
+
 # --------------------------------------------------------------------------- #
 # Apply / revoke (the event engine's conquest branch)
 # --------------------------------------------------------------------------- #
@@ -258,7 +286,8 @@ def apply_conquest(session, redis_conn, event: dict, task: dict, completion,
         # A task no tile uses: it keeps its running total and nothing else.
         session.flush()
         return result
-    earned = cq.troops_for_progress(previous, current, threshold, rule.troops)
+    earned = cq.troops_for_progress(previous, current, threshold, rule.troops,
+                                    once=bool(rule.once))
     have, need = cq.progress_to_next(current, threshold)
     frame = {"kind": "conquest_progress", "event_id": event["id"],
              "task_id": task["id"], "tile_id": rule.tile_id, "team_id": team_id,
@@ -294,19 +323,40 @@ def apply_conquest(session, redis_conn, event: dict, task: dict, completion,
         book = ConquestTroops(event_id=event["id"], tile_id=tile.id,
                               team_id=team_id, earned=0, debt=0)
         session.add(book)
-    book.earned = int(book.earned or 0) + earned
     paid = min(int(book.debt or 0), earned)
     book.debt = int(book.debt or 0) - paid
     usable = earned - paid
+    # Troops that paid off debt count as earned; the rest once they fight.
+    book.earned = int(book.earned or 0) + paid
     result["troops"] = earned
     if paid:
         result["troop_debt_paid"] = paid
 
     settings = map_settings(session, event["id"])
     now = now or datetime.now()
+    if usable > 0 and not can_reach(session, event["id"], team_id, tile.id, settings):
+        # Fronts: the tile isn't next to the team's land. The troops are
+        # recorded (held) and never fight (out_of_reach = "ignore").
+        book.held = int(book.held or 0) + usable
+        for _ in range(usable):
+            session.add(ConquestBattle(
+                event_id=event["id"], tile_id=tile.id, team_id=team_id, outcome="held",
+                owner_before=tile.owner_team_id, owner_after=tile.owner_team_id,
+                defense_before=int(tile.defense or 0), defense_after=int(tile.defense or 0),
+                player_id=player_id, completion_id=getattr(completion, "id", None),
+                task_id=task["id"], source="troop", created_at=now,
+            ))
+        session.flush()
+        result.update(held=usable, out_of_reach=True)
+        frame.update(out_of_reach=True, held=usable)
+        _publish(event["id"], frame)
+        return result
+    book.earned = int(book.earned or 0) + usable
+
     owner_before = tile.owner_team_id
     outcomes = cq.resolve_troops(tile.owner_team_id, tile.defense, team_id, usable,
-                                 settings, rng or cq.make_rng())
+                                 cq.tile_settings(settings, tile.max_defense),
+                                 rng or cq.make_rng())
     captures = 0
     for o in outcomes:
         session.add(ConquestBattle(
@@ -439,7 +489,13 @@ def revoke_conquest(session, event: dict, task: dict, team_id, completion) -> di
     (the caller already flipped the row). Dice can't be un-rolled, so troops
     the row had earned become debt on the rule's tile: the team's next troops
     there pay it off before doing anything. Returns the audit summary."""
-    from db.models import ConquestRule, ConquestTroops, EventCompletion, EventProgress
+    from db.models import (
+        ConquestBattle,
+        ConquestRule,
+        ConquestTroops,
+        EventCompletion,
+        EventProgress,
+    )
 
     cq = _cq()
     summary = {"progress": 0, "completed": False, "team_score": None, "troop_debt": 0}
@@ -472,7 +528,8 @@ def revoke_conquest(session, event: dict, task: dict, team_id, completion) -> di
     threshold = _threshold(task)
     lost = 0
     if rule is not None:
-        lost = max(-cq.troops_for_progress(previous, current, threshold, rule.troops), 0)
+        lost = max(-cq.troops_for_progress(previous, current, threshold, rule.troops,
+                                           once=bool(rule.once)), 0)
     if lost:
         book = (session.query(ConquestTroops)
                 .filter(ConquestTroops.tile_id == rule.tile_id,
@@ -480,11 +537,23 @@ def revoke_conquest(session, event: dict, task: dict, team_id, completion) -> di
                 .with_for_update().first())
         if book is None:
             book = ConquestTroops(event_id=event["id"], tile_id=rule.tile_id,
-                                  team_id=team_id, earned=0, debt=0)
+                                  team_id=team_id, earned=0, debt=0, held=0)
             session.add(book)
+        # Troops this row earned out of reach never fought: they just go.
+        held_here = 0
+        if getattr(completion, "id", None) is not None:
+            held_here = (session.query(ConquestBattle.id)
+                         .filter(ConquestBattle.completion_id == completion.id,
+                                 ConquestBattle.task_id == task["id"],
+                                 ConquestBattle.outcome == "held").count())
+        from_held = min(lost, held_here, int(book.held or 0))
+        book.held = int(book.held or 0) - from_held
+        lost -= from_held
         book.debt = int(book.debt or 0) + lost
         book.earned = max(int(book.earned or 0) - lost, 0)
         summary["troop_debt"] = lost
+        if from_held:
+            summary["held_removed"] = from_held
     session.flush()
     have, need = cq.progress_to_next(current, threshold)
     _publish(event["id"], {
@@ -538,12 +607,61 @@ def conquest_blockers(session, event) -> list:
             "message": "Conquest needs at least two teams to fight over the map.",
         })
     settings = map_settings(session, event.id)
-    if settings["start_mode"] == "dealt" and team_count and len(normal) < team_count:
+    if (settings["start_mode"] in ("dealt", "scattered") and team_count
+            and len(normal) < team_count):
         blockers.append({
             "code": "conquest_deal_short", "target": "board",
             "message": (f"Dealing the map needs a tile per team: {team_count} teams "
                         f"but only {len(normal)} tiles."),
         })
+    if settings["start_mode"] == "homes":
+        team_ids = [tid for (tid,) in session.query(EventTeam.id)
+                    .filter(EventTeam.event_id == event.id).all()]
+        homed = {t.home_team_id for t in normal if t.home_team_id is not None}
+        homeless = [tid for tid in team_ids if tid not in homed]
+        if homeless:
+            names = _team_names(session, homeless)
+            listed = ", ".join(_team_label(names, tid) for tid in homeless[:5])
+            blockers.append({
+                "code": "conquest_homes_missing", "target": "board",
+                "message": ("Every team needs a home tile to start on. Pick one in the "
+                            f"map designer for: {listed}"
+                            + (f" and {len(homeless) - 5} more" if len(homeless) > 5 else "")
+                            + "."),
+            })
+    if settings["attack_range"] == "adjacent":
+        _tiles, adj, _homes = front_state(session, event.id)
+        tile_dicts = _tile_dicts(tiles)
+        label_of = {t.id: t.label for t in tiles}
+        if not adj:
+            blockers.append({
+                "code": "conquest_no_connections", "target": "board",
+                "message": ("Teams can only attack tiles next to their own, but this map "
+                            "has no connections between tiles. Connect them in the map "
+                            "designer, rebuild the preset, or let teams attack anywhere "
+                            "in the rules."),
+            })
+        else:
+            lonely = _cq().isolated_tiles(tile_dicts, adj)
+            if lonely:
+                more = f" and {len(lonely) - 5} more" if len(lonely) > 5 else ""
+                blockers.append({
+                    "code": "conquest_isolated_tiles", "target": "board",
+                    "message": ("These tiles aren't connected to any other tile, so nobody "
+                                "could attack them from next door: "
+                                + ", ".join(label_of[t] for t in lonely[:5]) + more + "."),
+                })
+            else:
+                parts = _cq().map_parts(tile_dicts, adj)
+                if len(parts) > 1:
+                    small = parts[-1]
+                    blockers.append({
+                        "code": "conquest_map_split", "target": "board",
+                        "message": (f"The map is split into {len(parts)} separate parts, so "
+                                    "some land can never be reached from the rest. Connect "
+                                    "them in the map designer (for example "
+                                    + ", ".join(label_of[t] for t in small[:3]) + ")."),
+                    })
     if getattr(event, "schedule_config", None):
         blockers.append({
             "code": "schedule_conquest", "target": "dates",
@@ -587,23 +705,34 @@ def seed_conquest(session, event, now: Optional[datetime] = None, *, rng=None) -
     for t in tiles:
         normal = (t.kind or "normal") == "normal"
         t.owner_team_id = None
-        t.defense = settings["neutral_defense"] if normal else 0
+        t.defense = cq.tile_garrison(settings, t.garrison, t.max_defense) if normal else 0
         t.owner_since = None
         t.captures = 0
         t.last_battle_at = None
     dealt = {}
-    if settings["start_mode"] == "dealt":
+    mode = settings["start_mode"]
+    if mode in ("dealt", "scattered", "homes"):
         team_ids = [tid for (tid,) in session.query(EventTeam.id)
                     .filter(EventTeam.event_id == event.id)
                     .order_by(EventTeam.id).all()]
         normal_tiles = [t for t in tiles if (t.kind or "normal") == "normal"]
-        dealt = cq.deal_tiles([(t.id, t.value) for t in normal_tiles], team_ids,
-                              rng or cq.make_rng())
+        rng = rng or cq.make_rng()
+        if mode == "dealt":
+            dealt = cq.deal_tiles([(t.id, t.value) for t in normal_tiles], team_ids, rng)
+        elif mode == "scattered":
+            _tiles, adj, _homes = front_state(session, event.id)
+            dealt = {tile_id: team_id for team_id, tile_id in cq.scatter_tiles(
+                [t.id for t in normal_tiles], adj, team_ids, rng).items()}
+        else:
+            teams = set(team_ids)
+            dealt = {t.id: int(t.home_team_id) for t in normal_tiles
+                     if t.home_team_id is not None and int(t.home_team_id) in teams}
         by_id = {t.id: t for t in tiles}
         for tile_id, team_id in dealt.items():
             tile = by_id[tile_id]
             tile.owner_team_id = team_id
-            tile.defense = settings["start_defense"]
+            tile.defense = min(settings["start_defense"],
+                               cq.tile_settings(settings, tile.max_defense)["max_defense"])
             tile.owner_since = now
             session.add(ConquestHold(event_id=event.id, tile_id=tile_id,
                                      team_id=team_id, started_at=now))
@@ -778,11 +907,15 @@ def forget_team(session, event_id: int, team_id: int) -> None:
     from db.models import ConquestHold, ConquestRegion, ConquestTile, ConquestTroops
 
     settings = map_settings(session, event_id)
+    for tile in (session.query(ConquestTile)
+                 .filter(ConquestTile.event_id == event_id,
+                         ConquestTile.owner_team_id == team_id).all()):
+        tile.owner_team_id = None
+        tile.defense = _cq().tile_garrison(settings, tile.garrison, tile.max_defense)
+        tile.owner_since = None
     (session.query(ConquestTile)
-     .filter(ConquestTile.event_id == event_id, ConquestTile.owner_team_id == team_id)
-     .update({ConquestTile.owner_team_id: None,
-              ConquestTile.defense: settings["neutral_defense"],
-              ConquestTile.owner_since: None}, synchronize_session=False))
+     .filter(ConquestTile.event_id == event_id, ConquestTile.home_team_id == team_id)
+     .update({ConquestTile.home_team_id: None}, synchronize_session=False))
     (session.query(ConquestRegion)
      .filter(ConquestRegion.event_id == event_id,
              ConquestRegion.owner_team_id == team_id)
@@ -868,12 +1001,15 @@ def conquest_payload(session, event, *, conceal: bool = False,
                 .filter(EventProgress.task_id.in_(task_ids)).all()):
             progress[(task_id, team_id)] = int(value or 0)
     troops: dict = {}
-    for tile_id, team_id, earned in (
+    held: dict = {}
+    for tile_id, team_id, earned, held_n in (
             session.query(ConquestTroops.tile_id, ConquestTroops.team_id,
-                          ConquestTroops.earned)
+                          ConquestTroops.earned, ConquestTroops.held)
             .filter(ConquestTroops.event_id == event.id).all()):
         if earned:
             troops.setdefault(tile_id, {})[str(team_id)] = int(earned)
+        if held_n:
+            held.setdefault(tile_id, {})[str(team_id)] = int(held_n)
 
     rules_by_tile: dict = {}
     for r in rules:
@@ -883,13 +1019,22 @@ def conquest_payload(session, event, *, conceal: bool = False,
         target = max(int(task.target_value or 0), 1)
         rules_by_tile.setdefault(r.tile_id, []).append({
             "id": r.id, "task_id": r.task_id, "label": task.label, "type": task.type,
-            "troops": int(r.troops or 1), "target": target,
+            "troops": int(r.troops or 1), "once": bool(r.once), "target": target,
             "progress": {str(team.id): progress[(r.task_id, team.id)] % target
                          for team in teams if progress.get((r.task_id, team.id))},
         })
 
     seeded = map_row is not None and map_row.seeded_at is not None
     standings = compute_standings(session, event, settings, now) if seeded else {}
+    # Where each team's troops count right now (fronts); the site greys out
+    # the rest. Derived from ownership + connections, both public.
+    tile_dicts = [{"id": t.id, "kind": t.kind or "normal", "owner_team_id": t.owner_team_id}
+                  for t in tiles]
+    adj = cq.adjacency((a, b) for a, b in edges)
+    homes = {int(t.home_team_id): t.id for t in tiles if t.home_team_id is not None}
+    reach = {str(team.id): sorted(cq.reachable_tiles(team.id, tile_dicts, adj, settings,
+                                                     homes.get(team.id)))
+             for team in teams}
     start, end = event_window(event, now)
 
     battle_rows = []
@@ -932,12 +1077,17 @@ def conquest_payload(session, event, *, conceal: bool = False,
             "value": float(t.value or 0), "region_id": t.region_id,
             "icon_npc_id": t.icon_npc_id, "icon_item_id": t.icon_item_id,
             "shape": t.shape,
+            "max_defense": t.max_defense, "garrison": t.garrison,
+            "home_team_id": t.home_team_id,
+            "defense_cap": cq.tile_settings(settings, t.max_defense)["max_defense"],
             "owner_team_id": t.owner_team_id, "defense": int(t.defense or 0),
             "owner_since": _ts(t.owner_since), "captures": int(t.captures or 0),
             "rules": [] if conceal else rules_by_tile.get(t.id, []),
             "troops": troops.get(t.id, {}),
+            "held": held.get(t.id, {}),
         } for t in tiles],
         "edges": [[a, b] for a, b in edges],
+        "reach": reach,
         "teams": [{
             "id": team.id, "name": team.name, "color": team.color,
             "score": round(float(team.score or 0), 2),
@@ -1018,9 +1168,10 @@ def adjust_tile(session, event, tile_id: int, *, owner_team_id=None,
                           EventTeam.event_id == event.id).first())
         if exists is None:
             raise AdjustError("That team isn't in this event.")
+    cap = _cq().tile_settings(settings, tile.max_defense)["max_defense"]
     new_defense = tile.defense if defense is None else int(defense)
-    if not 0 <= new_defense <= settings["max_defense"]:
-        raise AdjustError(f"Defense must be 0 to {settings['max_defense']}.")
+    if not 0 <= new_defense <= cap:
+        raise AdjustError(f"Defense must be 0 to {cap}.")
 
     before_owner, before_defense = tile.owner_team_id, int(tile.defense or 0)
     if owner_team_id != before_owner:

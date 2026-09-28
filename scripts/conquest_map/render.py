@@ -187,69 +187,83 @@ def render_board(geom: dict, state: dict, *, theme: str = "vivid",
     out.append('</g>')  # terrain filter
 
     # ---- the Abyss rift -------------------------------------------------
-    ab = geom["abyss"]
-    tx, ty = ab["tether"]
-    out.append(f'<path d="M{tx} {ty} Q{(tx + ab["x"]) / 2} {min(ty, ab["y"]) - 260} {ab["x"] - ab["r"] * .7} '
-               f'{ab["y"] + ab["r"] * .7}" fill="none" stroke="#c9b3ff" stroke-width="3" '
-               f'stroke-dasharray="2 9" stroke-linecap="round" opacity=".9"/>')
-    out.append(f'<circle cx="{tx}" cy="{ty}" r="9" fill="url(#rift)" stroke="#1a1236" stroke-width="2"/>')
-    out.append(f'<circle cx="{ab["x"]}" cy="{ab["y"]}" r="{ab["r"] + 16}" fill="#6b4fd8" opacity=".35" filter="url(#soft)"/>')
-    out.append(f'<circle cx="{ab["x"]}" cy="{ab["y"]}" r="{ab["r"]}" fill="url(#rift)"/>')
-    spiral = []
-    for k in range(3):
-        pts = []
-        for i in range(60):
-            a = i / 59 * math.pi * 2.2 + k * 2.1
-            rr = ab["r"] * (0.12 + 0.85 * i / 59)
-            pts.append(f'{ab["x"] + rr * math.cos(a):.1f} {ab["y"] + rr * math.sin(a):.1f}')
-        spiral.append("M" + " L".join(pts))
-    out.append(f'<path d="{"".join(spiral)}" fill="none" stroke="#d9c7ff" stroke-width="2" opacity=".35"/>')
+    ab = geom.get("abyss")
+    if ab:
+        tx, ty = ab["tether"]
+        out.append(f'<path d="M{tx} {ty} Q{(tx + ab["x"]) / 2} {min(ty, ab["y"]) - 260} {ab["x"] - ab["r"] * .7} '
+                   f'{ab["y"] + ab["r"] * .7}" fill="none" stroke="#c9b3ff" stroke-width="3" '
+                   f'stroke-dasharray="2 9" stroke-linecap="round" opacity=".9"/>')
+        out.append(f'<circle cx="{tx}" cy="{ty}" r="9" fill="url(#rift)" stroke="#1a1236" stroke-width="2"/>')
+        out.append(f'<circle cx="{ab["x"]}" cy="{ab["y"]}" r="{ab["r"] + 16}" fill="#6b4fd8" opacity=".35" filter="url(#soft)"/>')
+        out.append(f'<circle cx="{ab["x"]}" cy="{ab["y"]}" r="{ab["r"]}" fill="url(#rift)"/>')
+        spiral = []
+        for k in range(3):
+            pts = []
+            for i in range(60):
+                a = i / 59 * math.pi * 2.2 + k * 2.1
+                rr = ab["r"] * (0.12 + 0.85 * i / 59)
+                pts.append(f'{ab["x"] + rr * math.cos(a):.1f} {ab["y"] + rr * math.sin(a):.1f}')
+            spiral.append("M" + " L".join(pts))
+        out.append(f'<path d="{"".join(spiral)}" fill="none" stroke="#d9c7ff" stroke-width="2" opacity=".35"/>')
 
     if terrain_only:
         out.append('</g></svg>')
         return "\n".join(out)
 
     # ---- territories ----------------------------------------------------
-    out.append('<g clip-path="url(#landclip)">')
+    # Land territories are clipped to the coast; sea ones (Sailing) are
+    # patches of open water, drawn as they are.
     region_color = {r["key"]: r["color"] for r in geom["regions"]}
-    for t in geom["tiles"]:
-        tid = owner.get(t["key"])
-        if tid is None or tid not in teams:
-            # Unclaimed ground keeps a faint wash of its region's colour, so
-            # each kingdom reads as one piece before anyone owns it.
-            out.append(f'<path d="{t["path"]}" fill="{region_color.get(t["region"], "#fff")}" '
-                       f'fill-opacity=".3"/>')
-            continue
-        col = teams[tid]["color"]
-        cid = f'c-{t["key"]}'
-        out.append(f'<clipPath id="{cid}"><path d="{t["path"]}"/></clipPath>')
-        out.append(f'<path d="{t["path"]}" fill="{col}" fill-opacity=".5"/>')
-        out.append(f'<path d="{t["path"]}" fill="none" stroke="{col}" stroke-width="12" '
-                   f'stroke-opacity=".85" clip-path="url(#{cid})"/>')
-    for t in geom["tiles"]:
-        out.append(f'<path d="{t["path"]}" fill="none" stroke="{th["ink"]}" stroke-width="2" '
-                   f'stroke-dasharray="7 5" stroke-opacity=".55"/>')
-    # Each kingdom is edged inside with a band of its own colour.
-    for r in geom["regions"]:
-        cid = f'r-{r["key"]}'
-        out.append(f'<clipPath id="{cid}"><path d="{r["path"]}"/></clipPath>')
-        out.append(f'<path d="{r["path"]}" fill="none" stroke="{r["color"]}" stroke-width="20" '
-                   f'stroke-opacity=".75" stroke-linejoin="round" clip-path="url(#{cid})"/>')
-    for r in geom["regions"]:
-        out.append(f'<path d="{r["path"]}" fill="none" stroke="{th["ink"]}" stroke-width="7" '
-                   f'stroke-opacity=".75" stroke-linejoin="round"/>')
-        out.append(f'<path d="{r["path"]}" fill="none" stroke="#f6e7b8" stroke-width="1.6" '
-                   f'stroke-opacity=".9" stroke-linejoin="round"/>')
+    sea_keys = {r["key"] for r in geom["regions"] if r.get("sea")}
+
+    def territories(tiles, regions):
+        out = []
+        for t in tiles:
+            tid = owner.get(t["key"])
+            if tid is None or tid not in teams:
+                # Unclaimed ground keeps a faint wash of its region's colour, so
+                # each kingdom reads as one piece before anyone owns it.
+                out.append(f'<path d="{t["path"]}" fill="{region_color.get(t["region"], "#fff")}" '
+                           f'fill-opacity=".3"/>')
+                continue
+            col = teams[tid]["color"]
+            cid = f'c-{t["key"]}'
+            out.append(f'<clipPath id="{cid}"><path d="{t["path"]}"/></clipPath>')
+            out.append(f'<path d="{t["path"]}" fill="{col}" fill-opacity=".5"/>')
+            out.append(f'<path d="{t["path"]}" fill="none" stroke="{col}" stroke-width="12" '
+                       f'stroke-opacity=".85" clip-path="url(#{cid})"/>')
+        for t in tiles:
+            out.append(f'<path d="{t["path"]}" fill="none" stroke="{th["ink"]}" stroke-width="2" '
+                       f'stroke-dasharray="7 5" stroke-opacity=".55"/>')
+        # Each kingdom is edged inside with a band of its own colour.
+        for r in regions:
+            cid = f'r-{r["key"]}'
+            out.append(f'<clipPath id="{cid}"><path d="{r["path"]}"/></clipPath>')
+            out.append(f'<path d="{r["path"]}" fill="none" stroke="{r["color"]}" stroke-width="20" '
+                       f'stroke-opacity=".75" stroke-linejoin="round" clip-path="url(#{cid})"/>')
+        for r in regions:
+            out.append(f'<path d="{r["path"]}" fill="none" stroke="{th["ink"]}" stroke-width="7" '
+                       f'stroke-opacity=".75" stroke-linejoin="round"/>')
+            out.append(f'<path d="{r["path"]}" fill="none" stroke="#f6e7b8" stroke-width="1.6" '
+                       f'stroke-opacity=".9" stroke-linejoin="round"/>')
+        return out
+
+    out.append('<g clip-path="url(#landclip)">')
+    out += territories([t for t in geom["tiles"] if t["region"] not in sea_keys],
+                       [r for r in geom["regions"] if r["key"] not in sea_keys])
     out.append('</g>')
+    out += territories([t for t in geom["tiles"] if t["region"] in sea_keys],
+                       [r for r in geom["regions"] if r["key"] in sea_keys])
 
     # ---- sea lanes for territories with no land neighbour ---------------
     linked = {k for e in geom["edges"] for k in e}
     anchors = {t["key"]: (t["x"], t["y"]) for t in geom["tiles"]}
     for t in geom["tiles"]:
-        if t["key"] in linked or t["region"] == "abyss":
+        if t["key"] in linked or t["region"] == "abyss" or t["region"] in sea_keys:
             continue
         x, y = anchors[t["key"]]
-        near = min((k for k in anchors if k != t["key"] and geom_region(geom, k) != "abyss"),
+        near = min((k for k in anchors if k != t["key"]
+                    and geom_region(geom, k) not in ("abyss", *sea_keys)),
                    key=lambda k: math.hypot(anchors[k][0] - x, anchors[k][1] - y))
         nx, ny = anchors[near]
         mx, my = (x + nx) / 2 + (ny - y) * .18, (y + ny) / 2 - (nx - x) * .18

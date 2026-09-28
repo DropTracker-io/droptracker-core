@@ -2,7 +2,21 @@
 
 ``gielinor`` is the default map: the 45 bosses of the task generator's
 curated encounter list (services/task_generator.ENCOUNTERS), each placed in
-the part of Gielinor it lives in (checked against the OSRS wiki).
+the part of Gielinor it lives in (checked against the OSRS wiki), plus the
+content that isn't a generator encounter (``EXTRA_TILES``): Karamja's TzHaar
+and Slayer tiles, and The Seas, a region of open water holding a tile per
+Sailing collection-log page.
+
+**Organisers pick what's in it.** Any region or tile can be left out, and
+the board is then redrawn without it (services/conquest_mapgen.py runs
+``scripts/conquest_map`` for that selection): a removed region's land goes
+to the kept regions on its landmass, a landmass with nothing kept is dropped
+and the frame is cropped to what is left. The caller passes the art pack for
+the selection (``art``); the full map uses the committed one.
+
+The seas fill all the open water, so every crossing between landmasses goes
+through a sea tile, and the art pack lists which territories border each
+other (``edges``), which becomes the map's connections (the fronts rule).
 
 It is drawn on the real world map (web121a): ``services/conquest_art/
 gielinor.json`` holds every tile's territory outline and badge spot, every
@@ -11,15 +25,21 @@ region's outline and name spot, and the terrain backdrop the website serves
 ``scripts/conquest_map`` from the OSRS wiki's world map. Without the art
 file the preset falls back to the old schematic layout (hex clusters).
 
-Every tile gets two rules, built from the encounter catalog the "Fill for me"
+Boss tiles get two rules, built from the encounter catalog the "Fill for me"
 generator already assembles (web_api/task_generator_catalog.py):
 
 - **kills**: one troop per N kills, where N is ``troop_hours`` of efficient
   kills at that boss (WOM's EHB rate, then our derived rates). This is what
   keeps the map fair: a troop costs about the same time at Zulrah and at Nex,
-  so no team wins by camping the fastest boss.
+  so no team wins by camping the fastest boss. A kill that takes longer than
+  a troop (the Inferno, a raid on a short troop cost) pays several troops.
 - **uniques**: ``unique_troops`` troops for any of the boss's Clan Log uniques,
   a lucky drop landing as a surge of troops.
+
+``EXTRA_TILES`` rows (resolved by :func:`resolve_extra_tiles`) carry the same
+fields, so they go through the same rules, plus a Slayer-task rule for the
+Slayer tile. Tiles made only of collection-log items (the Sailing pages) have
+just the uniques rule.
 
 Pure: the caller passes the assembled catalog rows. The route turns the
 result into rows through the designer's save path, so a preset map is
@@ -36,7 +56,7 @@ from typing import Iterable, Optional
 _ART_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conquest_art")
 
 #: {preset key: human label} — what the designer offers.
-PRESETS = {"gielinor": "Gielinor (45 bosses, 10 regions)"}
+PRESETS = {"gielinor": "Gielinor (pick the regions and tiles)"}
 
 #: Region order = display order. ``anchor`` is where the region's cluster of
 #: tiles is centred on the schematic map (x east, y south, both 0..1, on a
@@ -69,6 +89,9 @@ GIELINOR_REGIONS: tuple = (
      "color": "#6aa84f",
      "tiles": ("cerberus", "the_whisperer", "royal_titans", "scurrius",
                "tormented_demon")},
+    {"key": "karamja", "name": "Karamja", "anchor": (0.555, 0.86),
+     "color": "#c8612e",
+     "tiles": ("fight_caves", "tzhaar_city", "inferno", "karamja_slayer")},
     {"key": "abyss", "name": "The Abyss", "anchor": (0.93, 0.18),
      "color": "#5a4fb0",
      "tiles": ("abyssal_sire", "the_leviathan")},
@@ -79,6 +102,63 @@ GIELINOR_REGIONS: tuple = (
     {"key": "desert", "name": "Kharidian Desert", "anchor": (0.735, 0.85),
      "color": "#d6aa45",
      "tiles": ("kalphite_queen", "tombs_of_amascut")},
+    # Open water: every tile is a patch of sea (see scripts/conquest_map).
+    {"key": "seas", "name": "The Seas", "anchor": (0.36, 0.86), "color": "#2f8fa3",
+     "sea": True,
+     "tiles": ("lost_schematics", "sailing_misc", "barracuda_trials", "sea_treasures",
+               "boat_paints", "ocean_encounters", "shellbane_gryphon")},
+)
+
+#: Tiles that aren't task-generator encounters, resolved into catalog-shaped
+#: rows by :func:`resolve_extra_tiles` (the route looks the names up):
+#:
+#: - ``kc_npcs`` / ``wom_metric`` / ``kph``: a kill rule, priced by WOM's EHB
+#:   rate (``kph`` is the fallback);
+#: - ``clog_pages``: every item on these in-game collection-log pages counts
+#:   as a unique (read live, so a game update adding an item is picked up);
+#: - ``sections``: the same from our Clan Log catalog (clan_log_sections);
+#: - ``uniques``: extra item names; ``lock_items`` pins them to ``kc_npcs``;
+#: - ``common``: the uniques drop often enough that each pays half the
+#:   usual unique troops;
+#: - ``slayer_task_hours``: a Slayer-task rule, one task costing about this
+#:   many hours;
+#: - ``icon_item``: the item shown on the badge.
+EXTRA_TILES: tuple = (
+    # Karamja. TzHaar content is reached through Karamja Volcano.
+    {"key": "fight_caves", "label": "The Fight Caves", "short": "TzTok-Jad",
+     "kc_npcs": ["TzTok-Jad"], "wom_metric": "tztok_jad", "kph": 2.0,
+     "icon_item": "Fire cape"},
+    {"key": "inferno", "label": "The Inferno", "short": "TzKal-Zuk",
+     "kc_npcs": ["TzKal-Zuk"], "wom_metric": "tzkal_zuk", "kph": 0.8,
+     "icon_item": "Infernal cape"},
+    {"key": "tzhaar_city", "label": "TzHaar City", "short": "TzHaar",
+     "clog_pages": ["TzHaar"], "common": True, "icon_item": "Obsidian cape"},
+    {"key": "karamja_slayer", "label": "Slayer", "slayer_task_hours": 0.5,
+     "sections": ["slayer_non_boss"], "icon_item": "Slayer helmet"},
+    # The Seas: every Sailing collection-log page. Most Sailing drops aren't
+    # tied to one sea, so where a tile floats is flavour.
+    {"key": "lost_schematics", "label": "Lost Schematics", "clog_pages": ["Lost Schematics"],
+     "icon_item": "Dragon cannon schematic"},
+    {"key": "sailing_misc", "label": "Sailing Miscellaneous", "short": "Sailing Misc",
+     "clog_pages": ["Sailing Miscellaneous"], "common": True,
+     # Sailing's entries on the general Miscellaneous page: the deep sea
+     # trawling catches and the squid beak.
+     "uniques": ["Swift marlin", "Giant blue krill", "Golden haddock", "Orangefin",
+                 "Huge halibut", "Purplefin", "Squid beak"],
+     "icon_item": "Narwhal horn"},
+    {"key": "barracuda_trials", "label": "Barracuda Trials", "clog_pages": ["Barracuda Trials"],
+     "icon_item": "Stormy key"},
+    {"key": "sea_treasures", "label": "Sea Treasures", "clog_pages": ["Sea Treasures"],
+     "icon_item": "Sailors' amulet (inert)"},
+    {"key": "boat_paints", "label": "Boat Paints", "clog_pages": ["Boat Paints"],
+     "common": True, "icon_item": "Barracuda paint"},
+    {"key": "ocean_encounters", "label": "Ocean Encounters", "clog_pages": ["Ocean Encounters"],
+     "common": True, "icon_item": "Radiant pearl"},
+    # A Slayer boss on the Great Conch, an island only Sailing reaches. Its
+    # Gryphon feather drops every kill, so it isn't a unique here.
+    {"key": "shellbane_gryphon", "label": "Shellbane Gryphon", "short": "Shellbane Gryphon",
+     "kc_npcs": ["Shellbane Gryphon"], "wom_metric": "shellbane_gryphon", "kph": 60.0,
+     "uniques": ["Jar of Feathers", "Belle's folly (tarnished)"], "lock_items": True},
 )
 
 #: The schematic canvas (a 16:10 box) the preset positions assume.
@@ -90,6 +170,9 @@ TILE_SPACING = 108
 TROOP_HOURS_CHOICES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
 DEFAULT_TROOP_HOURS = 0.5
 DEFAULT_UNIQUE_TROOPS = 2
+#: services.conquest.MAX_TROOPS_PER_RULE (this module stays import-free; a
+#: unit test keeps the two equal).
+MAX_RULE_TROOPS = 50
 #: How many troops a typical tile should see over the whole event: enough
 #: for several captures (defense tops out at 5), few enough that each one
 #: still matters.
@@ -161,11 +244,31 @@ def _nice_round(value: float) -> int:
     return nice_round(value)
 
 
+def _per_troop(per: float) -> tuple:
+    """``(count, troops)`` for a rule where one troop's worth of play is
+    ``per`` units (kills, tasks): N units per troop, or, when one unit takes
+    longer than a troop, one unit paying several troops."""
+    if per >= 1:
+        return max(_nice_round(per), 1), 1
+    troops = int(1 / per + 0.5) if per > 0 else 1
+    return 1, min(max(troops, 1), MAX_RULE_TROOPS)
+
+
 def _kc_rule(row: dict, troop_hours: float) -> dict:
     from services.task_generator import _kc_task
 
-    kills = max(_nice_round(float(row["kph"]) * troop_hours), 1)
-    return {"troops": 1, "new_task": _kc_task(row, kills)}
+    kills, troops = _per_troop(float(row["kph"]) * troop_hours)
+    return {"troops": troops, "new_task": _kc_task(row, kills)}
+
+
+def _slayer_rule(row: dict, troop_hours: float) -> dict:
+    tasks, troops = _per_troop(troop_hours / float(row["slayer_task_hours"]))
+    return {"troops": troops, "new_task": {
+        "type": "slayer_target",
+        "label": f"{tasks:,} Slayer task{'' if tasks == 1 else 's'}",
+        "target": "",
+        "target_value": tasks,
+    }}
 
 
 def _unique_rule(row: dict, troops: int) -> Optional[dict]:
@@ -174,33 +277,192 @@ def _unique_rule(row: dict, troops: int) -> Optional[dict]:
         return None
     from services.task_generator import _bare, _item_lock
 
+    config = {"kind": "any_of", "items": [{"item_name": u} for u in uniques]}
+    # Boss uniques only count from that boss ("any Callisto unique" isn't a
+    # Dragon pickaxe from elsewhere); a collection-log page's items come from
+    # wherever the game drops them.
+    if row.get("kc_npcs") and row.get("lock_items", True):
+        config["item_npcs"] = _item_lock(row, uniques)
     return {"troops": troops, "new_task": {
         "type": "item_collection",
         "label": f"Any {_bare(row)} unique",
         "target_value": 1,
-        "config": {"kind": "any_of",
-                   "items": [{"item_name": u} for u in uniques],
-                   "item_npcs": _item_lock(row, uniques)},
+        "config": config,
     }}
+
+
+def tile_rules(row: dict, troop_hours: float, unique_troops: int) -> list:
+    """Every rule a catalog row's tile gets. ``unique_troops`` 0 leaves the
+    uniques rule off, except on a tile that has nothing else."""
+    rules = []
+    if row.get("kc_npcs") and float(row.get("kph") or 0) > 0:
+        rules.append(_kc_rule(row, troop_hours))
+    if float(row.get("slayer_task_hours") or 0) > 0:
+        rules.append(_slayer_rule(row, troop_hours))
+    troops = unique_troops or (0 if rules else 1)
+    if troops and row.get("common"):
+        troops = max(troops // 2, 1)
+    unique = _unique_rule(row, troops) if troops else None
+    if unique:
+        rules.append(unique)
+    return rules
+
+
+def resolve_extra_tiles(*, npc_ids: dict, wom_rates: dict, clog_pages: dict,
+                        sections: dict, items: dict) -> list:
+    """``EXTRA_TILES`` as catalog-shaped rows, from what the caller looked up:
+    ``npc_ids`` {npc name: [ids]}, ``wom_rates`` {metric: kills/hour},
+    ``clog_pages`` {page name: [item names]}, ``sections`` {slug: [item
+    names]} and ``items`` {lower-case item name: (canonical name, item id)}.
+    Names are matched case-insensitively and come out spelled as stored.
+    Names we don't know are dropped (a task naming one would be refused); a
+    tile left with no rule at all is left out, like an unpriced boss."""
+    rows = []
+    # npc_list's own spelling wins ("Shellbane gryphon"): tasks need it.
+    known = {str(n).lower(): n for n, ids in npc_ids.items() if ids}
+    for spec in EXTRA_TILES:
+        kc_npcs = [known[n.lower()] for n in spec.get("kc_npcs") or [] if n.lower() in known]
+        kph = float(wom_rates.get(spec.get("wom_metric") or "") or 0) or float(spec.get("kph") or 0)
+        names = [n for page in spec.get("clog_pages") or [] for n in clog_pages.get(page) or []]
+        names += [n for slug in spec.get("sections") or [] for n in sections.get(slug) or []]
+        names += list(spec.get("uniques") or [])
+        uniques, seen = [], set()
+        for raw in names:
+            hit = items.get(str(raw).lower())
+            if hit and hit[0].lower() not in seen:
+                seen.add(hit[0].lower())
+                uniques.append({"name": hit[0], "rate": None})
+        icon = items.get(str(spec.get("icon_item") or "").lower())
+        row = {
+            "key": spec["key"], "label": spec["label"], "short": spec.get("short"),
+            "unit": spec.get("unit") or "kills",
+            "kc_npcs": kc_npcs if kph > 0 else [],
+            "npc_ids": [i for n in kc_npcs for i in npc_ids[n]],
+            "kph": kph if kc_npcs else 0.0,
+            "uniques": uniques,
+            "lock_items": bool(spec.get("lock_items")),
+            "common": bool(spec.get("common")),
+            "slayer_task_hours": spec.get("slayer_task_hours"),
+            "icon_item_id": icon[1] if icon else None,
+        }
+        if tile_rules(row, DEFAULT_TROOP_HOURS, DEFAULT_UNIQUE_TROOPS):
+            rows.append(row)
+    return rows
+
+
+def _tile_label(key: str, row: Optional[dict], art: Optional[dict]) -> str:
+    drawn = (art or {}).get("tiles", {}).get(key) or {}
+    if drawn.get("label"):
+        return drawn["label"]
+    if row:
+        return row.get("short") or row["label"]
+    return key.replace("_", " ").title()
+
+
+def preset_regions(preset: str, catalog: Iterable[dict]) -> list:
+    """What the preset dialog offers: every region with its tiles, and
+    whether each tile can be built on this database (``available``: its
+    catalog row exists and prices at least one rule)."""
+    if preset not in PRESETS:
+        raise ValueError(f"Unknown preset: {preset}")
+    by_key = {row["key"]: row for row in catalog}
+    art = preset_art(preset)
+    out = []
+    for region in GIELINOR_REGIONS:
+        tiles = []
+        for key in region["tiles"]:
+            row = by_key.get(key)
+            npc_ids = (row or {}).get("npc_ids") or []
+            tiles.append({
+                "key": key, "label": _tile_label(key, row, art),
+                "available": bool(row and tile_rules(row, DEFAULT_TROOP_HOURS,
+                                                     DEFAULT_UNIQUE_TROOPS)),
+                "icon_item_id": (row or {}).get("icon_item_id"),
+                "icon_npc_id": None if (row or {}).get("icon_item_id") else
+                (npc_ids[0] if npc_ids else None),
+            })
+        out.append({"key": region["key"], "name": region["name"], "color": region["color"],
+                    "sea": bool(region.get("sea")), "tiles": tiles})
+    return out
+
+
+def plan_selection(catalog: Iterable[dict], *, troop_hours: float = DEFAULT_TROOP_HOURS,
+                   unique_troops: int = DEFAULT_UNIQUE_TROOPS,
+                   regions: Optional[Iterable[str]] = None,
+                   exclude: Iterable[str] = ()) -> tuple:
+    """``(regions, drop, skipped)``: what the board for this pick has to be
+    drawn with. ``regions`` are the region keys that keep at least one tile,
+    ``drop`` the preset tiles inside them that won't be built (left out, or
+    ``skipped``: the catalog can't price them on this database)."""
+    by_key = {row["key"]: row for row in catalog}
+    wanted = None if regions is None else set(regions)
+    exclude = set(exclude)
+    kept_regions, drop, skipped = [], [], []
+    for region in GIELINOR_REGIONS:
+        if wanted is not None and region["key"] not in wanted:
+            continue
+        built = []
+        for key in region["tiles"]:
+            if key in exclude:
+                drop.append(key)
+                continue
+            row = by_key.get(key)
+            if not (row and tile_rules(row, troop_hours, unique_troops)):
+                skipped.append(key)
+                drop.append(key)
+                continue
+            built.append(key)
+        if built:
+            kept_regions.append(region["key"])
+    drop = [k for r in GIELINOR_REGIONS if r["key"] in kept_regions
+            for k in r["tiles"] if k in drop]
+    return kept_regions, drop, skipped
+
+
+def is_full_selection(regions: Iterable[str], drop: Iterable[str]) -> bool:
+    """Whether a pick is the whole preset (drawn by the committed art)."""
+    return set(regions) == {r["key"] for r in GIELINOR_REGIONS} and not list(drop)
 
 
 def build_preset_map(preset: str, catalog: Iterable[dict], *,
                      troop_hours: float = DEFAULT_TROOP_HOURS,
-                     unique_troops: int = DEFAULT_UNIQUE_TROOPS) -> tuple:
+                     unique_troops: int = DEFAULT_UNIQUE_TROOPS,
+                     regions: Optional[Iterable[str]] = None,
+                     exclude: Iterable[str] = (),
+                     art: Optional[dict] = None) -> tuple:
     """``(map_body, skipped)``: a designer-save body (regions + tiles with
-    ``new_task`` rules, the shape services.conquest.validate_map takes) and
-    the encounter keys left out because the catalog couldn't price them
-    (no kill rate / unknown NPC on this database)."""
+    ``new_task`` rules and the ``edges`` between them, the shape
+    services.conquest.validate_map takes) and the tile keys left out because
+    the catalog couldn't price them (no kill rate / unknown NPC or items on
+    this database).
+
+    ``regions`` (None = all) are the regions to build and ``exclude`` the
+    tiles to leave out of them. ``art`` is the art pack drawn for exactly
+    that pick (:func:`plan_selection`; None = the committed full map). Tiles
+    the art doesn't draw fall back to the schematic layout."""
     if preset != "gielinor":
         raise ValueError(f"Unknown preset: {preset}")
     by_key = {row["key"]: row for row in catalog}
+    wanted = None if regions is None else set(regions)
+    exclude = set(exclude)
     width, height = CANVAS
-    art = preset_art(preset)
+    art = art if art is not None else preset_art(preset)
     aw, ah = (art["width"], art["height"]) if art else (width, height)
-    regions, tiles, skipped = [], [], []
+    out_regions, tiles, skipped = [], [], []
     for region in GIELINOR_REGIONS:
-        rows = [by_key[k] for k in region["tiles"] if k in by_key]
-        skipped += [k for k in region["tiles"] if k not in by_key]
+        if wanted is not None and region["key"] not in wanted:
+            continue
+        rows, rules_by_key = [], {}
+        for key in region["tiles"]:
+            if key in exclude:
+                continue
+            row = by_key.get(key)
+            rules = tile_rules(row, troop_hours, unique_troops) if row else []
+            if not rules:
+                skipped.append(key)
+                continue
+            rows.append(row)
+            rules_by_key[key] = rules
         if not rows:
             continue
         ax, ay = region["anchor"]
@@ -210,18 +472,8 @@ def build_preset_map(preset: str, catalog: Iterable[dict], *,
         label_x, label_y = ax, max(ay + (top - 58) / height, 0.02)
         if drawn and drawn.get("label"):
             label_x, label_y = drawn["label"][0] / aw, drawn["label"][1] / ah
-        regions.append({
-            "key": region["key"], "name": region["name"], "color": region["color"],
-            # Risk-style: a bigger region is worth more to hold.
-            "bonus": max(math.ceil(len(rows) / 2), 1),
-            "label_x": round(label_x, 4), "label_y": round(label_y, 4),
-            "shape": drawn.get("shape") if drawn else None,
-        })
+        region_tiles = []
         for row, (dx, dy) in zip(rows, offsets):
-            rules = [_kc_rule(row, troop_hours)]
-            unique = _unique_rule(row, unique_troops)
-            if unique:
-                rules.append(unique)
             npc_ids = row.get("npc_ids") or []
             drawn_tile = (art or {}).get("tiles", {}).get(row["key"])
             if drawn_tile:
@@ -232,16 +484,28 @@ def build_preset_map(preset: str, catalog: Iterable[dict], *,
                 label = row.get("short") or row["label"]
                 x = min(max(ax + dx / width, 0.02), 0.98)
                 y = min(max(ay + dy / height, 0.04), 0.96)
-            tiles.append({
+            region_tiles.append({
                 "key": row["key"],
                 "label": label,
                 "x": round(x, 4), "y": round(y, 4),
                 "kind": "normal", "value": 1, "region_key": region["key"],
-                "icon_npc_id": npc_ids[0] if npc_ids else None,
+                "icon_npc_id": None if row.get("icon_item_id") else (npc_ids[0] if npc_ids else None),
+                "icon_item_id": row.get("icon_item_id"),
                 "shape": drawn_tile.get("shape") if drawn_tile else None,
-                "rules": rules,
+                "rules": rules_by_key[row["key"]],
             })
-    body = {"regions": regions, "tiles": tiles, "preset": preset}
+        shape = drawn.get("shape") if drawn else None
+        out_regions.append({
+            "key": region["key"], "name": region["name"], "color": region["color"],
+            # Risk-style: a bigger region is worth more to hold.
+            "bonus": max(math.ceil(len(rows) / 2), 1),
+            "label_x": round(label_x, 4), "label_y": round(label_y, 4),
+            "shape": shape,
+        })
+        tiles += region_tiles
+    built = {t["key"] for t in tiles}
+    edges = [[a, b] for a, b in (art or {}).get("edges") or [] if a in built and b in built]
+    body = {"regions": out_regions, "tiles": tiles, "edges": edges, "preset": preset}
     if art:
         body["art"] = {"background_url": art["background"], "width": aw, "height": ah}
     return body, skipped

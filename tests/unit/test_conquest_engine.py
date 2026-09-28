@@ -140,8 +140,9 @@ def _teams(s, ev, *names):
 
 
 def _map(s, ev, *, regions=(("r1", 3.0),), tiles=(("Zulrah", "r1"),), settings=None,
-         seeded=True):
-    """Regions + tiles, each tile with one kc rule (target 10, 1 troop).
+         seeded=True, edges=()):
+    """Regions + tiles, each tile with one kc rule (target 10, 1 troop), and
+    ``edges`` as (tile index, tile index) connections.
     Returns ({region key: row}, [tile rows], [task rows])."""
     s.add(M.ConquestMap(event_id=ev.id, settings=json.dumps(settings or {}),
                         revision=0, seeded_at=T0 if seeded else None))
@@ -164,6 +165,9 @@ def _map(s, ev, *, regions=(("r1", 3.0),), tiles=(("Zulrah", "r1"),), settings=N
         s.add(M.ConquestRule(event_id=ev.id, tile_id=tile.id, task_id=task.id, troops=1))
         tile_rows.append(tile)
         task_rows.append(task)
+    for i, j in edges:
+        a, b = sorted((tile_rows[i].id, tile_rows[j].id))
+        s.add(M.ConquestEdge(event_id=ev.id, tile_a_id=a, tile_b_id=b))
     s.flush()
     return region_rows, tile_rows, task_rows
 
@@ -415,7 +419,8 @@ class TestBlockers:
     def test_tile_without_rule_and_one_team(self, env):
         ev = _event(env.s, status="draft")
         _teams(env.s, ev, "Red")
-        _map(env.s, ev, tiles=(("A", "r1"), ("B", "r1")), seeded=False)
+        _map(env.s, ev, tiles=(("A", "r1"), ("B", "r1")), seeded=False,
+             settings={"attack_range": "anywhere"})
         bare = M.ConquestTile(event_id=ev.id, idx=9, label="Bare", x=0.1, y=0.1)
         env.s.add(bare)
         env.s.flush()
@@ -426,7 +431,7 @@ class TestBlockers:
         ev = _event(env.s, status="draft")
         _teams(env.s, ev, "A", "B", "C")
         _map(env.s, ev, tiles=(("X", "r1"), ("Y", "r1")),
-             settings={"start_mode": "dealt"}, seeded=False)
+             settings={"start_mode": "dealt"}, seeded=False, edges=((0, 1),))
         codes = [b["code"] for b in engine_mod.conquest_blockers(env.s, ev)]
         assert codes == ["conquest_deal_short"]
 
@@ -554,3 +559,186 @@ class TestBoardImageSignature:
         img = self._image_module()
         ev = _event(env.s)
         assert img._collect_render_inputs(env.s, ev) is None
+
+
+# --------------------------------------------------------------------------- #
+# Fronts, start modes and per-tile overrides (web122a)
+# --------------------------------------------------------------------------- #
+_CHAIN3 = (("A", "r1"), ("B", "r1"), ("C", "r1"))
+
+
+class TestFronts:
+    def test_troops_only_count_next_to_your_land(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        _r, (a, b, c), (ta, tb, tc) = _map(env.s, ev, tiles=_CHAIN3, edges=((0, 1), (1, 2)))
+        assert _apply(env, ev, ta, red, 10, cid=1)["outcomes"] == ["claim"]
+        out = _apply(env, ev, tc, red, 20, cid=2)            # C isn't next to A
+        assert out["out_of_reach"] and out["held"] == 2 and "outcomes" not in out
+        env.s.refresh(c)
+        assert c.owner_team_id is None
+        book = env.s.query(M.ConquestTroops).filter_by(tile_id=c.id).one()
+        assert (book.held, book.earned) == (2, 0)
+        held = env.s.query(M.ConquestBattle).filter_by(outcome="held").count()
+        assert held == 2
+        assert env.ev.published[-1]["out_of_reach"] is True
+        assert not env.ev.types("event_conquest_capture")[1:]  # only A's claim posted
+        assert _apply(env, ev, tb, red, 10, cid=3)["outcomes"] == ["claim"]
+        # Holding B, C is now in reach.
+        assert _apply(env, ev, tc, red, 10, cid=4)["outcomes"] == ["claim"]
+
+    def test_first_tile_can_be_anywhere(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        _r, _tiles, (_ta, _tb, tc) = _map(env.s, ev, tiles=_CHAIN3, edges=((0, 1), (1, 2)))
+        assert _apply(env, ev, tc, red, 10)["outcomes"] == ["claim"]
+
+    def test_homes_mode_enters_at_home(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        _r, (a, _b, c), (ta, _tb, tc) = _map(env.s, ev, tiles=_CHAIN3,
+                                             edges=((0, 1), (1, 2)),
+                                             settings={"start_mode": "homes"})
+        c.home_team_id = red.id
+        env.s.flush()
+        assert _apply(env, ev, ta, red, 10, cid=1)["out_of_reach"]
+        assert _apply(env, ev, tc, red, 10, cid=2)["outcomes"] == ["claim"]
+
+    def test_anywhere_setting(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        _r, _t, (ta, _tb, tc) = _map(env.s, ev, tiles=_CHAIN3, edges=((0, 1), (1, 2)),
+                                      settings={"attack_range": "anywhere"})
+        _apply(env, ev, ta, red, 10, cid=1)
+        assert _apply(env, ev, tc, red, 10, cid=2)["outcomes"] == ["claim"]
+
+    def test_revoking_a_held_troop_leaves_no_debt(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        _r, (_a, _b, c), (ta, _tb, tc) = _map(env.s, ev, tiles=_CHAIN3,
+                                              edges=((0, 1), (1, 2)))
+        _apply(env, ev, ta, red, 10, cid=1)
+        env.s.add(M.EventCompletion(id=2, event_id=ev.id, task_id=tc.id, team_id=red.id,
+                                    status="revoked", quantity=10))
+        env.s.flush()
+        _apply(env, ev, tc, red, 10, cid=2)                  # held
+        out = engine_mod.revoke_conquest(
+            env.s, {"id": ev.id, "kind": "conquest"},
+            {"id": tc.id, "target_value": 10}, red.id, SimpleNamespace(id=2))
+        assert out["troop_debt"] == 0 and out["held_removed"] == 1
+        book = env.s.query(M.ConquestTroops).filter_by(tile_id=c.id).one()
+        assert (book.held, book.debt) == (0, 0)
+
+    def test_payload_carries_reach_and_edges(self, env):
+        ev = _event(env.s)
+        red, blue = _teams(env.s, ev, "Red", "Blue")
+        _r, (a, b, c), (ta, _tb, _tc) = _map(env.s, ev, tiles=_CHAIN3,
+                                             edges=((0, 1), (1, 2)))
+        _apply(env, ev, ta, red, 10)
+        payload = engine_mod.conquest_payload(env.s, ev, now=T0 + timedelta(hours=2))
+        assert payload["reach"][str(red.id)] == [a.id, b.id]
+        assert payload["reach"][str(blue.id)] == [a.id, b.id, c.id]
+        assert len(payload["edges"]) == 2
+        assert payload["tiles"][0]["defense_cap"] == 5
+
+
+class TestTileOverridesEngine:
+    def test_tile_cap_and_garrison(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        _r, (tile,), (task,) = _map(env.s, ev, seeded=False)
+        tile.max_defense, tile.garrison = 2, 1
+        env.s.flush()
+        engine_mod.seed_conquest(env.s, ev, now=T0)
+        env.s.refresh(tile)
+        assert tile.defense == 1                              # its own garrison
+        out = _apply(env, ev, task, red, 50, rng=_Faces([6, 6, 1]))
+        assert out["outcomes"] == ["breach", "claim", "fortify", "full", "full"]
+        env.s.refresh(tile)
+        assert tile.defense == 2
+
+    def test_once_rule_pays_once(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        _r, (tile,), (task,) = _map(env.s, ev)
+        rule = env.s.query(M.ConquestRule).one()
+        rule.once, rule.troops = 1, 3
+        env.s.flush()
+        assert _apply(env, ev, task, red, 10, cid=1)["troops"] == 3
+        assert _apply(env, ev, task, red, 30, cid=2)["troops"] == 0
+
+
+class TestStartModes:
+    def test_scattered_gives_each_team_one_tile(self, env):
+        ev = _event(env.s)
+        teams = _teams(env.s, ev, "Red", "Blue")
+        tiles = tuple((str(i), "r1") for i in range(6))
+        _map(env.s, ev, tiles=tiles, edges=tuple((i, i + 1) for i in range(5)),
+             settings={"start_mode": "scattered"}, seeded=False)
+        engine_mod.seed_conquest(env.s, ev, now=T0, rng=random.Random(4))
+        owned = env.s.query(M.ConquestTile).filter(M.ConquestTile.owner_team_id.isnot(None)).all()
+        assert sorted(t.owner_team_id for t in owned) == sorted(t.id for t in teams)
+        a, b = sorted(t.idx for t in owned)
+        assert b - a >= 3                                     # spread apart
+        assert env.s.query(M.ConquestHold).count() == 2
+
+    def test_homes_start(self, env):
+        ev = _event(env.s)
+        red, blue = _teams(env.s, ev, "Red", "Blue")
+        _r, (a, b, c), _t = _map(env.s, ev, tiles=_CHAIN3, edges=((0, 1), (1, 2)),
+                                 settings={"start_mode": "homes", "start_defense": 2},
+                                 seeded=False)
+        a.home_team_id, c.home_team_id = red.id, blue.id
+        env.s.flush()
+        engine_mod.seed_conquest(env.s, ev, now=T0)
+        for t in (a, b, c):
+            env.s.refresh(t)
+        assert (a.owner_team_id, b.owner_team_id, c.owner_team_id) == (red.id, None, blue.id)
+        assert a.defense == 2
+
+    def test_forget_team_clears_its_home(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        _r, (tile,), _t = _map(env.s, ev)
+        tile.home_team_id = red.id
+        env.s.flush()
+        engine_mod.forget_team(env.s, ev.id, red.id)
+        env.s.refresh(tile)
+        assert tile.home_team_id is None
+
+
+class TestFrontBlockers:
+    def _codes(self, env, ev):
+        return [b["code"] for b in engine_mod.conquest_blockers(env.s, ev)]
+
+    def test_no_connections(self, env):
+        ev = _event(env.s, status="draft")
+        _teams(env.s, ev, "Red", "Blue")
+        _map(env.s, ev, tiles=_CHAIN3, seeded=False)
+        assert self._codes(env, ev) == ["conquest_no_connections"]
+
+    def test_isolated_tile(self, env):
+        ev = _event(env.s, status="draft")
+        _teams(env.s, ev, "Red", "Blue")
+        _map(env.s, ev, tiles=_CHAIN3, edges=((0, 1),), seeded=False)
+        blockers = engine_mod.conquest_blockers(env.s, ev)
+        assert [b["code"] for b in blockers] == ["conquest_isolated_tiles"]
+        assert "C" in blockers[0]["message"]
+
+    def test_split_map(self, env):
+        ev = _event(env.s, status="draft")
+        _teams(env.s, ev, "Red", "Blue")
+        tiles = _CHAIN3 + (("D", "r1"),)
+        _map(env.s, ev, tiles=tiles, edges=((0, 1), (2, 3)), seeded=False)
+        assert self._codes(env, ev) == ["conquest_map_split"]
+
+    def test_homes_missing(self, env):
+        ev = _event(env.s, status="draft")
+        red, _blue = _teams(env.s, ev, "Red", "Blue")
+        _r, (a, _b, _c), _t = _map(env.s, ev, tiles=_CHAIN3, edges=((0, 1), (1, 2)),
+                                   settings={"start_mode": "homes"}, seeded=False)
+        a.home_team_id = red.id
+        env.s.flush()
+        blockers = engine_mod.conquest_blockers(env.s, ev)
+        assert [b["code"] for b in blockers] == ["conquest_homes_missing"]
+        assert "Blue" in blockers[0]["message"]

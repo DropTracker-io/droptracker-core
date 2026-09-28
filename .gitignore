@@ -115,3 +115,7 @@ scripts/.event_task_stats_cache.json
 # Weekly cache-derived structure written by droptracker-clog-structure.timer
 scripts/cache/*.live.json
 scripts/cache/*.live.json.new
+
+# Conquest map generator toolchain + cache (services/conquest_mapgen.py;
+# see its README). 300 MB of scipy etc., never committed.
+/.conquest_mapgen/

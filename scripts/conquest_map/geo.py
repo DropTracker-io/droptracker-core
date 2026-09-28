@@ -75,6 +75,16 @@ REGIONS = (
         ("scurrius", 3237, 3458),               # Varrock Sewers
         ("tormented_demon", 3169, 3172),        # Lumbridge Swamp Caves
     )},
+    # TzHaar is underground, reached through Karamja Volcano. The volcano's
+    # strip of coast is too narrow for a badge, so like God Wars the TzHaar
+    # tiles are spread down the main island from it; the strip (Brimhaven,
+    # the volcano, Crandor) joins whichever territory is nearest.
+    {"key": "karamja", "name": "Karamja", "color": "#c8612e", "bosses": (
+        ("fight_caves", 2880, 3100),            # below Karamja Volcano
+        ("tzhaar_city", 2790, 3080),            # Tai Bwo Wannai side
+        ("inferno", 2830, 2990),                # the jungle west of Shilo
+        ("karamja_slayer", 2900, 2930),         # Duradel, Shilo Village
+    )},
     {"key": "morytania", "name": "Morytania", "color": "#7d6aa0", "bosses": (
         ("barrows", 3565, 3289),
         ("theatre_of_blood", 3663, 3220),       # Ver Sinhaza
@@ -90,7 +100,25 @@ REGIONS = (
         ("abyssal_sire", 0, 0),                 # placed on the rift island
         ("the_leviathan", 0, 0),
     )},
+    # Sailing: one region of open sea. Each tile is a patch of water (not
+    # land) in the ocean its content belongs to; most Sailing drops aren't
+    # tied to one sea, so the placement is flavour (see SEA_RADIUS).
+    {"key": "seas", "name": "The Seas", "color": "#2f8fa3", "sea": True, "bosses": (
+        ("lost_schematics", 1996, 3380),        # Western Ocean (lockbox islands)
+        ("sailing_misc", 2560, 4040),           # Northern Ocean (narwhal, orca)
+        ("barracuda_trials", 3040, 2860),       # The Tempor Tantrum, Ardent Ocean
+        ("sea_treasures", 2250, 2707),          # Sea of Souls, Shrouded Ocean
+        ("boat_paints", 2530, 2742),            # Mythic Sea, Shrouded Ocean
+        ("ocean_encounters", 1427, 2747),       # Misty Sea, Sunset Ocean
+        ("shellbane_gryphon", 3200, 2690),      # towards the Great Conch, Unquiet Ocean
+    )},
 )
+
+REGION_BY_KEY = {r["key"]: r for r in REGIONS}
+
+# A sea tile's territory: the open water within this many game tiles of its
+# spot (wobbled like every border), shared out with the nearest other sea tile.
+SEA_RADIUS = 125
 
 # The Abyss has no place on the surface. It is drawn as a rift island out in
 # the northern sea, tethered to its real way in: the Mage of Zamorak at the
@@ -114,8 +142,12 @@ AREAS = {
                     (3290, 3140), (3290, 3230), (3395, 3230), (3395, 3520), (2800, 3520)]],
     "morytania": [[(3395, 3140), (3980, 3140), (3980, 3620), (3395, 3620)]],
     "desert": [[(3100, 2620), (3620, 2620), (3620, 3240), (3100, 3240)]],
+    # Brimhaven and the volcano, Crandor, and the jungle down to Kharazi;
+    # clear of Witchaven, Rimmington and Mudskipper Point on the mainland.
+    "karamja": [[(2690, 2860), (2980, 2860), (2980, 3050), (2966, 3050), (2966, 3170),
+                 (2905, 3170), (2905, 3325), (2790, 3325), (2790, 3262), (2690, 3262)]],
 }
-AREA_PRIORITY = ("gwd", "fremennik", "wilderness", "morytania", "heartlands", "desert",
+AREA_PRIORITY = ("gwd", "fremennik", "wilderness", "morytania", "karamja", "heartlands", "desert",
                  "kandarin", "kourend", "varlamore")
 # Medallion metrics in board units (1 unit = 1 game tile). The site draws
 # each boss badge at exactly these sizes (scaled with the map), so the room
@@ -150,6 +182,11 @@ MIN_ISLAND = 22
 
 # Names that fit on a medallion's scroll.
 LABELS = {
+    "fight_caves": "Fight Caves", "inferno": "Inferno", "tzhaar_city": "TzHaar",
+    "karamja_slayer": "Slayer", "lost_schematics": "Lost Schematics", "sailing_misc": "Sailing Misc",
+    "barracuda_trials": "Barracuda Trials", "sea_treasures": "Sea Treasures",
+    "boat_paints": "Boat Paints", "ocean_encounters": "Ocean Encounters",
+    "shellbane_gryphon": "Shellbane",
     "chambers_of_xeric": "CoX", "theatre_of_blood": "ToB",
     "tombs_of_amascut": "ToA", "thermonuclear_smoke_devil": "Thermy",
     "corrupted_gauntlet": "The Gauntlet", "wilderness_demi_bosses": "Demi-bosses",

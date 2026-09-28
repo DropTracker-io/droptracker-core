@@ -136,6 +136,14 @@ class ConquestTile(Base):
     # The territory this tile covers, an SVG path in the map's shape space
     # (web121a). NULL = drawn as a badge only.
     shape = Column(Text, nullable=True)
+    # Organiser overrides (web122a): this tile's defense cap and the garrison
+    # it starts with when unowned; NULL = the map's max_defense /
+    # neutral_defense.
+    max_defense = Column(Integer, nullable=True)
+    garrison = Column(Integer, nullable=True)
+    # The team that starts here in the "homes" start mode, and re-enters here
+    # after losing every tile. No FK on purpose (module doc).
+    home_team_id = Column(Integer, nullable=True)
     # --- live state ---
     owner_team_id = Column(Integer, nullable=True)  # no FK on purpose (module doc)
     defense = Column(Integer, nullable=False, default=0, server_default="0")
@@ -166,12 +174,15 @@ class ConquestRule(Base):
                      nullable=False)
     troops = Column(Integer, nullable=False, default=1, server_default="1")
     sort = Column(Integer, nullable=False, default=0, server_default="0")
+    # 1 = a one-time award: pays only the first time the target is reached,
+    # like an achievement (web122a).
+    once = Column(Integer, nullable=False, default=0, server_default="0")
 
 
 class ConquestEdge(Base):
     """Two tiles that border each other (undirected, ``tile_a_id`` <
-    ``tile_b_id``). Drawn on the map; the "fronts" rule (attack only next to
-    your own tiles) will read them."""
+    ``tile_b_id``). The fronts rule reads them: a team's troops only count on
+    its own tiles and the ones bordering them (services.conquest)."""
 
     __tablename__ = "web_conquest_edges"
     __table_args__ = (
@@ -246,7 +257,7 @@ class ConquestBattle(Base):
 
 class ConquestTroops(Base):
     """Per (tile, team) troop book: how many troops the team has earned there
-    and any troop debt. A revoked submission can't un-roll dice, so troops it
+    and any troop debt (and what it earned out of reach). A revoked submission can't un-roll dice, so troops it
     had already spent become debt that the team's next troops on that tile pay
     off first."""
 
@@ -265,4 +276,8 @@ class ConquestTroops(Base):
     team_id = Column(Integer, nullable=False)  # no FK on purpose (module doc)
     earned = Column(Integer, nullable=False, default=0, server_default="0")
     debt = Column(Integer, nullable=False, default=0, server_default="0")
+    # Troops earned while the tile was out of the team's reach (fronts,
+    # web122a). With out_of_reach = "ignore" they never fight; kept so a
+    # later policy can deploy them.
+    held = Column(Integer, nullable=False, default=0, server_default="0")
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

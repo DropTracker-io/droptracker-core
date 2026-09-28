@@ -128,13 +128,14 @@ def main(geom_path: str, out_dir: str, only: str = "") -> None:
     from render import FRAME, HEADER
     w, h = geom["width"] + 2 * FRAME, geom["height"] + 2 * FRAME + HEADER
     jobs = {
-        "board_fresh": (fresh_state(), "vivid"),
-        "board_midgame": (midgame_state(geom), "vivid"),
-        "board_parchment": (midgame_state(geom), "parchment"),
+        "board_fresh": (fresh_state, "vivid"),
+        "board_midgame": (lambda: midgame_state(geom), "vivid"),
+        "board_parchment": (lambda: midgame_state(geom), "parchment"),
     }
-    for name, (state, theme) in jobs.items():
+    for name, (make_state, theme) in jobs.items():
         if only and only not in name:
             continue
+        state = make_state()
         svg = render_board(geom, state, theme=theme, portrait=portrait, font_b64=font_b64)
         with open(os.path.join(out_dir, name + ".svg"), "w") as fh:
             fh.write(svg)

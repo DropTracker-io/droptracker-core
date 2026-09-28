@@ -387,7 +387,7 @@ class TestValidateMap:
         (lambda m: m["tiles"][0].update(x=1.5), "x and y"),
         (lambda m: m["tiles"][0].update(region_key="nope"), "unknown region"),
         (lambda m: m["tiles"][1].update(rules=[{"task_id": 1}]), "respawn"),
-        (lambda m: m["tiles"][0]["rules"][0].update(troops=11), "troops"),
+        (lambda m: m["tiles"][0]["rules"][0].update(troops=51), "troops"),
         (lambda m: m["tiles"][0]["rules"][0].update(new_task={}), "exactly one"),
         (lambda m: m["tiles"][1].update(key="t1"), "unique key"),
         (lambda m: m["regions"].append({"key": "w", "name": "Dup"}), "used twice"),
@@ -447,3 +447,164 @@ class TestDisplay:
     def test_fmt_points(self):
         assert cq.fmt_points(1234.0) == "1,234"
         assert cq.fmt_points(12.34) == "12.3"
+
+
+# --------------------------------------------------------------------------- #
+# Fronts, start modes and per-tile overrides (web122a)
+# --------------------------------------------------------------------------- #
+def _t(tid, owner=None, kind="normal"):
+    return {"id": tid, "owner_team_id": owner, "kind": kind}
+
+
+# A chain 1 - 2 - 3 - 4, plus 9 on its own.
+_CHAIN = cq.adjacency([(1, 2), (2, 3), (3, 4)])
+
+
+class TestFronts:
+    def test_default_is_adjacent(self):
+        s = _settings()
+        assert s["attack_range"] == "adjacent" and s["out_of_reach"] == "ignore"
+
+    def test_own_tiles_and_their_neighbours(self):
+        tiles = [_t(1, owner=7), _t(2), _t(3), _t(4)]
+        assert cq.reachable_tiles(7, tiles, _CHAIN, _settings()) == {1, 2}
+
+    def test_neighbours_of_every_owned_tile(self):
+        tiles = [_t(1, owner=7), _t(2, owner=8), _t(3, owner=7), _t(4)]
+        assert cq.reachable_tiles(7, tiles, _CHAIN, _settings()) == {1, 2, 3, 4}
+
+    def test_landless_team_enters_anywhere(self):
+        tiles = [_t(1, owner=8), _t(2), _t(3), _t(4)]
+        assert cq.reachable_tiles(7, tiles, _CHAIN, _settings()) == {1, 2, 3, 4}
+
+    def test_landless_team_in_homes_mode_only_reaches_home(self):
+        tiles = [_t(1, owner=8), _t(2), _t(3), _t(4)]
+        s = _settings(start_mode="homes")
+        assert cq.reachable_tiles(7, tiles, _CHAIN, s, home_tile=4) == {4}
+        # A team whose home was taken can still fight for it.
+        tiles[3]["owner_team_id"] = 8
+        assert cq.reachable_tiles(7, tiles, _CHAIN, s, home_tile=4) == {4}
+
+    def test_landless_team_enters_next_to_a_respawn_point(self):
+        adj = cq.adjacency([(1, 2), (2, 3), (3, 4), (4, 5)])
+        tiles = [_t(1), _t(2), _t(3), _t(4), _t(5, kind="respawn")]
+        assert cq.reachable_tiles(7, tiles, adj, _settings()) == {4}
+
+    def test_anywhere_and_unconnected_maps(self):
+        tiles = [_t(1, owner=7), _t(2), _t(3), _t(4), _t(5, kind="respawn")]
+        s = _settings(attack_range="anywhere")
+        assert cq.reachable_tiles(7, tiles, _CHAIN, s) == {1, 2, 3, 4}
+        assert cq.reachable_tiles(7, tiles, {}, _settings()) == {1, 2, 3, 4}
+
+    def test_isolated_and_parts(self):
+        tiles = [_t(1), _t(2), _t(3), _t(4), _t(9)]
+        assert cq.isolated_tiles(tiles, _CHAIN) == [9]
+        assert cq.map_parts(tiles, _CHAIN) == [[1, 2, 3, 4], [9]]
+        # A respawn point doesn't join two parts on its own.
+        adj = cq.adjacency([(1, 5), (5, 2)])
+        tiles = [_t(1), _t(2), _t(5, kind="respawn")]
+        assert cq.map_parts(tiles, adj) == [[1], [2]]
+
+    def test_scatter_spreads_teams_apart(self):
+        adj = cq.adjacency([(i, i + 1) for i in range(1, 9)])  # a line of 9
+        for seed in range(5):
+            out = cq.scatter_tiles(range(1, 10), adj, [10, 20], random.Random(seed))
+            a, b = sorted(out.values())
+            assert set(out) == {10, 20}
+            # The second team lands at the far end from the first.
+            assert b - a >= 4
+
+    def test_scatter_with_more_teams_than_tiles(self):
+        out = cq.scatter_tiles([1, 2], _CHAIN, [10, 20, 30], random.Random(1))
+        assert len(out) == 2 and sorted(out.values()) == [1, 2]
+
+
+class TestOnceRules:
+    def test_pays_once(self):
+        assert cq.troops_for_progress(0, 1, 1, 5, once=True) == 5
+        assert cq.troops_for_progress(1, 3, 1, 5, once=True) == 0
+        assert cq.troops_for_progress(0, 30, 10, 2, once=True) == 2
+
+    def test_revoke_below_target_takes_it_back(self):
+        assert cq.troops_for_progress(12, 8, 10, 4, once=True) == -4
+        assert cq.troops_for_progress(25, 12, 10, 4, once=True) == 0
+
+
+class TestTileOverrides:
+    def test_tile_cap(self):
+        s = _settings(max_defense=5, capture_defense=3)
+        assert cq.tile_settings(s, None) is s
+        t = cq.tile_settings(s, 2)
+        assert (t["max_defense"], t["capture_defense"]) == (2, 2)
+        assert cq.tile_settings(s, 99)["max_defense"] == 20
+
+    def test_garrison(self):
+        s = _settings(neutral_defense=1, max_defense=5)
+        assert cq.tile_garrison(s) == 1
+        assert cq.tile_garrison(s, garrison=4) == 4
+        assert cq.tile_garrison(s, garrison=4, max_defense=2) == 2
+        assert cq.tile_garrison(s, garrison=0) == 0
+
+    def test_tile_cap_limits_fortify(self):
+        s = cq.tile_settings(_settings(max_defense=5), 2)
+        assert cq.resolve_troop(7, 2, 7, s, random.Random(1)).outcome == "full"
+
+
+class TestValidateFronts:
+    def _body(self, **over):
+        body = {
+            "regions": [{"key": "r", "name": "R"}],
+            "tiles": [{"key": k, "label": k.upper(), "x": 0.5, "y": 0.5, "region_key": "r",
+                       "rules": []} for k in ("a", "b", "c")],
+            "edges": [["a", "b"], ["b", "a"], ["b", "c"], ["c", "c"]],
+        }
+        body.update(over)
+        return body
+
+    def test_edges_are_deduped(self):
+        clean, errors = cq.validate_map(self._body())
+        assert errors == []
+        assert clean["edges"] == [["a", "b"], ["b", "c"]]
+
+    def test_unknown_edge_tile(self):
+        _clean, errors = cq.validate_map(self._body(edges=[["a", "zz"]]))
+        assert any("unknown tile" in e for e in errors)
+
+    def test_tile_overrides_and_homes(self):
+        body = self._body()
+        body["tiles"][0].update(max_defense=3, garrison=2, home_team_id=7)
+        body["tiles"][1].update(max_defense="", garrison=None)
+        clean, errors = cq.validate_map(body)
+        assert errors == []
+        a, b, _c = clean["tiles"]
+        assert (a["max_defense"], a["garrison"], a["home_team_id"]) == (3, 2, 7)
+        assert (b["max_defense"], b["garrison"], b["home_team_id"]) == (None, None, None)
+
+    def test_bad_overrides(self):
+        body = self._body(edges=[])
+        body["tiles"][0]["max_defense"] = 0
+        body["tiles"][1]["garrison"] = 21
+        _clean, errors = cq.validate_map(body)
+        assert len(errors) == 2
+
+    def test_one_home_per_team(self):
+        body = self._body()
+        body["tiles"][0]["home_team_id"] = 7
+        body["tiles"][1]["home_team_id"] = 7
+        _clean, errors = cq.validate_map(body)
+        assert "A team can only have one home tile." in errors
+
+    def test_once_flag(self):
+        body = self._body()
+        body["tiles"][0]["rules"] = [{"task_id": 1, "troops": 5, "once": True},
+                                     {"task_id": 2, "troops": 1}]
+        clean, errors = cq.validate_map(body)
+        assert errors == []
+        assert [r["once"] for r in clean["tiles"][0]["rules"]] == [True, False]
+
+    def test_new_start_modes(self):
+        for mode in ("scattered", "homes"):
+            assert cq.conquest_settings({"start_mode": mode})["start_mode"] == mode
+        patch, errors = cq.clean_settings_patch({"attack_range": "anywhere",
+                                                 "start_mode": "homes"})
+        assert errors == [] and patch == {"attack_range": "anywhere", "start_mode": "homes"}

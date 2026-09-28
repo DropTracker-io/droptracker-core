@@ -25,6 +25,11 @@ activity. Teams take and hold tiles by playing them:
 
   The troop that takes a tile stays to guard it (``capture_defense``), so a
   tile cannot flip straight back and forth.
+- **Fronts** (``attack_range = "adjacent"``, the default): a team's troops
+  only count on tiles it can reach (:func:`reachable_tiles`): its own tiles
+  and the tiles bordering them (``web_conquest_edges``). A team with no land
+  enters where the start mode says (anywhere, or its home tile). Troops
+  earned out of reach are recorded but don't fight (``out_of_reach``).
 - Holding every tile of a region is **region control**, worth the region's
   bonus.
 
@@ -64,9 +69,19 @@ from typing import Iterable, Optional
 # --------------------------------------------------------------------------- #
 SCORING_MODES = ("hold_time", "final")
 BATTLE_MODES = ("dice", "attrition")
-# How tiles are owned when the event starts: all unowned (a land grab) or
-# dealt out evenly between the teams, like the opening of a game of Risk.
-START_MODES = ("neutral", "dealt")
+# How tiles are owned when the event starts: all unowned (a land grab), every
+# tile dealt out evenly between the teams (the opening of a game of Risk), one
+# random tile per team spread across the map, or one tile per team that the
+# organiser picked (its home; a team that loses everything re-enters there).
+START_MODES = ("neutral", "dealt", "scattered", "homes")
+# Where a team's troops count: only on its own tiles and the tiles bordering
+# them ("adjacent", fronts), or on any tile ("anywhere").
+ATTACK_RANGES = ("adjacent", "anywhere")
+# What happens to troops a team earns on a tile it can't reach. "ignore":
+# they are recorded (the troop book's ``held``) and never fight. Kept as a
+# setting so other policies (deploy them once the tile is reachable, a team
+# reserve) can be added without a schema change.
+OUT_OF_REACH_MODES = ("ignore",)
 # "respawn" tiles can never be owned. They are placeholders for the fronts
 # rule (attack only next to your own tiles), where a team that lost every tile
 # re-enters the map next to one. They carry no rules and never count for a
@@ -79,7 +94,7 @@ DICE_SIDES = 6
 # What a troop did (web_conquest_battles.outcome). "adjust" is an admin
 # correction (set owner / defense by hand), never a troop.
 OUTCOMES = ("claim", "capture", "fortify", "full", "attack", "breach", "repelled",
-            "adjust")
+            "adjust", "held")
 CAPTURE_OUTCOMES = ("claim", "capture")
 
 # Task types a tile rule may use: the ADDITIVE ones, where every qualifying
@@ -96,12 +111,16 @@ RULE_ITEM_LIST_KINDS = (None, "any_of", "point_collection")
 # Bounds shared by the write validator and the designer.
 MAX_REGIONS = 24
 MAX_TILES = 120
-MAX_RULES_PER_TILE = 4
-MAX_TROOPS_PER_RULE = 10
+MAX_RULES_PER_TILE = 8
+MAX_TROOPS_PER_RULE = 50
 MAX_TILE_VALUE = 100
 MAX_REGION_BONUS = 1000
 MAX_LABEL_LEN = 80
 MAX_REGION_NAME_LEN = 60
+MAX_EDGES = 1000
+# Per-tile overrides of max_defense / neutral_defense.
+TILE_DEFENSE_BOUNDS = (1, 20)
+TILE_GARRISON_BOUNDS = (0, 20)
 # Territory / region outlines (web121a): SVG path data, moves and lines only.
 # The Gielinor preset's biggest region outline is ~4 KB; this leaves room.
 MAX_SHAPE_LEN = 20000
@@ -118,6 +137,8 @@ DEFAULT_SETTINGS = {
     "start_mode": "neutral",
     "start_defense": 1,
     "neutral_defense": 0,
+    "attack_range": "adjacent",
+    "out_of_reach": "ignore",
 }
 
 # Inclusive integer bounds per numeric setting.
@@ -133,6 +154,8 @@ _ENUM_SETTINGS = {
     "scoring_mode": SCORING_MODES,
     "battle_mode": BATTLE_MODES,
     "start_mode": START_MODES,
+    "attack_range": ATTACK_RANGES,
+    "out_of_reach": OUT_OF_REACH_MODES,
 }
 
 
@@ -232,14 +255,20 @@ def settings_change_problem(patch: dict, current: dict,
 # --------------------------------------------------------------------------- #
 # Troops
 # --------------------------------------------------------------------------- #
-def troops_for_progress(previous, current, threshold, troops_per: int = 1) -> int:
+def troops_for_progress(previous, current, threshold, troops_per: int = 1,
+                        once: bool = False) -> int:
     """Troops earned when a rule's running progress moves ``previous`` ->
     ``current``: one batch of ``troops_per`` per new multiple of
     ``threshold`` crossed. Negative when progress falls back across a
-    multiple (a revoke), which the caller books as troop debt."""
+    multiple (a revoke), which the caller books as troop debt. A one-time
+    rule (``once``) pays only for reaching the target the first time."""
     t = max(_int_or(threshold, 1), 1)
     per = max(_int_or(troops_per, 1), 1)
-    return (max(_int_or(current, 0), 0) // t - max(_int_or(previous, 0), 0) // t) * per
+    prev = max(_int_or(previous, 0), 0)
+    cur = max(_int_or(current, 0), 0)
+    if once:
+        return per * (int(cur >= t) - int(prev >= t))
+    return (cur // t - prev // t) * per
 
 
 def progress_to_next(progress, threshold) -> tuple[int, int]:
@@ -283,6 +312,26 @@ def battle_losses(attack: Iterable[int], defense: Iterable[int]) -> int:
     a = sorted(attack, reverse=True)
     d = sorted(defense, reverse=True)
     return sum(1 for x, y in zip(a, d) if x > y)
+
+
+def tile_settings(settings: dict, max_defense=None) -> dict:
+    """The settings one tile plays under: the map's, with the tile's own
+    defense cap (None = the map's) and the capture defense kept under it."""
+    cap = _int_or(max_defense, 0)
+    if cap <= 0:
+        return settings
+    lo, hi = TILE_DEFENSE_BOUNDS
+    out = dict(settings)
+    out["max_defense"] = min(max(cap, lo), hi)
+    out["capture_defense"] = min(out["capture_defense"], out["max_defense"])
+    return out
+
+
+def tile_garrison(settings: dict, garrison=None, max_defense=None) -> int:
+    """Defense an unowned tile sits at: its own garrison, else the map's
+    ``neutral_defense``, never above the tile's cap."""
+    value = settings["neutral_defense"] if garrison is None else _int_or(garrison, 0)
+    return min(max(value, 0), tile_settings(settings, max_defense)["max_defense"])
 
 
 def resolve_troop(owner, defense, team_id: int, settings: dict,
@@ -364,6 +413,119 @@ def region_owners(tiles: Iterable[dict]) -> dict:
     owner_of = {t["id"]: t.get("owner_team_id") for t in tiles}
     return {rid: region_owner(owner_of[tid] for tid in tids)
             for rid, tids in region_tile_map(tiles).items()}
+
+
+# --------------------------------------------------------------------------- #
+# Fronts (adjacency)
+# --------------------------------------------------------------------------- #
+def adjacency(edges: Iterable) -> dict:
+    """{tile id: set of bordering tile ids} from ``(a, b)`` pairs."""
+    out: dict = {}
+    for a, b in edges:
+        if a == b:
+            continue
+        out.setdefault(a, set()).add(b)
+        out.setdefault(b, set()).add(a)
+    return out
+
+
+def reachable_tiles(team_id: int, tiles: Iterable[dict], adj: dict, settings: dict,
+                    home_tile: Optional[int] = None) -> set:
+    """The tile ids where ``team_id``'s troops count right now.
+
+    ``tiles``: dicts with ``id``, ``kind``, ``owner_team_id``. ``adj``: an
+    :func:`adjacency` map. With ``attack_range = "anywhere"`` (or a map with
+    no connections at all, which can't have fronts) that is every ownable
+    tile. Otherwise it is the team's own tiles plus every ownable tile
+    bordering one. A team with no land enters at its home tile in the
+    ``homes`` start mode, next to a respawn point when the map has any, and
+    anywhere otherwise."""
+    tiles = list(tiles)
+    ownable = {t["id"] for t in tiles if t.get("kind", "normal") == "normal"}
+    if settings.get("attack_range") == "anywhere" or not adj:
+        return ownable
+    own = {t["id"] for t in tiles
+           if t.get("owner_team_id") == team_id and t["id"] in ownable}
+    if own:
+        return own | {n for tid in own for n in adj.get(tid, ()) if n in ownable}
+    if settings.get("start_mode") == "homes" and home_tile in ownable:
+        return {home_tile}
+    respawns = [t["id"] for t in tiles if t.get("kind") == "respawn"]
+    entry = {n for r in respawns for n in adj.get(r, ()) if n in ownable}
+    return entry or ownable
+
+
+def isolated_tiles(tiles: Iterable[dict], adj: dict) -> list:
+    """Ownable tile ids with no ownable neighbour: under fronts nobody could
+    ever attack them from next door, or move on from them."""
+    tiles = list(tiles)
+    ownable = {t["id"] for t in tiles if t.get("kind", "normal") == "normal"}
+    return [tid for tid in sorted(ownable)
+            if not any(n in ownable for n in adj.get(tid, ()))]
+
+
+def map_parts(tiles: Iterable[dict], adj: dict) -> list:
+    """The ownable tiles split into connected parts (lists of ids, biggest
+    first). More than one part means some land can never be reached from
+    the rest."""
+    ownable = {t["id"] for t in tiles if t.get("kind", "normal") == "normal"}
+    seen, parts = set(), []
+    for start in sorted(ownable):
+        if start in seen:
+            continue
+        part, stack = [], [start]
+        seen.add(start)
+        while stack:
+            cur = stack.pop()
+            part.append(cur)
+            for n in adj.get(cur, ()):
+                if n in ownable and n not in seen:
+                    seen.add(n)
+                    stack.append(n)
+        parts.append(sorted(part))
+    return sorted(parts, key=lambda p: (-len(p), p[0]))
+
+
+def _hops(adj: dict, start: int) -> dict:
+    """{tile id: hops from ``start``} (BFS)."""
+    out = {start: 0}
+    frontier = [start]
+    while frontier:
+        nxt = []
+        for cur in frontier:
+            for n in adj.get(cur, ()):
+                if n not in out:
+                    out[n] = out[cur] + 1
+                    nxt.append(n)
+        frontier = nxt
+    return out
+
+
+def scatter_tiles(tile_ids: Iterable[int], adj: dict, team_ids: Iterable[int], rng) -> dict:
+    """One starting tile per team, spread as far apart as the map allows:
+    the first team's is random, each next team's the tile furthest (in hops)
+    from every tile already given out, ties broken at random. Returns
+    ``{team_id: tile_id}``; teams beyond the tile count get nothing."""
+    pool = sorted(int(t) for t in tile_ids)
+    teams = sorted(int(t) for t in team_ids)
+    rng.shuffle(pool)
+    rng.shuffle(teams)
+    far = len(pool) + 1  # unreachable counts as further than anything
+    out: dict = {}
+    picked: list = []
+    dists: list = []
+    for team in teams:
+        left = [t for t in pool if t not in out.values()]
+        if not left:
+            break
+        if not picked:
+            choice = left[0]
+        else:
+            choice = max(left, key=lambda t: min(d.get(t, far) for d in dists))
+        picked.append(choice)
+        dists.append(_hops(adj, choice))
+        out[team] = choice
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -693,7 +855,32 @@ def validate_map(body) -> tuple[dict, list]:
                 "task_id": _int_or(task_id, 0) or None,
                 "new_task": new_task,
                 "troops": int(troops),
+                # A one-time award: pays the first time the target is
+                # reached, like an achievement.
+                "once": rule.get("once") is True,
             })
+        caps = {}
+        for field, (lo, hi), what in (
+                ("max_defense", TILE_DEFENSE_BOUNDS, "most defense"),
+                ("garrison", TILE_GARRISON_BOUNDS, "starting garrison")):
+            raw = t.get(field)
+            if raw is None or raw == "":
+                caps[field] = None
+                continue
+            n = _int_or(raw, lo - 1)
+            if isinstance(raw, bool) or not lo <= n <= hi:
+                errors.append(f"{where}: {what} must be {lo} to {hi} (or empty for "
+                              "the map's rule).")
+                caps = None
+                break
+            caps[field] = n
+        if caps is None:
+            continue
+        home = t.get("home_team_id")
+        home = _int_or(home, 0) if home not in (None, "") else None
+        if home is not None and (home <= 0 or kind != "normal"):
+            errors.append(f"{where}: a home tile needs a team and has to be a territory.")
+            continue
         icon_item_id = _int_or(t.get("icon_item_id"), 0) or None
         icon_npc_id = _int_or(t.get("icon_npc_id"), 0) or None
         tiles.append({
@@ -701,9 +888,40 @@ def validate_map(body) -> tuple[dict, list]:
             "value": round(value, 2), "region_key": region_key,
             "icon_item_id": icon_item_id, "icon_npc_id": icon_npc_id,
             "shape": clean_shape(t.get("shape")),
+            "max_defense": caps["max_defense"], "garrison": caps["garrison"],
+            "home_team_id": home,
             "rules": rules,
         })
-    return {"regions": regions, "tiles": tiles}, errors
+
+    homes = [t["home_team_id"] for t in tiles if t["home_team_id"] is not None]
+    if len(homes) != len(set(homes)):
+        errors.append("A team can only have one home tile.")
+
+    edges = []
+    edges_in = body.get("edges") or []
+    if not isinstance(edges_in, list):
+        errors.append("edges must be a list of [tile key, tile key] pairs.")
+        edges_in = []
+    if len(edges_in) > MAX_EDGES:
+        errors.append(f"A map can have at most {MAX_EDGES} connections.")
+        edges_in = []
+    seen_edges = set()
+    kept = {t["key"] for t in tiles}
+    for pair in edges_in:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            errors.append("Each connection must be a pair of tile keys.")
+            continue
+        a, b = (str(k or "").strip() for k in pair)
+        if a not in kept or b not in kept:
+            errors.append(f"A connection names an unknown tile ({a!r} - {b!r}).")
+            continue
+        if a == b:
+            continue
+        k = (min(a, b), max(a, b))
+        if k not in seen_edges:
+            seen_edges.add(k)
+            edges.append(list(k))
+    return {"regions": regions, "tiles": tiles, "edges": edges}, errors
 
 
 def rule_task_problem(task_type: str, config: Optional[dict]) -> Optional[str]:
