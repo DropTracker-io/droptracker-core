@@ -81,6 +81,9 @@ DEFAULT_TEAM_MESSAGE_TOGGLES = {
     "event_lead_change": True,
     "event_board_turn": True,
     "event_board_roll_prompt": True,
+    # Board items and attacks: posts to the acting team's channel and, for an
+    # attack, the target's too.
+    "event_board_action": True,
     # Loot Sweep verbosity — inherits the event-level toggles (individual item
     # receipts default off; subset + whole-set completions default on).
     "event_sweep_item": False,
@@ -104,6 +107,7 @@ DEFAULT_TEAM_MESSAGE_PINGS = {
     "event_lead_change": True,
     "event_board_turn": False,
     "event_board_roll_prompt": True,
+    "event_board_action": False,
     # Ping for the celebratory set/subset completions; stay quiet for the
     # high-frequency individual item receipts.
     "event_sweep_item": False,
@@ -652,6 +656,7 @@ TEAM_SCOPED_TYPES = (
     "event_blackout",
     "event_board_turn",
     "event_board_roll_prompt",
+    "event_board_action",
     # Loot Sweep verbosity posts to the owning team's channel.
     "event_sweep_item",
     "event_sweep_group",
@@ -720,9 +725,15 @@ def team_progress_interest(session, event_id: int, team_id) -> str:
     return best
 
 
+# Team-scoped types that also post to a second team: an item aimed at a rival
+# reaches the victim's channel as well as the attacker's.
+BOTH_TEAMS_TYPES = ("event_board_action",)
+
+
 def load_team_destinations(session, event, notification_type: str,
                            team_id=None, milestone: bool = True,
-                           progress_override: str = None) -> list:
+                           progress_override: str = None,
+                           target_team_id=None) -> list:
     """Send destinations for the team channels of one event:
     ``[{"channel_id", "role_id", "team_id"}]``, toggle-filtered per team.
 
@@ -732,7 +743,9 @@ def load_team_destinations(session, event, notification_type: str,
     ``event_task_progress`` row crossed a milestone — teams in 'milestones'
     mode skip non-milestone increments. ``progress_override`` is the per-task
     ``config.progress_notify`` mode, which replaces the team's own progress
-    verbosity when set (the per-type send toggle still applies)."""
+    verbosity when set (the per-type send toggle still applies).
+    ``target_team_id`` adds the other team's channels for
+    :data:`BOTH_TEAMS_TYPES`."""
     is_lead = notification_type == "event_lead_change"
     if notification_type not in TEAM_SCOPED_TYPES and not is_lead:
         return []
@@ -745,7 +758,11 @@ def load_team_destinations(session, event, notification_type: str,
                      EventTeamDiscord.sync_status.in_(LIVE_CHANNEL_STATUSES),
                      EventTeamDiscord.channel_id.isnot(None)))
     if not is_lead:
-        query = query.filter(EventTeamDiscord.team_id == team_id)
+        team_ids = [team_id]
+        if (notification_type in BOTH_TEAMS_TYPES and target_team_id is not None
+                and target_team_id != team_id):
+            team_ids.append(target_team_id)
+        query = query.filter(EventTeamDiscord.team_id.in_(team_ids))
     rows = query.all()
     if not rows:
         return []

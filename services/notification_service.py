@@ -2988,7 +2988,8 @@ class NotificationService:
                 team_dests = load_team_destinations(
                     db_session, event, notification_type,
                     data.get('team_id'), milestone=milestone,
-                    progress_override=task_override)
+                    progress_override=task_override,
+                    target_team_id=data.get('target_team_id'))
             except Exception:
                 team_dests = []
             seen_ids = {d["channel_id"] for d in destinations}

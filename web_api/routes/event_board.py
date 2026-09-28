@@ -1400,62 +1400,6 @@ async def buy_board_item(event_id: int):
     return private_no_store(jsonify(result))
 
 
-# Offensive effects worth a Discord skirmish post (coin_toll is a self-buff
-# announced on the roll, not a direct attack — omitted here).
-_BOARD_ACTION_VERBS = {
-    "freeze_opponent": "❄️ froze",
-    "knockback": "\U0001F4A5 knocked back",
-    "steal_item": "\U0001F99D stole an item from",
-    "reroll_opponent_task": "\U0001F52E rerolled the task of",
-}
-
-
-def _maybe_enqueue_board_action(s, ev, actor_team_id: int, result: dict) -> None:
-    """Announce an offensive item hit (freeze/knockback/steal/reroll-opponent),
-    or a defense that absorbed one, as event_board_action so the PvP layer is
-    visible on Discord (N2). Best-effort — never fails the item use."""
-    effect = (result or {}).get("effect")
-    target_id = (result or {}).get("target_team_id")
-    if effect not in _BOARD_ACTION_VERBS or not target_id:
-        return
-    try:
-        from services import event_engine, event_lifecycle as _lc
-
-        rep = _lc._representative_player_id(s, ev.id)
-        if rep is None:
-            return
-        names = {
-            t.id: t.name for t in s.query(EventTeam)
-            .filter(EventTeam.id.in_([actor_team_id, int(target_id)])).all()
-        }
-        actor = names.get(actor_team_id) or f"Team {actor_team_id}"
-        victim = names.get(int(target_id)) or f"Team {target_id}"
-        item_name = result.get("item_name") or "an item"
-        if result.get("absorbed"):
-            defense = result.get("absorbed_by") or "a defense"
-            action_line = (f"**{victim}** blocked **{actor}**'s **{item_name}** "
-                           f"with their {defense}! \U0001F6E1️")
-        else:
-            detail = ""
-            if effect == "freeze_opponent" and result.get("frozen_rolls"):
-                detail = f" for **{int(result['frozen_rolls'])}** rolls"
-            elif effect == "knockback" and result.get("tiles"):
-                detail = f" **{int(result['tiles'])}** tiles"
-            action_line = (f"**{actor}** {_BOARD_ACTION_VERBS[effect]} "
-                           f"**{victim}**{detail} with **{item_name}**.")
-        event_engine._enqueue_notification(
-            s, "event_board_action", event_engine._event_to_dict(ev), rep, {
-                "team_id": actor_team_id, "team_name": actor,
-                "target_team_id": int(target_id), "target_team_name": victim,
-                "item_name": item_name, "effect": effect,
-                "absorbed": bool(result.get("absorbed")),
-                "absorbed_by": result.get("absorbed_by"),
-                "action_line": action_line,
-            })
-    except Exception:
-        pass
-
-
 @event_board_bp.post("/events/<int:event_id>/board/items/<int:inventory_id>/use")
 async def use_board_item(event_id: int, inventory_id: int):
     user_id = current_user_id()
@@ -1496,11 +1440,15 @@ async def use_board_item(event_id: int, inventory_id: int):
                 action="event.board.item.use", target=str(ev.id),
                 after=f"team={team_id} inv={inventory_id} fx={result.get('effect')}",
             ))
-            # N2: surface offensive hits / absorbed attacks on Discord.
-            _maybe_enqueue_board_action(s, ev, team_id, result)
-            # A movement item (advance / reroll_move) that reaches the finish
-            # tile ends the event, mirroring the roll route.
-            if result.get("won"):
+            # Every item use posts to Discord (attacks, blocks, self items),
+            # naming any new task: services/boardgame_announce.
+            from services.boardgame_announce import announce_item_use
+
+            announce_item_use(s, ev, team_id, result)
+            # A movement item (advance / reroll_move), or a skip whose auto
+            # roll carries the team over the line, reaching the finish tile
+            # ends the event, mirroring the roll route.
+            if result.get("won") or (result.get("roll") or {}).get("won"):
                 from services import event_lifecycle
 
                 event_lifecycle.end_event(s, ev)
@@ -1550,6 +1498,9 @@ async def choose_board_task(event_id: int):
                 action="event.board.task.choose", target=str(ev.id),
                 after=f"team={team_id} choice={choice_index}",
             ))
+            from services.boardgame_announce import announce_task_choice
+
+            announce_task_choice(s, ev, team_id, result)
             s.commit()
             return {"team_id": team_id, **result}
 

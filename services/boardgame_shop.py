@@ -49,10 +49,10 @@ from services.boardgame_effects import (
 )
 from services.boardgame_engine import (
     assign_tile_task,
+    auto_advance,
     award_coins,
     load_board_settings,
     load_tiles,
-    perform_roll,
 )
 
 # Difficulty tiers, easiest → hardest (services/boardgame_engine +
@@ -696,6 +696,7 @@ def _use_skip_task(session, redis_conn, event_id, team_id, pos, item,
 
     if pos.status != "active" or not pos.current_task_id:
         raise ShopError(409, "Nothing to skip", "The team has no live task.")
+    skipped_label = _task_label(session, pos.current_task_id)
     progress = (session.query(EventProgress)
                 .filter(EventProgress.task_id == pos.current_task_id,
                         EventProgress.team_id == team_id)
@@ -711,13 +712,28 @@ def _use_skip_task(session, redis_conn, event_id, team_id, pos, item,
     pos.current_task_id = None
     pos.mercy_deadline = None
     session.flush()
-    out: dict = {"skipped": True}
+    out: dict = {"skipped": True, "previous_task_label": skipped_label}
     if ((settings.get("movement") or {}).get("trigger") or "manual") == "auto":
-        roll = perform_roll(session, redis_conn, event_id, team_id,
-                            settings=settings, rng=rng)
+        # auto_advance (not a single roll) so a landing on a rest tile keeps
+        # rolling, exactly like a completion: a lone roll there dead-ended the
+        # team, since auto games forbid member rolls.
+        roll = auto_advance(session, redis_conn, event_id, team_id, settings,
+                            rng=rng)
         if roll:
             out["roll"] = roll
+            out["won"] = bool(roll.get("won"))
     return out
+
+
+def _task_label(session, task_id) -> Optional[str]:
+    """A task instance's label, for the Discord post naming what a team left
+    behind. Read BEFORE the instance is GC'd."""
+    if not task_id:
+        return None
+    from db.models import EventTask
+
+    row = session.query(EventTask.label).filter(EventTask.id == task_id).first()
+    return row[0] if row else None
 
 
 def _discard_task_instance(session, event_id, task_id) -> None:
@@ -772,6 +788,7 @@ def _reroll_current_task(session, redis_conn, event_id, team_id, pos, settings,
 
     old_task_id = pos.current_task_id
     old_task = session.query(EventTask).filter(EventTask.id == old_task_id).first()
+    old_label = getattr(old_task, "label", None)
     old_source = None
     if old_task is not None:
         try:
@@ -809,7 +826,7 @@ def _reroll_current_task(session, redis_conn, event_id, team_id, pos, settings,
         publish_event_admin_bump(event_id)
     except Exception:
         pass
-    return instance
+    return instance, old_label
 
 
 def _use_reroll_task(session, redis_conn, event_id, team_id, pos, item,
@@ -822,10 +839,12 @@ def _use_reroll_task(session, redis_conn, event_id, team_id, pos, item,
         shift = int(_cfg(item.effect_config).get("difficulty_shift", 0) or 0)
     except (TypeError, ValueError):
         shift = 0
-    instance = _reroll_current_task(session, redis_conn, event_id, team_id, pos,
-                                    settings, rng=rng, difficulty_shift=shift)
+    instance, old_label = _reroll_current_task(
+        session, redis_conn, event_id, team_id, pos, settings, rng=rng,
+        difficulty_shift=shift)
     return {"task_id": instance.id, "task_label": instance.label,
-            "task_difficulty": instance.difficulty}
+            "task_difficulty": instance.difficulty,
+            "previous_task_label": old_label}
 
 
 def _use_boost_coins(session, redis_conn, event_id, team_id, pos, item,
@@ -897,6 +916,7 @@ def _use_advance(session, redis_conn, event_id, team_id, pos, item,
     steps = (rng or random).randint(1, sides)
     start = int(pos.tile_idx or 0)
     old_task_id = pos.current_task_id
+    old_label = _task_label(session, old_task_id)
     summary = _move_piece(session, event_id, team_id, pos, tiles, start, steps,
                           settings, rng=rng)
     # E3: a teleport abandons the current task without completing it — GC the
@@ -922,7 +942,8 @@ def _use_advance(session, redis_conn, event_id, team_id, pos, item,
         })
     except Exception:
         pass
-    return {"teleport": True, **summary}
+    return {"teleport": True, "teleport_roll": steps,
+            "previous_task_label": old_label, **summary}
 
 
 def _use_roadblock(session, redis_conn, event_id, team_id, pos, item,
@@ -1196,6 +1217,7 @@ def _use_reroll_move(session, redis_conn, event_id, team_id, pos, item,
     # before the row is deleted, or MySQL refuses the delete (IntegrityError
     # 1451; every Reroll failed this way until 2026-09-26).
     old_task_id = pos.current_task_id
+    old_label = _task_label(session, old_task_id)
     pos.current_task_id = None
     pos.tile_idx = origin
     session.flush()
@@ -1230,7 +1252,7 @@ def _use_reroll_move(session, redis_conn, event_id, team_id, pos, item,
         })
     except Exception:
         pass
-    return {"rerolled": True, **summary}
+    return {"rerolled": True, "previous_task_label": old_label, **summary}
 
 
 def _use_ward(session, redis_conn, event_id, team_id, pos, item,
@@ -1271,12 +1293,14 @@ def _use_cleanse(session, redis_conn, event_id, team_id, pos, item,
         r.status = "consumed"
         cleared.append(r.effect_type)
     unblocked = False
+    instance = None
     if pos.status == "blocked":
         pos.blocked_until_turn = None
         tiles = load_tiles(session, event_id)
         by_idx = {int(t.idx): t for t in tiles}
-        assign_tile_task(session, event_id, team_id,
-                         by_idx.get(int(pos.tile_idx or 0)), pos, settings, rng=rng)
+        instance = assign_tile_task(session, event_id, team_id,
+                                    by_idx.get(int(pos.tile_idx or 0)), pos,
+                                    settings, rng=rng)
         unblocked = True
     session.flush()
     if unblocked:
@@ -1286,7 +1310,8 @@ def _use_cleanse(session, redis_conn, event_id, team_id, pos, item,
             publish_event_admin_bump(event_id)
         except Exception:
             pass
-    return {"cleansed": cleared, "unblocked": unblocked}
+    return {"cleansed": cleared, "unblocked": unblocked,
+            **({"task_label": instance.label} if instance is not None else {})}
 
 
 def _distinct_tier_order(difficulty):
@@ -1399,6 +1424,7 @@ def apply_task_choice(session, redis_conn, event_id: int, team_id: int,
 
     settings = load_board_settings(session, event_id)
     old_task_id = pos.current_task_id
+    old_label = _task_label(session, old_task_id)
     instance = _materialize_instance(session, event_id, team_id, source,
                                      int(pos.turns_completed or 0),
                                      tile_idx=int(pos.tile_idx or 0))
@@ -1427,7 +1453,8 @@ def apply_task_choice(session, redis_conn, event_id: int, team_id: int,
     except Exception:
         pass
     return {"task_id": instance.id, "task_label": instance.label,
-            "task_difficulty": instance.difficulty}
+            "task_difficulty": instance.difficulty,
+            "previous_task_label": old_label, "candidates": len(pending)}
 
 
 def _use_steal_item(session, redis_conn, event_id, team_id, pos, item,
@@ -1435,7 +1462,7 @@ def _use_steal_item(session, redis_conn, event_id, team_id, pos, item,
     """Steal one random OWNED item from the target team and reassign it to the
     acting team. 409 when the target has nothing owned. An armed shield/ward
     on the target absorbs it instead."""
-    from db.models import EventTeamInventory
+    from db.models import BoardgameShopItem, EventTeamInventory
 
     target_team, _tpos = _resolve_offensive_target(session, event_id, team_id, target)
     absorbed = _absorb_defense(session, event_id, target_team, item.effect)
@@ -1450,10 +1477,13 @@ def _use_steal_item(session, redis_conn, event_id, team_id, pos, item,
         raise ShopError(409, "Nothing to steal", "That team has no items to steal.")
     victim = (rng or random).choice(owned)
     stolen_shop_item_id = victim.shop_item_id
+    stolen = (session.query(BoardgameShopItem.name)
+              .filter(BoardgameShopItem.id == stolen_shop_item_id).first())
     victim.team_id = team_id  # reassign the copy to the acting team
     session.flush()
     return {"target_team_id": target_team, "stolen_inventory_id": victim.id,
-            "stolen_shop_item_id": stolen_shop_item_id}
+            "stolen_shop_item_id": stolen_shop_item_id,
+            "stolen_item_name": stolen[0] if stolen else None}
 
 
 def _use_reroll_opponent_task(session, redis_conn, event_id, team_id, pos, item,
@@ -1467,8 +1497,9 @@ def _use_reroll_opponent_task(session, redis_conn, event_id, team_id, pos, item,
         return absorbed
     if tpos.status != "active" or not tpos.current_task_id:
         raise ShopError(409, "Nothing to reroll", "That team has no live task.")
-    instance = _reroll_current_task(session, redis_conn, event_id, target_team,
-                                    tpos, settings, rng=rng, difficulty_shift=0)
+    instance, old_label = _reroll_current_task(
+        session, redis_conn, event_id, target_team, tpos, settings, rng=rng,
+        difficulty_shift=0)
     try:
         from services.realtime import publish_event_update
 
@@ -1480,7 +1511,8 @@ def _use_reroll_opponent_task(session, redis_conn, event_id, team_id, pos, item,
     except Exception:
         pass
     return {"target_team_id": target_team, "task_id": instance.id,
-            "task_label": instance.label, "task_difficulty": instance.difficulty}
+            "task_label": instance.label, "task_difficulty": instance.difficulty,
+            "previous_task_label": old_label}
 
 
 def _use_knockback(session, redis_conn, event_id, team_id, pos, item,
@@ -1504,6 +1536,7 @@ def _use_knockback(session, redis_conn, event_id, team_id, pos, item,
 
     old = int(tpos.tile_idx or 0)
     old_task_id = tpos.current_task_id
+    old_label = _task_label(session, old_task_id)
     new = max(0, old - n)
     by_idx = {int(t.idx): t for t in tiles}
     # Land through the shared resolver so a knockback onto a chute slides and
@@ -1534,7 +1567,9 @@ def _use_knockback(session, redis_conn, event_id, team_id, pos, item,
     except Exception:
         pass
     return {"target_team_id": target_team, "from": old, "to": new,
-            "tiles": old - new, **({"jump": landing["jump"]} if landing.get("jump") else {})}
+            "tiles": old - new, "task_label": landing.get("task_label"),
+            "previous_task_label": old_label,
+            **({"jump": landing["jump"]} if landing.get("jump") else {})}
 
 
 def _use_coin_toll(session, redis_conn, event_id, team_id, pos, item,

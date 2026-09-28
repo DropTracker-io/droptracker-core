@@ -3235,9 +3235,11 @@ def _enqueue_notification(session, notification_type: str, event: dict,
             from services.event_team_discord import team_channel_interest
         except ImportError:  # unit-test stubs
             return
-        if not team_channel_interest(
-            session, event["id"], notification_type, data.get("team_id")
-        ):
+        if not (team_channel_interest(
+                    session, event["id"], notification_type, data.get("team_id"))
+                or (data.get("target_team_id") is not None and team_channel_interest(
+                    session, event["id"], notification_type,
+                    data.get("target_team_id")))):
             return
     from db.models.notification_queue import NotificationQueue
     payload = dict(data)

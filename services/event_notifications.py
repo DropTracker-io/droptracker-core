@@ -144,6 +144,12 @@ _COLORS = {
 # --------------------------------------------------------------------------- #
 # Mirrors db.models.events.EVENT_TASK_PROGRESS_MODES / EVENT_MESSAGE_TOGGLE_KEYS
 # (kept literal here so this module stays stdlib-only for the unit tests).
+# The pre-composed extra lines an event_board_turn can carry, in display order
+# (boardgame_engine.turn_notification_data). The legacy embed and the V2 layout
+# context both read this list; an absent key is simply no line.
+BOARD_TURN_LINE_KEYS = ("frozen_line", "stall_line", "roadblock_line", "jump_line",
+                        "required_line", "overshoot_line", "toll_line", "finish_line")
+
 TASK_PROGRESS_MODES = ("off", "milestones", "all")
 
 # The percent thresholds 'milestones' mode announces when a team crosses them.
@@ -842,8 +848,7 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         # The chute/ladder, required-stop, overshoot and finish-task lines
         # (2026-09) are pre-composed at enqueue — same text as the V2 layout.
         extra = "\n".join(
-            str(data[k]) for k in ("jump_line", "required_line", "overshoot_line",
-                                   "finish_line") if data.get(k))
+            str(data[k]) for k in BOARD_TURN_LINE_KEYS if data.get(k))
         if data.get("won"):
             spec["title"] = f"\U0001F3C6 {team or 'A team'} reached the finish!"
             if data.get("won_by_ladder"):
@@ -861,6 +866,10 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
                     + (f" (**{total}**)" if len(dice) > 1 else "")
                     + f" — tile `{data.get('tile_from')}` → `{data.get('tile_to')}`"
                 )
+            elif data.get("stalled"):
+                spec["title"] = f"\U0001F6A7 {team or 'A team'} lost a turn"
+                spec["description"] = (
+                    f"**{team or 'A team'}** is held on tile `{data.get('tile_to')}`.")
             elif jump.get("kind") == "ladder":
                 spec["title"] = f"\U0001FA9C {team or 'A team'} climbed a ladder"
                 spec["description"] = (
@@ -884,15 +893,20 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             field("Turn", f"`#{int(data['turn'])}`")
 
     elif notification_type == "event_board_action":
-        # A precomputed action_line (built at enqueue) keeps both the embed and
-        # the V2 layout renderer to a single, always-present placeholder.
-        if data.get("absorbed"):
+        # Pre-composed at enqueue (services/boardgame_announce) so the embed and
+        # the V2 layout say the same thing. Rows queued before action_title
+        # existed fall back to the original skirmish titles.
+        if data.get("action_title"):
+            spec["title"] = str(data["action_title"])
+        elif data.get("absorbed"):
             spec["title"] = "\U0001F6E1️ Attack blocked!"
         else:
             spec["title"] = "⚔️ Board skirmish"
         spec["description"] = (
             data.get("action_line")
             or f"**{team or 'A team'}** used **{data.get('item_name') or 'an item'}**.")
+        if data.get("action_detail_line"):
+            spec["description"] += "\n" + str(data["action_detail_line"])
 
     elif notification_type == "event_board_roll_prompt":
         spec["title"] = f"\U0001F3B2 {team or 'Your team'} can roll!"

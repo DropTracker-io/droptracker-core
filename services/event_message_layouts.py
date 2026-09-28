@@ -335,9 +335,13 @@ DEFAULT_LAYOUTS = {
                 # lines (2026-09) are pre-composed at enqueue and drop out of
                 # the block when the turn had none.
                 "content": "Tile `{tile_from}` → `{tile_to}`\n"
+                           "{frozen_line}\n"
+                           "{stall_line}\n"
+                           "{roadblock_line}\n"
                            "{jump_line}\n"
                            "{required_line}\n"
                            "{overshoot_line}\n"
+                           "{toll_line}\n"
                            "{finish_line}\n"
                            "**Next task** {next_task_label}\n"
                            "**Coins** `+{coins_awarded}` (wallet `{coin_balance}`)\n"
@@ -366,8 +370,8 @@ DEFAULT_LAYOUTS = {
     "event_board_action": {
         "accent_color": "#E74C3C",
         "blocks": [
-            {"type": "text", "content": "### ⚔️ Board skirmish"},
-            {"type": "text", "content": "{action_line}"},
+            {"type": "text", "content": "### {action_title}"},
+            {"type": "text", "content": "{action_line}\n{action_detail_line}"},
         ],
     },
     "event_board_roll_prompt": {
@@ -704,8 +708,28 @@ TOKEN_DOCS = {
     "next_task_label": {"help": "The next task drawn for the team", "sample": "Zulrah kill"},
     "coins_awarded": {"help": "Coins earned this turn", "sample": "3"},
     "coin_balance": {"help": "The team's coin wallet after the turn", "sample": "11"},
-    "action_line": {"help": "What happened in the board skirmish",
+    "action_line": {"help": "What the team did with its item (or what happened to it)",
                     "sample": "**Team Bandos** froze **Team Zamorak** for 2 turns"},
+    "item_name": {"help": "The shop item the team used", "sample": "Ice Barrage"},
+    "target_team_name": {"help": "The rival an attack was aimed at (empty for "
+                                 "self items)",
+                         "sample": "Team Zamorak"},
+    "action_title": {"help": "The board action's headline, set per item",
+                     "sample": "\u2744\ufe0f Frozen!"},
+    "action_detail_line": {"help": "What changed: the new task, the move, a win "
+                                   "(empty when nothing moved)",
+                           "sample": "**New task** Zulrah kill"},
+    "frozen_line": {"help": "Set when a freeze kept the piece still this roll",
+                    "sample": "\u2744\ufe0f Frozen: the dice were thrown but the "
+                              "piece stayed put."},
+    "stall_line": {"help": "Set when the turn was spent sitting out a roadblock",
+                   "sample": "\U0001F6A7 Held by a roadblock: this turn is lost."},
+    "roadblock_line": {"help": "Set when a roadblock stopped the move",
+                       "sample": "\U0001F6A7 Stopped by a roadblock on tile `14` and "
+                                 "stalled for 1 turn."},
+    "toll_line": {"help": "Set when an armed coin toll collected from passed teams",
+                  "sample": "\U0001FA99 Coin toll: collected `50` coins from 2 teams "
+                            "on the way."},
     "conquest_headline": {"help": "Conquest: what happened, in one line",
                           "sample": "⚔️ **Team Bandos** captured **Zulrah** from "
                                     "**Team Zamorak**"},
@@ -908,7 +932,8 @@ TYPE_META = {
         "description": "A team rolled the dice and moved (or climbed / was stopped).",
         "tokens": ("turn_headline", "team_name", "player_name", "dice_str", "tile_from",
                    "tile_to", "turn", "next_task_label", "coins_awarded", "coin_balance",
-                   "jump_line", "required_line", "overshoot_line", "finish_line"),
+                   "frozen_line", "stall_line", "roadblock_line", "jump_line",
+                   "required_line", "overshoot_line", "toll_line", "finish_line"),
         "standings": False,
     },
     "event_board_win": {
@@ -924,9 +949,13 @@ TYPE_META = {
         "standings": False,
     },
     "event_board_action": {
-        "label": "Board: skirmish", "group": "Board game",
-        "description": "A team used an item on a rival (or a defense blocked one).",
-        "tokens": ("team_name", "action_line"), "standings": False,
+        "label": "Board: items & attacks", "group": "Board game",
+        "description": "A team used a shop item, picked a task, or ran out of time "
+                       "on one (an attack on a rival, or a defense that blocked it, "
+                       "included).",
+        "tokens": ("action_title", "team_name", "action_line", "action_detail_line",
+                   "item_name", "target_team_name", "next_task_label"),
+        "standings": False,
     },
     "event_signup_prompt": {
         "label": "Sign-up prompt", "group": "Announcements",
@@ -1458,7 +1487,7 @@ def notification_context(notification_type: str, data: dict) -> dict:
     the layouts substitute from. Values that are None/empty/zero are omitted
     so their lines drop out of the rendered message."""
     from services.event_notifications import (
-        _completion_item_redundant, _fmt_minutes_left, _fmt_ts,
+        BOARD_TURN_LINE_KEYS, _completion_item_redundant, _fmt_minutes_left, _fmt_ts,
         _received_item_text, event_url, fmt_pts, format_gp,
         line_bonus_summary, sweep_contributor_lines,
     )
@@ -1641,12 +1670,18 @@ def notification_context(notification_type: str, data: dict) -> dict:
     put("coins_awarded", data.get("coins_awarded"))
     # Chutes & ladders / required tiles / exact finish (2026-09): pre-composed
     # at enqueue (boardgame_engine.turn_notification_data); absent = no line.
-    for key in ("jump_line", "required_line", "overshoot_line", "finish_line"):
+    for key in BOARD_TURN_LINE_KEYS:
         put(key, data.get(key))
-    # Board skirmish (web61a): pre-composed at enqueue by the use-item route.
-    # The default event_board_action layout's only body line — without this
-    # the V2 message rendered its title alone.
+    # Board actions (web61a, widened 2026-09-28): pre-composed at enqueue by
+    # services/boardgame_announce. Rows queued before action_title existed
+    # keep their original skirmish headline.
     put("action_line", data.get("action_line"))
+    put("action_detail_line", data.get("action_detail_line"))
+    put("action_title", data.get("action_title") or (
+        "\U0001F6E1\ufe0f Attack blocked!" if data.get("absorbed")
+        else "\u2694\ufe0f Board skirmish"))
+    put("item_name", data.get("item_name"))
+    put("target_team_name", data.get("target_team_name"))
     # Conquest (web120a): every line is pre-composed at enqueue
     # (services/conquest_engine) — pass-throughs that drop cleanly elsewhere.
     for key in ("conquest_headline", "conquest_detail_line", "conquest_dice_line",
@@ -1662,6 +1697,8 @@ def notification_context(notification_type: str, data: dict) -> dict:
             headline = f"\U0001F3B2 {team} rolled `{context['dice_str']}`"
         elif data.get("won"):
             headline = f"\U0001F3C6 {team} reached the finish!"
+        elif data.get("stalled"):
+            headline = f"\U0001F6A7 {team} lost a turn"
         elif jump.get("kind") == "ladder":
             headline = f"\U0001FA9C {team} climbed a ladder"
         else:

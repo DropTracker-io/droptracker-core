@@ -263,6 +263,14 @@ class TestTeamScopedTypes:
         # Lead change deliberately NOT team-scoped (goes to every team channel).
         assert "event_lead_change" not in etd.TEAM_SCOPED_TYPES
 
+    def test_board_actions_reach_both_teams_quietly(self):
+        # An item used on a rival posts to the attacker's AND the victim's
+        # channel; item posts post but never ping @TeamRole by default.
+        assert "event_board_action" in etd.TEAM_SCOPED_TYPES
+        assert "event_board_action" in etd.BOTH_TEAMS_TYPES
+        assert etd.DEFAULT_TEAM_MESSAGE_TOGGLES["event_board_action"] is True
+        assert etd.DEFAULT_TEAM_MESSAGE_PINGS["event_board_action"] is False
+
     def test_defaults_cover_every_routable_type(self):
         # Every type load_team_destinations can route must have a default.
         for t in etd.TEAM_SCOPED_TYPES + ("event_lead_change",):

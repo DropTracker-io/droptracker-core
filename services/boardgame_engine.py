@@ -652,6 +652,45 @@ def _line_for_jump(jump: Optional[dict]) -> Optional[str]:
             f"to tile `{jump.get('to')}`!")
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def effect_lines(move: Optional[dict]) -> dict:
+    """The item effects a move ran into, as pre-composed Discord lines: a
+    freeze that kept the piece still, a roadblock that stopped it, a stall
+    being served, a coin toll collected on the way. Keys are absent when the
+    move had none. Shared by the turn post and the item-use post (a teleport
+    can hit a roadblock or collect a toll too)."""
+    move = move or {}
+    lines: dict = {}
+    if move.get("frozen"):
+        lines["frozen_line"] = ("\u2744\ufe0f Frozen: the dice were thrown but the "
+                                "piece stayed put.")
+    effect = move.get("tile_effect") or {}
+    if effect.get("stopped"):
+        stall = int(effect.get("stall_turns") or 0)
+        lines["roadblock_line"] = (
+            f"\U0001F6A7 Stopped by a roadblock on tile `{effect.get('tile_idx')}`"
+            + (f" and stalled for {_plural(stall, 'turn')}." if stall else "."))
+    if move.get("blocked") and not move.get("dice") and not effect:
+        if move.get("blocked_cleared"):
+            lines["stall_line"] = ("\U0001F6A7 Sat out the roadblock stall and is "
+                                   "back in play.")
+        else:
+            left = int(move.get("stall_remaining") or 0)
+            lines["stall_line"] = (
+                "\U0001F6A7 Held by a roadblock: this turn is lost"
+                + (f", {_plural(left, 'more turn')} to wait." if left else "."))
+    toll = move.get("coin_toll") or {}
+    if int(toll.get("total") or 0) > 0:
+        paid = len(toll.get("stolen") or [])
+        lines["toll_line"] = (
+            f"\U0001FA99 Coin toll: collected `{int(toll['total'])}` coins from "
+            f"{_plural(paid, 'team')} on the way.")
+    return lines
+
+
 def turn_notification_data(*, team_id: int, team_name=None, player_name=None,
                            roll: Optional[dict] = None,
                            board: Optional[dict] = None) -> dict:
@@ -692,8 +731,11 @@ def turn_notification_data(*, team_id: int, team_name=None, player_name=None,
         "required_stop": required,
         "overshoot": overshoot,
         "finish_task": finish_task,
+        # A roll attempt spent sitting out a roadblock stall: no dice, no move.
+        "stalled": bool(roll.get("blocked") and not dice),
     }
     lines = {
+        **effect_lines(roll),
         "jump_line": _line_for_jump(jump),
         "required_line": (
             f"\u26d4 Stopped at required tile `{required.get('tile_idx')}` — "
@@ -1325,6 +1367,13 @@ def mercy_sweep(session, redis_conn, now: Optional[datetime] = None) -> list:
             continue
         if pos.mercy_deadline is None or pos.mercy_deadline > now:
             continue
+        skipped_label = None
+        if pos.current_task_id:
+            from db.models import EventTask
+
+            row = (session.query(EventTask.label)
+                   .filter(EventTask.id == pos.current_task_id).first())
+            skipped_label = row[0] if row else None
         # Mark the task's rollup complete (no score, no coins — mercy is a
         # release valve, not a reward).
         if pos.current_task_id:
@@ -1345,6 +1394,7 @@ def mercy_sweep(session, redis_conn, now: Optional[datetime] = None) -> list:
         pos.mercy_deadline = None
         session.flush()
         won = False
+        roll = None
         movement = settings.get("movement") or {}
         if (movement.get("trigger") or "manual") == "auto":
             # A mercy auto-roll can carry a team across the finish. Surface that
@@ -1352,5 +1402,10 @@ def mercy_sweep(session, redis_conn, now: Optional[datetime] = None) -> list:
             # discarded its summary, leaving a mercy-won game active forever (W2).
             roll = auto_advance(session, redis_conn, ev.id, pos.team_id, settings)
             won = bool(roll and roll.get("won"))
+        # Tell Discord the task was skipped (and where an auto roll went), or
+        # the team's channel never learns its task changed.
+        from services.boardgame_announce import announce_mercy
+
+        announce_mercy(session, ev, pos.team_id, skipped_label, roll)
         swept.append({"event_id": ev.id, "team_id": pos.team_id, "won": won})
     return swept
