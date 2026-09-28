@@ -85,6 +85,11 @@ KIND_FOR_TYPE = {
     "event_conquest_battle": "completions",
     "event_conquest_region": "completions",
     "event_conquest_summary": "leaderboard",
+    # web123a: an attack alert for the defending team (team channel only; the
+    # main-channel toggle defaults off), and news: a phase begins, a hot zone
+    # goes hot.
+    "event_conquest_alert": "completions",
+    "event_conquest_news": "leaderboard",
 }
 
 EVENT_NOTIFICATION_TYPES = tuple(KIND_FOR_TYPE)
@@ -136,6 +141,8 @@ _COLORS = {
     "event_conquest_battle": 0xE74C3C,   # combat red — dice were rolled
     "event_conquest_region": 0xFFD700,   # crown gold — a whole region held
     "event_conquest_summary": 0x5865F2,  # blurple — the periodic map update
+    "event_conquest_alert": 0xED4245,    # alarm red — your land is under attack
+    "event_conquest_news": 0xF39C12,     # hot orange — phases and hot zones
 }
 
 
@@ -193,6 +200,8 @@ DEFAULT_MESSAGE_TOGGLES = {
     "event_conquest_battle": False,
     "event_conquest_region": True,
     "event_conquest_summary": True,
+    "event_conquest_alert": False,
+    "event_conquest_news": True,
 }
 
 # Loot Sweep messaging sub-config defaults (message_config["loot_sweep"]).
@@ -1059,7 +1068,8 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         spec["description"] = "\n".join(lines)
 
     elif notification_type in ("event_conquest_capture", "event_conquest_battle",
-                               "event_conquest_region", "event_conquest_summary"):
+                               "event_conquest_region", "event_conquest_summary",
+                               "event_conquest_alert", "event_conquest_news"):
         # Conquest (web120a): every line is pre-composed at enqueue
         # (services/conquest_engine) so the embed and the V2 layout read the
         # same text.
@@ -1068,6 +1078,8 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             "event_conquest_battle": "\U0001F3B2 Battle",
             "event_conquest_region": "\U0001F451 Region control",
             "event_conquest_summary": f"\U0001F5FA️ {event_name}: map update",
+            "event_conquest_alert": "\U0001F6A8 Under attack",
+            "event_conquest_news": f"\U0001F4E3 {event_name}",
         }[notification_type]
         lines = [data.get(k) for k in ("conquest_headline", "conquest_dice_line",
                                         "conquest_summary_block",

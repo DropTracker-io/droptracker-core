@@ -94,7 +94,24 @@ DICE_SIDES = 6
 # What a troop did (web_conquest_battles.outcome). "adjust" is an admin
 # correction (set owner / defense by hand), never a troop.
 OUTCOMES = ("claim", "capture", "fortify", "full", "attack", "breach", "repelled",
-            "adjust", "held")
+            "adjust", "held", "shielded", "retreat")
+# Capital tiles (a team's home) under capitals = "safe" can't lose their last
+# point of defense to an enemy, so they are never captured.
+CAPITAL_MODES = ("normal", "safe")
+# Help for a team that lost all its land and fought its way back: its tiles
+# can't be attacked (shield), or its troops count double (boost), for
+# comeback_hours after it takes a tile again.
+COMEBACK_MODES = ("none", "shield", "boost")
+COMEBACK_HOURS_CHOICES = (6, 12, 24, 48)
+# The team(s) holding the fewest tiles defend harder: an extra defense die,
+# or (no dice) every other attacking troop is absorbed.
+UNDERDOG_MODES = ("on", "off")
+CONTESTED_MULTIPLIERS = (2, 3, 5)
+# Hot zones multiply the troops earned on their tiles.
+HOT_MULTIPLIER = 2
+MAX_PHASES = 4
+MAX_HOTZONES = 60
+MAX_HOTZONE_HOURS = 168
 CAPTURE_OUTCOMES = ("claim", "capture")
 
 # Task types a tile rule may use: the ADDITIVE ones, where every qualifying
@@ -139,6 +156,14 @@ DEFAULT_SETTINGS = {
     "neutral_defense": 0,
     "attack_range": "adjacent",
     "out_of_reach": "ignore",
+    "retreat_defense": 1,
+    "capitals": "normal",
+    "comeback": "shield",
+    "comeback_hours": 12,
+    "underdog_defense": "on",
+    "bounty_points": 0,
+    "contested_multiplier": 3,
+    "phase_count": 1,
 }
 
 # Inclusive integer bounds per numeric setting.
@@ -149,6 +174,9 @@ SETTING_BOUNDS = {
     "capture_defense": (0, 20),
     "start_defense": (0, 20),
     "neutral_defense": (0, 20),
+    "retreat_defense": (0, 5),
+    "bounty_points": (0, 20),
+    "phase_count": (1, MAX_PHASES),
 }
 _ENUM_SETTINGS = {
     "scoring_mode": SCORING_MODES,
@@ -156,6 +184,15 @@ _ENUM_SETTINGS = {
     "start_mode": START_MODES,
     "attack_range": ATTACK_RANGES,
     "out_of_reach": OUT_OF_REACH_MODES,
+    "capitals": CAPITAL_MODES,
+    "comeback": COMEBACK_MODES,
+    "underdog_defense": UNDERDOG_MODES,
+}
+# Whole-number settings that only take a few values.
+_CHOICE_SETTINGS = {
+    "summary_hours": SUMMARY_HOURS_CHOICES,
+    "comeback_hours": COMEBACK_HOURS_CHOICES,
+    "contested_multiplier": CONTESTED_MULTIPLIERS,
 }
 
 
@@ -194,8 +231,10 @@ def conquest_settings(raw) -> dict:
     for key, choices in _ENUM_SETTINGS.items():
         if stored.get(key) in choices:
             out[key] = stored[key]
-    if _int_or(stored.get("summary_hours"), -1) in SUMMARY_HOURS_CHOICES:
-        out["summary_hours"] = int(stored["summary_hours"])
+    for key, choices in _CHOICE_SETTINGS.items():
+        if (key in stored and not isinstance(stored[key], bool)
+                and _int_or(stored[key], -1) in choices):
+            out[key] = int(stored[key])
     for key, (lo, hi) in SETTING_BOUNDS.items():
         if key in stored:
             out[key] = min(max(_int_or(stored[key], out[key]), lo), hi)
@@ -220,12 +259,12 @@ def clean_settings_patch(body) -> tuple[dict, list]:
                 patch[key] = value
             else:
                 errors.append(f"{key} must be one of {list(_ENUM_SETTINGS[key])}.")
-        elif key == "summary_hours":
+        elif key in _CHOICE_SETTINGS:
             if (not isinstance(value, bool)
-                    and _int_or(value, -1) in SUMMARY_HOURS_CHOICES):
+                    and _int_or(value, -1) in _CHOICE_SETTINGS[key]):
                 patch[key] = int(value)
             else:
-                errors.append(f"summary_hours must be one of {list(SUMMARY_HOURS_CHOICES)}.")
+                errors.append(f"{key} must be one of {list(_CHOICE_SETTINGS[key])}.")
         elif key in SETTING_BOUNDS:
             lo, hi = SETTING_BOUNDS[key]
             n = _int_or(value, lo - 1)
@@ -293,10 +332,29 @@ class TroopOutcome:
     defense_after: int
     attack_dice: tuple = ()
     defense_dice: tuple = ()
+    # The tile's siege counter after this troop (underdog, no-dice mode).
+    siege_after: int = 0
 
     @property
     def captured(self) -> bool:
         return self.outcome in CAPTURE_OUTCOMES
+
+
+@dataclass(frozen=True)
+class TileGuard:
+    """What protects one tile beyond its defense, decided by the engine from
+    the live map: ``shielded`` owners can't be attacked at all (comeback
+    shield); ``capital_of`` is the team whose safe capital this is (never
+    drops below 1 defense while that team holds it); ``underdogs`` are the
+    teams holding the fewest tiles (an extra defense die, or with no dice
+    every other attacking troop is absorbed)."""
+
+    shielded: frozenset = frozenset()
+    capital_of: Optional[int] = None
+    underdogs: frozenset = frozenset()
+
+
+NO_GUARD = TileGuard()
 
 
 def roll_dice(count: int, rng) -> list:
@@ -335,45 +393,154 @@ def tile_garrison(settings: dict, garrison=None, max_defense=None) -> int:
 
 
 def resolve_troop(owner, defense, team_id: int, settings: dict,
-                  rng) -> TroopOutcome:
+                  rng, guard: TileGuard = NO_GUARD, siege: int = 0) -> TroopOutcome:
     """Resolve one troop of ``team_id`` against a tile owned by ``owner``
     (None = unowned) with ``defense`` points. ``settings`` is a
-    :func:`conquest_settings` dict. See the module docstring for the rules."""
+    :func:`conquest_settings` dict, ``guard`` the tile's protections and
+    ``siege`` its siege counter. See the module docstring for the rules."""
     max_def = settings["max_defense"]
     capture_def = min(settings["capture_defense"], max_def)
     defense = max(_int_or(defense, 0), 0)
+    siege = max(_int_or(siege, 0), 0)
     if owner is not None and owner == team_id:
         if defense >= max_def:
-            return TroopOutcome("full", owner, owner, defense, defense)
-        return TroopOutcome("fortify", owner, owner, defense, defense + 1)
-    if defense <= 0:
+            return TroopOutcome("full", owner, owner, defense, defense, siege_after=siege)
+        return TroopOutcome("fortify", owner, owner, defense, defense + 1, siege_after=siege)
+    if owner is not None and owner in guard.shielded:
+        return TroopOutcome("shielded", owner, owner, defense, defense, siege_after=siege)
+    # A safe capital never loses its last point of defense to an enemy.
+    floor = 1 if owner is not None and guard.capital_of == owner else 0
+    if defense <= 0 and not floor:
         kind = "claim" if owner is None else "capture"
         return TroopOutcome(kind, owner, team_id, defense, capture_def)
+    defense = max(defense, floor)
+    underdog = owner is not None and owner in guard.underdogs
     if settings["battle_mode"] == "attrition":
-        after = defense - 1
-        return TroopOutcome("breach" if after == 0 else "attack",
-                            owner, owner, defense, after)
+        if underdog and siege % 2 == 0:
+            # Every other troop against an underdog is absorbed.
+            return TroopOutcome("repelled", owner, owner, defense, defense,
+                                siege_after=siege + 1)
+        after = max(defense - 1, floor)
+        kind = "repelled" if after == defense else ("breach" if after == 0 else "attack")
+        return TroopOutcome(kind, owner, owner, defense, after, siege_after=siege + 1)
     attack = roll_dice(settings["attack_dice"], rng)
-    defend = roll_dice(min(defense, settings["defense_dice"]), rng)
-    after = max(defense - battle_losses(attack, defend), 0)
+    defend_count = min(defense, settings["defense_dice"]) + (1 if underdog else 0)
+    defend = roll_dice(min(defend_count, 3), rng)
+    after = max(defense - battle_losses(attack, defend), floor)
     if after == defense:
         kind = "repelled"
     else:
         kind = "breach" if after == 0 else "attack"
     return TroopOutcome(kind, owner, owner, defense, after,
-                        tuple(attack), tuple(defend))
+                        tuple(attack), tuple(defend), siege_after=siege)
 
 
 def resolve_troops(owner, defense, team_id: int, count: int, settings: dict,
-                   rng) -> list:
+                   rng, guard: TileGuard = NO_GUARD, siege: int = 0) -> list:
     """Resolve ``count`` troops one after another (each sees the tile the
-    previous one left). Troops after a capture fortify the new holding."""
+    previous one left). Troops after a capture fortify the new holding; a
+    capture resets the siege counter."""
     out = []
     for _ in range(max(_int_or(count, 0), 0)):
-        result = resolve_troop(owner, defense, team_id, settings, rng)
+        result = resolve_troop(owner, defense, team_id, settings, rng, guard, siege)
         out.append(result)
         owner, defense = result.owner_after, result.defense_after
+        siege = 0 if result.captured else result.siege_after
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Fairness rules (retreat, underdogs, bounty)
+# --------------------------------------------------------------------------- #
+def underdog_teams(tile_counts: dict, settings: dict) -> frozenset:
+    """The team(s) holding the fewest tiles, when underdog defense is on and
+    not everyone holds the same number. Teams with no land aren't counted
+    (they have nothing to defend)."""
+    if settings.get("underdog_defense") != "on":
+        return frozenset()
+    held = {t: n for t, n in tile_counts.items() if n > 0}
+    if len(held) < 2:
+        return frozenset()
+    low, high = min(held.values()), max(held.values())
+    if low == high:
+        return frozenset()
+    return frozenset(t for t, n in held.items() if n == low)
+
+
+def bounty_for(victim_rank: int, team_count: int, points) -> float:
+    """Bonus points for capturing a tile from the team ranked
+    ``victim_rank`` (1 = the leader): the full bounty from the leader,
+    nothing from the last-place team, in even steps between (to the half
+    point)."""
+    pts = max(float(points or 0), 0.0)
+    if pts <= 0 or team_count < 2 or victim_rank < 1:
+        return 0.0
+    share = (team_count - min(victim_rank, team_count)) / (team_count - 1)
+    return round(pts * share * 2) / 2
+
+
+def retreat_target(lost_tile_id: int, loser: int, tiles: Iterable[dict], adj: dict,
+                   settings: dict) -> Optional[int]:
+    """Where the defenders of a lost tile fall back to: the loser's weakest
+    tile bordering it that still has room (``tiles``: dicts with ``id``,
+    ``owner_team_id``, ``defense`` and ``max_defense``), lowest id on a tie.
+    None when retreat is off or nothing of theirs borders it."""
+    if int(settings.get("retreat_defense") or 0) <= 0:
+        return None
+    by_id = {t["id"]: t for t in tiles}
+    options = []
+    for n in adj.get(lost_tile_id, ()):
+        t = by_id.get(n)
+        if not t or t.get("owner_team_id") != loser or t.get("kind", "normal") != "normal":
+            continue
+        cap = tile_settings(settings, t.get("max_defense"))["max_defense"]
+        if int(t.get("defense") or 0) < cap:
+            options.append((int(t.get("defense") or 0), t["id"]))
+    return min(options)[1] if options else None
+
+
+# --------------------------------------------------------------------------- #
+# Phases and hot zones
+# --------------------------------------------------------------------------- #
+def phase_bounds(start: Optional[datetime], end: Optional[datetime], count) -> list:
+    """``[(phase, start, end)]``: the event window split evenly into
+    ``count`` phases (1-based). Empty without a window."""
+    n = min(max(_int_or(count, 1), 1), MAX_PHASES)
+    if start is None or end is None or end <= start:
+        return []
+    step = (end - start) / n
+    return [(k + 1, start + step * k, end if k == n - 1 else start + step * (k + 1))
+            for k in range(n)]
+
+
+def phase_at(start: Optional[datetime], end: Optional[datetime], count,
+             now: datetime) -> int:
+    """The phase ``now`` falls in (1 before the start, the last after the
+    end, 1 with no window or a single phase)."""
+    bounds = phase_bounds(start, end, count)
+    if not bounds:
+        return 1
+    for phase, _s, e in bounds:
+        if now < e:
+            return phase
+    return bounds[-1][0]
+
+
+def rule_active(rule_phase, current_phase: int) -> bool:
+    """A rule with phase 0 plays in every phase; otherwise only its own."""
+    p = _int_or(rule_phase, 0)
+    return p <= 0 or p == current_phase
+
+
+def hot_multiplier(zones: Iterable[dict], region_id, now: datetime) -> int:
+    """Troop multiplier for a tile in ``region_id`` at ``now``: hot zones are
+    dicts with ``region_id``, ``starts_at``, ``ends_at``."""
+    if region_id is None:
+        return 1
+    for z in zones:
+        if z.get("region_id") == region_id and z["starts_at"] <= now < z["ends_at"]:
+            return HOT_MULTIPLIER
+    return 1
 
 
 def make_rng(seed=None):
@@ -597,22 +764,32 @@ class TeamStanding:
 def compute_standings(mode: str, tiles: Iterable[dict], regions: Iterable[dict],
                       holds: Iterable[Hold], team_ids: Iterable[int],
                       window_start: Optional[datetime],
-                      window_end: Optional[datetime]) -> dict:
+                      window_end: Optional[datetime], *,
+                      contested_multiplier=1, bonus_points: Optional[dict] = None) -> dict:
     """Every team's :class:`TeamStanding` for one map.
 
     ``tiles``: dicts with ``id``, ``value``, ``region_id``, ``kind``,
-    ``owner_team_id`` (current). ``regions``: dicts with ``id``, ``bonus``.
-    ``holds``: the ownership history. ``window_start``/``window_end`` bound the
-    scoring window (hold_time); either None means nothing has accrued yet.
+    ``owner_team_id`` (current). ``regions``: dicts with ``id``, ``bonus``
+    and ``contested`` (the contested centre: its bonus and its tiles' values
+    are multiplied by ``contested_multiplier``). ``holds``: the ownership
+    history. ``window_start``/``window_end`` bound the scoring window
+    (hold_time); either None means nothing has accrued yet. ``bonus_points``
+    ({team id: points}, the bounties) is added in both modes.
 
     Current tiles/regions/holding always come from the CURRENT owners; the
     score is either that holding (final) or the time-weighted history
-    (hold_time)."""
+    (hold_time), plus the bonus points."""
     tiles = [t for t in tiles if t.get("kind", "normal") == "normal"]
     regions = list(regions)
     teams = {int(t): TeamStanding(int(t)) for t in team_ids}
-    value_of = {t["id"]: float(t.get("value") or 0) for t in tiles}
-    bonus_of = {r["id"]: float(r.get("bonus") or 0) for r in regions}
+    mult = max(float(contested_multiplier or 1), 1.0)
+    contested = {r["id"] for r in regions if r.get("contested")}
+    value_of = {t["id"]: float(t.get("value") or 0) * (mult if t.get("region_id") in contested
+                                                         else 1.0)
+                for t in tiles}
+    bonus_of = {r["id"]: float(r.get("bonus") or 0) * (mult if r["id"] in contested else 1.0)
+                for r in regions}
+    extra = {int(k): float(v or 0) for k, v in (bonus_points or {}).items()}
 
     for t in tiles:
         owner = t.get("owner_team_id")
@@ -627,10 +804,12 @@ def compute_standings(mode: str, tiles: Iterable[dict], regions: Iterable[dict],
 
     if mode == "final":
         for st in teams.values():
-            st.score = round(st.holding, 2)
+            st.score = round(st.holding + extra.get(st.team_id, 0.0), 2)
         return teams
 
     if window_start is None or window_end is None or window_end <= window_start:
+        for st in teams.values():
+            st.score = round(extra.get(st.team_id, 0.0), 2)
         return teams
     # (tile, team) -> merged clipped intervals.
     per: dict = {}
@@ -656,7 +835,7 @@ def compute_standings(mode: str, tiles: Iterable[dict], regions: Iterable[dict],
             if common:
                 st.score += bonus * _total(common) / 3600.0
     for st in teams.values():
-        st.score = round(st.score, 2)
+        st.score = round(st.score + extra.get(st.team_id, 0.0), 2)
     return teams
 
 
@@ -780,6 +959,7 @@ def validate_map(body) -> tuple[dict, list]:
             "color": _clean_color(r.get("color")),
             "label_x": _frac(r.get("label_x")), "label_y": _frac(r.get("label_y")),
             "shape": clean_shape(r.get("shape")),
+            "contested": r.get("contested") is True,
         })
 
     tiles = []
@@ -858,6 +1038,8 @@ def validate_map(body) -> tuple[dict, list]:
                 # A one-time award: pays the first time the target is
                 # reached, like an achievement.
                 "once": rule.get("once") is True,
+                # 0 = every phase; otherwise the one phase it plays in.
+                "phase": min(max(_int_or(rule.get("phase"), 0), 0), MAX_PHASES),
             })
         caps = {}
         for field, (lo, hi), what in (
@@ -921,7 +1103,34 @@ def validate_map(body) -> tuple[dict, list]:
         if k not in seen_edges:
             seen_edges.add(k)
             edges.append(list(k))
-    return {"regions": regions, "tiles": tiles, "edges": edges}, errors
+
+    hotzones = []
+    zones_in = body.get("hotzones") or []
+    if not isinstance(zones_in, list):
+        errors.append("hotzones must be a list.")
+        zones_in = []
+    if len(zones_in) > MAX_HOTZONES:
+        errors.append(f"A map can have at most {MAX_HOTZONES} hot zones.")
+        zones_in = []
+    for i, z in enumerate(zones_in):
+        if not isinstance(z, dict):
+            errors.append(f"Hot zone {i + 1} is not an object.")
+            continue
+        rk = str(z.get("region_key") or "").strip()
+        if rk not in region_keys:
+            errors.append(f"Hot zone {i + 1} names an unknown region.")
+            continue
+        start = z.get("starts_at")
+        hours = z.get("hours")
+        if (isinstance(start, bool) or not isinstance(start, (int, float)) or start <= 0
+                or isinstance(hours, bool) or not isinstance(hours, (int, float))
+                or not 1 <= hours <= MAX_HOTZONE_HOURS):
+            errors.append(f"Hot zone {i + 1} needs a start time and 1 to "
+                          f"{MAX_HOTZONE_HOURS} hours.")
+            continue
+        hotzones.append({"region_key": rk, "starts_at": int(start), "hours": float(hours)})
+    return {"regions": regions, "tiles": tiles, "edges": edges,
+            "hotzones": hotzones}, errors
 
 
 def rule_task_problem(task_type: str, config: Optional[dict]) -> Optional[str]:

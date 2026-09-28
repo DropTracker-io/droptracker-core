@@ -308,6 +308,41 @@ def tile_rules(row: dict, troop_hours: float, unique_troops: int) -> list:
     return rules
 
 
+#: Phases (settings.phase_count): every tile keeps its boss, but alternates
+#: between a steady variant (troops for kills, the usual unique bonus) and a
+#: hunt variant (half the troops for kills, double for uniques), with half
+#: the map switching at each phase so which tiles are worth fighting over
+#: keeps moving. Tiles with nothing but uniques play the same every phase.
+PHASE_VARIANTS = ("steady", "hunt")
+
+
+def phased_rules(row: dict, troop_hours: float, unique_troops: int, phases: int,
+                 index: int) -> list:
+    """A tile's rules for a ``phases``-phase event (``index`` = its position,
+    which staggers the variants). One phase = :func:`tile_rules` unchanged
+    (every rule plays all event, ``phase`` 0)."""
+    base = tile_rules(row, troop_hours, unique_troops)
+    if phases <= 1 or not base:
+        return base
+    has_grind = bool(row.get("kc_npcs") and float(row.get("kph") or 0) > 0) or \
+        float(row.get("slayer_task_hours") or 0) > 0
+    if not has_grind:
+        return base  # uniques only: nothing to rebalance
+    out = []
+    for phase in range(1, phases + 1):
+        variant = PHASE_VARIANTS[(index + phase - 1) % len(PHASE_VARIANTS)]
+        if variant == "steady":
+            rules = tile_rules(row, troop_hours, unique_troops)
+        else:
+            rules = tile_rules(row, troop_hours * 2, min(max(unique_troops, 1) * 2,
+                                                          MAX_RULE_TROOPS))
+        for rule in rules:
+            task = dict(rule["new_task"])
+            task["label"] = f"{task['label']} (phase {phase})"
+            out.append(dict(rule, new_task=task, phase=phase))
+    return out
+
+
 def resolve_extra_tiles(*, npc_ids: dict, wom_rates: dict, clog_pages: dict,
                         sections: dict, items: dict) -> list:
     """``EXTRA_TILES`` as catalog-shaped rows, from what the caller looked up:
@@ -429,7 +464,7 @@ def build_preset_map(preset: str, catalog: Iterable[dict], *,
                      unique_troops: int = DEFAULT_UNIQUE_TROOPS,
                      regions: Optional[Iterable[str]] = None,
                      exclude: Iterable[str] = (),
-                     art: Optional[dict] = None) -> tuple:
+                     art: Optional[dict] = None, phases: int = 1) -> tuple:
     """``(map_body, skipped)``: a designer-save body (regions + tiles with
     ``new_task`` rules and the ``edges`` between them, the shape
     services.conquest.validate_map takes) and the tile keys left out because
@@ -462,7 +497,8 @@ def build_preset_map(preset: str, catalog: Iterable[dict], *,
                 skipped.append(key)
                 continue
             rows.append(row)
-            rules_by_key[key] = rules
+            rules_by_key[key] = phased_rules(row, troop_hours, unique_troops, phases,
+                                             len(rules_by_key))
         if not rows:
             continue
         ax, ay = region["anchor"]

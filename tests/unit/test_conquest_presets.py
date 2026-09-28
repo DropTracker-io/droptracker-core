@@ -348,3 +348,36 @@ class TestExtraTiles:
     def test_unknown_preset(self):
         with pytest.raises(ValueError):
             presets.build_preset_map("westeros", _catalog())
+
+
+class TestPhasedPreset:
+    def test_boss_tiles_alternate_steady_and_hunt(self):
+        body, _ = presets.build_preset_map("gielinor", _catalog(), phases=2)
+        zulrah = _tile(body, "zulrah")["rules"]
+        assert sorted({r["phase"] for r in zulrah}) == [1, 2]
+        by_phase = {p: [r for r in zulrah if r["phase"] == p] for p in (1, 2)}
+        kc = {p: next(r for r in rs if r["new_task"]["type"] == "kc_target")
+              for p, rs in by_phase.items()}
+        uniq = {p: next(r for r in rs if r["new_task"]["type"] == "item_collection")
+                for p, rs in by_phase.items()}
+        # One phase asks for twice the kills per troop and pays double for uniques.
+        steady, hunt = sorted((1, 2), key=lambda p: kc[p]["new_task"]["target_value"])
+        assert kc[hunt]["new_task"]["target_value"] >= 2 * kc[steady]["new_task"]["target_value"] - 1
+        assert uniq[hunt]["troops"] == 2 * uniq[steady]["troops"]
+        assert all(r["new_task"]["label"].endswith(f"(phase {r['phase']})") for r in zulrah)
+
+    def test_uniques_only_tiles_play_every_phase(self):
+        body, _ = presets.build_preset_map("gielinor", _catalog(), phases=3)
+        assert {r.get("phase", 0) for r in _tile(body, "lost_schematics")["rules"]} == {0}
+
+    def test_four_phases_fit_and_validate(self):
+        body, _ = presets.build_preset_map("gielinor", _catalog(), phases=4)
+        assert max(len(t["rules"]) for t in body["tiles"]) <= cq.MAX_RULES_PER_TILE
+        clean, errors = cq.validate_map(body)
+        assert errors == []
+        assert {r["phase"] for t in clean["tiles"] for r in t["rules"]} == {0, 1, 2, 3, 4}
+
+    def test_one_phase_is_unchanged(self):
+        one, _ = presets.build_preset_map("gielinor", _catalog(), phases=1)
+        plain, _ = presets.build_preset_map("gielinor", _catalog())
+        assert one == plain

@@ -89,11 +89,15 @@ DEFAULT_TEAM_MESSAGE_TOGGLES = {
     "event_sweep_item": False,
     "event_sweep_group": True,
     "event_sweep_set": True,
+    # Conquest (web123a): "your tile is under attack / breached / taken",
+    # posted to the DEFENDING team's channel only.
+    "event_conquest_alert": True,
 }
 
-# Types the roll-prompt exception applies to (never inherited from the event
-# config; see above).
-_NEVER_INHERITED_TOGGLES = ("event_board_roll_prompt",)
+# Types never inherited from the event config: the roll prompt (see above) and
+# the Conquest attack alert, which has no main-channel counterpart (it is off
+# there by default and only means something in the defender's own channel).
+_NEVER_INHERITED_TOGGLES = ("event_board_roll_prompt", "event_conquest_alert")
 
 # Which team-channel messages mention @TeamRole. Send-toggles say "post it";
 # these say "ping for it". Defaults keep pings for the actionable/celebratory
@@ -113,6 +117,8 @@ DEFAULT_TEAM_MESSAGE_PINGS = {
     "event_sweep_item": False,
     "event_sweep_group": True,
     "event_sweep_set": True,
+    # Conquest attack alerts are the "act now" message: ping.
+    "event_conquest_alert": True,
 }
 
 # Progress verbosity for team channels ('off'|'milestones'|'all') when the
@@ -661,6 +667,8 @@ TEAM_SCOPED_TYPES = (
     "event_sweep_item",
     "event_sweep_group",
     "event_sweep_set",
+    # Conquest (web123a): the defender's own channel.
+    "event_conquest_alert",
 )
 
 

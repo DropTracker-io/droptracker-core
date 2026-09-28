@@ -73,6 +73,8 @@ class ConquestMap(Base):
     settled_at = Column(DateTime, nullable=True)
     # Last periodic "map update" post (settings.summary_hours cadence).
     summary_at = Column(DateTime, nullable=True)
+    # The phase whose start was last announced (settings.phase_count, web123a).
+    phase_announced = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -104,6 +106,9 @@ class ConquestRegion(Base):
     # Outline of the whole region as an SVG path in the map's shape space
     # (web121a); NULL on hand-built maps, which draw soft blobs instead.
     shape = Column(Text, nullable=True)
+    # 1 = the contested centre (web123a): its bonus and its tiles' values are
+    # multiplied by settings.contested_multiplier.
+    contested = Column(Integer, nullable=False, default=0, server_default="0")
 
 
 class ConquestTile(Base):
@@ -150,6 +155,9 @@ class ConquestTile(Base):
     owner_since = Column(DateTime, nullable=True)
     captures = Column(Integer, nullable=False, default=0, server_default="0")
     last_battle_at = Column(DateTime, nullable=True)
+    # Troops thrown at this tile by the current siege (web123a): with no dice,
+    # every other troop against an underdog is absorbed. Reset on capture.
+    siege = Column(Integer, nullable=False, default=0, server_default="0")
 
 
 class ConquestRule(Base):
@@ -177,6 +185,9 @@ class ConquestRule(Base):
     # 1 = a one-time award: pays only the first time the target is reached,
     # like an achievement (web122a).
     once = Column(Integer, nullable=False, default=0, server_default="0")
+    # 0 = plays in every phase; N = only in phase N (settings.phase_count,
+    # web123a).
+    phase = Column(Integer, nullable=False, default=0, server_default="0")
 
 
 class ConquestEdge(Base):
@@ -250,8 +261,12 @@ class ConquestBattle(Base):
     player_id = Column(Integer, nullable=True)
     completion_id = Column(BigInteger, nullable=True)
     task_id = Column(Integer, nullable=True)
-    # 'troop' (earned in play) or 'admin' (a manual correction).
+    # 'troop' (earned in play), 'admin' (a manual correction) or 'rule' (a
+    # game rule acting on its own: a retreat).
     source = Column(String(16), nullable=False, default="troop", server_default="troop")
+    # Bonus points this troop won (a bounty for a capture, web123a); added to
+    # the team's score in both scoring modes.
+    points = Column(Float, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
@@ -281,3 +296,47 @@ class ConquestTroops(Base):
     # later policy can deploy them.
     held = Column(Integer, nullable=False, default=0, server_default="0")
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ConquestHotZone(Base):
+    """A region that is "hot" for a while (web123a): troops earned on its
+    tiles count double (services.conquest.HOT_MULTIPLIER). Planned in the
+    designer before the event starts; ``announced_at`` marks the Discord
+    post when it went hot."""
+
+    __tablename__ = "web_conquest_hotzones"
+    __table_args__ = (
+        Index("idx_web_conquest_hotzone_event", "event_id", "starts_at"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id", ondelete="CASCADE"),
+                      nullable=False)
+    region_id = Column(Integer, ForeignKey("web_conquest_regions.id", ondelete="CASCADE"),
+                       nullable=False)
+    starts_at = Column(DateTime, nullable=False)
+    ends_at = Column(DateTime, nullable=False)
+    announced_at = Column(DateTime, nullable=True)
+
+
+class ConquestTeamState(Base):
+    """Per-team comeback bookkeeping (web123a). ``landless_since`` is set when
+    a team loses its last tile; when it takes a tile again it gets a shield
+    (``shield_until``: its tiles can't be attacked) or a boost
+    (``boost_until``: its troops count double), per settings.comeback."""
+
+    __tablename__ = "web_conquest_team_state"
+    __table_args__ = (
+        Index("uq_web_conquest_team_state", "event_id", "team_id", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id", ondelete="CASCADE"),
+                      nullable=False)
+    team_id = Column(Integer, nullable=False)  # no FK on purpose (module doc)
+    landless_since = Column(DateTime, nullable=True)
+    shield_until = Column(DateTime, nullable=True)
+    boost_until = Column(DateTime, nullable=True)
+    comebacks = Column(Integer, nullable=False, default=0, server_default="0")

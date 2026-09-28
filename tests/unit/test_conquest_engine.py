@@ -176,7 +176,8 @@ def _apply(env, ev, task, team, qty, *, rng=None, player_id=5, cid=1, when=None)
     completion = SimpleNamespace(id=cid, team_id=team.id, player_id=player_id,
                                  quantity=qty, matched_target=None)
     task_dict = {"id": task.id, "label": task.label, "target_value": task.target_value}
-    event_dict = {"id": ev.id, "name": ev.name, "group_id": None, "kind": "conquest"}
+    event_dict = {"id": ev.id, "name": ev.name, "group_id": None, "kind": "conquest",
+                  "window_start": ev.starts_at, "window_end": ev.ends_at}
     return engine_mod.apply_conquest(env.s, None, event_dict, task_dict, completion,
                                      player_name="Zed", rng=rng or random.Random(1),
                                      now=when or T0 + timedelta(hours=1))
@@ -742,3 +743,205 @@ class TestFrontBlockers:
         blockers = engine_mod.conquest_blockers(env.s, ev)
         assert [b["code"] for b in blockers] == ["conquest_homes_missing"]
         assert "Blue" in blockers[0]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# Fairness rules (web123a)
+# --------------------------------------------------------------------------- #
+def _own(env, tile, team, defense):
+    tile.owner_team_id, tile.defense = team.id, defense
+    env.s.add(M.ConquestHold(event_id=tile.event_id, tile_id=tile.id, team_id=team.id,
+                             started_at=T0))
+    env.s.flush()
+
+
+def _set(env, ev, **settings):
+    row = env.s.query(M.ConquestMap).filter_by(event_id=ev.id).one()
+    row.settings = json.dumps({**json.loads(row.settings or "{}"), **settings})
+    env.s.flush()
+
+
+class TestRetreatAndAlerts:
+    def test_lost_tile_reinforces_the_neighbour_and_alerts_the_defender(self, env):
+        ev = _event(env.s)
+        red, blue = _teams(env.s, ev, "Red", "Blue")
+        _r, (a, b, c), (ta, tb, tc) = _map(env.s, ev, tiles=_CHAIN3, edges=((0, 1), (1, 2)),
+                                           settings={"battle_mode": "attrition",
+                                                     "underdog_defense": "off"})
+        _own(env, a, red, 1)
+        _own(env, b, blue, 1)
+        _own(env, c, blue, 2)
+        out = _apply(env, ev, tb, red, 20)                 # breach, then capture
+        assert out["outcomes"] == ["breach", "capture"]
+        assert out["retreat"] == {"tile_id": c.id, "defense": 3}
+        env.s.refresh(c)
+        assert c.defense == 3
+        retreat = env.s.query(M.ConquestBattle).filter_by(outcome="retreat").one()
+        assert (retreat.team_id, retreat.source) == (blue.id, "rule")
+        alerts = env.ev.types("event_conquest_alert")
+        assert len(alerts) == 1 and alerts[0]["team_id"] == blue.id
+        assert "was taken by **Red**" in alerts[0]["conquest_headline"]
+        assert "fell back to **C**" in alerts[0]["conquest_detail_line"]
+
+    def test_attack_alert_without_capture(self, env):
+        ev = _event(env.s)
+        red, blue = _teams(env.s, ev, "Red", "Blue")
+        _r, (a, b), (ta, tb) = _map(env.s, ev, tiles=(("A", "r1"), ("B", "r1")),
+                                    edges=((0, 1),), settings={"battle_mode": "attrition"})
+        _own(env, a, red, 1)
+        _own(env, b, blue, 3)
+        _apply(env, ev, tb, red, 10)
+        alert, = env.ev.types("event_conquest_alert")
+        assert alert["team_id"] == blue.id and alert["outcome"] == "attack"
+
+
+class TestComeback:
+    def _wipe_and_return(self, env, mode):
+        ev = _event(env.s)
+        red, blue = _teams(env.s, ev, "Red", "Blue")
+        _r, (a, b, c), (ta, tb, tc) = _map(
+            env.s, ev, tiles=_CHAIN3, edges=((0, 1), (1, 2)),
+            settings={"battle_mode": "attrition", "comeback": mode, "comeback_hours": 12,
+                      "underdog_defense": "off", "retreat_defense": 0})
+        _own(env, a, red, 1)
+        _own(env, b, blue, 0)
+        _apply(env, ev, tb, red, 10, cid=1)                # Blue's only tile falls
+        st = env.s.query(M.ConquestTeamState).filter_by(team_id=blue.id).one()
+        assert st.landless_since is not None
+        out = _apply(env, ev, tc, blue, 10, cid=2)         # back in, anywhere
+        assert out["outcomes"] == ["claim"]
+        env.s.refresh(st)
+        assert st.landless_since is None and st.comebacks == 1
+        return ev, red, blue, (a, b, c), (ta, tb, tc), st
+
+    def test_shield_bounces_attacks(self, env):
+        ev, red, blue, (a, b, c), (ta, tb, tc), st = self._wipe_and_return(env, "shield")
+        assert st.shield_until is not None
+        capture, = [d for d in env.ev.types("event_conquest_capture")
+                    if d["team_id"] == blue.id]
+        assert "shielded for 12h" in capture["conquest_detail_line"]
+        out = _apply(env, ev, tc, red, 10, cid=3)          # Red now borders C
+        assert out["outcomes"] == ["shielded"]
+        env.s.refresh(c)
+        assert c.owner_team_id == blue.id
+
+    def test_boost_doubles_troops(self, env):
+        ev, red, blue, tiles, (ta, tb, tc), st = self._wipe_and_return(env, "boost")
+        assert st.boost_until is not None
+        out = _apply(env, ev, tc, blue, 10, cid=3)
+        assert out["troops"] == 2 and out["boosts"] == ["comeback boost"]
+
+
+class TestCapitalsBountyHotZones:
+    def test_safe_capital_holds(self, env):
+        ev = _event(env.s)
+        red, blue = _teams(env.s, ev, "Red", "Blue")
+        _r, (a, b), (ta, tb) = _map(env.s, ev, tiles=(("A", "r1"), ("B", "r1")),
+                                    edges=((0, 1),),
+                                    settings={"battle_mode": "attrition", "capitals": "safe",
+                                              "underdog_defense": "off"})
+        _own(env, a, red, 1)
+        _own(env, b, blue, 2)
+        b.home_team_id = blue.id
+        env.s.flush()
+        out = _apply(env, ev, tb, red, 50)
+        assert out["outcomes"] == ["attack", "repelled", "repelled", "repelled", "repelled"]
+        env.s.refresh(b)
+        assert (b.owner_team_id, b.defense) == (blue.id, 1)
+
+    def test_bounty_for_taking_the_leaders_land(self, env):
+        ev = _event(env.s)
+        red, blue = _teams(env.s, ev, "Red", "Blue")
+        _r, (a, b), (ta, tb) = _map(env.s, ev, tiles=(("A", "r1"), ("B", "r1")),
+                                    edges=((0, 1),),
+                                    settings={"bounty_points": 4, "scoring_mode": "final",
+                                              "underdog_defense": "off"})
+        _own(env, a, red, 1)
+        _own(env, b, blue, 0)
+        blue.score = 50                                    # Blue leads
+        env.s.flush()
+        out = _apply(env, ev, tb, red, 10)
+        assert out["outcomes"] == ["capture"] and out["bounty"] == 4
+        standings = engine_mod.compute_standings(env.s, ev, now=T0 + timedelta(hours=2))
+        assert standings[red.id].score == 2 + 3 + 4       # two tiles, the region, the bounty
+        cap, = env.ev.types("event_conquest_capture")
+        assert "+4 bounty points" in cap["conquest_detail_line"]
+
+    def test_hot_zone_doubles_troops(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        regions, (tile,), (task,) = _map(env.s, ev)
+        env.s.add(M.ConquestHotZone(event_id=ev.id, region_id=regions["r1"].id,
+                                    starts_at=T0, ends_at=T0 + timedelta(hours=6)))
+        env.s.flush()
+        out = _apply(env, ev, task, red, 10)
+        assert out["troops"] == 2 and out["boosts"] == ["hot zone"]
+
+    def test_contested_centre_multiplies_the_region(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        regions, (tile,), _t = _map(env.s, ev, settings={"scoring_mode": "final",
+                                                         "contested_multiplier": 5})
+        regions["r1"].contested = 1
+        _own(env, tile, red, 1)
+        st = engine_mod.compute_standings(env.s, ev, now=T0 + timedelta(hours=1))
+        assert st[red.id].score == 1 * 5 + 3 * 5
+
+
+class TestPhases:
+    def test_a_rule_only_counts_in_its_phase(self, env):
+        ev = _event(env.s)                                  # a 7-day window
+        red, = _teams(env.s, ev, "Red")
+        _r, (tile,), (task,) = _map(env.s, ev, settings={"phase_count": 2})
+        rule = env.s.query(M.ConquestRule).one()
+        rule.phase = 2
+        env.s.flush()
+        out = _apply(env, ev, task, red, 10, when=T0 + timedelta(days=1))
+        assert out.get("inactive_phase") and out["troops"] == 0
+        assert env.s.query(M.EventProgress).count() == 0
+        out = _apply(env, ev, task, red, 10, when=T0 + timedelta(days=5))
+        assert out["outcomes"] == ["claim"]
+
+    def test_settle_announces_a_new_phase_and_a_hot_zone(self, env):
+        ev = _event(env.s)
+        red, = _teams(env.s, ev, "Red")
+        regions, _t, _k = _map(env.s, ev, settings={"phase_count": 2})
+        env.s.query(M.ConquestMap).one().phase_announced = 1
+        env.s.add(M.ConquestHotZone(event_id=ev.id, region_id=regions["r1"].id,
+                                    starts_at=T0 + timedelta(days=4),
+                                    ends_at=T0 + timedelta(days=4, hours=6)))
+        env.s.flush()
+        engine_mod.settle_conquest(env.s, None, ev, now=T0 + timedelta(days=4, hours=1))
+        news = env.ev.types("event_conquest_news")
+        assert [n["news"] for n in news] == ["phase", "hotzone"]
+        assert "Phase 2 of 2" in news[0]["conquest_headline"]
+        engine_mod.settle_conquest(env.s, None, ev, now=T0 + timedelta(days=4, hours=2))
+        assert len(env.ev.types("event_conquest_news")) == 2   # once each
+
+
+class TestLeaderboardAndStarts:
+    def test_troops_raised(self, env):
+        ev = _event(env.s)
+        red, blue = _teams(env.s, ev, "Red", "Blue")
+        _r, (a, b, c), (ta, tb, tc) = _map(env.s, ev, tiles=_CHAIN3, edges=((0, 1), (1, 2)))
+        env.s.add(M.Player(player_id=5, player_name="Zed"))
+        env.s.flush()
+        _apply(env, ev, ta, red, 20, cid=1)                # claim + fortify
+        _apply(env, ev, tc, red, 10, cid=2)                # out of reach: wasted
+        board = engine_mod.troop_leaderboard(env.s, ev.id)
+        team, = board["teams"]
+        assert (team["name"], team["troops"], team["captures"], team["reinforced"],
+                team["wasted"]) == ("Red", 3, 1, 1, 1)
+        player, = board["players"]
+        assert (player["name"], player["troops"]) == ("Zed", 3)
+
+    def test_scattered_start_makes_capitals(self, env):
+        ev = _event(env.s)
+        red, blue = _teams(env.s, ev, "Red", "Blue")
+        tiles = tuple((str(i), "r1") for i in range(4))
+        _map(env.s, ev, tiles=tiles, edges=tuple((i, i + 1) for i in range(3)),
+             settings={"start_mode": "scattered"}, seeded=False)
+        engine_mod.seed_conquest(env.s, ev, now=T0, rng=random.Random(2))
+        homes = {t.home_team_id for t in env.s.query(M.ConquestTile).all()
+                 if t.owner_team_id is not None}
+        assert homes == {red.id, blue.id}

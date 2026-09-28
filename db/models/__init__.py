@@ -227,6 +227,8 @@ from .event_conquest import (
     ConquestHold,
     ConquestBattle,
     ConquestTroops,
+    ConquestHotZone,
+    ConquestTeamState,
 )
 
 
@@ -438,6 +440,8 @@ __all__ = [
     "ConquestHold",
     "ConquestBattle",
     "ConquestTroops",
+    "ConquestHotZone",
+    "ConquestTeamState",
     "EventBoardPosition",
     "EventCoinLedger",
     "BoardgameShopItem",

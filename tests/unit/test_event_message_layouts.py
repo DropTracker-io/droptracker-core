@@ -312,6 +312,7 @@ class TestDefaultLayouts:
             # Conquest (web120a).
             "event_conquest_capture", "event_conquest_battle",
             "event_conquest_region", "event_conquest_summary",
+            "event_conquest_alert", "event_conquest_news",
         }
         assert set(ml.DEFAULT_LAYOUTS) == expected
 

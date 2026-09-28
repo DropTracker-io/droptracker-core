@@ -35,6 +35,7 @@ ALL_TYPES = (
     # Conquest (web120a).
     "event_conquest_capture", "event_conquest_battle",
     "event_conquest_region", "event_conquest_summary",
+    "event_conquest_alert", "event_conquest_news",
 )
 
 
@@ -75,6 +76,8 @@ class TestKindMapping:
             "event_conquest_battle": "completions",
             "event_conquest_region": "completions",
             "event_conquest_summary": "leaderboard",
+            "event_conquest_alert": "completions",
+            "event_conquest_news": "leaderboard",
         }
 
     def test_all_families_covered(self):

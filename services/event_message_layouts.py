@@ -611,6 +611,23 @@ DEFAULT_LAYOUTS = {
             _EVENT_BUTTON,
         ],
     },
+    "event_conquest_alert": {
+        "accent_color": "#ED4245",
+        "blocks": [
+            {"type": "section",
+             "content": "### {conquest_headline}\n{conquest_detail_line}",
+             "thumbnail": "{conquest_icon}"},
+            _EVENT_BUTTON,
+        ],
+    },
+    "event_conquest_news": {
+        "accent_color": "#F39C12",
+        "blocks": [
+            {"type": "text", "content": "## {conquest_headline}"},
+            {"type": "text", "content": "{conquest_detail_line}"},
+            _EVENT_BUTTON,
+        ],
+    },
 }
 
 
@@ -1026,6 +1043,20 @@ TYPE_META = {
         "description": "A team took (or lost) control of a whole region.",
         "tokens": ("conquest_headline", "conquest_detail_line", "team_name",
                    "region_name"),
+        "standings": False,
+    },
+    "event_conquest_alert": {
+        "label": "Conquest: under attack", "group": "Conquest",
+        "description": "Posted to the defending team's own channel when one of its "
+                       "tiles is attacked, breached or taken.",
+        "tokens": ("conquest_headline", "conquest_detail_line", "conquest_icon",
+                   "team_name", "tile_label"),
+        "standings": False,
+    },
+    "event_conquest_news": {
+        "label": "Conquest: news", "group": "Conquest",
+        "description": "A new phase begins, or a region becomes a hot zone.",
+        "tokens": ("conquest_headline", "conquest_detail_line", "region_name"),
         "standings": False,
     },
     "event_conquest_summary": {

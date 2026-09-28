@@ -2,6 +2,7 @@
 
   GET    /api/v1/events/{id}/conquest                     -> the map + live state
   GET    /api/v1/events/{id}/conquest/battles             -> one page of the battle log
+  GET    /api/v1/events/{id}/conquest/troops              -> troops raised per team/player
   GET    /api/v1/events/{id}/conquest/presets             -> preset options (admins)
   PUT    /api/v1/events/{id}/conquest/map                 -> the designer's save
   POST   /api/v1/events/{id}/conquest/preset              -> build the map from a preset
@@ -22,7 +23,7 @@ import asyncio
 import json
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from quart import Blueprint, jsonify, request
 
@@ -146,6 +147,7 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
     caller owns the commit."""
     from db.models import (
         ConquestEdge,
+        ConquestHotZone,
         ConquestRegion,
         ConquestRule,
         ConquestTile,
@@ -209,7 +211,7 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
     # rows simply go; rules first (they reference tiles and tasks).
     old_rule_task_ids = {tid for (tid,) in s.query(ConquestRule.task_id)
                          .filter(ConquestRule.event_id == ev.id).all()}
-    for model in (ConquestRule, ConquestEdge, ConquestTile, ConquestRegion):
+    for model in (ConquestRule, ConquestEdge, ConquestHotZone, ConquestTile, ConquestRegion):
         (s.query(model).filter(model.event_id == ev.id)
          .delete(synchronize_session=False))
     s.flush()
@@ -219,7 +221,7 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
         row = ConquestRegion(event_id=ev.id, name=r["name"], color=r["color"],
                              bonus=r["bonus"], sort=i,
                              label_x=r["label_x"], label_y=r["label_y"],
-                             shape=r.get("shape"))
+                             shape=r.get("shape"), contested=1 if r.get("contested") else 0)
         s.add(row)
         s.flush()
         region_ids[r["key"]] = row.id
@@ -259,10 +261,15 @@ def _write_map(s, ev, user_id: int, clean: dict, *, preset=None,
             used_task_ids.add(task_id)
             s.add(ConquestRule(event_id=ev.id, tile_id=tile.id, task_id=task_id,
                                troops=rule["troops"], once=1 if rule.get("once") else 0,
-                               sort=j))
+                               phase=int(rule.get("phase") or 0), sort=j))
     for a_key, b_key in clean.get("edges") or []:
         a, b = sorted((tile_ids[a_key], tile_ids[b_key]))
         s.add(ConquestEdge(event_id=ev.id, tile_a_id=a, tile_b_id=b))
+    for z in clean.get("hotzones") or []:
+        start = datetime.fromtimestamp(z["starts_at"])
+        s.add(ConquestHotZone(event_id=ev.id, region_id=region_ids[z["region_key"]],
+                              starts_at=start,
+                              ends_at=start + timedelta(hours=z["hours"])))
     s.flush()
 
     # Garbage-collect designer tasks no tile uses any more (never ones that
@@ -458,6 +465,22 @@ async def get_conquest_battles(event_id: int):
     return private_no_store(jsonify(await asyncio.to_thread(_read)))
 
 
+@event_conquest_bp.get("/events/<int:event_id>/conquest/troops")
+async def get_conquest_troops(event_id: int):
+    """Troops raised per team and per player (credit for effort)."""
+    viewer_id = optional_user_id()
+
+    def _read():
+        from services.conquest_engine import troop_leaderboard
+
+        with db_session() as s:
+            ev = _load_conquest_event(s, event_id)
+            _read_gate(s, ev, viewer_id, False)
+            return troop_leaderboard(s, ev.id)
+
+    return private_no_store(jsonify(await asyncio.to_thread(_read)))
+
+
 @event_conquest_bp.get("/events/<int:event_id>/conquest/presets")
 async def get_conquest_presets(event_id: int):
     """What the designer's "start from a preset" panel offers: the preset's
@@ -550,7 +573,9 @@ async def apply_conquest_preset(event_id: int):
     rule sized to ``troop_hours`` of efficient kills and an any-unique rule
     worth ``unique_troops`` (see services.conquest_presets). ``regions``
     (default: all) picks the regions to build and ``exclude_tiles`` leaves
-    tiles out of them.
+    tiles out of them. ``phases`` (1-4, default: the rules' phase count)
+    splits the event into phases; each boss tile then alternates between a
+    steady and a hunt variant (services.conquest_presets.phased_rules).
 
     Anything short of the whole preset is drawn fresh for that pick
     (services.conquest_mapgen, ~20 s, cached per pick). Until it's ready
@@ -590,6 +615,10 @@ async def apply_conquest_preset(event_id: int):
                                 or set(regions) - set(region_keys)):
         abort_problem(422, "Invalid regions",
                       f"regions must be a list drawn from {region_keys}.")
+    phases = body.get("phases")
+    if phases is not None and (isinstance(phases, bool) or not isinstance(phases, int)
+                               or not 1 <= phases <= _cq().MAX_PHASES):
+        abort_problem(422, "Invalid phases", f"phases must be 1 to {_cq().MAX_PHASES}.")
     exclude = body.get("exclude_tiles") or []
     if (not isinstance(exclude, list) or not all(isinstance(k, str) for k in exclude)
             or set(exclude) - tile_keys):
@@ -650,9 +679,18 @@ async def apply_conquest_preset(event_id: int):
             ev = _load_conquest_event(s, event_id)
             _assert_event_admin(s, user_id, ev)
             _assert_map_editable(ev)
+            from services.conquest_engine import ensure_map
+
+            map_row = ensure_map(s, ev.id)
+            stored = _config_dict(map_row.settings)
+            if phases is not None:
+                stored["phase_count"] = phases
+                map_row.settings = json.dumps(_cq().conquest_settings(stored))
+            phase_count = _cq().conquest_settings(stored)["phase_count"]
             body_map, skipped = build_preset_map(
                 preset, _preset_catalog(s), troop_hours=hours,
-                unique_troops=unique_troops, regions=regions, exclude=exclude, art=art)
+                unique_troops=unique_troops, regions=regions, exclude=exclude, art=art,
+                phases=phase_count)
             if not body_map["tiles"]:
                 abort_problem(422, "Nothing to build",
                               "None of the picked tiles can be built on this server.")

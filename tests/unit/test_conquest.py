@@ -608,3 +608,134 @@ class TestValidateFronts:
         patch, errors = cq.clean_settings_patch({"attack_range": "anywhere",
                                                  "start_mode": "homes"})
         assert errors == [] and patch == {"attack_range": "anywhere", "start_mode": "homes"}
+
+
+# --------------------------------------------------------------------------- #
+# Fairness rules (web123a)
+# --------------------------------------------------------------------------- #
+class _Seq:
+    """Dice faces handed out in order."""
+
+    def __init__(self, faces):
+        self.faces = list(faces)
+
+    def randint(self, lo, hi):
+        return self.faces.pop(0)
+
+
+class TestGuards:
+    def test_shielded_owner_bounces_every_troop(self):
+        guard = cq.TileGuard(shielded=frozenset({2}))
+        out = cq.resolve_troop(2, 0, 1, _settings(), random.Random(1), guard)
+        assert (out.outcome, out.owner_after, out.defense_after) == ("shielded", 2, 0)
+        # The owner itself still reinforces.
+        assert cq.resolve_troop(2, 0, 2, _settings(), random.Random(1), guard).outcome == "fortify"
+
+    def test_safe_capital_never_falls(self):
+        guard = cq.TileGuard(capital_of=2)
+        s = _settings(battle_mode="attrition")
+        out = cq.resolve_troop(2, 1, 1, s, random.Random(1), guard)
+        assert (out.outcome, out.defense_after) == ("repelled", 1)
+        # Even knocked to 0 by an admin, an enemy can't walk in.
+        assert cq.resolve_troop(2, 0, 1, s, random.Random(1), guard).owner_after == 2
+        # Another team's capital is just a tile.
+        other = cq.TileGuard(capital_of=3)
+        assert cq.resolve_troop(2, 1, 1, s, random.Random(1), other).outcome == "breach"
+
+    def test_underdog_rolls_an_extra_die(self):
+        guard = cq.TileGuard(underdogs=frozenset({2}))
+        out = cq.resolve_troop(2, 1, 1, _settings(), _Seq([6, 6, 1, 1]), guard)
+        assert len(out.defense_dice) == 2          # 1 defense + the underdog die
+        plain = cq.resolve_troop(2, 1, 1, _settings(), _Seq([6, 6, 1]))
+        assert len(plain.defense_dice) == 1
+
+    def test_underdog_absorbs_every_other_troop_without_dice(self):
+        guard = cq.TileGuard(underdogs=frozenset({2}))
+        s = _settings(battle_mode="attrition")
+        outs = cq.resolve_troops(2, 2, 1, 4, s, random.Random(1), guard)
+        assert [o.outcome for o in outs] == ["repelled", "attack", "repelled", "breach"]
+        assert outs[-1].defense_after == 0
+
+    def test_capture_resets_the_siege(self):
+        guard = cq.TileGuard(underdogs=frozenset({2}))
+        s = _settings(battle_mode="attrition", capture_defense=1)
+        outs = cq.resolve_troops(2, 1, 1, 3, s, random.Random(1), guard, siege=1)
+        assert [o.outcome for o in outs] == ["breach", "capture", "fortify"]
+
+
+class TestFairnessHelpers:
+    def test_underdogs(self):
+        s = _settings()
+        assert cq.underdog_teams({1: 5, 2: 2, 3: 2, 4: 0}, s) == {2, 3}
+        assert cq.underdog_teams({1: 3, 2: 3}, s) == frozenset()
+        assert cq.underdog_teams({1: 5, 2: 2}, _settings(underdog_defense="off")) == frozenset()
+
+    def test_bounty_scales_by_rank(self):
+        assert cq.bounty_for(1, 4, 6) == 6
+        assert cq.bounty_for(2, 4, 6) == 4
+        assert cq.bounty_for(4, 4, 6) == 0
+        assert cq.bounty_for(1, 3, 5) == 5 and cq.bounty_for(2, 3, 5) == 2.5
+        assert cq.bounty_for(1, 1, 5) == 0 and cq.bounty_for(1, 4, 0) == 0
+
+    def test_retreat_picks_the_weakest_bordering_tile_with_room(self):
+        adj = cq.adjacency([(1, 2), (1, 3), (1, 4)])
+        tiles = [{"id": 2, "owner_team_id": 7, "defense": 3, "max_defense": None},
+                 {"id": 3, "owner_team_id": 7, "defense": 1, "max_defense": 1},  # full
+                 {"id": 4, "owner_team_id": 7, "defense": 2, "max_defense": None},
+                 {"id": 9, "owner_team_id": 7, "defense": 0, "max_defense": None}]
+        assert cq.retreat_target(1, 7, tiles, adj, _settings()) == 4
+        assert cq.retreat_target(1, 8, tiles, adj, _settings()) is None
+        assert cq.retreat_target(1, 7, tiles, adj, _settings(retreat_defense=0)) is None
+
+    def test_phases(self):
+        start, end = T0, T0 + timedelta(days=6)
+        bounds = cq.phase_bounds(start, end, 3)
+        assert [(p, s_.day, e.day) for p, s_, e in bounds] == [(1, 1, 3), (2, 3, 5), (3, 5, 7)]
+        assert cq.phase_at(start, end, 3, T0 - timedelta(hours=1)) == 1
+        assert cq.phase_at(start, end, 3, T0 + timedelta(days=2, hours=1)) == 2
+        assert cq.phase_at(start, end, 3, T0 + timedelta(days=9)) == 3
+        assert cq.phase_at(start, None, 3, T0) == 1
+        assert cq.rule_active(0, 2) and cq.rule_active(2, 2) and not cq.rule_active(1, 2)
+
+    def test_hot_multiplier(self):
+        zones = [{"region_id": 5, "starts_at": T0, "ends_at": T0 + timedelta(hours=6)}]
+        assert cq.hot_multiplier(zones, 5, T0 + timedelta(hours=1)) == cq.HOT_MULTIPLIER
+        assert cq.hot_multiplier(zones, 5, T0 + timedelta(hours=6)) == 1
+        assert cq.hot_multiplier(zones, 6, T0 + timedelta(hours=1)) == 1
+        assert cq.hot_multiplier(zones, None, T0) == 1
+
+    def test_contested_centre_and_bounties_in_the_score(self):
+        tiles = [_tile(1, region=1, owner=10, value=2), _tile(2, region=1, owner=10, value=2),
+                 _tile(3, region=2, owner=20, value=2)]
+        regions = [{"id": 1, "bonus": 3, "contested": True}, {"id": 2, "bonus": 3}]
+        out = cq.compute_standings("final", tiles, regions, [], [10, 20], None, None,
+                                   contested_multiplier=3, bonus_points={20: 4.5})
+        assert out[10].score == 2 * 3 + 2 * 3 + 3 * 3
+        assert out[20].score == 2 + 3 + 4.5
+
+    def test_new_settings(self):
+        s = cq.conquest_settings({"capitals": "safe", "comeback": "boost",
+                                  "comeback_hours": 24, "bounty_points": 99,
+                                  "contested_multiplier": 4, "phase_count": 3})
+        assert (s["capitals"], s["comeback"], s["comeback_hours"]) == ("safe", "boost", 24)
+        assert s["bounty_points"] == 20                 # clamped
+        assert s["contested_multiplier"] == 3           # not a choice: default
+        assert s["phase_count"] == 3
+        patch, errors = cq.clean_settings_patch({"comeback_hours": 5})
+        assert errors and not patch
+
+    def test_validate_contested_phase_and_hotzones(self):
+        body = {"regions": [{"key": "r", "name": "R", "contested": True}],
+                "tiles": [{"key": "a", "label": "A", "x": 0.5, "y": 0.5, "region_key": "r",
+                           "rules": [{"task_id": 1, "phase": 2}, {"task_id": 2, "phase": 9}]}],
+                "hotzones": [{"region_key": "r", "starts_at": 1_800_000_000, "hours": 12}]}
+        clean, errors = cq.validate_map(body)
+        assert errors == []
+        assert clean["regions"][0]["contested"] is True
+        assert [r["phase"] for r in clean["tiles"][0]["rules"]] == [2, cq.MAX_PHASES]
+        assert clean["hotzones"] == [{"region_key": "r", "starts_at": 1_800_000_000,
+                                      "hours": 12.0}]
+        body["hotzones"] = [{"region_key": "zz", "starts_at": 1, "hours": 1},
+                            {"region_key": "r", "starts_at": 1, "hours": 999}]
+        _clean, errors = cq.validate_map(body)
+        assert len(errors) == 2
