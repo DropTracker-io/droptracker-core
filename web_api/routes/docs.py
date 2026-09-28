@@ -2,6 +2,7 @@
 
 Public reads (cached):
   GET /api/v1/docs             -> DocSummary[] (sorted by category, then order)
+  GET /api/v1/docs/search?q=   -> DocSearchHit[] (full text, best section first)
   GET /api/v1/docs/{slug}      -> Doc (full body_md)
 
 Writes (superadmin only):
@@ -17,16 +18,25 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 
 from quart import Blueprint, jsonify, request
 
 from db import DocsPage, User
 from web_api.common import abort_problem, db_session, private_no_store, with_cache_headers
 from web_api.deps import assert_superadmin, current_user_id, json_body, load_user
+from web_api.docs_search import search_docs
 
 docs_bp = Blueprint("v1_docs", __name__)
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+# Taken by GET /docs/search, so a page with this slug could never be read.
+_RESERVED_SLUGS = {"search"}
+
+# Search scans every page's body; there are only a few dozen, so they are held
+# in memory briefly rather than re-read on every keystroke of a typeahead.
+_SEARCH_TTL_SECONDS = 60
+_search_cache: dict = {"at": 0.0, "docs": None}
 
 
 def _slugify(raw: str) -> str:
@@ -59,6 +69,33 @@ async def list_docs():
     return with_cache_headers(jsonify(items), max_age=60)
 
 
+def _search_corpus() -> list[dict]:
+    now = time.monotonic()
+    if _search_cache["docs"] is None or now - _search_cache["at"] > _SEARCH_TTL_SECONDS:
+        with db_session() as s:
+            rows = s.query(DocsPage).all()
+            _search_cache["docs"] = [_full(d) for d in rows]
+        _search_cache["at"] = now
+    return _search_cache["docs"]
+
+
+@docs_bp.get("/docs/search")
+async def search_docs_route():
+    q = (request.args.get("q") or "").strip()[:100]
+    try:
+        limit = max(1, min(int(request.args.get("limit") or 5), 10))
+    except ValueError:
+        limit = 5
+    if not q:
+        return with_cache_headers(jsonify([]), max_age=60)
+
+    def _run():
+        return search_docs(_search_corpus(), q, limit=limit)
+
+    hits = await asyncio.to_thread(_run)
+    return with_cache_headers(jsonify(hits), max_age=60)
+
+
 @docs_bp.get("/docs/<slug>")
 async def get_doc(slug: str):
     def _load():
@@ -81,6 +118,8 @@ def _validate(body: dict, *, require_slug: bool) -> dict:
         slug = _slugify(raw_slug)
         if not _SLUG_RE.match(slug):
             abort_problem(422, "Invalid slug", "Slug must be lowercase letters, numbers, and hyphens.")
+        if slug in _RESERVED_SLUGS:
+            abort_problem(422, "Reserved slug", f"'{slug}' is reserved; pick another slug.")
         out["slug"] = slug
     if require_slug or "title" in body:
         title = str(body.get("title") or "").strip()
@@ -127,6 +166,7 @@ async def create_doc():
             return d.id
 
     doc_id = await asyncio.to_thread(_create)
+    _search_cache["docs"] = None
     _audit(actor, "docs.create", f"docs_pages:{fields['slug']}", after=fields["title"])
     return jsonify({"id": doc_id})
 
@@ -159,6 +199,7 @@ async def update_doc(slug: str):
             return _full(d)
 
     payload = await asyncio.to_thread(_apply)
+    _search_cache["docs"] = None
     _audit(actor, "docs.update", f"docs_pages:{slug}", after=str(list(fields.keys())))
     return private_no_store(jsonify(payload))
 
@@ -182,6 +223,7 @@ async def delete_doc(slug: str):
             s.commit()
 
     await asyncio.to_thread(_delete)
+    _search_cache["docs"] = None
     _audit(actor, "docs.delete", f"docs_pages:{slug}")
     return jsonify({"ok": True})
 

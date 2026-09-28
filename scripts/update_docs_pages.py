@@ -6,14 +6,16 @@ notably a plugin-code account claim that was never built (the real flow is
 the Discord ``/claim-rsn`` command) — and predate events v2, badges,
 deaths/diaries notifications, manual submissions, and custom embeds.
 
-This script **overwrites** the body/metadata of every slug listed in PAGES
-and creates the ones that don't exist yet. Content is otherwise edited
-through ``/admin/docs``; re-running this script will clobber CMS edits to
-these slugs, so treat it as a one-time content drop.
+**The database is the source of truth for docs** (edited at ``/admin/docs``).
+Since 2026-09-28 this script only *seeds*: it creates pages whose slug does
+not exist yet and leaves every existing page alone. The bodies below are the
+2026-07 drop and are stale next to the live pages; ``--overwrite`` exists for
+a deliberate reset and clobbers CMS edits. Slugs in ``RETIRED_SLUGS`` were
+folded into other pages (with redirects) and are never recreated.
 
 Run:
-    venv/bin/python -m scripts.update_docs_pages            # apply
     venv/bin/python -m scripts.update_docs_pages --dry-run  # preview
+    venv/bin/python -m scripts.update_docs_pages            # seed missing pages
 """
 from __future__ import annotations
 
@@ -24,6 +26,13 @@ from db.models import DocsPage, session
 
 BOT_INVITE = "https://discord.com/oauth2/authorize?client_id=1172933457010245762"
 DISCORD = "https://discord.gg/droptracker"
+
+# Folded into events-players / events-create in the 2026-09-28 consolidation;
+# /admin/redirects sends the old URLs to the right section.
+RETIRED_SLUGS = frozenset({
+    "events", "events-tasks", "events-bingo", "events-teams",
+    "events-review", "events-discord", "events-templates", "events-activity",
+})
 
 # slug -> (title, description, category, order, body_md)
 PAGES: dict[str, tuple[str, str, str, int, str]] = {
@@ -1262,8 +1271,13 @@ or hide from leaderboards entirely. See
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Rewrite docs_pages content (2026-07 overhaul).")
+    ap = argparse.ArgumentParser(description="Seed missing docs_pages (the DB is canonical).")
     ap.add_argument("--dry-run", action="store_true", help="Preview without writing.")
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Also overwrite pages that already exist. Clobbers CMS edits.",
+    )
     ap.add_argument(
         "--prefix",
         help="Only apply pages whose slug starts with this (e.g. 'events'). "
@@ -1272,17 +1286,20 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    pages = PAGES
+    pages = {s: v for s, v in PAGES.items() if s not in RETIRED_SLUGS}
     if args.prefix:
-        pages = {s: v for s, v in PAGES.items() if s.startswith(args.prefix)}
+        pages = {s: v for s, v in pages.items() if s.startswith(args.prefix)}
         if not pages:
             print(f"No pages match prefix {args.prefix!r}.")
             return 1
 
-    created = updated = 0
+    created = updated = skipped = 0
     for slug, (title, description, category, order, body) in pages.items():
         body = body.strip() + "\n"
         row = session.query(DocsPage).filter(DocsPage.slug == slug).first()
+        if row and not args.overwrite:
+            skipped += 1
+            continue
         action = "update" if row else "create"
         print(f"  {'would ' if args.dry_run else ''}{action}  {slug:28} ({category}, order={order}, {len(body)} chars)")
         if args.dry_run:
@@ -1300,7 +1317,10 @@ def main() -> int:
 
     if not args.dry_run:
         session.commit()
-    print(f"\n{'Previewed' if args.dry_run else 'Done'}: {created} created, {updated} updated, {len(pages)} total.")
+    print(
+        f"\n{'Previewed' if args.dry_run else 'Done'}: {created} created, {updated} updated, "
+        f"{skipped} existing left alone, {len(pages)} total."
+    )
     return 0
 
 
