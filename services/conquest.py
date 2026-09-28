@@ -215,6 +215,20 @@ def clean_settings_patch(body) -> tuple[dict, list]:
     return patch, errors
 
 
+def settings_change_problem(patch: dict, current: dict,
+                            event_status: Optional[str]) -> Optional[str]:
+    """Why a cleaned settings patch can't be saved now (None = fine).
+    Switching the scoring mode re-scores the whole event (both modes derive
+    from the same map and ownership history), so it is allowed while the event
+    runs. Once the event is over it is not: the final standings already went
+    out, and the map would start showing a different result."""
+    if (event_status == "past" and "scoring_mode" in patch
+            and patch["scoring_mode"] != current.get("scoring_mode")):
+        return ("This event is over, so its scoring can't change: the final "
+                "standings have already been posted.")
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Troops
 # --------------------------------------------------------------------------- #

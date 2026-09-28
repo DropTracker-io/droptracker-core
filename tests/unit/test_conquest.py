@@ -90,6 +90,21 @@ class TestSettingsPatch:
     def test_not_an_object(self):
         assert cq.clean_settings_patch([1]) == ({}, ["Settings must be an object."])
 
+    def test_scoring_switch_allowed_until_the_end(self):
+        current = _settings()
+        switch = {"scoring_mode": "final"}
+        for status in ("draft", "scheduled", "active"):
+            assert cq.settings_change_problem(switch, current, status) is None
+        assert cq.settings_change_problem(switch, current, "past")
+
+    def test_ended_event_keeps_other_settings_editable(self):
+        current = _settings()
+        # Re-sending the same mode (the form sends whatever changed) and
+        # non-scoring keys are fine after the end.
+        assert cq.settings_change_problem(
+            {"scoring_mode": "hold_time", "summary_hours": 0}, current, "past") is None
+        assert cq.settings_change_problem({"attack_dice": 3}, current, "past") is None
+
 
 # --------------------------------------------------------------------------- #
 # Troops

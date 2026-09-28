@@ -503,7 +503,8 @@ async def apply_conquest_preset(event_id: int):
 async def patch_conquest_settings(event_id: int):
     """Merge a partial settings document. Live-tunable: dice, defense caps
     and the summary cadence apply from the next troop / sweep. The start
-    options only matter at activation."""
+    options only matter at activation. Switching the scoring mode re-scores
+    the whole event, and is refused once the event is over."""
     user_id = current_user_id()
     body = await json_body()
     patch, errors = _cq().clean_settings_patch(body)
@@ -521,6 +522,10 @@ async def patch_conquest_settings(event_id: int):
             _assert_event_admin(s, user_id, ev)
             map_row = ensure_map(s, ev.id)
             stored = _config_dict(map_row.settings)
+            problem = _cq().settings_change_problem(
+                patch, _cq().conquest_settings(stored), ev.status)
+            if problem:
+                abort_problem(409, "Scoring is locked", problem)
             stored.update(patch)
             settings = _cq().conquest_settings(stored)
             map_row.settings = json.dumps(settings)
