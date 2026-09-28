@@ -54,6 +54,11 @@ DEFAULT_BOARD_SETTINGS = {
         "outline_color": "#ffcc33",
         "show_labels": True,
         "icon_size": 20,         # px — tile icon size on the rendered board (8–64)
+        # Where the live standings banner sits over the board (the site, the
+        # Activity and the Discord board image all render the same view).
+        # "hidden" drops it for boards whose art it would cover; the standings
+        # table under the board still shows.
+        "standings_position": "bottom-right",
     },
     "coins": {
         "enabled": True,

@@ -82,6 +82,8 @@ _MOVEMENT_MODES = ("dice", "fixed_step")
 _MOVEMENT_TRIGGERS = ("auto", "manual")
 _MANUAL_ROLLERS = ("team", "group_admin", "either")
 _TILE_RENDER_MODES = ("rune", "invisible", "outline")
+_STANDINGS_POSITIONS = ("bottom-right", "bottom-left", "top-right", "top-left",
+                        "hidden")
 _WIN_RULES = ("finish_tile",)  # P1; threshold/time-boxed variants later
 # Ordered tiebreak metrics for a finish_tile race (event_lifecycle.final_standings).
 _WIN_TIEBREAKS = ("score", "coins")
@@ -168,6 +170,12 @@ def _validate_settings_patch(body: dict) -> dict:
             t["outline_color"] = color
         if "show_labels" in render:
             t["show_labels"] = bool(render["show_labels"])
+        if "standings_position" in render:
+            if render["standings_position"] not in _STANDINGS_POSITIONS:
+                abort_problem(422, "Invalid settings",
+                              "tile_render.standings_position must be one of "
+                              f"{list(_STANDINGS_POSITIONS)}.")
+            t["standings_position"] = render["standings_position"]
         if t:
             out["tile_render"] = t
 

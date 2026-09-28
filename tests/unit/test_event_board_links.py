@@ -126,3 +126,13 @@ class TestSettingsPatch:
         with pytest.raises(ProblemException) as e:
             eb._validate_settings_patch({"win": {"exact_finish": "explode"}})
         assert e.value.status == 422
+
+    def test_standings_position(self):
+        for pos in ("bottom-right", "bottom-left", "top-right", "top-left", "hidden"):
+            out = eb._validate_settings_patch({"tile_render": {"standings_position": pos}})
+            assert out == {"tile_render": {"standings_position": pos}}
+
+    def test_unknown_standings_position(self):
+        with pytest.raises(ProblemException) as e:
+            eb._validate_settings_patch({"tile_render": {"standings_position": "middle"}})
+        assert e.value.status == 422
