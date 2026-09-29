@@ -151,10 +151,26 @@ async def update_event_team_boards():
         print(f"Error updating event team boards: {e}")
 
 
+async def update_event_boards():
+    """Event-wide lootboards with per-player KC/EHE (lootboard/event_boards.py).
+    Hourly per event by PNG mtime, plus one final render after the end. Same
+    isolation as the team boards above."""
+    try:
+        from lootboard.event_boards import feature_enabled, sweep_event_boards
+
+        if not feature_enabled():
+            return
+        written = await sweep_event_boards()
+        print(f"Generated {len(written)} event board(s)")
+    except Exception as e:
+        print(f"Error updating event boards: {e}")
+
+
 async def startup():
     print("Starting lootboard pass")
     await update_boards()
     await update_event_team_boards()
+    await update_event_boards()
 
 if __name__ == "__main__":
     asyncio.run(startup())

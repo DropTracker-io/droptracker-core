@@ -55,7 +55,8 @@ class TestEffectiveMessageConfig:
         assert config["toggles"]["event_completion"] is False
         assert config["toggles"]["event_started"] is True  # untouched default
         assert config["task_progress"] == "milestones"
-        assert config["leaderboard"] == {"live": True, "top_n": 10, "show_tasks": True}
+        assert config["leaderboard"] == {"live": True, "top_n": 10, "show_tasks": True,
+                                         "lootboard": True}
 
     def test_unknown_keys_ignored(self):
         config = en.effective_message_config(

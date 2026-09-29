@@ -521,6 +521,11 @@ async def run_board_sweep(bot) -> None:
         )
         for event in events:
             await refresh_event_board(bot, session, event, force=True)
+        # The event lootboard (loot/KC/EHE image) sits directly beneath each
+        # board post, so it rides the same sweep once the boards are fresh.
+        from services.event_lootboard_post import refresh_event_lootboards
+
+        await refresh_event_lootboards(bot, session, events)
     except Exception as e:
         app_logger.log(
             log_type="error",

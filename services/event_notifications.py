@@ -219,7 +219,9 @@ DEFAULT_MESSAGE_CONFIG = {
     # Default on (additive detail); a group can silence it per event.
     "item_details": True,
     "loot_sweep": dict(DEFAULT_LOOT_SWEEP_CONFIG),
-    "leaderboard": {"live": True, "top_n": 10, "show_tasks": True},
+    # lootboard: the event-wide loot/KC/EHE image posted beneath the live
+    # board (lootboard/event_boards.py). Default on; needs the board channel.
+    "leaderboard": {"live": True, "top_n": 10, "show_tasks": True, "lootboard": True},
 }
 
 LEADERBOARD_TOP_N_RANGE = (3, 25)
@@ -279,6 +281,8 @@ def effective_message_config(raw_json) -> dict:
             config["leaderboard"]["live"] = bool(board["live"])
         if "show_tasks" in board:
             config["leaderboard"]["show_tasks"] = bool(board["show_tasks"])
+        if "lootboard" in board:
+            config["leaderboard"]["lootboard"] = bool(board["lootboard"])
         try:
             top_n = int(board.get("top_n"))
         except (TypeError, ValueError):

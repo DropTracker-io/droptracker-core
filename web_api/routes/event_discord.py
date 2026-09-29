@@ -350,7 +350,7 @@ def _parse_message_config(value) -> str:
     board = value.get("leaderboard") or {}
     if not isinstance(board, dict):
         abort_problem(422, "Invalid messages", "'messages.leaderboard' must be an object.")
-    for flag in ("live", "show_tasks"):
+    for flag in ("live", "show_tasks", "lootboard"):
         if flag in board and not isinstance(board[flag], bool):
             abort_problem(422, "Invalid leaderboard option", f"'messages.leaderboard.{flag}' must be a boolean.")
     if "top_n" in board:
