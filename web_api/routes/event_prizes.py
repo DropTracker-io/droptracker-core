@@ -7,6 +7,7 @@ The tool tracks/advertises GP only — payouts are traded in-game by the clan
 (like split-tracking); nothing here moves real GP or ``EventTeam.score``.
 
   GET    /api/v1/events/{id}/pot                         -> pot read (public)
+  GET    /api/v1/events/{id}/payouts                     -> who gets paid (admin)
   POST   /api/v1/events/{id}/buyins   { player_id?|rsn?, team_id?, kind?,
                                         amount, status?, note?,
                                         proof_key? }                    -> { id }
@@ -318,6 +319,7 @@ def _pot_payload(s, ev, viewer_id) -> dict:
             "advertise": cfg["advertise"],
             "show_contributors": cfg["show_contributors"],
             "allow_leader_mark": cfg["allow_leader_mark"],
+            "payout_active_only": cfg["payout_active_only"],
         },
         "per_team": per_team,
         "unassigned": {
@@ -354,6 +356,35 @@ async def get_pot(event_id: int):
         # Viewer-specific (can_manage, admin-only rows/notes) — never shared.
         return private_no_store(jsonify(payload))
     return with_cache_headers(jsonify(payload), max_age=15)
+
+
+@event_prizes_bp.get("/events/<int:event_id>/payouts")
+async def get_payouts(event_id: int):
+    """The payout checklist: which teams/players finished in a paid place and
+    what each member is owed under ``prize_config.distribution``
+    (``services/event_payouts.py``). Admin-only — the public page already
+    advertises the pot and the rule; per-member amounts are for whoever
+    trades the GP out. Live standings while the event runs, final once past."""
+    user_id = current_user_id()
+
+    def _load():
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_event_admin(s, user_id, ev)
+            from services.event_payouts import payout_plan
+
+            plan = payout_plan(s, ev)
+            for key in ("total", "unclaimed", "rounding", "unallocated"):
+                plan[key] = money(plan[key])
+            for w in plan["winners"]:
+                w["amount"] = money(w["amount"])
+                w["member_remainder"] = money(w["member_remainder"])
+                for m in w["members"]:
+                    m["amount"] = money(m["amount"])
+            return plan
+
+    payload = await asyncio.to_thread(_load)
+    return private_no_store(jsonify(payload))
 
 
 # --------------------------------------------------------------------------- #

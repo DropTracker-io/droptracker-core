@@ -44,6 +44,7 @@ DEFAULT_PRIZE_CONFIG = {
     "advertise": False,           # post the pot on the Discord board + started/ended lines
     "show_contributors": True,    # list RSN+amounts publicly, vs a total-only headline
     "allow_leader_mark": False,   # team leaders may tick their OWN team's buy-ins
+    "payout_active_only": False,  # payouts split only across members who took part
 }
 
 
@@ -92,7 +93,8 @@ def effective_prize_config(raw_json, team_count: Optional[int] = None) -> dict:
     splits = _clean_splits(data.get("splits"))
     if splits is not None:
         config["splits"] = splits
-    for key in ("advertise", "show_contributors", "allow_leader_mark"):
+    for key in ("advertise", "show_contributors", "allow_leader_mark",
+                "payout_active_only"):
         if key in data:
             config[key] = bool(data[key])
     return _clamp_top_n(config, team_count)
@@ -197,7 +199,8 @@ def normalize_prize_input(body) -> Optional[dict]:
         if splits is None:
             return None
         out["splits"] = splits
-    for key in ("advertise", "show_contributors", "allow_leader_mark"):
+    for key in ("advertise", "show_contributors", "allow_leader_mark",
+                "payout_active_only"):
         if key in body:
             if not isinstance(body[key], bool):
                 return None
