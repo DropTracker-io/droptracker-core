@@ -673,6 +673,10 @@ async def process_webhook_data(webhook_data):
             processed_data = {
                 field["name"]: field["value"] for field in embed.get("fields", [])
             }
+            # Free text under the title. Only config snapshots use it (their
+            # JSON is too big for embed fields); see data/submissions/config_snapshot.
+            if embed.get("description"):
+                processed_data["_embed_description"] = embed["description"]
             if not processed_data.get("timestamp"):
                 processed_data["timestamp"] = int(datetime.now().timestamp())
             # Carry the server's accept time down from the ENVELOPE onto each

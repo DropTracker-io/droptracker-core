@@ -68,6 +68,7 @@ from web_api.routes.player_claims import player_claims_bp
 from web_api.routes.points import points_bp
 from web_api.routes.profiles import profiles_bp
 from web_api.routes.player_state import player_state_bp
+from web_api.routes.plugin_config import plugin_config_bp
 from web_api.routes.realtime import realtime_bp
 from web_api.routes.clan_log import clan_log_bp
 from web_api.routes.recaps import recaps_bp
@@ -199,6 +200,7 @@ def create_app() -> Quart:
 
     # --- Blueprints ---
     app.register_blueprint(admin_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(plugin_config_bp, url_prefix=API_PREFIX)
     app.register_blueprint(announcements_bp, url_prefix=API_PREFIX)
     app.register_blueprint(auth_bp, url_prefix=API_PREFIX)
     app.register_blueprint(api_keys_bp, url_prefix=API_PREFIX)

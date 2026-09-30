@@ -66,6 +66,8 @@ _PROCESSORS = {
     "adventure_log": "adventure_log_processor",
     "clan_broadcast": "clan_broadcast_processor",
     "clan_chat": "clan_chat_processor",
+    # Plugin settings snapshot for debugging (JSON in the embed description).
+    "config_snapshot": "config_snapshot_processor",
 }
 
 SUPPORTED_TYPES = frozenset(_PROCESSORS)

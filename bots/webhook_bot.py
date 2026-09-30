@@ -704,7 +704,12 @@ def _flag_bundle_duplicates(embed_dicts) -> None:
 
 def _embed_to_dict(embed: Embed):
     if embed.fields:
-        return {f.name: f.value for f in embed.fields}
+        data = {f.name: f.value for f in embed.fields}
+        # Config snapshots carry their JSON here (too big for embed fields);
+        # same key as api.routes.webhook.process_webhook_data.
+        if embed.description:
+            data["_embed_description"] = embed.description
+        return data
     return {}
 
 
