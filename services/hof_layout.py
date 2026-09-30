@@ -11,8 +11,8 @@ notification layout already knows this one.
 Two things are new, and both come from what a Hall of Fame message *is* — a
 set of rankings rather than one event:
 
-**The ``leaderboard`` block.** Picks a ranking (``pb``, ``kc``, ``loot_month``
-or ``loot_all``), how many places to show, and how each line looks::
+**The ``leaderboard`` block.** Picks a ranking (``pb``, ``kc``, ``loot_month``,
+``loot_all`` or ``delve``), how many places to show, and how each line looks::
 
     {"type": "leaderboard", "board": "kc", "count": 3,
      "title": "**Most kills**",
@@ -102,6 +102,12 @@ BOARDS: Dict[str, Dict[str, str]] = {
         "help": "Most loot from this boss since tracking began.",
         "value": "the GP value, e.g. 1.204B",
     },
+    "delve": {
+        "label": "Deepest delve",
+        "help": "Doom of Mokhaiotl only: the deepest delve level each member has completed. "
+                "Hidden on every other boss.",
+        "value": "the delve level, e.g. 12 (9+ when only known to be past 8)",
+    },
 }
 
 #: What a leaderboard line looks like when the author leaves it blank.
@@ -110,6 +116,7 @@ DEFAULT_LINES = {
     "kc": "-# {medal} {player} - `{value}` kc",
     "loot_month": "-# {medal} {player} - {coins_emoji} `{value}` gp",
     "loot_all": "-# {medal} {player} - {coins_emoji} `{value}` gp",
+    "delve": "-# {medal} {player} - level `{value}`",
 }
 DEFAULT_BRACKET = "-# **{team_size}**"
 
@@ -183,6 +190,8 @@ TOKEN_GROUPS: List[Dict[str, Any]] = [
             ("fastest_player", "Member with the fastest kill"),
             ("fastest_time", "The fastest kill's time"),
             ("fastest_team_size", "The fastest kill's team size"),
+            ("deepest_delve_player", "Doom of Mokhaiotl only: member with the deepest delve"),
+            ("deepest_delve", "Doom of Mokhaiotl only: the deepest delve level completed"),
         ],
     },
     {
@@ -211,7 +220,7 @@ ROW_TOKENS: List[Tuple[str, str]] = [
     ("rank", "The place as a number"),
     ("player", "The member, linked to their profile"),
     ("player_plain", "The member's name with no link"),
-    ("value", "What they are ranked by: the time, kill count or GP"),
+    ("value", "What they are ranked by: the time, kill count, GP or delve level"),
     ("team_size", "Personal bests only: the team size of this list"),
 ]
 
@@ -232,6 +241,7 @@ DEFAULT_LAYOUT: Dict[str, Any] = {
                 "-# • Highest KC: `{top_kc}` kc by {top_kc_player}\n"
                 "-# • Most loot this month: {coins_emoji} `{top_loot_month}` gp by {top_looter_month}\n"
                 "-# • Fastest kill: `{fastest_time}` ({fastest_team_size}) by {fastest_player}\n"
+                "-# • Deepest delve: level `{deepest_delve}` by {deepest_delve_player}\n"
                 "-# • Total loot tracked: {coins_emoji} `{total_loot}` gp\n"
                 "-# • Personal bests tracked: `{total_pbs}`"
             ),
@@ -248,6 +258,16 @@ DEFAULT_LAYOUT: Dict[str, Any] = {
             "bracket": "-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n-# **{team_size}**",
             "line": DEFAULT_LINES["pb"],
             "empty": "-# No personal bests recorded yet.",
+        },
+        {"type": "separator", "divider": True},
+        # Doom of Mokhaiotl only: every other boss has no delve rows, so the
+        # block renders nothing and its dividers collapse into one.
+        {
+            "type": "leaderboard",
+            "board": "delve",
+            "count": None,
+            "title": "🕳️ **__Deepest Delves__**",
+            "line": DEFAULT_LINES["delve"],
         },
         {"type": "separator", "divider": True},
         {
@@ -284,6 +304,8 @@ _BOARD_FOR_TOKEN = {
     "top_looter_month": "loot_month",
     "top_loot_all": "loot_all",
     "top_looter_all": "loot_all",
+    "deepest_delve": "delve",
+    "deepest_delve_player": "delve",
 }
 
 

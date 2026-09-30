@@ -263,6 +263,20 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         return
     apply_account_type(player, pb_data.get("account_type"), world_type)
 
+    # Doom of Mokhaiotl: every timed delve level is a completion, PB or not,
+    # so it can raise the player's deepest delve (the Hall of Fame board).
+    # A SAVEPOINT, so a failed write can never cost the PB itself.
+    if not is_seasonal:
+        try:
+            from utils.doom_delve import completed_level, record_completed
+
+            completed = completed_level(npc_id, pb_data.get("delve_level"))
+            if completed:
+                with session.begin_nested():
+                    record_completed(session, player_id, *completed)
+        except Exception as e:
+            debug_print(f"Deepest delve update failed for player {player_id}: {e}")
+
     # TEMP (2026-08) split-source observation: kill-time submissions carry the
     # authoritative ToB/ToA/CoX roster (unused elsewhere) plus the game's
     # team_size, both evidence for where split tracking belongs. Fail-open;

@@ -15,6 +15,8 @@ Sources:
   reports on every drop and timed kill (``data/submissions/kc_milestones.py``).
   It fills in as members play; a member who has not killed a boss since it
   started recording is not on that boss's board yet.
+* Deepest delve — ``player_deepest_delve`` (Doom of Mokhaiotl only; see
+  ``utils/doom_delve.py``). Every other boss gets no rows, so its lines drop.
 * Loot — the per-NPC Redis boards ``services/redis_updates.py`` maintains
   (``leaderboard:group:{gid}:npc:{npc}[:{partition}]``; the global group reads
   the site-wide ``leaderboard:npc:...`` boards).
@@ -32,8 +34,11 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import func
 
-from db.models import NpcList, Player, PersonalBestEntry, PlayerNpcKc, get_current_partition
+from db.models import (
+    NpcList, Player, PersonalBestEntry, PlayerDeepestDelve, PlayerNpcKc, get_current_partition,
+)
 from services.hof_layout import HofEntry, Row, Scope
+from utils.doom_delve import DOOM_NPC_ID, format_level
 from utils.format import NPC_IMG_DIR, convert_from_ms, format_number
 from utils.hof import RAID_GROUPS, SEPULCHRE_CANONICAL, canonical_display_name, npc_name_candidates
 from utils.site_urls import WEBSITE_URL, npc_url
@@ -279,6 +284,8 @@ class HofDataCollector:
         pbs = self._db.query(PersonalBestEntry).filter(
             PersonalBestEntry.player_id.in_(self.player_ids),
             PersonalBestEntry.npc_id.in_(npc_ids),
+            # A 0:00 row is a broken submission, not the fastest kill.
+            PersonalBestEntry.personal_best > 0,
         ).all()
         buckets: Dict[object, List[PersonalBestEntry]] = {}
         for pb in pbs:
@@ -335,6 +342,30 @@ class HofDataCollector:
             .all()
         )
         return [self._row(self._player(int(pid)), f"{int(kc):,}") for pid, kc in top if kc]
+
+    # -- deepest delve ----------------------------------------------------
+
+    def delve_rows(self, npc_ids: List[int], rows: int) -> List[Row]:
+        """Deepest Doom delve completed, deepest first; first to get there wins
+        a tie. Only on the boss's own message, not per-level ones."""
+        if rows <= 0 or DOOM_NPC_ID not in npc_ids:
+            return []
+        query = self._db.query(PlayerDeepestDelve)
+        if self.group_id != GLOBAL_GROUP_ID:
+            if not self.player_ids:
+                return []
+            query = query.filter(PlayerDeepestDelve.player_id.in_(self.player_ids))
+        top = (
+            query.order_by(
+                PlayerDeepestDelve.deepest_level.desc(),
+                PlayerDeepestDelve.exact.desc(),
+                PlayerDeepestDelve.achieved_at.asc(),
+            )
+            .limit(rows)
+            .all()
+        )
+        return [self._row(self._player(int(r.player_id)), format_level(r.deepest_level, bool(r.exact)))
+                for r in top]
 
     # -- loot -------------------------------------------------------------
 
@@ -396,10 +427,13 @@ class HofDataCollector:
             scope.boards["loot_month"] = self.loot_rows(npc_ids, needs["loot_month"], month=True)
         if "loot_all" in needs:
             scope.boards["loot_all"] = self.loot_rows(npc_ids, needs["loot_all"], month=False)
+        if "delve" in needs:
+            scope.boards["delve"] = self.delve_rows(npc_ids, needs["delve"])
         for board, (player_token, value_token) in {
             "kc": ("{top_kc_player}", "{top_kc}"),
             "loot_month": ("{top_looter_month}", "{top_loot_month}"),
             "loot_all": ("{top_looter_all}", "{top_loot_all}"),
+            "delve": ("{deepest_delve_player}", "{deepest_delve}"),
         }.items():
             top = (scope.boards.get(board) or [None])[0]
             scope.tokens[player_token] = top.player if top else ""

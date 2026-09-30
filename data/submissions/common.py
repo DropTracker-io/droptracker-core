@@ -1046,21 +1046,14 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
     if npc_name in npc_list:
         return npc_list[npc_name], npc_name
     if ("doom of mokhaiotl" in npc_name.lower()) and ("(level" in npc_name.lower()):
-        import re
+        # Delve levels 1-8 have their own rows; every level past 8 shares the
+        # game's one "8+" personal best (utils/doom_delve.py).
+        from utils.doom_delve import DOOM_NPC_ID, resolve_level_name
 
-        match = re.search(r"\(\s*Level\s*:??\s*(\d+)\s*\)", npc_name, flags=re.IGNORECASE)
-        level_value = None
-        if match:
-            #print("Got a match on doom level value:", match.group(1))
-            level_value = int(match.group(1))
-            try:
-                level_value = int(level_value)
-            except Exception:
-                return 14704, npc_name
-            npc_name = re.sub(r"\(\s*Level\s*:??\s*(\d+)\s*\)", r"(Level \1)", npc_name, flags=re.IGNORECASE)
-            #print("Parsed doom's name:", npc_name, "Level:", level_value)
-            return (14707 + level_value), npc_name
-        return 14707, npc_name
+        resolved = resolve_level_name(npc_name)
+        if resolved:
+            return resolved
+        return DOOM_NPC_ID, npc_name
     npc_row = session.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).first()
     if npc_row:
         npc_list[npc_name] = npc_row.npc_id

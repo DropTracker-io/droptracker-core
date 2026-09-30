@@ -40,6 +40,7 @@ from .group_notification_always_list import GroupNotificationAlwaysList
 from .notified_submission import NotifiedSubmission
 from .notification_queue import NotificationQueue
 from .player_npc_kc import PlayerNpcKc
+from .player_deepest_delve import PlayerDeepestDelve
 from .player_notification_prefs import PlayerNotificationPrefs
 from .member_message import PlayerCustomMessage, GroupMemberMessageBlock
 from .embed import GroupEmbed, Field
@@ -281,6 +282,7 @@ __all__ = [
     "NotifiedSubmission",
     "NotificationQueue",
     "PlayerNpcKc",
+    "PlayerDeepestDelve",
     "PlayerNotificationPrefs",
     "PlayerCustomMessage",
     "GroupMemberMessageBlock",

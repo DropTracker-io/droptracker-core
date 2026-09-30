@@ -72,7 +72,7 @@ async def test_meta_documents_boards_tokens_and_default(client, monkeypatch):
     resp = await client.get("/api/v1/hall-of-fame/layout/meta")
     assert resp.status_code == 200
     body = await resp.get_json()
-    assert {b["key"] for b in body["boards"]} == {"pb", "kc", "loot_month", "loot_all"}
+    assert {b["key"] for b in body["boards"]} == {"pb", "kc", "loot_month", "loot_all", "delve"}
     tokens = {t["token"] for g in body["token_groups"] for t in g["tokens"]}
     assert {"boss_emoji", "coins_emoji", "top_kc_player", "top_looter_month"} <= tokens
     assert {t["token"] for t in body["row_tokens"]} >= {"medal", "player", "value"}
