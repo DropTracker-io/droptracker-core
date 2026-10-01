@@ -24,6 +24,11 @@ Semantics:
   scores, join codes, Discord config or clan-vs-clan participants. A
   clan_vs_clan event saves its team *names* and re-runs as a standard draft
   (clan bindings and invites are inherently per-run).
+- Skill/Boss of the Week events save their race config (metric, ranking,
+  bonus rules, format) and participation mode in a ``competition`` block.
+  The managed race task, the individual race's roster team and the WOM
+  linkage stay behind; instantiation re-validates the config and rebuilds
+  the scaffold exactly as the create wizard does.
 - Templates are owned by the event's host group (``ev.group_id``; NULL for
   global events = site-wide, superadmin-managed).
 - Instantiation re-validates every task through ``validate_task_payload`` —
@@ -36,6 +41,7 @@ Semantics:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 
 from quart import Blueprint, jsonify, request
@@ -99,12 +105,21 @@ def snapshot_event(s, ev: Event) -> dict:
     Bingo cells reference tasks by ``task_ref`` — the task's index in the
     payload's ``tasks`` list — so the snapshot carries no row ids.
     """
+    from services.competition import COMPETITION_KINDS, COMPETITION_TASK_TYPE
+
+    kind = getattr(ev, "kind", None) or "standard"
     tasks = (
         s.query(EventTask)
         .filter(EventTask.event_id == ev.id)
         .order_by(EventTask.id.asc())
         .all()
     )
+    # SOTW/BOTW: the hidden race task carries the whole race config. It goes
+    # in its own block — the generic task pipeline refuses managed tasks.
+    race_task = None
+    if kind in COMPETITION_KINDS:
+        race_task = next((t for t in tasks if t.type == COMPETITION_TASK_TYPE), None)
+        tasks = [t for t in tasks if t.type != COMPETITION_TASK_TYPE]
     ref_by_task_id: dict[int, int] = {}
     tasks_out = []
     for i, t in enumerate(tasks):
@@ -123,13 +138,25 @@ def snapshot_event(s, ev: Event) -> dict:
             "difficulty": getattr(t, "difficulty", None) or None,
         })
 
-    teams_out = [
-        {"name": tm.name}
-        for tm in s.query(EventTeam)
+    teams = (
+        s.query(EventTeam)
         .filter(EventTeam.event_id == ev.id)
         .order_by(EventTeam.id.asc())
         .all()
-    ]
+    )
+    teams_out = [{"name": tm.name} for tm in teams]
+
+    competition = None
+    if kind in COMPETITION_KINDS:
+        race_config = _parse_json_col(race_task.config if race_task is not None else None) or {}
+        participation = None
+        if race_config.get("format") != "teams":
+            # Individual race: the one roster team is scaffolding (rebuilt on
+            # instantiate) and its auto_clan flag IS the participation mode.
+            participation = ("whole_clan" if teams and getattr(teams[0], "auto_clan", False)
+                             else "signup")
+            teams_out = []
+        competition = {"config": race_config, "participation": participation}
 
     bingo = None
     if ev.has_bingo:
@@ -201,6 +228,8 @@ def snapshot_event(s, ev: Event) -> dict:
         "tasks": tasks_out,
         "teams": teams_out,
         "bingo": bingo,
+        # SOTW/BOTW race config + participation; None for every other kind.
+        "competition": competition,
     }
 
 
@@ -267,15 +296,9 @@ def instantiate_template(
     kind = spec.get("kind") or "standard"
     if kind not in EVENT_KINDS:
         kind = "standard"
-    from db import COMPETITION_EVENT_KINDS
+    from services.competition import COMPETITION_KINDS, COMPETITION_TASK_TYPE
 
-    if kind in COMPETITION_EVENT_KINDS:
-        # Belt-and-braces: template SAVE refuses these kinds, so such a
-        # payload shouldn't exist — but an instantiated one would create an
-        # unmanaged competition task with no scaffold.
-        abort_problem(422, "Templates not supported",
-                      "Skill/Boss of the Week events can't be created from "
-                      "templates yet — use the event wizard.")
+    is_competition = kind in COMPETITION_KINDS
     if kind != "standard" and not is_event_type_creatable(
         s, kind, is_superadmin=superadmin, group_id=group_id
     ):
@@ -355,6 +378,8 @@ def instantiate_template(
     for i, t in enumerate(payload.get("tasks") or []):
         label = (str(t.get("label") or "")).strip()
         ttype = t.get("type")
+        if ttype == COMPETITION_TASK_TYPE:
+            continue  # managed race task — rebuilt from the competition block
         if ttype not in EVENT_TASK_TYPES or not label:
             skipped.append({"index": i, "label": label or "(unnamed)",
                             "reason": "Unknown task type." if label else "Missing label."})
@@ -411,13 +436,57 @@ def instantiate_template(
         # No free-cell grants here — a fresh draft is not live; activation
         # (event_lifecycle) grants free cells exactly as for hand-built events.
 
-    if include_teams:
+    team_race = True
+    if is_competition:
+        team_race = _instantiate_competition(s, ev, kind, payload.get("competition"), skipped)
+
+    # An individual race has exactly one roster (the scaffold's) — never
+    # extra teams from the payload.
+    if include_teams and team_race:
         for team in payload.get("teams") or []:
             tname = (str(team.get("name") or "")).strip()
             if tname:
                 s.add(EventTeam(event_id=ev.id, name=tname[:80], score=0))
 
     return ev, skipped
+
+
+def _instantiate_competition(s, ev: Event, kind: str, spec, skipped: list[dict]) -> bool:
+    """Rebuild a SOTW/BOTW scaffold from a template's ``competition`` block.
+
+    The config is re-validated (NPC/pet names can drift between save and
+    re-run). One that no longer validates falls back to the wizard's empty
+    placeholder — the activation blockers refuse it until the organiser
+    re-picks — and is reported in ``skipped`` instead of failing the run.
+    Returns True for a team race (the payload's teams are the competitors).
+    """
+    from services.competition_setup import (
+        PARTICIPATION_MODES,
+        RACE_FORMATS,
+        ensure_competition_scaffold,
+    )
+    from web_api.routes.event_task_validation import validated_competition_config
+
+    spec = spec if isinstance(spec, dict) else {}
+    raw = spec.get("config") if isinstance(spec.get("config"), dict) else {}
+    race_format = raw.get("format") if raw.get("format") in RACE_FORMATS else "individual"
+    cfg = {"kind": "competition", "metric_kind": "skill" if kind == "sotw" else "boss",
+           "format": race_format}
+    if raw.get("skill") or raw.get("npcs"):
+        try:
+            # deepcopy: the validator pops passthrough keys off its input.
+            cfg = validated_competition_config(s, kind, copy.deepcopy(raw))
+        except ProblemException as exc:
+            skipped.append({
+                "index": -1, "label": "Competition settings",
+                "reason": f"{exc.detail or exc.title} Re-pick them in the "
+                          "event's Competition settings.",
+            })
+    participation = spec.get("participation")
+    if participation not in PARTICIPATION_MODES:
+        participation = None
+    ensure_competition_scaffold(s, ev, cfg, participation)
+    return cfg.get("format") == "teams"
 
 
 # --------------------------------------------------------------------------- #
@@ -493,6 +562,9 @@ def _detail(tmpl: EventTemplate) -> dict:
             for t in payload.get("tasks") or []
         ],
         "teams": [t.get("name") for t in payload.get("teams") or [] if t.get("name")],
+        "kind": spec.get("kind") or "standard",
+        # SOTW/BOTW race config (metric, ranking, bonus rules); None otherwise.
+        "competition": payload.get("competition"),
     }
     return base
 
@@ -550,17 +622,6 @@ async def save_event_template(event_id: int):
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
-            from db import COMPETITION_EVENT_KINDS
-
-            if (getattr(ev, "kind", None) or "standard") in COMPETITION_EVENT_KINDS:
-                # v1: the competition config (WOM linkage, bonus rules) is
-                # instance-bound and the managed task must never round-trip
-                # through the generic task pipeline. The setup is a two-minute
-                # wizard — templates add little until team competitions land.
-                abort_problem(
-                    422, "Templates not supported",
-                    "Skill/Boss of the Week events can't be saved as templates "
-                    "yet — their setup is quick to recreate from the wizard.")
             if (getattr(ev, "kind", None) or "standard") == "conquest":
                 # The map (regions, tiles, rules) isn't part of the snapshot
                 # yet, so a template would come back as a map-less Conquest

@@ -12,6 +12,7 @@ pattern).
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -206,6 +207,12 @@ def _unstub(monkeypatch):
         "web_api.routes.event_task_validation.validate_task_payload",
         _default_validate,
     )
+    # services.competition{,_setup} are conftest stubs — pin the real constants.
+    comp, setup = sys.modules["services.competition"], sys.modules["services.competition_setup"]
+    monkeypatch.setattr(comp, "COMPETITION_KINDS", ("sotw", "botw"))
+    monkeypatch.setattr(comp, "COMPETITION_TASK_TYPE", "competition")
+    monkeypatch.setattr(setup, "PARTICIPATION_MODES", ("whole_clan", "signup"))
+    monkeypatch.setattr(setup, "RACE_FORMATS", ("individual", "teams"))
     FakeTask._next = 900
 
 
@@ -639,3 +646,132 @@ class TestNormalizePayload:
         with pytest.raises(ProblemException) as exc:
             etr._normalize_payload(raw)
         assert exc.value.status == 500
+
+
+# ── SOTW/BOTW (competition kinds) ────────────────────────────────────────────
+
+_RACE_CFG = {
+    "kind": "competition", "metric_kind": "boss", "npcs": ["Chambers of Xeric"],
+    "format": "individual", "team_scoring": "total",
+    "ranking": {"mode": "points", "gained_per_point": 1},
+    "bonus_rules": [{"id": 1, "type": "milestone", "points": 5, "max_awards": 3,
+                     "step": 25}],
+}
+
+
+def _race_task(cfg=None):
+    return _task(10, "Boss race: Chambers of Xeric", type="competition",
+                 target="Chambers of Xeric", target_value=0, points=0,
+                 visibility="private", config=json.dumps(cfg or _RACE_CFG))
+
+
+def _comp_payload(cfg=None, participation="whole_clan", teams=()):
+    payload = _payload(kind="botw", has_bingo=False, formation_mode="admin_assign")
+    payload.update(tasks=[], bingo=None, teams=[{"name": n} for n in teams],
+                   competition={"config": cfg or _RACE_CFG,
+                                "participation": participation})
+    return payload
+
+
+@pytest.fixture()
+def scaffold(monkeypatch):
+    """Record ensure_competition_scaffold calls; validation passes through."""
+    calls = []
+    monkeypatch.setattr(
+        sys.modules["services.competition_setup"], "ensure_competition_scaffold",
+        lambda s, ev, cfg, participation=None: calls.append((ev, cfg, participation)),
+    )
+    monkeypatch.setattr(
+        "web_api.routes.event_task_validation.validated_competition_config",
+        lambda s, kind, raw: raw,
+    )
+    monkeypatch.setattr(sys.modules["services.event_types"], "is_event_type_creatable",
+                        lambda *a, **k: True)
+    monkeypatch.setattr(sys.modules["db"], "EVENT_KINDS", ("standard", "sotw", "botw"))
+    return calls
+
+
+class TestCompetitionTemplates:
+    def test_snapshot_individual_race(self):
+        roster = _team(3, "Participants")
+        roster.auto_clan = True
+        extra = _task(11, "Side task")
+        s = _S([_race_task(), extra], [roster], [])
+        payload = etr.snapshot_event(s, _event(kind="botw", has_bingo=False))
+        # The managed race task travels in its own block, not as a task…
+        assert [t["label"] for t in payload["tasks"]] == ["Side task"]
+        assert payload["competition"] == {"config": _RACE_CFG,
+                                          "participation": "whole_clan"}
+        # …and the individual roster team is scaffolding, not a template team.
+        assert payload["teams"] == []
+        assert payload["event"]["kind"] == "botw"
+
+    def test_snapshot_team_race_keeps_teams(self):
+        cfg = {**_RACE_CFG, "format": "teams"}
+        s = _S([_race_task(cfg)], [_team(3, "Red"), _team(4, "Blue")], [])
+        payload = etr.snapshot_event(s, _event(kind="botw", has_bingo=False))
+        assert payload["teams"] == [{"name": "Red"}, {"name": "Blue"}]
+        assert payload["competition"]["participation"] is None
+
+    def test_standard_snapshot_has_no_competition_block(self):
+        s = _S([_task(11, "Whip")], [], [])
+        assert etr.snapshot_event(s, _event(has_bingo=False))["competition"] is None
+
+    async def test_save_botw_template(self, client, monkeypatch):
+        roster = _team(3, "Participants")
+        roster.auto_clan = False
+        s = _S([_event(kind="botw", has_bingo=False)], [_race_task()], [roster], [], [])
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/events/1/save-template", json={"name": "CoX week"})
+        assert r.status_code == 200
+        tmpl = next(a for a in s.added if isinstance(a, FakeTemplate))
+        assert tmpl.task_count == 0 and tmpl.team_count == 0
+        stored = json.loads(tmpl.payload)
+        assert stored["competition"]["participation"] == "signup"
+        assert stored["competition"]["config"]["npcs"] == ["Chambers of Xeric"]
+
+    async def test_instantiate_rebuilds_scaffold(self, client, monkeypatch, scaffold):
+        tmpl = _template(payload=json.dumps(_comp_payload(teams=["Stray"])))
+        s = _S([tmpl], [SimpleNamespace(group_id=42, guild_id=None)])
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/event-templates/33/instantiate",
+                              json={"group_id": 42})
+        assert r.status_code == 200
+        assert (await r.get_json())["skipped_tasks"] == []
+        ev = next(a for a in s.added if isinstance(a, FakeEvent))
+        assert ev.kind == "botw"
+        [(scaffold_ev, cfg, participation)] = scaffold
+        assert scaffold_ev is ev and cfg == _RACE_CFG and participation == "whole_clan"
+        # An individual race gets only the scaffold's roster, no payload teams
+        # and no generic copy of the managed task.
+        assert not any(isinstance(a, (FakeTeam, FakeTask)) for a in s.added)
+
+    async def test_instantiate_team_race_adds_teams(self, client, monkeypatch, scaffold):
+        cfg = {**_RACE_CFG, "format": "teams"}
+        tmpl = _template(payload=json.dumps(
+            _comp_payload(cfg, participation=None, teams=["Red", "Blue"])))
+        s = _S([tmpl], [SimpleNamespace(group_id=42, guild_id=None)])
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/event-templates/33/instantiate",
+                              json={"group_id": 42})
+        assert r.status_code == 200
+        assert [t.name for t in s.added if isinstance(t, FakeTeam)] == ["Red", "Blue"]
+        assert scaffold[0][2] is None
+
+    async def test_stale_config_falls_back_to_placeholder(self, client, monkeypatch, scaffold):
+        def _reject(s, kind, raw):
+            raise ProblemException(422, "Unknown NPC", "Not in the NPC database: X.")
+
+        monkeypatch.setattr(
+            "web_api.routes.event_task_validation.validated_competition_config", _reject)
+        tmpl = _template(payload=json.dumps(_comp_payload()))
+        s = _S([tmpl], [SimpleNamespace(group_id=42, guild_id=None)])
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/event-templates/33/instantiate",
+                              json={"group_id": 42})
+        assert r.status_code == 200
+        [skip] = (await r.get_json())["skipped_tasks"]
+        assert skip["label"] == "Competition settings"
+        assert "Not in the NPC database" in skip["reason"]
+        cfg = scaffold[0][1]
+        assert cfg == {"kind": "competition", "metric_kind": "boss", "format": "individual"}
