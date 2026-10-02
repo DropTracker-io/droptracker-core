@@ -651,9 +651,9 @@ def collect_group_targets(
         text(
             "SELECT g.group_id, g.group_name FROM groups g "
             "WHERE g.group_id NOT IN (1, 2)"
-            + (" AND g.group_id = :gid" if only_group else "")
+            + (" AND g.group_id = :gid" if only_group is not None else "")
         ),
-        {"gid": only_group} if only_group else {},
+        {"gid": only_group} if only_group is not None else {},
     ).fetchall()
     if not rows:
         return []
@@ -736,9 +736,9 @@ def collect_user_targets(
             "WHERE r.date_hour BETWEEN :lo AND :hi "
             "  AND u.discord_id IS NOT NULL AND u.discord_id <> '' AND u.discord_id <> '0' "
             "  AND COALESCE(p.hidden, 0) = 0 AND COALESCE(u.hidden, 0) = 0"
-            + (" AND u.user_id = :uid" if only_user else "")
+            + (" AND u.user_id = :uid" if only_user is not None else "")
         ),
-        {"lo": lo, "hi": hi, **({"uid": only_user} if only_user else {})},
+        {"lo": lo, "hi": hi, **({"uid": only_user} if only_user is not None else {})},
     ).fetchall()
     if not rows:
         return []
@@ -901,9 +901,9 @@ def collect_group_generation_ids(
     rows = session.execute(
         text(
             "SELECT g.group_id FROM groups g WHERE g.group_id NOT IN (1, 2)"
-            + (" AND g.group_id = :gid" if only_group else "")
+            + (" AND g.group_id = :gid" if only_group is not None else "")
         ),
-        {"gid": only_group} if only_group else {},
+        {"gid": only_group} if only_group is not None else {},
     ).fetchall()
     if not rows:
         return []
