@@ -377,3 +377,37 @@ class TestSearchNpcsEndpoint:
         r = await client.get("/api/v1/events/meta/npcs?q=a")
         assert r.status_code == 200
         assert (await r.get_json()) == []
+
+
+class TestRankItemMatches:
+    """events._rank_item_matches: item-search ordering for the pickers. A
+    never-dropped name (pets never land in the item rollup) must still be
+    listed, flagged, instead of vanishing behind any tracked match."""
+
+    def test_untracked_names_are_listed_not_hidden(self):
+        candidates = [
+            ("Tumeken's shadow", 27275, [27275, 27276]),
+            ("Tumeken's guardian", 27352, [27352, 27353]),
+            ("Tumeken's shadow (uncharged)", 27277, [27277]),
+        ]
+        tracked = {"Tumeken's shadow (uncharged)", "Tumeken's guardian"}
+        out = evr._rank_item_matches("Tumeken's", candidates, lambda n, ids: n in tracked)
+        assert [e["name"] for e in out] == [
+            "Tumeken's guardian",
+            "Tumeken's shadow (uncharged)",
+            "Tumeken's shadow",
+        ]
+        assert out[-1]["tracked"] is False
+
+    def test_prefix_beats_mid_word_and_exact_beats_prefix(self):
+        candidates = [
+            ("Abyssal whip", 4151, [4151]),
+            ("Whip", 1, [1]),
+            ("Whipped cream", 2, [2]),
+        ]
+        out = evr._rank_item_matches("whip", candidates, lambda n, ids: True)
+        assert [e["name"] for e in out] == ["Whip", "Whipped cream", "Abyssal whip"]
+
+    def test_limit_applies_after_ranking(self):
+        candidates = [(f"Item {i:02d}", i, [i]) for i in range(40)]
+        assert len(evr._rank_item_matches("item", candidates, lambda n, ids: True)) == 25

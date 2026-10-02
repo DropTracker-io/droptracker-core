@@ -45,7 +45,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from quart import Blueprint, jsonify, request
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy import or_ as sa_or
 from sqlalchemy.exc import IntegrityError
 
@@ -6164,19 +6164,51 @@ async def ai_task_quota_refund():
 # charged "Scythe of vitur" row) must not resurrect an untrackable variant.
 RECEIVABLE_MIN_ROWS = 3
 _SEARCH_CANDIDATE_NAMES = 40
+_ITEM_SEARCH_LIMIT = 25
+
+
+def _match_tier(name: str, q: str) -> int:
+    """How well ``name`` matches the typed query: exact, prefix, word-start,
+    anywhere. Ranks "Tumeken's g" style queries by relevance instead of
+    leaving it to name length alone."""
+    n, q = name.lower(), q.lower()
+    if n == q:
+        return 0
+    if n.startswith(q):
+        return 1
+    if re.search(r"(?:^|[\s(\-'])" + re.escape(q), n):
+        return 2
+    return 3
+
+
+def _rank_item_matches(q: str, candidates, receivable, limit: int = _ITEM_SEARCH_LIMIT) -> list:
+    """Order item-search candidates for the picker.
+
+    ``candidates`` is ``[(name, min_id, ids)]``; ``receivable(name, ids)``
+    says whether the name has ever dropped. Receivable names lead each match
+    tier, but a never-dropped name is still listed (``tracked: false``) rather
+    than hidden — hiding them made pets vanish from "Tumeken's" (pets never
+    land in the item rollup) and only reappear once nothing tracked matched."""
+    ranked = []
+    for name, min_id, ids in candidates:
+        tracked = bool(receivable(name, ids))
+        ranked.append(((_match_tier(name, q), not tracked, len(name), name),
+                       {"id": min_id, "name": name, "tracked": tracked}))
+    ranked.sort(key=lambda r: r[0])
+    return [entry for _, entry in ranked[:limit]]
 
 
 @events_bp.get("/events/meta/items")
 async def search_items():
     """Item-name autocomplete for the task form (session required).
 
-    Tasks match drops by exact item name, so offering catalog-only variants
-    (charged weapons, ornamented kits, …) creates tasks no drop can ever
-    complete. Results are therefore restricted to names actually seen in the
-    drop history (``player_item_hourly_totals``). If nothing matching the
-    query has ever dropped — e.g. a brand-new boss item — the raw catalog
-    matches are returned instead, flagged ``tracked: false`` so the picker
-    can warn the configurator."""
+    Tasks match drops by exact item name, so catalog-only variants (charged
+    weapons, ornamented kits, …) create tasks no drop can ever complete.
+    Each result therefore carries ``tracked``: true when the name has been
+    seen in the drop history (``player_item_hourly_totals``) or is a pet
+    (pets are recorded on their own path, never in the item rollup). Tracked
+    names rank first within each relevance tier; the rest follow flagged
+    ``tracked: false`` so the picker can warn the configurator."""
     current_user_id()
     q = (request.args.get("q") or "").strip()
     if len(q) < 2:
@@ -6184,23 +6216,28 @@ async def search_items():
 
     def _search():
         from db import ItemList, PlayerItemHourlyTotals
+        from utils.osrs_pets import PET_DISPLAY_BY_NORM, _norm
 
         with db_session() as s:
             # Stack/noted variants share a name — collapse to one row per name,
             # keeping every id so the receivable probe covers all variants.
+            # Prefix matches first so a long query's best hits aren't cut by
+            # the candidate cap in favour of shorter mid-word matches.
+            prefix_first = case((ItemList.item_name.ilike(f"{q}%"), 0), else_=1)
             candidates = (
                 s.query(ItemList.item_name,
                         func.min(ItemList.item_id),
                         func.group_concat(ItemList.item_id))
                 .filter(ItemList.item_name.ilike(f"%{q}%"), ItemList.noted.is_(False))
                 .group_by(ItemList.item_name)
-                .order_by(func.length(ItemList.item_name), ItemList.item_name)
+                .order_by(prefix_first, func.length(ItemList.item_name), ItemList.item_name)
                 .limit(_SEARCH_CANDIDATE_NAMES)
                 .all()
             )
-            tracked, untracked = [], []
-            for name, min_id, ids_csv in candidates:
-                ids = [int(x) for x in str(ids_csv or min_id).split(",")]
+
+            def receivable(name, ids):
+                if _norm(name) in PET_DISPLAY_BY_NORM:
+                    return True
                 # Indexed probe, LIMIT'd so common items never scan rollups.
                 seen = (
                     s.query(PlayerItemHourlyTotals.item_id)
@@ -6208,13 +6245,14 @@ async def search_items():
                     .limit(RECEIVABLE_MIN_ROWS)
                     .all()
                 )
-                bucket = tracked if len(seen) >= RECEIVABLE_MIN_ROWS else untracked
-                bucket.append({"id": min_id, "name": name})
-                if len(tracked) >= 15:
-                    break
-            if tracked:
-                return [{**e, "tracked": True} for e in tracked[:15]]
-            return [{**e, "tracked": False} for e in untracked[:15]]
+                return len(seen) >= RECEIVABLE_MIN_ROWS
+
+            return _rank_item_matches(
+                q,
+                [(name, min_id, [int(x) for x in str(ids_csv or min_id).split(",")])
+                 for name, min_id, ids_csv in candidates],
+                receivable,
+            )
 
     return jsonify(await asyncio.to_thread(_search))
 
@@ -6409,7 +6447,8 @@ async def search_npcs():
                 s.query(func.min(NpcList.npc_id), NpcList.npc_name)
                 .filter(NpcList.npc_name.ilike(f"%{q}%"))
                 .group_by(NpcList.npc_name)
-                .order_by(func.length(NpcList.npc_name), NpcList.npc_name)
+                .order_by(case((NpcList.npc_name.ilike(f"{q}%"), 0), else_=1),
+                          func.length(NpcList.npc_name), NpcList.npc_name)
                 .limit(15)
                 .all()
             )
