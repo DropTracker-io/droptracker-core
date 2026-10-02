@@ -812,7 +812,9 @@ async def delete_point_list_entry(group_id: int, entry_id: int):
 OPERATIONS = ("multiply", "add", "set", "add_per_member")
 TARGET_TYPES = ("any", "item", "npc")
 MAX_BOOSTS_PER_GROUP = 100
-MAX_BOOST_TARGETS = 25
+# Not a product limit — boosts can target as many items/NPCs as a group wants.
+# Only a sanity bound on one request (target_ids is a TEXT JSON array, ~64KB).
+MAX_BOOST_TARGETS = 2000
 
 
 def _boost_target_id_list(row) -> list[int]:
