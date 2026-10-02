@@ -257,9 +257,20 @@ def pick_best_account(accounts: Iterable[tuple[int, int]]) -> Optional[int]:
     return ranked[0] if ranked else None
 
 
-def user_is_entitled(*, opted_in: bool, had_prior: bool) -> bool:
-    """One unsolicited recap, then only on request."""
-    return opted_in or not had_prior
+def user_is_entitled(
+    *, opted_in: bool, had_prior: bool, never_ping: bool = False
+) -> bool:
+    """One unsolicited recap, then only on request.
+
+    ``never_ping`` is a mention setting ("don't @ me on my drop posts"), and
+    the settings panel derives it whenever both ping toggles are off. It is
+    reason enough to skip the unsolicited card, but never to override an
+    explicit ``dm_monthly_recap`` opt-in: that silently dropped everyone who
+    had turned their pings off, both superadmins included.
+    """
+    if opted_in:
+        return True
+    return not had_prior and not never_ping
 
 
 def parse_account_preference(value: Optional[str]) -> tuple[str, list[int]]:
@@ -749,10 +760,11 @@ def collect_user_targets(
     by_user: dict[int, dict] = {}
     for player_id, player_name, user_id, discord_id, never_ping in rows:
         player_id, user_id = int(player_id), int(user_id)
-        if player_id in hidden or int(never_ping or 0):
+        if player_id in hidden:
             continue
         entry = by_user.setdefault(
-            user_id, {"discord_id": str(discord_id), "players": {}}
+            user_id,
+            {"discord_id": str(discord_id), "players": {}, "never_ping": bool(int(never_ping or 0))},
         )
         entry["players"][player_id] = player_name
 
@@ -774,7 +786,9 @@ def collect_user_targets(
         if not ignore_due and not is_due(now, period, tz_name, DEFAULT_POST_HOUR):
             continue
         if not user_is_entitled(
-            opted_in=opted_in, had_prior=user_had_prior_recap(session, user_id)
+            opted_in=opted_in,
+            had_prior=user_had_prior_recap(session, user_id),
+            never_ping=entry["never_ping"],
         ):
             continue
         # Their choice, from the settings page: one named account, all of them,

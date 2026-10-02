@@ -392,6 +392,17 @@ class TestEntitlement:
     def test_opting_in_before_the_first_card_is_harmless(self):
         assert delivery.user_is_entitled(opted_in=True, had_prior=False)
 
+    def test_never_ping_skips_the_unsolicited_card(self):
+        assert not delivery.user_is_entitled(
+            opted_in=False, had_prior=False, never_ping=True
+        )
+
+    def test_explicit_opt_in_beats_never_ping(self):
+        # Pings off is a mention setting; it must not cancel a recap the
+        # user asked for on the settings page.
+        assert delivery.user_is_entitled(opted_in=True, had_prior=True, never_ping=True)
+        assert delivery.user_is_entitled(opted_in=True, had_prior=False, never_ping=True)
+
 
 class TestMessages:
     def _target(self, **kw):
