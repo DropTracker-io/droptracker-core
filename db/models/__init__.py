@@ -498,3 +498,9 @@ __all__ = [
     "COMPETITION_EVENT_KINDS",
     "COMPETITION_SOURCE_MODES",
 ]
+
+# Every new items / npc_list row writes an audit_log entry saying where it came
+# from (process, caller, submission). See utils/catalog_audit.py.
+from utils.catalog_audit import register as _register_catalog_audit
+
+_register_catalog_audit(ItemList, NpcList, AuditLog.__table__)

@@ -937,7 +937,12 @@ async def manual_submit():
         return auth_error
     import time
     req_start = time.perf_counter()
-    return await _process_manual_submission(req_start)
+    from utils.catalog_audit import catalog_origin
+
+    # Items/NPCs a manual submission adds are attributed to it (filled in
+    # once the request is parsed; see _process_manual_submission).
+    with catalog_origin({"path": "manual-submit"}):
+        return await _process_manual_submission(req_start)
 
 
 async def _process_manual_submission(req_start):
@@ -1100,7 +1105,12 @@ async def _process_manual_submission(req_start):
                 # Continue without image - don't fail the submission
         
         response = None
-        
+
+        from utils.catalog_audit import annotate_origin, submission_context
+        annotate_origin(submission_context(
+            {**data, "type": submission_type, "guid": processed_data.get("guid")},
+            "manual-submit"))
+
         try:
             match submission_type:
                 case "drop":

@@ -168,10 +168,17 @@ async def dispatch_submission(submission_type, data, session, *, world_type=MAIN
     transaction boundary.
     """
     from data import submissions
+    from utils.catalog_audit import catalog_origin, submission_context
 
     norm_type = normalize_submission_type(submission_type)
     world = normalize_world_type(world_type)
 
+    # Any items/npc_list row this submission creates is attributed to it.
+    with catalog_origin(submission_context(data, f"dispatch:{norm_type}")):
+        return await _run_processor(submissions, norm_type, world, data, session)
+
+
+async def _run_processor(submissions, norm_type, world, data, session):
     if world == SEASONAL_WORLD_TYPE:
         if norm_type not in SEASONAL_TYPES:
             return None
