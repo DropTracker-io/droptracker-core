@@ -114,6 +114,60 @@ SPECS = {
         "developer", "🛠️", False, 1263916346954088558,
         "\"clan setup\" button on the help/info panels",
     ),
+    # Game icons for the clan chat bridge (services/clan_chat_bridge.py). No
+    # guild emoji ever existed for these: the art is the wiki's own icon,
+    # upscaled nearest-neighbour into static/emoji/<key>.png.
+    "combat_achievement": Spec(
+        "combat_achievement", "⚔️", False, None,
+        "combat achievement broadcasts in the clan chat bridge",
+    ),
+    "quest": Spec(
+        "quest", "📜", False, None,
+        "quest completion broadcasts in the clan chat bridge",
+    ),
+    "collection_log": Spec(
+        "collection_log", "📖", False, None,
+        "collection log broadcasts in the clan chat bridge",
+    ),
+    "diary": Spec(
+        "diary", "🗺️", False, None,
+        "achievement diary broadcasts in the clan chat bridge",
+    ),
+    "stats": Spec(
+        "stats", "📈", False, None,
+        "level-up and XP milestone broadcasts in the clan chat bridge",
+    ),
+    "skull": Spec(
+        "skull", "☠️", False, None,
+        "PvP kill/death broadcasts in the clan chat bridge",
+    ),
+    # Account-type chat badges, shown before a player's name in the bridge the
+    # way the game shows them in the chat box. The fallbacks exist only to
+    # satisfy validate_specs: the bridge reads these through seeded_emoji(),
+    # because no Unicode glyph means "hardcore group ironman".
+    "ironman": Spec(
+        "ironman", "⚙️", False, None, "ironman badge before a clan chat bridge name",
+    ),
+    "hardcore_ironman": Spec(
+        "hardcore_ironman", "⚙️", False, None,
+        "hardcore ironman badge before a clan chat bridge name",
+    ),
+    "ultimate_ironman": Spec(
+        "ultimate_ironman", "⚙️", False, None,
+        "ultimate ironman badge before a clan chat bridge name",
+    ),
+    "group_ironman": Spec(
+        "group_ironman", "⚙️", False, None,
+        "group ironman badge before a clan chat bridge name",
+    ),
+    "hardcore_group_ironman": Spec(
+        "hardcore_group_ironman", "⚙️", False, None,
+        "hardcore group ironman badge before a clan chat bridge name",
+    ),
+    "unranked_group_ironman": Spec(
+        "unranked_group_ironman", "⚙️", False, None,
+        "unranked group ironman badge before a clan chat bridge name",
+    ),
 }
 
 _state = {"profile": os.getenv("DROPTRACKER_EMOJI_PROFILE") or DEFAULT_PROFILE}
@@ -174,6 +228,18 @@ def emoji(key: str, profile: str = None) -> str:
         return ""
     entry = load_map().get(profile or current_profile(), {}).get(key)
     return entry or spec.fallback
+
+
+def seeded_emoji(key: str, profile: str = None) -> Optional[str]:
+    """The uploaded app emoji for ``key``, or None — never the Unicode fallback.
+
+    For glyphs that are decoration rather than meaning (the account-type badges
+    in the clan chat bridge): when the art is missing the right rendering is
+    nothing at all, not a stand-in that reads as something else.
+    """
+    if key not in SPECS:
+        return None
+    return load_map().get(profile or current_profile(), {}).get(key) or None
 
 
 def partial_emoji(key: str, profile: str = None):

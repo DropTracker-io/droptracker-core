@@ -57,8 +57,10 @@ MIRROR_MESSAGE_MAX_CHARS = 1800
 #: before broadcasts were mirrored carry no kind and read as chat.
 MIRROR_KIND_CHAT = "chat"
 MIRROR_KIND_BROADCAST = "broadcast"
-#: Marks a system broadcast in the mirror channel — the game colours these
-#: differently in the chat box; Discord gets a prefix instead of a fake sender.
+#: Leads a system broadcast in the mirror channel when nothing better fits —
+#: the game colours these differently in the chat box; Discord gets an icon
+#: instead of a fake sender. Recognized kinds get their own icon instead (see
+#: :func:`broadcast_icon`).
 BROADCAST_PREFIX = "📢"
 
 #: Per-relayer, per-minute ceiling on lines staged for the bridge. ONE budget
@@ -69,9 +71,9 @@ BRIDGE_RATE_LIMIT_PER_MIN = 120
 
 #: Multi-relayer collapse window for broadcasts. Same 60s as the chat window
 #: (``clan_chat.CHAT_SEEN_TTL_SECONDS``, which was widened to match after the
-#: shorter one leaked duplicates): an identical line inside a minute is the
-#: same event seen by a second relayer, and for a Jagex-generated broadcast it
-#: can be nothing else.
+#: shorter one leaked duplicates): an identical line inside a minute from a
+#: SECOND relayer is the same event seen twice. A repeat from the same relayer
+#: is a second event and still mirrors (:func:`claim_relayed_line`).
 BROADCAST_SEEN_TTL_SECONDS = 60
 
 #: Presence heartbeat per clan: ZSET of player_ids scored by last-poll time.
@@ -326,16 +328,43 @@ def relayer_within_rate_limit(relayer_player_id) -> bool:
         return True
 
 
-def _claim_first_sight(key: str, ttl: int) -> bool:
-    """``SET NX`` claim so only the first relayer's copy of a line is staged.
-    Fails open: a doubled display line beats a missing one."""
+#: Atomic per-relayer occurrence count for one line. Each relayer's client
+#: sees every copy of a line exactly once, so the number of copies that really
+#: happened is the HIGHEST count any single relayer has reported — a line is
+#: shown when its relayer's count passes the number already shown. The window
+#: is fixed from the first sighting (EXPIRE only on create), matching the old
+#: SET NX EX claim it replaces.
+_CLAIM_LINE_LUA = """
+local n = redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
+if redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+local shown = tonumber(redis.call('HGET', KEYS[1], '_shown') or '0')
+if n > shown then
+  redis.call('HSET', KEYS[1], '_shown', n)
+  return 1
+end
+return 0
+"""
+
+
+def claim_relayed_line(key: str, relayer_id, ttl: int) -> bool:
+    """Whether this relayer's copy of a line should be staged.
+
+    The dedupe exists to collapse the copies N clanmates' plugins relay of ONE
+    line — never to second-guess a single client. So the same relayer sending
+    the same text twice ("gz", then "gz" again) means it really appeared
+    twice and both copies mirror, while a second relayer's copies only mirror
+    once they outnumber what has already been shown. Fails open: a doubled
+    display line beats a missing one."""
     try:
-        return bool(_redis().set(key, "1", nx=True, ex=ttl))
+        return bool(_redis().eval(_CLAIM_LINE_LUA, 1, key, str(relayer_id), int(ttl)))
     except Exception:
         return True
 
 
-def _stage_entry(group_id, channel_id, kind, message, sender=None, rank=None) -> bool:
+def _stage_entry(group_id, channel_id, kind, message, sender=None, rank=None,
+                 extra: dict = None) -> bool:
     from utils.mirror_context import is_mirrored_submission
 
     # Mirrored production traffic never reaches the bridge. Staged entries are
@@ -355,6 +384,11 @@ def _stage_entry(group_id, channel_id, kind, message, sender=None, rank=None) ->
         if kind == MIRROR_KIND_CHAT:
             entry["sender"] = str(sender or "")[:32]
             entry["rank"] = str(rank or "")[:32] or None
+        # Render hints (broadcast kind, item/NPC for the icon, account type for
+        # the name badge). Optional: entries staged without them render plain.
+        for field, value in (extra or {}).items():
+            if value:
+                entry[field] = str(value)[:64]
         client = _redis()
         pipe = client.pipeline()
         pipe.rpush(MIRROR_LIST_KEY, json.dumps(entry))
@@ -368,19 +402,115 @@ def _stage_entry(group_id, channel_id, kind, message, sender=None, rank=None) ->
         return False
 
 
-def push_mirror_line(group_id, channel_id, sender, message, rank=None) -> bool:
+def push_mirror_line(group_id, channel_id, sender, message, rank=None,
+                     account_type=None) -> bool:
     """Stage one game chat line (player speech) for the batched channel send."""
     return _stage_entry(
-        group_id, channel_id, MIRROR_KIND_CHAT, message, sender=sender, rank=rank
+        group_id, channel_id, MIRROR_KIND_CHAT, message, sender=sender, rank=rank,
+        extra={"account_type": account_type},
     )
 
 
-def push_mirror_broadcast(group_id, channel_id, message) -> bool:
-    """Stage one clan system broadcast (no speaker) for the batched send."""
-    return _stage_entry(group_id, channel_id, MIRROR_KIND_BROADCAST, message)
+def push_mirror_broadcast(group_id, channel_id, message, extra: dict = None) -> bool:
+    """Stage one clan system broadcast (no speaker) for the batched send.
+    ``extra`` carries the render hints from :func:`broadcast_hints`."""
+    return _stage_entry(group_id, channel_id, MIRROR_KIND_BROADCAST, message, extra=extra)
 
 
-def mirror_broadcast_line(session, relayer_player_id, clan_slug: str, message: str) -> int:
+# ── broadcast icons ─────────────────────────────────────────────────────────
+
+#: Shapes the tracking parser (``utils.clan_broadcasts``) does not classify,
+#: recognized here for the icon only. Kept out of the parser on purpose: a
+#: parser match changes what TRACKING does with a line, and a display tweak
+#: must never start recording e.g. ToA personal bests.
+_DISPLAY_KIND_PATTERNS = (
+    (re.compile(r" achieved a new .*personal best", re.IGNORECASE), "personal_best"),
+    (re.compile(r" tier of rewards from Combat Achievements", re.IGNORECASE),
+     "combat_achievement"),
+    (re.compile(r" has opened a loot key", re.IGNORECASE), "pk"),
+    (re.compile(r" has (?:been )?defeated ", re.IGNORECASE), "pk"),
+    (re.compile(r" has completed a quest", re.IGNORECASE), "quest"),
+)
+
+#: Broadcast kind → app emoji key (utils/app_emojis.SPECS).
+_KIND_APP_EMOJI = {
+    "collection_log": "collection_log",
+    "combat_achievement": "combat_achievement",
+    "quest": "quest",
+    "diary": "diary",
+    "level_up": "stats",
+    "xp_milestone": "stats",
+    "pk": "skull",
+}
+
+#: Broadcast kind → plain Unicode icon, for kinds with no game art of their own.
+_KIND_UNICODE = {
+    "item_drop": "💰",
+    "raid_drop": "💰",
+    "clue_item": "💰",
+    "pet": "🐾",
+    "personal_best": "⏱️",
+    "coffer_donation": "💰",
+    "coffer_withdrawal": "💰",
+    "invite": "🤝",
+    "left_clan": "🚪",
+    "expelled": "🚫",
+}
+
+
+def broadcast_hints(parsed, message: str) -> dict:
+    """Render hints staged with a broadcast: which icon family it gets and the
+    item/NPC name that picks a game glyph. ``parsed`` is the tracking parser's
+    result (or None); unparsed lines fall back to the display-only shapes."""
+    kind = getattr(parsed, "kind", None)
+    if not kind:
+        for pattern, display_kind in _DISPLAY_KIND_PATTERNS:
+            if pattern.search(str(message or "")):
+                kind = display_kind
+                break
+    hints = {"bkind": kind, "subject": getattr(parsed, "player", None)}
+    if kind in ("item_drop", "raid_drop", "clue_item", "pet"):
+        hints["item"] = getattr(parsed, "item_name", None)
+    elif kind == "personal_best" and parsed is not None:
+        hints["npc"] = (getattr(parsed, "extra", None) or {}).get("activity")
+    elif kind in ("coffer_donation", "coffer_withdrawal"):
+        hints["item"] = "Coins"
+    return hints
+
+
+def broadcast_icon(entry: dict) -> str:
+    """The leading icon for a staged broadcast.
+
+    Drops and pets use the item's own glyph, personal bests the boss's, when
+    the game emoji set has one (it is a budget, not a catalogue); otherwise
+    each kind has its own icon, and only lines nobody recognizes keep the
+    generic :data:`BROADCAST_PREFIX`."""
+    from utils import app_emojis, game_emojis
+
+    kind = entry.get("bkind")
+    glyph = None
+    if entry.get("item"):
+        glyph = game_emojis.emoji_for_item(entry["item"])
+    elif entry.get("npc"):
+        glyph = game_emojis.emoji_for_npc(entry["npc"])
+    if glyph:
+        return glyph
+    if kind in _KIND_APP_EMOJI:
+        return app_emojis.emoji(_KIND_APP_EMOJI[kind])
+    return _KIND_UNICODE.get(kind) or BROADCAST_PREFIX
+
+
+def account_badge(account_type) -> str:
+    """The game-mode badge drawn before a name, or "" for none/unseeded."""
+    if not account_type or account_type == "normal":
+        return ""
+    from utils import app_emojis
+
+    return app_emojis.seeded_emoji(str(account_type)) or ""
+
+
+def mirror_broadcast_line(session, relayer_player_id, clan_slug: str, message: str,
+                          parsed=None) -> int:
     """Mirror one ``CLAN_MESSAGE`` broadcast into this clan's bridge channels.
 
     Called from the clan_broadcast intake ahead of every tracking decision —
@@ -399,15 +529,33 @@ def mirror_broadcast_line(session, relayer_player_id, clan_slug: str, message: s
     if not bound:
         return 0
     digest = hashlib.sha256(str(message).encode("utf-8")).hexdigest()[:24]
+    hints = broadcast_hints(parsed, message)
     staged = 0
     for group_id, channel_id in bound.items():
-        if not _claim_first_sight(
-            f"chatbridge:seenbc:{group_id}:{digest}", BROADCAST_SEEN_TTL_SECONDS
+        if not claim_relayed_line(
+            f"chatbridge:seenbc:{group_id}:{digest}",
+            relayer_player_id,
+            BROADCAST_SEEN_TTL_SECONDS,
         ):
             continue
-        if push_mirror_broadcast(group_id, channel_id, message):
+        extra = dict(hints)
+        if hints.get("subject"):
+            extra["account_type"] = _subject_account_type(
+                session, group_id, hints["subject"]
+            )
+        if push_mirror_broadcast(group_id, channel_id, message, extra=extra):
             staged += 1
     return staged
+
+
+def _subject_account_type(session, group_id, player_name):
+    """Badge lookup for a broadcast's subject; cosmetic, so never raises."""
+    try:
+        from utils.clan_ranks import account_type_for_group_member
+
+        return account_type_for_group_member(session, group_id, player_name)
+    except Exception:
+        return None
 
 
 def drain_mirror_lines(limit: int = MIRROR_DRAIN_BATCH) -> list:
@@ -435,14 +583,16 @@ def batch_lines_by_channel(entries: list, rank_emojis: dict = None) -> dict:
 
     Lines arrive pre-sanitized relative to the GAME (client markup already
     meaningless) but not Discord: sender and message are markdown-escaped
-    here, at the last moment before send. Broadcasts have no sender and render
-    with :data:`BROADCAST_PREFIX` instead, keeping system lines visually apart
-    from player speech the way the game's chat colours do.
+    here, at the last moment before send. Broadcasts have no sender and lead
+    with a kind icon instead (:func:`broadcast_icon`), in plain text: the
+    missing bold ``Name:`` already says nobody typed it, the way the game's
+    chat colours do.
 
-    A staged rank renders as a leading app emoji (``:rank: **Name**: msg``) —
-    the emoji token is built after escaping, never through it, or the escaper
-    would break the ``<:name:id>`` syntax. Pass ``rank_emojis`` to keep this
-    pure; the default loads the seeded map."""
+    A staged rank renders as a leading app emoji (``:rank: **Name**: msg``),
+    then the account-type badge, as the game draws them — the emoji tokens
+    are built after escaping, never through it, or the escaper would break
+    the ``<:name:id>`` syntax. Pass ``rank_emojis`` to keep this pure; the
+    default loads the seeded map."""
     from utils.rank_emojis import emoji_for_rank
 
     batches: dict = {}
@@ -451,15 +601,19 @@ def batch_lines_by_channel(entries: list, rank_emojis: dict = None) -> dict:
         message = sanitize_game_line(entry.get("message"))
         if not channel_id or not message:
             continue
+        badge = account_badge(entry.get("account_type"))
         if str(entry.get("kind") or MIRROR_KIND_CHAT) == MIRROR_KIND_BROADCAST:
-            batches.setdefault(channel_id, []).append(f"{BROADCAST_PREFIX} *{message}*")
+            subject = sanitize_game_line(entry.get("subject"))
+            if badge and subject and message.startswith(subject):
+                message = f"{badge} {message}"
+            batches.setdefault(channel_id, []).append(f"{broadcast_icon(entry)} {message}")
             continue
         sender = sanitize_game_line(entry.get("sender"))
         if not sender:
             continue
-        icon = emoji_for_rank(entry.get("rank"), rank_emojis)
+        icons = [i for i in (emoji_for_rank(entry.get("rank"), rank_emojis), badge) if i]
         line = f"**{sender}**: {message}"
-        batches.setdefault(channel_id, []).append(f"{icon} {line}" if icon else line)
+        batches.setdefault(channel_id, []).append(" ".join(icons + [line]))
     return batches
 
 

@@ -601,7 +601,9 @@ def _mirror_to_bridge(
         if not relayer_within_rate_limit(relayer.player_id):
             _stat("bridge_rate_limited")
             return 0
-        mirrored = mirror_broadcast_line(session, relayer.player_id, clan_slug, message)
+        mirrored = mirror_broadcast_line(
+            session, relayer.player_id, clan_slug, message, parsed=parsed
+        )
         if mirrored:
             _stat("bridge_mirrored")
         return mirrored
@@ -609,6 +611,18 @@ def _mirror_to_bridge(
         # Mirroring is display; never let it cost the tracking record.
         print(f"[ClanBroadcast] bridge mirror failed: {e}")
         return 0
+
+
+def _is_bridge_only(broadcast_data) -> bool:
+    """Whether the relayer sent this line for the chat bridge alone.
+
+    Before 6.0.17 the plugin forwarded ``CLAN_MESSAGE`` lines only when its
+    "Clan Broadcasts" (tracking) toggle was on, so a clan whose relayers had
+    only "Relay clan chat to Discord" enabled got player speech and no
+    broadcasts at all — a clanmate's Twisted bow never reached the channel.
+    Newer builds relay broadcasts whenever either toggle is on and mark the
+    bridge-only ones with this flag. Embed fields arrive as strings."""
+    return str(broadcast_data.get("bridge_only") or "").strip().lower() in ("1", "true", "yes")
 
 
 async def _images_gate_blocks(session, group_id) -> bool:
@@ -706,6 +720,14 @@ async def clan_broadcast_processor(
     parsed = parse_broadcast(message)
     mirrored = _mirror_to_bridge(session, relayer, clan_slug, message, parsed, _deferred_replay)
     mirror_note = f" (mirrored to {mirrored} bridge channel(s))" if mirrored else ""
+
+    if _is_bridge_only(broadcast_data):
+        # Relayed by a member who turned on the chat bridge but not broadcast
+        # tracking (plugin 6.0.17+). The bridge is a view of the whole chat
+        # box, so the plugin forwards broadcasts for it either way — but this
+        # relayer never opted into feeding records, so the line stops here.
+        _stat("bridge_only")
+        return SubmissionResponse(True, f"Broadcast relayed for the chat bridge only{mirror_note}")
 
     if parsed is None:
         _stat("unparsed")

@@ -602,7 +602,7 @@ def _fake_bridge_module(monkeypatch, allowed=True, staged=2, boom=False):
 
     module = types.ModuleType("services.clan_chat_bridge")
 
-    def mirror(_session, _pid, _slug, _message):
+    def mirror(_session, _pid, _slug, _message, parsed=None):
         if boom:
             raise RuntimeError("redis down")
         return staged
@@ -665,3 +665,28 @@ def test_unparsed_lines_still_mirror_so_a_rewording_cannot_mute_the_bridge(monke
     _fake_bridge_module(monkeypatch, staged=2)
     assert cb.parse_broadcast("Brand new Jagex wording") is None
     assert _mirror(parsed=None) == 2
+
+
+# ── bridge-only relays (plugin 6.0.17+) ─────────────────────────────────────
+
+def test_bridge_only_relay_mirrors_but_never_reaches_tracking(mirror_spy, monkeypatch):
+    """A relayer with only the chat bridge on forwards broadcasts so the
+    channel shows them (the missing-Twisted-bow bug), but never opted into
+    feeding records: the line stops right after the mirror."""
+    def tracking_must_not_run(*_a, **_k):
+        raise AssertionError("bridge-only line reached tracking")
+
+    monkeypatch.setattr(cb, "_bound_group_ids", tracking_must_not_run)
+    line = "Loggy received special loot from a raid: Twisted bow."
+    payload = dict(_payload(line), bridge_only="true")
+    response = asyncio.run(cb.clan_broadcast_processor(payload))
+    assert [call[1] for call in mirror_spy.calls] == [line]
+    assert response.success is True
+    assert "bridge only" in response.message
+
+
+def test_flag_absent_or_false_keeps_the_tracking_path():
+    assert cb._is_bridge_only({}) is False
+    assert cb._is_bridge_only({"bridge_only": "false"}) is False
+    assert cb._is_bridge_only({"bridge_only": "true"}) is True
+    assert cb._is_bridge_only({"bridge_only": True}) is True

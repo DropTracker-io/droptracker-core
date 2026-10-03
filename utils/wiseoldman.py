@@ -656,6 +656,10 @@ async def fetch_group_members(
             # already carries one — the clan chat bridge renders it as a rank
             # emoji because the plugin's relay doesn't send a rank of its own.
             rank_map = {}
+            # Same idea for the account-type badge: WOM's player type rides on
+            # every membership too (the bridge's fallback for clanmates whose
+            # mode no plugin has reported).
+            type_map = {}
             for member in members:
                 player_obj = getattr(member, "player", None)
                 player_name = getattr(player_obj, "display_name", None)
@@ -663,6 +667,9 @@ async def fetch_group_members(
                 member_role = getattr(member, "role", None)
                 if player_name and member_role is not None:
                     rank_map[player_name] = getattr(member_role, "value", member_role)
+                player_type = getattr(player_obj, "type", None)
+                if player_name and player_type is not None:
+                    type_map[player_name] = getattr(player_type, "value", player_type)
                 existing_player = session.query(Player).filter(Player.wom_id == member_wom_id).first()
                 if existing_player is not None and _is_wom_import_stub(existing_player):
                     # A stub is holding an id that belongs to a real, plugin-authed
@@ -751,6 +758,10 @@ async def fetch_group_members(
                 from utils.clan_ranks import store_group_ranks
 
                 store_group_ranks(wom_group_id, rank_map)
+            if type_map:
+                from utils.clan_ranks import store_group_account_types
+
+                store_group_account_types(wom_group_id, type_map)
             await _store_group_cache(wom_group_id, user_list)
             return user_list
         else:

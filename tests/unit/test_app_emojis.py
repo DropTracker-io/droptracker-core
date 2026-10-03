@@ -181,3 +181,13 @@ class TestMapFile:
                     f"{profile}.{key} is {'animated' if SPECS[key].animated else 'static'} "
                     f"in SPECS but mapped as {reference}"
                 )
+
+
+def test_seeded_emoji_never_returns_the_unicode_fallback(monkeypatch):
+    from utils import app_emojis
+
+    monkeypatch.setattr(app_emojis, "load_map", lambda path=None: {"core": {"ironman": "<:ironman:1>"}})
+    assert app_emojis.seeded_emoji("ironman", "core") == "<:ironman:1>"
+    assert app_emojis.seeded_emoji("group_ironman", "core") is None
+    assert app_emojis.seeded_emoji("ironman", "hof") is None
+    assert app_emojis.seeded_emoji("not_a_key", "core") is None

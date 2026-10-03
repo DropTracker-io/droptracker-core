@@ -27,7 +27,6 @@ from .common import (
     ensure_player_and_auth,
     select_session_and_flag,
 )
-from .raid_dedupe import _bundle_is_new
 
 #: Multi-relayer collapse window, matching
 #: ``clan_chat_bridge.BROADCAST_SEEN_TTL_SECONDS``. It started at 10s on the
@@ -41,10 +40,12 @@ from .raid_dedupe import _bundle_is_new
 #: structural — the plugin's 2s flush debounce drifts out of phase per client,
 #: and its retry backoff alone reaches 15s by the fourth attempt.
 #:
-#: The false-suppression cost stays small because the digest is
-#: ``sender|message``: it takes the SAME player repeating the SAME text inside
-#: the window. In that sample only 4 repeat pairs fell between 45s and 120s;
-#: genuine human repeats sat at 120s and beyond.
+#: The window no longer suppresses genuine repeats at all: the claim counts
+#: copies PER RELAYER (``clan_chat_bridge.claim_relayed_line``), and one
+#: client sees each real line exactly once, so a player saying "gz" twice is
+#: two copies from every relayer and mirrors twice. Only a second relayer's
+#: copies of lines already shown are dropped. (It used to be a plain SET NX on
+#: ``sender|message``, which ate every repeat inside the minute.)
 CHAT_SEEN_TTL_SECONDS = 60
 
 #: Defensive caps (the client caps chat at ~80 visible chars already).
@@ -87,6 +88,7 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
 
     from services.clan_chat_bridge import (
         bridge_bound_groups,
+        claim_relayed_line,
         push_mirror_line,
         relayer_within_rate_limit,
     )
@@ -105,19 +107,35 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
         )
 
     digest = hashlib.sha256(f"{sender}|{message}".encode("utf-8")).hexdigest()[:24]
-    if not _bundle_is_new(f"chatbridge:seen:{slug}:{digest}", CHAT_SEEN_TTL_SECONDS):
+    if not claim_relayed_line(
+        f"chatbridge:seen:{slug}:{digest}", relayer.player_id, CHAT_SEEN_TTL_SECONDS
+    ):
         return SubmissionResponse(True, "Line already relayed by another clanmate")
 
     # Rank drives the mirror line's rank emoji. The plugin's relay doesn't send
     # one today, so it falls back to the clan's WOM roles (cached by the hourly
     # membership sync) — resolved per group, since a player can hold different
     # ranks in two clans. Purely cosmetic: None just renders a plain line.
-    from utils.clan_ranks import rank_for_group_member
+    # The account-type badge works the same way: the relaying plugin reads it
+    # off the chat line (6.0.17+), else the sender's state sync or WOM type.
+    from utils.account_types import VALID_ACCOUNT_TYPES
+    from utils.clan_ranks import account_type_for_group_member, rank_for_group_member
 
     plugin_rank = chat_data.get("rank")
+    plugin_type = str(chat_data.get("account_type") or "").strip().lower()
+    if plugin_type not in VALID_ACCOUNT_TYPES:
+        plugin_type = None
     staged = 0
     for group_id, channel_id in bound.items():
         rank = plugin_rank or rank_for_group_member(session, group_id, sender)
-        if push_mirror_line(group_id, channel_id, sender, message, rank=rank):
+        account_type = plugin_type
+        if account_type is None:
+            try:
+                account_type = account_type_for_group_member(session, group_id, sender)
+            except Exception:
+                account_type = None
+        if push_mirror_line(
+            group_id, channel_id, sender, message, rank=rank, account_type=account_type
+        ):
             staged += 1
     return SubmissionResponse(True, f"Clan chat line staged for {staged} group(s)")
