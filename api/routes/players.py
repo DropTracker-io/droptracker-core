@@ -437,6 +437,13 @@ def _group_configs_for(player_name, acc_hash, db_session):
         group_id = group_id_row[0]
         group = db_session.query(Group).filter(Group.group_id == group_id).first()
         current_group_configs = db_session.query(GroupConfiguration).filter(GroupConfiguration.group_id == group_id).all()
+        # Clan chat relay opt-in (utils/clan_relay_gate.py): the plugin relays
+        # its clan's chat only when one of these says that clan is opted in.
+        from utils.clan_relay_gate import group_relay_fields
+        relay_fields = group_relay_fields({
+            c.config_key: (c.config_value if c.config_value not in (None, "") else c.long_value)
+            for c in current_group_configs
+        })
         group_configs.append({"group_id": group_id,
                             "group_name": group.group_name,
                             "min_value": get_config_value(current_group_configs, "minimum_value_to_notify"),
@@ -464,7 +471,8 @@ def _group_configs_for(player_name, acc_hash, db_session):
                             "send_stacked_items": get_config_value(current_group_configs, "send_stacks_of_items"),
                             "minimum_ca_tier": get_config_value(current_group_configs, "min_ca_tier_to_notify"),
                             "track_xp_events": xp_events_active,
-                            "active_event": event_active})
+                            "active_event": event_active,
+                            **relay_fields})
     return group_configs
 
 

@@ -731,7 +731,11 @@ async def clan_broadcast_processor(
 
     if parsed is None:
         _stat("unparsed")
-        _log_unknown_broadcast(message)
+        # Sampled to the journal only for a relayer whose own group opted
+        # this clan in: relaying is on by default, and lines from clans that
+        # never opted in must not be written anywhere (utils/clan_relay_gate).
+        if mirrored or _bound_group_ids(session, relayer, clan_slug):
+            _log_unknown_broadcast(message)
         return SubmissionResponse(mirrored > 0, f"Unrecognized clan broadcast{mirror_note}")
     _stat(f"kind:{parsed.kind}")
     if parsed.kind not in TRACKED_KINDS or not parsed.player:

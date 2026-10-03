@@ -254,6 +254,20 @@ async def _save_upload_to_temp(image_file) -> tuple:
         return None, filename, content_type
 
 
+def _looks_like_clan_relay(webhook_payload) -> bool:
+    """Cheap pre-check (no DB) so only clan relay payloads pay for the gate."""
+    try:
+        for embed in webhook_payload.get("embeds") or []:
+            for field in embed.get("fields") or []:
+                if field.get("name") == "type" and str(field.get("value")).strip().lower() in (
+                    "clan_chat", "clan_broadcast"
+                ):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 async def _queue_webhook_request():
     """Fast-path acceptor: validate, save image to temp, push to Redis queue, return 200."""
     import json
@@ -277,6 +291,16 @@ async def _queue_webhook_request():
 
         if not webhook_payload:
             return jsonify({"error": "Empty payload"}), 400
+
+        # Clan chat relaying is on by default in the plugin, so chat from a
+        # clan no group opted in is dropped here, before it is queued or
+        # spooled anywhere (utils/clan_relay_gate.py). 200 so the client does
+        # not retry it. The table read is cached and kept off the event loop.
+        if _looks_like_clan_relay(webhook_payload):
+            from utils.clan_relay_gate import relay_payload_unwanted
+
+            if await asyncio.to_thread(relay_payload_unwanted, webhook_payload):
+                return jsonify({"message": "Ignored: no group uses clan chat for this clan"}), 200
 
         files = await request.files
         image_file = files.get("file") if files else None
