@@ -119,6 +119,28 @@ def team_board_url(path: str) -> Optional[str]:
     return image_path_to_url(path)
 
 
+def team_board_info(event, team) -> Optional[dict]:
+    """``{"url", "updated_at"}`` for a team's generated board, or None.
+
+    What the website's team page shows. Reads only the PNG on disk (no flag
+    check: the web API process doesn't carry ``EVENT_TEAM_LOOTBOARDS``, and a
+    file existing is the proof the feature rendered it). Still applies the
+    visibility gate, so a board left over from before an event went private
+    is never advertised. ``url`` carries ``?v={mtime}`` so the hourly
+    re-render isn't hidden behind a cached image."""
+    if not event_is_public(event):
+        return None
+    path = team_board_path(board_group_id(event, team), event.id, team.id)
+    try:
+        mtime = int(os.path.getmtime(path))
+    except OSError:
+        return None
+    url = team_board_url(path)
+    if not url:
+        return None
+    return {"url": f"{url}?v={mtime}", "updated_at": mtime}
+
+
 # --------------------------------------------------------------------------- #
 # Throttle
 # --------------------------------------------------------------------------- #

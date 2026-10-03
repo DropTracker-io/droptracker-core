@@ -71,6 +71,50 @@ class TestPaths:
         assert tb.team_board_url("/tmp/nope.png") is None
 
 
+class TestTeamBoardInfo:
+    """What the website's team page is handed (``lootboard`` on the payload)."""
+
+    @pytest.fixture
+    def img_root(self, tmp_path, monkeypatch):
+        from lootboard import timeframe
+
+        monkeypatch.setattr(tb, "IMG_ROOT", str(tmp_path))
+        monkeypatch.setattr(timeframe, "_IMG_FS_PREFIX", str(tmp_path))
+        return tmp_path
+
+    def _write(self, mtime=1_700_000_000):
+        path = tb.team_board_path(7, 42, 3)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"png")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_none_until_a_board_is_rendered(self, img_root):
+        assert tb.team_board_info(_event(), _team()) is None
+
+    def test_url_is_cache_busted_by_mtime(self, img_root):
+        self._write(mtime=1_700_000_000)
+        info = tb.team_board_info(_event(), _team())
+        assert info == {
+            "url": "https://www.droptracker.io/img/clans/7/events/42/teams/3"
+                   "/lootboard.png?v=1700000000",
+            "updated_at": 1_700_000_000,
+        }
+
+    def test_private_event_never_advertises_a_leftover_board(self, img_root):
+        # A board drawn while the event was public stays on disk; going
+        # private must hide it from the page even though the file exists.
+        self._write()
+        assert tb.team_board_info(_event(visibility="private"), _team()) is None
+
+    def test_needs_no_feature_flag(self, img_root, monkeypatch):
+        # The web API process never carries EVENT_TEAM_LOOTBOARDS.
+        monkeypatch.delenv(tb.FEATURE_FLAG_ENV, raising=False)
+        self._write()
+        assert tb.team_board_info(_event(), _team()) is not None
+
+
 # --------------------------------------------------------------------------- #
 # Throttle
 # --------------------------------------------------------------------------- #

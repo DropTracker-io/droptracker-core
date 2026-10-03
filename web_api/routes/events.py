@@ -1322,6 +1322,17 @@ _TEAMS_ITEM_PREVIEW = 8       # per-team item strip on the Teams tab rollup
 _TEAMS_TOP_CONTRIBUTORS = 3   # contributor chips per team on the Teams tab
 
 
+def _team_lootboard(ev, team) -> dict | None:
+    """The team's event lootboard image for the team page. Fails open to None
+    — the board is a bonus panel, never worth a 500."""
+    try:
+        from lootboard.team_boards import team_board_info
+
+        return team_board_info(ev, team)
+    except Exception:
+        return None
+
+
 @events_bp.get("/events/<int:event_id>/teams/<int:team_id>")
 async def get_event_team(event_id: int, team_id: int):
     """Public team detail: standings context, roster with per-member
@@ -1601,6 +1612,9 @@ async def get_event_team(event_id: int, team_id: int):
                     "member_count": len(members),
                     "coins": int(getattr(team, "coins", 0) or 0),
                     "loot_gp": money(sum(loot_gp.values())),
+                    # The team's generated event lootboard PNG (t63), when
+                    # one has been rendered. None = not public / not yet drawn.
+                    "lootboard": _team_lootboard(ev, team),
                     **({
                         "ehb_hours": round(
                             sum(float((e or {}).get("ehb_hours") or 0.0)
