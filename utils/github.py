@@ -266,6 +266,16 @@ class GithubPagesUpdater:
                 out.append(("content/server_loot_npc_ids.txt", content))
         except Exception as e:
             print(f"Failed to build server_loot_npc_ids.txt content: {e}")
+        try:
+            # Clans opted into clan chat relaying, for webhook-only plugin
+            # clients that may not ask our API (utils/clan_relay_gate.py).
+            from utils.clan_relay_gate import published_clan_list
+
+            content = published_clan_list()
+            if content:
+                out.append(("content/clan_chat_clans.txt", content))
+        except Exception as e:
+            print(f"Failed to build clan_chat_clans.txt content: {e}")
         return out
 
     def _update_github_pages(self, publish_urls=None):

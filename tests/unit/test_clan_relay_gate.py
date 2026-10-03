@@ -68,3 +68,30 @@ def test_acceptor_precheck_spots_relay_payloads_only():
     assert webhook._looks_like_clan_relay(_payload({"type": "CLAN_BROADCAST"})) is True
     assert webhook._looks_like_clan_relay(_payload({"type": "drop"})) is False
     assert webhook._looks_like_clan_relay({}) is False
+
+
+# ── published list for webhook-only clients ─────────────────────────────────
+
+def test_published_list_is_hashed_sorted_and_flagged():
+    flags = {"the best clan": (True, False), "trackers": (False, True), "both": (True, True)}
+    content = gate.published_clan_list(flags)
+    lines = content.strip().split("\n")
+    assert lines == sorted(lines)
+    assert f"{gate.published_hash('the best clan')}:b" in lines
+    assert f"{gate.published_hash('trackers')}:t" in lines
+    assert f"{gate.published_hash('both')}:bt" in lines
+    assert "the best clan" not in content  # names never published in clear
+    # Deterministic: the publisher change-gates on the blob sha.
+    assert gate.published_clan_list(dict(reversed(list(flags.items())))) == content
+
+
+def test_published_hash_is_sha256_prefix():
+    import hashlib
+
+    assert gate.published_hash("realists") == hashlib.sha256(b"realists").hexdigest()[:16]
+
+
+def test_published_list_empty_vs_unreadable(monkeypatch):
+    assert gate.published_clan_list({}) == "none\n"
+    monkeypatch.setattr(gate, "opted_in_clan_flags", lambda session=None: None)
+    assert gate.published_clan_list() == ""

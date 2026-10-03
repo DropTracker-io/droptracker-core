@@ -9,9 +9,13 @@ opted that clan in, through ``clan_chat_bridge_enabled`` plus a bridge channel
 
 Three layers enforce it, so no single bug stores a stranger's chat:
 
-1. the plugin only relays when one of the player's OWN groups opted their
-   current clan in (``/load_config`` / ``/panel_data`` expose
-   :func:`group_relay_fields`), so a non-participant's client sends nothing;
+1. the plugin only relays from an opted-in clan, so a non-participant's
+   client sends nothing. API clients check their OWN groups
+   (``/load_config`` / ``/panel_data`` expose :func:`group_relay_fields`).
+   Webhook-only clients may not contact our hosts at all, so they check the
+   clan against ``content/clan_chat_clans.txt`` on GitHub Pages
+   (:func:`published_clan_list`, hashed so the public file does not list
+   clan names);
 2. the intake acceptor drops relay payloads for clans no group opted in
    (:func:`relay_payload_unwanted`), before anything is queued;
 3. the processors bind each line to the RELAYER's own opted-in groups and
@@ -33,7 +37,11 @@ CLAN_NAME_KEY = "clan_chat_name"
 RELAY_TYPES = frozenset({"clan_chat", "clan_broadcast"})
 
 _CACHE_TTL_SECONDS = 60
-_cache = {"expires": 0.0, "slugs": None}
+_cache = {"expires": 0.0, "flags": None}
+
+#: Hex chars of sha256(slug) published per clan. 64 bits: collision-free at
+#: any realistic clan count, and short enough to keep the file small.
+PUBLISHED_HASH_CHARS = 16
 
 
 def _truthy(value) -> bool:
@@ -80,9 +88,16 @@ def opted_in_clan_slugs(session=None) -> frozenset:
 
     Returns None when the set could not be read, so the caller can fail open
     (the processors still discard unbound lines)."""
+    flags = opted_in_clan_flags(session)
+    return None if flags is None else frozenset(flags)
+
+
+def opted_in_clan_flags(session=None) -> dict:
+    """``{slug: (bridge, tracking)}`` across every group naming that clan,
+    cached for 60s; None when unreadable."""
     now = time.monotonic()
-    if _cache["slugs"] is not None and now < _cache["expires"]:
-        return _cache["slugs"]
+    if _cache["flags"] is not None and now < _cache["expires"]:
+        return _cache["flags"]
     owns = session is None
     try:
         from db.models import GroupConfiguration, Session
@@ -106,17 +121,18 @@ def opted_in_clan_slugs(session=None) -> frozenset:
         by_group: dict = {}
         for gid, key, value, long_value in rows:
             by_group.setdefault(gid, {})[key] = value if value not in (None, "") else long_value
-        slugs = set()
+        flags: dict = {}
         for values in by_group.values():
             bridge, tracking, slug = relay_flags(values)
             if slug and (bridge or tracking):
-                slugs.add(slug)
-        _cache["slugs"] = frozenset(slugs)
+                had_bridge, had_tracking = flags.get(slug, (False, False))
+                flags[slug] = (had_bridge or bridge, had_tracking or tracking)
+        _cache["flags"] = flags
         _cache["expires"] = now + _CACHE_TTL_SECONDS
-        return _cache["slugs"]
+        return _cache["flags"]
     except Exception as e:
         print(f"[ClanRelayGate] opted-in clan refresh failed: {e}")
-        return _cache["slugs"]
+        return _cache["flags"]
     finally:
         if owns and session is not None:
             try:
@@ -152,3 +168,30 @@ def relay_payload_unwanted(webhook_payload, opted_in=None) -> bool:
     from utils.clan_broadcasts import clan_slug
 
     return not any(clan_slug(f.get("clan_name") or "") in opted_in for f in parsed)
+
+
+def published_hash(slug: str) -> str:
+    """The published key for one clan slug (plugin: ClanRelayService)."""
+    import hashlib
+
+    return hashlib.sha256(slug.encode("utf-8")).hexdigest()[:PUBLISHED_HASH_CHARS]
+
+
+def published_clan_list(flags: dict = None) -> str:
+    """``content/clan_chat_clans.txt``: one ``<hash>:<b|t|bt>`` line per
+    opted-in clan, sorted so an unchanged set publishes byte-identically (the
+    publisher change-gates on the blob sha). ``b`` = a group bridges the
+    clan's chat to Discord, ``t`` = a group tracks its broadcasts. Returns ""
+    when the set is unreadable, which the publisher treats as "skip"; an
+    empty set publishes ``none`` so the plugin can tell it from a failed
+    fetch."""
+    if flags is None:
+        flags = opted_in_clan_flags()
+    if flags is None:
+        return ""
+    lines = []
+    for slug, (bridge, tracking) in flags.items():
+        mode = ("b" if bridge else "") + ("t" if tracking else "")
+        if mode:
+            lines.append(f"{published_hash(slug)}:{mode}")
+    return "\n".join(sorted(lines)) + "\n" if lines else "none\n"
