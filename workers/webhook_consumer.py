@@ -78,6 +78,17 @@ def _record_status_metrics(processed_data) -> None:
         pass
 
 
+def _record_plugin_version(processed_data) -> None:
+    """Note which plugin version this account is running, for the tester
+    pages (utils/plugin_versions.py). Fail-open; never blocks processing."""
+    try:
+        from utils.plugin_versions import record_sighting
+
+        record_sighting(processed_data)
+    except Exception:
+        pass
+
+
 def _status_heartbeat(r) -> None:
     try:
         from services.status_metrics import HEARTBEAT_CONSUMER, heartbeat
@@ -409,6 +420,7 @@ async def _process_submission(entry_bytes: bytes) -> None:
                     _mark_submission_outcome(processed_data, norm_type, response)
                     _push_plugin_notice(db_session, processed_data, response)
                     _record_status_metrics(processed_data)
+                    _record_plugin_version(processed_data)
                     continue
                 elif world_type != "main":
                     continue
@@ -436,6 +448,7 @@ async def _process_submission(entry_bytes: bytes) -> None:
                 _mark_submission_outcome(processed_data, norm_type, response)
                 _push_plugin_notice(db_session, processed_data, response)
                 _record_status_metrics(processed_data)
+                _record_plugin_version(processed_data)
             except Exception:
                 db_session.rollback()
                 raise

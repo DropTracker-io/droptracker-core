@@ -1,18 +1,19 @@
 """Discord reporting for the background automation jobs.
 
-Two jobs make unattended changes: the GitHub Pages publisher
-(``data/player_total_updater.py`` -> ``utils/github.py``) and the WOM fork
-sync (``scripts/sync_wom_fork.py``). This module posts what they did to the
-automation channel, and maintains a single status message — always the
-bottom-most message in the channel — showing both jobs' last result and next
-run time.
+Three jobs make unattended changes: the GitHub Pages publisher
+(``data/player_total_updater.py`` -> ``utils/github.py``), the WOM fork
+sync (``scripts/sync_wom_fork.py``) and the tester client build (a private
+build job, reporting through ``scripts/tester_build_report.py``). This module
+posts what they did to the automation channel, and maintains a single status
+message — always the bottom-most message in the channel — showing every
+job's last result and next run time.
 
 Refresh policy: when a run changed nothing, the status message is edited in
 place. When a change (or failure) message was just posted above it, the old
 status message is deleted and a fresh one posted below, so the status card
 never gets buried.
 
-Both producers run in different processes under different users, so shared
+The producers run in different processes under different users, so shared
 state lives in Redis and delivery is gateway-less REST
 (:class:`utils.discord_rest.DiscordRest`). Everything here is best-effort: a
 report must never fail the job that called it, and must never stall the
@@ -34,6 +35,7 @@ from typing import Optional
 JOBS = {
     "github_pages": "GitHub Pages publisher",
     "wom_sync": "WOM fork sync",
+    "tester_build": "Tester client build",
 }
 
 STATUS_MESSAGE_KEY = "automation:updates:status_message_id"
@@ -41,6 +43,7 @@ JOB_STATE_KEY = "automation:updates:job:{job}"
 LOCK_KEY = "automation:updates:lock"
 
 WOM_SYNC_TIMER = "droptracker-wom-sync.timer"
+TESTER_BUILD_TIMER = "droptracker-tester-build.timer"
 GITHUB_GATE_KEY = "github_update_last_timestamp"
 GITHUB_GATE_MINUTES = 30
 
@@ -162,16 +165,49 @@ def _parse_next_elapse(value: str) -> Optional[int]:
         return None
 
 
-def next_run_wom() -> Optional[int]:
+def _parse_list_timers(raw: str, unit: str) -> Optional[int]:
+    """``systemctl list-timers <unit> --output=json`` output to epoch. Its
+    ``next`` is wall-clock microseconds whichever way the timer is defined;
+    absent or zero when the timer is not scheduled."""
+    try:
+        for row in json.loads(raw or "[]"):
+            if isinstance(row, dict) and row.get("unit") == unit and row.get("next"):
+                return int(row["next"]) // 1_000_000
+    except Exception:
+        pass
+    return None
+
+
+def next_run_timer(unit: str) -> Optional[int]:
+    """Epoch of a systemd timer's next run, or None (no such unit, timer
+    inactive, no systemctl)."""
     try:
         out = subprocess.run(
-            ["systemctl", "show", WOM_SYNC_TIMER,
+            ["systemctl", "show", unit,
              "-p", "NextElapseUSecRealtime", "--value"],
             capture_output=True, text=True, timeout=5,
         )
-        return _parse_next_elapse(out.stdout)
+        epoch = _parse_next_elapse(out.stdout)
+        if epoch is not None:
+            return epoch
+        # That property is only set for calendar timers (OnCalendar=). One
+        # that runs "every N minutes after the last run" has only a monotonic
+        # next elapse, which list-timers converts to wall-clock time.
+        out = subprocess.run(
+            ["systemctl", "list-timers", unit, "--all", "--output=json", "--no-pager"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return _parse_list_timers(out.stdout, unit)
     except Exception:
         return None
+
+
+def next_run_wom() -> Optional[int]:
+    return next_run_timer(WOM_SYNC_TIMER)
+
+
+def next_run_tester_build() -> Optional[int]:
+    return next_run_timer(TESTER_BUILD_TIMER)
 
 
 def build_change_embed(job: str, ok: bool, changes: list, error: Optional[str] = None,
@@ -242,7 +278,18 @@ async def _refresh_status(rest, conn, channel_id: str, *, reposted_above: bool) 
     message was just posted above it (or it doesn't exist), in which case the
     old one is deleted and a fresh one posted so status stays bottom-most."""
     states = {job: _load_job_state(job) for job in JOBS}
-    next_runs = {"github_pages": next_run_github(), "wom_sync": next_run_wom()}
+    # The timer lookups shell out to systemctl. Off the loop and side by side:
+    # the publisher reports from inside the player-updates loop, whose
+    # watchdog a slow systemd must not be able to starve.
+    wom_next, build_next = await asyncio.gather(
+        asyncio.to_thread(next_run_wom),
+        asyncio.to_thread(next_run_tester_build),
+    )
+    next_runs = {
+        "github_pages": next_run_github(),
+        "wom_sync": wom_next,
+        "tester_build": build_next,
+    }
     embed = build_status_embed(states, next_runs)
     payload = {"embeds": [embed]}
 

@@ -643,6 +643,7 @@ async def process_submission_with_session(submission_type, embed_data):
             pass
         if success:
             _record_status_metrics(embed_data)
+            _record_plugin_version(embed_data)
         return result
         
     except Exception as e:
@@ -822,6 +823,17 @@ def _record_status_metrics(embed_data) -> None:
                 embed_data.get("acc_hash"),
             ),
         )
+    except Exception:
+        pass
+
+
+def _record_plugin_version(embed_data) -> None:
+    """Note which plugin version this account is running, for the tester
+    pages (utils/plugin_versions.py). Fail-open, like the counters above."""
+    try:
+        from utils.plugin_versions import record_sighting
+
+        record_sighting(embed_data)
     except Exception:
         pass
 

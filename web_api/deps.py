@@ -474,6 +474,39 @@ def assert_support_staff(user: Optional[User]) -> None:
         )
 
 
+#: Same value as services.tester_roster.BUG_TESTER_BADGE_KEY (a test pins it).
+#: Not imported: ``services`` is lazy-imported in this package. And not
+#: db.entitlements' env-overridable key either. That one decides who gets
+#: complimentary supporter perks, which can be pointed at another badge
+#: without changing who is a tester.
+BUG_TESTER_BADGE_KEY = "bug_tester_helper"
+
+
+def is_bug_tester(s, user_id: int) -> bool:
+    """Whether any of the user's accounts holds an active Bug Tester badge.
+
+    The same rule as services.tester_roster and services.discord_roles: an
+    active award of the badge, and the badge itself still active.
+    """
+    if user_id is None:
+        return False
+    from db.models import Badge, Player, PlayerBadge
+
+    held = (
+        s.query(PlayerBadge.id)
+        .join(Badge, Badge.badge_id == PlayerBadge.badge_id)
+        .join(Player, Player.player_id == PlayerBadge.player_id)
+        .filter(
+            Player.user_id == user_id,
+            Badge.key == BUG_TESTER_BADGE_KEY,
+            Badge.active == True,  # noqa: E712
+            PlayerBadge.status == "active",
+        )
+        .first()
+    )
+    return held is not None
+
+
 def assert_group_entitlement(
     s,
     user_id: int,

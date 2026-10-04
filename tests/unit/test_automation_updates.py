@@ -1,5 +1,5 @@
 """Unit tests for services/automation_updates.py — the Discord reporter for
-the GitHub Pages publisher and the WOM fork sync.
+the GitHub Pages publisher, the WOM fork sync and the tester client build.
 
 Loaded standalone via importlib (conftest stubs services/utils.redis); Discord
 and Redis are replaced with in-memory fakes, so these tests pin the refresh
@@ -99,6 +99,66 @@ class TestParseNextElapse:
         assert au._parse_next_elapse("not a timestamp at all") is None
 
 
+class TestNextRunTimer:
+    """Timers are read two ways: a calendar timer has a wall-clock next run,
+    one that repeats after its last run only has it in list-timers."""
+
+    WOM_ROW = ('[{"next":1791048680052010,"left":1791048680052010,"last":1791046855384642,'
+               '"passed":1791046855384642,"unit":"droptracker-wom-sync.timer",'
+               '"activates":"droptracker-wom-sync.service"}]')
+
+    def _systemctl(self, monkeypatch, show="", listed="[]"):
+        calls = []
+
+        def _run(cmd, **kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(stdout=show if cmd[1] == "show" else listed)
+
+        monkeypatch.setattr(au.subprocess, "run", _run)
+        return calls
+
+    def test_list_timers_row(self):
+        assert au._parse_list_timers(self.WOM_ROW, "droptracker-wom-sync.timer") == 1791048680
+        assert au._parse_list_timers(self.WOM_ROW, "some-other.timer") is None
+
+    def test_list_timers_unscheduled_missing_or_garbage(self):
+        unit = "droptracker-tester-build.timer"
+        assert au._parse_list_timers("[]", unit) is None
+        assert au._parse_list_timers("", unit) is None
+        assert au._parse_list_timers(None, unit) is None
+        assert au._parse_list_timers("0 timers listed.", unit) is None
+        assert au._parse_list_timers('[{"unit":"%s","next":0}]' % unit, unit) is None
+        assert au._parse_list_timers('[{"unit":"%s","next":null}]' % unit, unit) is None
+        assert au._parse_list_timers('{"unit":"%s"}' % unit, unit) is None
+
+    def test_calendar_timer_needs_one_call(self, monkeypatch):
+        calls = self._systemctl(monkeypatch, show="Wed 2026-08-05 14:32:23 UTC\n")
+        assert au.next_run_timer("droptracker-wom-sync.timer") == 1785940343
+        assert len(calls) == 1 and calls[0][2] == "droptracker-wom-sync.timer"
+
+    def test_repeating_timer_falls_back_to_list_timers(self, monkeypatch):
+        calls = self._systemctl(monkeypatch, show="\n", listed=self.WOM_ROW)
+        assert au.next_run_timer("droptracker-wom-sync.timer") == 1791048680
+        assert [c[1] for c in calls] == ["show", "list-timers"]
+
+    def test_unknown_unit(self, monkeypatch):
+        self._systemctl(monkeypatch, show="\n", listed="[]")
+        assert au.next_run_timer("droptracker-tester-build.timer") is None
+
+    def test_no_systemctl(self, monkeypatch):
+        def _missing(cmd, **kwargs):
+            raise FileNotFoundError("systemctl")
+
+        monkeypatch.setattr(au.subprocess, "run", _missing)
+        assert au.next_run_timer("droptracker-wom-sync.timer") is None
+
+    def test_each_job_reads_its_own_timer(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(au, "next_run_timer", lambda unit: asked.append(unit) or 7)
+        assert au.next_run_wom() == 7 and au.next_run_tester_build() == 7
+        assert asked == ["droptracker-wom-sync.timer", "droptracker-tester-build.timer"]
+
+
 class TestNextRunGithub:
     def test_gate_plus_thirty_minutes(self, monkeypatch):
         conn = FakeRedis()
@@ -132,29 +192,45 @@ class TestEmbedBuilders:
         embed = au.build_change_embed("wom_sync", True, ["x" * 500] * 20, now=1000)
         assert len(embed["description"]) <= au._DESCRIPTION_LIMIT + 1
 
-    def test_status_embed_lists_both_jobs(self):
+    def test_change_embed_names_the_tester_build(self):
+        embed = au.build_change_embed(
+            "tester_build", True, ["Published 6.0.19-2cd73be-rl1.13.1 (plugin)"], now=1000)
+        assert embed["title"] == "Tester client build — changes applied"
+
+    def test_status_embed_lists_every_job(self):
         states = {
             "github_pages": {"ts": 900, "ok": True, "changes": 3},
             "wom_sync": {"ts": 800, "ok": True, "changes": 0},
+            "tester_build": {"ts": 700, "ok": True, "changes": 4},
         }
-        embed = au.build_status_embed(states, {"github_pages": 2000, "wom_sync": 3000}, now=1000)
+        next_runs = {"github_pages": 2000, "wom_sync": 3000, "tester_build": 4000}
+        embed = au.build_status_embed(states, next_runs, now=1000)
         names = [f["name"] for f in embed["fields"]]
-        assert names == ["GitHub Pages publisher", "WOM fork sync"]
-        gh_field, wom_field = embed["fields"]
+        assert names == ["GitHub Pages publisher", "WOM fork sync", "Tester client build"]
+        gh_field, wom_field, build_field = embed["fields"]
         assert "<t:900:R>" in gh_field["value"]
         assert "3 change(s)" in gh_field["value"]
         assert "<t:2000:R>" in gh_field["value"]
         assert "no changes" in wom_field["value"]
+        assert "<t:700:R>" in build_field["value"]
+        assert "<t:4000:R>" in build_field["value"]
         assert embed["color"] == au.COLOR_NEUTRAL
 
     def test_status_embed_failure_and_unknowns(self):
         states = {"github_pages": {"ts": 900, "ok": False, "error": "kaput\ndetail"}}
         embed = au.build_status_embed(states, {}, now=1000)
-        gh_field, wom_field = embed["fields"]
+        gh_field, wom_field, build_field = embed["fields"]
         assert "FAILED: kaput" in gh_field["value"]
         assert "detail" not in gh_field["value"]  # first line only
         assert "never" in wom_field["value"]
+        assert "never" in build_field["value"]
         assert "Next run: unknown" in gh_field["value"]
+        assert embed["color"] == au.COLOR_FAIL
+
+    def test_a_failed_tester_build_turns_the_card_red(self):
+        states = {"tester_build": {"ts": 900, "ok": False, "error": "gradle exited 1"}}
+        embed = au.build_status_embed(states, {}, now=1000)
+        assert "FAILED: gradle exited 1" in embed["fields"][2]["value"]
         assert embed["color"] == au.COLOR_FAIL
 
 
@@ -163,6 +239,7 @@ class TestRefreshStatus:
         monkeypatch.setattr(au, "_redis", lambda: conn)
         monkeypatch.setattr(au, "next_run_github", lambda: 2000)
         monkeypatch.setattr(au, "next_run_wom", lambda: 3000)
+        monkeypatch.setattr(au, "next_run_tester_build", lambda: 4000)
 
     def test_first_run_posts_and_stores(self, monkeypatch):
         conn, rest = FakeRedis(), FakeRest()
@@ -170,6 +247,15 @@ class TestRefreshStatus:
         asyncio.run(au._refresh_status(rest, conn, "42", reposted_above=False))
         assert len(rest.posts) == 1
         assert conn.store[au.STATUS_MESSAGE_KEY] == "101"
+
+    def test_status_card_carries_every_jobs_next_run(self, monkeypatch):
+        conn, rest = FakeRedis(), FakeRest()
+        self._setup(monkeypatch, conn)
+        asyncio.run(au._refresh_status(rest, conn, "42", reposted_above=False))
+        fields = rest.posts[0][1]["embeds"][0]["fields"]
+        assert [f["name"] for f in fields] == list(au.JOBS.values())
+        assert ["<t:2000:R>" in fields[0]["value"], "<t:3000:R>" in fields[1]["value"],
+                "<t:4000:R>" in fields[2]["value"]] == [True, True, True]
 
     def test_quiet_run_edits_in_place(self, monkeypatch):
         conn, rest = FakeRedis(), FakeRest()
@@ -229,6 +315,7 @@ class TestReportRun:
         monkeypatch.setattr(au, "_redis", lambda: conn)
         monkeypatch.setattr(au, "next_run_github", lambda: 2000)
         monkeypatch.setattr(au, "next_run_wom", lambda: 3000)
+        monkeypatch.setattr(au, "next_run_tester_build", lambda: 4000)
         monkeypatch.setitem(
             sys.modules, "utils.discord_rest", SimpleNamespace(DiscordRest=FakeRest)
         )
@@ -244,6 +331,17 @@ class TestReportRun:
         state = json.loads(conn.store[au.JOB_STATE_KEY.format(job="wom_sync")])
         assert state["ok"] is True and state["changes"] == 1
         assert au.LOCK_KEY not in conn.store  # lock released
+
+    def test_tester_build_reports_like_the_other_jobs(self, monkeypatch):
+        conn = FakeRedis()
+        self._setup(monkeypatch, conn)
+        asyncio.run(au.report_run("tester_build", ok=False, changes=[], error="gradle exited 1"))
+        rest = FakeRest.instances[0]
+        failure = rest.posts[0][1]["embeds"][0]
+        assert failure["title"] == "Tester client build — FAILED"
+        assert "gradle exited 1" in failure["description"]
+        state = json.loads(conn.store[au.JOB_STATE_KEY.format(job="tester_build")])
+        assert state["ok"] is False and state["error"] == "gradle exited 1"
 
     def test_no_changes_edits_status_only(self, monkeypatch):
         conn = FakeRedis()
