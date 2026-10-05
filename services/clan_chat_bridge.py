@@ -34,6 +34,15 @@ rendered sender carries :data:`ECHO_SENDER_MARKER`; the plugin drops those
 before relaying and this intake drops them again (:func:`is_bridge_echo`),
 which is what covers the installs still running a pre-fix build.
 
+Bots and webhooks are ignored on the Discord side unless the group
+allowlisted that exact ID (``clan_chat_bridge_allowed_bots``, empty by
+default; /clan-bridge or the website). Our own application can never be
+admitted (:func:`allowed_bot_source`), so the first guard holds. An allowed
+bot that is itself a game→Discord bridge would re-post our clan's chat, so
+every staged line is also remembered per channel for a few minutes and a bot
+message repeating one is dropped (:func:`is_recent_mirror_echo`), with a
+per-bot rate limit as the backstop.
+
 Module-level imports are stdlib-only (same contract as
 plugin_notifications.py): anything Redis/DB/Discord-shaped is lazy-imported
 inside functions so unit tests can load this file under the conftest stubs.
@@ -89,6 +98,27 @@ DISCORD_TO_GAME_MAX_CHARS = 200
 BRIDGE_ENABLED_KEY = "clan_chat_bridge_enabled"
 BRIDGE_CHANNEL_KEY = "channel_id_clan_chat_bridge"
 CLAN_NAME_KEY = "clan_chat_name"
+#: Comma-separated Discord IDs (bot users or webhooks) whose messages in the
+#: bridge channel are relayed into the game like a member's. Empty, the
+#: default, means bots are ignored as they always were. Bridge channel only.
+BRIDGE_ALLOWED_BOTS_KEY = "clan_chat_bridge_allowed_bots"
+#: 10 snowflakes plus commas stays inside config_value's VARCHAR(255).
+MAX_ALLOWED_BOTS = 10
+
+#: Per-bot, per-channel ceiling on lines relayed into the game. Far above any
+#: announcement bot; mainly a circuit breaker for two bridges feeding each
+#: other (see :func:`is_recent_mirror_echo`).
+BOT_RELAY_RATE_LIMIT_PER_MIN = 30
+
+#: What the bot recently mirrored game→Discord into each bridge channel, so an
+#: allowlisted bot that re-posts the same clan chat (another game bridge) is
+#: not relayed back into the game as a duplicate line.
+RECENT_MIRROR_KEY_TEMPLATE = "chatbridge:recent:{channel_id}"
+RECENT_MIRROR_KEEP = 60
+RECENT_MIRROR_TTL_SECONDS = 180
+#: A remembered line shorter than this only matches a bot message EXACTLY —
+#: "gz" must not swallow every bot post that contains "gz".
+RECENT_MIRROR_MIN_SUBSTRING = 12
 
 #: Envelope type for Discord→game lines (plugin renders as a clan-chat-styled
 #: local message; unaware builds drop it).
@@ -233,10 +263,61 @@ def bridge_bound_groups(session, relayer_player_id, clan_slug: str) -> dict:
     return bound
 
 
+_SNOWFLAKE_RE = re.compile(r"^\d{15,21}$")
+
+
+def parse_allowed_bots(raw) -> frozenset:
+    """The stored allowlist → a set of snowflake strings. Separators are
+    forgiving (commas, spaces, newlines); anything that isn't a snowflake is
+    dropped rather than failing the whole list."""
+    ids = []
+    for part in re.split(r"[\s,]+", str(raw or "")):
+        part = part.strip().strip("<@!&>")
+        if _SNOWFLAKE_RE.match(part) and part not in ids:
+            ids.append(part)
+    return frozenset(ids[:MAX_ALLOWED_BOTS])
+
+
+def add_allowed_bot(raw, bot_id) -> tuple:
+    """(new stored value, status) after adding ``bot_id`` to the stored
+    allowlist. status: ``added`` | ``already`` | ``full`` | ``invalid``."""
+    bot_id = str(bot_id or "").strip()
+    current = allowed_bot_list(raw)
+    if not _SNOWFLAKE_RE.match(bot_id):
+        return ",".join(current), "invalid"
+    if bot_id in current:
+        return ",".join(current), "already"
+    if len(current) >= MAX_ALLOWED_BOTS:
+        return ",".join(current), "full"
+    return ",".join(current + [bot_id]), "added"
+
+
+def remove_allowed_bot(raw, bot_id) -> tuple:
+    """(new stored value, removed?) after taking ``bot_id`` off the list."""
+    bot_id = str(bot_id or "").strip()
+    current = allowed_bot_list(raw)
+    if bot_id not in current:
+        return ",".join(current), False
+    return ",".join(i for i in current if i != bot_id), True
+
+
+def allowed_bot_list(raw) -> list:
+    """The stored list in its saved order (parse_allowed_bots is a set)."""
+    allowed = parse_allowed_bots(raw)
+    seen: list = []
+    for part in re.split(r"[\s,]+", str(raw or "")):
+        part = part.strip().strip("<@!&>")
+        if part in allowed and part not in seen:
+            seen.append(part)
+    return seen
+
+
 def bridge_channel_map(session=None) -> dict:
-    """``{channel_id_str: (group_id, clan_slug)}`` for every fully-configured
-    bridge — the MessageCreate listener's routing table. Cached in-process for
-    60s so the listener never queries per message.
+    """``{channel_id_str: (group_id, clan_slug, allowed_bot_ids)}`` for every
+    fully-configured bridge — the MessageCreate listener's routing table.
+    ``allowed_bot_ids`` is a frozenset of bot-user / webhook IDs (usually
+    empty). Cached in-process for 60s so the listener never queries per
+    message.
 
     Owns a fresh session unless the caller supplies one. The listener calls this
     under ``asyncio.to_thread``, and a *scoped* session touched on a pool worker
@@ -264,17 +345,19 @@ def bridge_channel_map(session=None) -> dict:
                 GroupConfiguration.group_id,
                 GroupConfiguration.config_key,
                 GroupConfiguration.config_value,
+                GroupConfiguration.long_value,
             )
             .filter(
                 GroupConfiguration.config_key.in_(
-                    [BRIDGE_ENABLED_KEY, BRIDGE_CHANNEL_KEY, CLAN_NAME_KEY]
+                    [BRIDGE_ENABLED_KEY, BRIDGE_CHANNEL_KEY, CLAN_NAME_KEY,
+                     BRIDGE_ALLOWED_BOTS_KEY]
                 )
             )
             .all()
         )
         by_group: dict = {}
-        for gid, key, value in rows:
-            by_group.setdefault(gid, {})[key] = value
+        for gid, key, value, long_value in rows:
+            by_group.setdefault(gid, {})[key] = value or long_value
         for gid, values in by_group.items():
             if str(values.get(BRIDGE_ENABLED_KEY) or "").strip().lower() not in ("1", "true"):
                 continue
@@ -282,7 +365,8 @@ def bridge_channel_map(session=None) -> dict:
             slug = make_slug(values.get(CLAN_NAME_KEY) or "")
             if channel_id in ("", "0") or not slug:
                 continue
-            result[channel_id] = (gid, slug)
+            allowed = parse_allowed_bots(values.get(BRIDGE_ALLOWED_BOTS_KEY))
+            result[channel_id] = (gid, slug, allowed)
         _channel_map_cache["map"] = result
         _channel_map_cache["expires"] = now + _CHANNEL_MAP_TTL_SECONDS
     except Exception as e:
@@ -395,11 +479,99 @@ def _stage_entry(group_id, channel_id, kind, message, sender=None, rank=None,
         # Backstop cap: if the bot is down, don't grow unbounded — old chatter
         # is worthless once it's minutes stale.
         pipe.ltrim(MIRROR_LIST_KEY, -2000, -1)
+        _remember_mirrored(pipe, entry)
         pipe.execute()
         return True
     except Exception as e:
         print(f"[ClanChatBridge] mirror push failed: {e}")
         return False
+
+
+_NORMALIZE_STRIP_RE = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_for_echo(text) -> str:
+    """Case, markup and punctuation folded away: lowercase alphanumeric words
+    separated by single spaces. Both sides of the echo check go through this,
+    so another bridge's "**Bob**: hi!" and our "Bob hi" compare equal."""
+    text = _ANGLE_TAG_RE.sub(" ", _CUSTOM_EMOJI_RE.sub(r"\1", str(text or "")))
+    return _NORMALIZE_STRIP_RE.sub(" ", text.lower()).strip()
+
+
+def _echo_forms(entry: dict) -> list:
+    """The normalized texts an echo of this staged entry could look like."""
+    message = normalize_for_echo(entry.get("message"))
+    if not message:
+        return []
+    forms = [message]
+    sender = normalize_for_echo(entry.get("sender"))
+    if sender:
+        forms.append(f"{sender} {message}")
+    return forms
+
+
+def _remember_mirrored(pipe, entry: dict) -> None:
+    """Queue (on the staging pipeline) this entry's echo forms onto its
+    channel's short recent-mirror list. Read only for allowlisted bots."""
+    forms = _echo_forms(entry)
+    if not forms:
+        return
+    key = RECENT_MIRROR_KEY_TEMPLATE.format(channel_id=entry["channel_id"])
+    pipe.lpush(key, *forms)
+    pipe.ltrim(key, 0, RECENT_MIRROR_KEEP - 1)
+    pipe.expire(key, RECENT_MIRROR_TTL_SECONDS)
+
+
+def matches_recent_mirror(text: str, recent) -> bool:
+    """Whether a bot message (already normalized) repeats a line we mirrored.
+
+    Exact match always counts. A prefixed copy ("clan bob hi" for "bob hi")
+    counts when the remembered form is a whole-word suffix, and a long enough
+    remembered line counts anywhere inside the message. Short lines need an
+    exact match so "gz" never eats an unrelated bot post."""
+    if not text:
+        return False
+    for remembered in recent or ():
+        if isinstance(remembered, bytes):
+            remembered = remembered.decode("utf-8", "replace")
+        if not remembered:
+            continue
+        if text == remembered or text.endswith(" " + remembered):
+            return True
+        if len(remembered) >= RECENT_MIRROR_MIN_SUBSTRING and remembered in text:
+            return True
+    return False
+
+
+def is_recent_mirror_echo(channel_id, text: str) -> bool:
+    """Whether an allowlisted bot's message in ``channel_id`` is a copy of game
+    chat we just mirrored there — i.e. the bot is another game→Discord bridge,
+    and relaying it would show the clan every line twice. Fails open (not an
+    echo) when Redis is unavailable; the per-bot rate limit still holds."""
+    normalized = normalize_for_echo(text)
+    if not normalized:
+        return False
+    try:
+        key = RECENT_MIRROR_KEY_TEMPLATE.format(channel_id=channel_id)
+        recent = _redis().lrange(key, 0, RECENT_MIRROR_KEEP - 1)
+    except Exception:
+        return False
+    return matches_recent_mirror(normalized, recent)
+
+
+def bot_within_rate_limit(channel_id, author_id) -> bool:
+    """Per-(channel, bot) ceiling on lines relayed into the game per minute.
+    Fails open, like the relayer limit."""
+    try:
+        minute = int(time.time() // 60)
+        key = f"chatbridge:botrate:{channel_id}:{author_id}:{minute}"
+        client = _redis()
+        count = client.incr(key)
+        if count == 1:
+            client.expire(key, 120)
+        return int(count) <= BOT_RELAY_RATE_LIMIT_PER_MIN
+    except Exception:
+        return True
 
 
 def push_mirror_line(group_id, channel_id, sender, message, rank=None,
@@ -662,19 +834,113 @@ def is_bridge_echo(sender) -> bool:
     return ECHO_SENDER_MARKER in str(sender or "")
 
 
-def fan_out_discord_message(clan_slug: str, sender: str, content: str) -> int:
+#: Message types an allowlisted bot can relay: plain posts, replies, and the
+#: visible responses to slash / context-menu commands. Everything else (pins,
+#: joins, boosts, thread notices) is a system message, not speech.
+_RELAYABLE_BOT_MESSAGE_TYPES = frozenset({0, 19, 20, 23})
+
+
+def allowed_bot_source(message, allowed_ids, own_ids=()) -> "str | None":
+    """Which allowlist entry admits this bot/webhook message, or None.
+
+    A webhook post is matched by its webhook ID (its author ID is the same
+    number), a bot's post by the bot's user ID. Our own application can never
+    be admitted, whatever the list says: the bot's mirrored game lines are
+    posted in this very channel, and relaying them would loop."""
+    if not allowed_ids:
+        return None
+    author = getattr(message, "author", None)
+    author_id = str(getattr(author, "id", "") or "")
+    application_id = str(getattr(message, "application_id", "") or "")
+    own = {str(i) for i in own_ids if i}
+    if author_id in own or (application_id and application_id in own):
+        return None
+    try:
+        message_type = int(getattr(message, "type", 0) or 0)
+    except (TypeError, ValueError):
+        message_type = 0
+    if message_type not in _RELAYABLE_BOT_MESSAGE_TYPES:
+        return None
+    webhook_id = str(getattr(message, "webhook_id", "") or "")
+    for candidate in (webhook_id, author_id):
+        if candidate and candidate in allowed_ids:
+            return candidate
+    return None
+
+
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\((?:https?://|<)[^)]*\)")
+_MD_HEADING_RE = re.compile(r"^\s*(?:-#|#{1,3})\s+", re.MULTILINE)
+_MD_EMPHASIS_RE = re.compile(r"(\*\*|__|~~|\|\||`+|\*)")
+
+
+def strip_markdown(text: str) -> str:
+    """Bot posts lean on markdown that would show as literal ``**`` in game.
+    Links keep their label, headings and emphasis markers go."""
+    text = _MD_LINK_RE.sub(r"\1", str(text or ""))
+    text = _MD_HEADING_RE.sub("", text)
+    return _MD_EMPHASIS_RE.sub("", text)
+
+
+def _field(obj, name):
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _component_texts(components, out: list, depth: int = 0) -> None:
+    """Text Display contents from a Components V2 tree, in order."""
+    if depth > 4:
+        return
+    for component in components or ():
+        content = _field(component, "content")
+        if isinstance(content, str) and content.strip():
+            out.append(content.strip())
+        _component_texts(_field(component, "components"), out, depth + 1)
+
+
+def bot_message_text(message) -> str:
+    """The speakable text of a bot/webhook message.
+
+    Plain content wins. Bots often post an embed (or a Components V2 layout)
+    with no content at all, so fall back to the first embed's author, title
+    and description, then to V2 text blocks. Markdown is stripped here; the
+    usual sanitizer still runs afterwards."""
+    text = str(getattr(message, "content", "") or "").strip()
+    if not text:
+        embeds = getattr(message, "embeds", None) or []
+        if embeds:
+            embed = embeds[0]
+            parts = []
+            author = _field(embed, "author")
+            for value in (_field(author, "name") if author else None,
+                          _field(embed, "title"),
+                          _field(embed, "description")):
+                if isinstance(value, str) and value.strip():
+                    parts.append(value.strip())
+            text = " - ".join(parts)
+    if not text:
+        found: list = []
+        _component_texts(getattr(message, "components", None), found)
+        text = " ".join(found)
+    return strip_markdown(text).strip()
+
+
+def fan_out_discord_message(clan_slug: str, sender: str, content: str,
+                            from_bot: bool = False) -> int:
     """Push one Discord line to every present clan member's plugin inbox.
     Returns inboxes pushed; 0 when nobody's plugin is online (the message
-    simply doesn't reach the game — there is no backfill, like real chat)."""
+    simply doesn't reach the game — there is no backfill, like real chat).
+    ``from_bot`` marks lines from an allowlisted bot or webhook; builds that
+    don't know the flag ignore it."""
     message = sanitize_discord_content(content)
     if not message:
         return 0
     from services.plugin_notifications import build_envelope, push_to_inbox
 
-    envelope = build_envelope(
-        ENVELOPE_TYPE,
-        {"sender": str(sender or "Discord")[:32], "message": message},
-    )
+    payload = {"sender": str(sender or "Discord")[:32], "message": message}
+    if from_bot:
+        payload["bot"] = True
+    envelope = build_envelope(ENVELOPE_TYPE, payload)
     delivered = 0
     for player_id in online_player_ids(clan_slug):
         if push_to_inbox(player_id, envelope):

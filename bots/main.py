@@ -376,33 +376,54 @@ async def on_clan_bridge_message(event: MessageCreate):
     fanned out to the plugin inboxes of clan members whose plugin is present
     (services/clan_chat_bridge). The channel routing table is a 60s-cached
     config scan, so the fast path for every other message is one dict miss.
-    Bot authors are ignored — that includes our own mirrored game lines, which
-    is what makes the loop structurally impossible.
+    Bot and webhook authors are ignored unless the group allowlisted that
+    exact bot/webhook (``clan_chat_bridge_allowed_bots``, empty by default).
+    Our own application is never admitted, so our mirrored game lines can't
+    loop; an allowlisted bot that re-posts game chat (another bridge) is
+    caught by the recent-mirror echo check and a per-bot rate limit.
     """
     message = event.message
     try:
         author = getattr(message, "author", None)
-        if author is None or getattr(author, "bot", False):
+        if author is None:
             return
-        from services.clan_chat_bridge import bridge_channel_map, fan_out_discord_message
+        is_bot = bool(getattr(author, "bot", False) or getattr(message, "webhook_id", None))
+        from services import clan_chat_bridge as ccb
 
         # The 60s-expiry cache miss runs a GroupConfiguration query; with
         # GUILD_MESSAGES on, this listener sees every guild message, so the
         # query must not run on the gateway loop. It owns its own session —
         # never hand it the scoped one, which the worker thread would then
         # hold idle-in-transaction for the life of the process (2026-08-25).
-        channel_map = await asyncio.to_thread(bridge_channel_map)
-        route = channel_map.get(str(message.channel.id))
+        channel_map = await asyncio.to_thread(ccb.bridge_channel_map)
+        channel_id = str(message.channel.id)
+        route = channel_map.get(channel_id)
         if route is None:
             return
-        _group_id, clan_slug = route
-        content = (message.content or "").strip()
-        if getattr(message, "attachments", None):
-            content = f"{content} [attachment]".strip()
-        if not content:
-            return
+        _group_id, clan_slug, allowed_bots = route
+
+        if is_bot:
+            own_ids = (getattr(bot.user, "id", None), getattr(getattr(bot, "app", None), "id", None))
+            source = ccb.allowed_bot_source(message, allowed_bots, own_ids)
+            if source is None:
+                return
+            content = ccb.bot_message_text(message)
+            if not content:
+                return
+            if await asyncio.to_thread(ccb.is_recent_mirror_echo, channel_id, content):
+                return
+            if not await asyncio.to_thread(ccb.bot_within_rate_limit, channel_id, source):
+                return
+        else:
+            content = (message.content or "").strip()
+            if getattr(message, "attachments", None):
+                content = f"{content} [attachment]".strip()
+            if not content:
+                return
+        # A webhook's username is set per message (relay bots post as the
+        # speaker), and a bot's display name is its server nickname.
         sender = getattr(author, "display_name", None) or getattr(author, "username", "Discord")
-        await asyncio.to_thread(fan_out_discord_message, clan_slug, sender, content)
+        await asyncio.to_thread(ccb.fan_out_discord_message, clan_slug, sender, content, is_bot)
     except Exception as e:
         print(f"[ClanChatBridge] Discord->game handling failed: {e}")
 

@@ -11,6 +11,7 @@ Modules:
     points: Member-facing points commands (/group-points, /my-points, /lookup)
     submissions: Manual submission commands (/submit drop|clog|pb|ca|pet)
     bug_tester: Bot-owner /bug-tester add|remove|list (main server only)
+    clan_bridge: Group-admin /clan-bridge allow-bot|remove-bot|bots (clan chat bridge bot allowlist)
     utils: Utility functions and helpers for commands
 
 Classes:
@@ -20,6 +21,7 @@ Classes:
     PointsCommands: Extension containing the member-facing clan points commands
     SubmissionCommands: Extension containing the /submit manual-submission commands
     BugTesterCommands: Extension containing the owner-only /bug-tester commands
+    ClanBridgeCommands: Extension containing the /clan-bridge bot allowlist commands
 
 Author: joelhalen
 """
@@ -30,6 +32,7 @@ from .group_admin import GroupAdminCommands
 from .points import PointsCommands
 from .submissions import SubmissionCommands
 from .bug_tester import BugTesterCommands
+from .clan_bridge import ClanBridgeCommands
 from .utils import try_create_user, is_admin, is_user_authorized, get_external_latency
 
 __all__ = [
@@ -39,6 +42,7 @@ __all__ = [
     'PointsCommands',
     'SubmissionCommands',
     'BugTesterCommands',
+    'ClanBridgeCommands',
     'try_create_user',
     'is_admin',
     'is_user_authorized',

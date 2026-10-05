@@ -825,6 +825,17 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "The Discord channel your in-game clan chat is mirrored to, and whose messages are relayed into the game. Anyone who can type in this channel can speak to the clan — restrict it accordingly.",
         "default": None,
     },
+    # services/clan_chat_bridge.allowed_bot_source: bot/webhook IDs admitted
+    # to the Discord→game direction, bridge channel only. Validated by
+    # _coerce_snowflake_list (10 IDs fit config_value's 255 chars).
+    {
+        "key": "clan_chat_bridge_allowed_bots",
+        "label": "Bots allowed in the bridge",
+        "category": "clan_chat",
+        "type": "csv",
+        "help": "Bots or webhooks whose messages in the bridge channel also reach your clan in game. Off by default: leave this empty and bots are ignored. Enter Discord IDs separated by commas (up to 10), or use /clan-bridge allow-bot in your server, or right-click a bot's message and pick Apps, Allow in clan bridge. Anything an allowed bot posts in the bridge channel is shown to your clan.",
+        "default": "",
+    },
     {
         "key": "discord_url",
         "label": "Discord invite URL",
@@ -977,6 +988,36 @@ SENSITIVE_KEYS = {"export_api_key", "wom_verification_code"}
 # therefore never hold a webhook URL — that carries its own auth token, so
 # publishing one hands write access to the clan's server to anyone who looks.
 _DISCORD_LINK_KEYS = frozenset({"discord_url"})
+
+#: csv keys that hold Discord IDs: each entry must be a snowflake, duplicates
+#: collapse, and the list is capped (key → max entries).
+_SNOWFLAKE_LIST_KEYS = {"clan_chat_bridge_allowed_bots": 10}
+_SNOWFLAKE_RE = re.compile(r"^\d{15,21}$")
+
+
+def _coerce_snowflake_list(key: str, value: Any) -> str:
+    """Comma/space separated Discord IDs → canonical "id,id". Mentions
+    (<@123>) are unwrapped; anything else that isn't an ID is an error, so a
+    pasted bot NAME is refused instead of silently allowing nothing."""
+    if isinstance(value, (list, tuple)):
+        parts = [str(v) for v in value]
+    else:
+        parts = re.split(r"[\s,]+", str(value or ""))
+    ids: List[str] = []
+    for part in parts:
+        part = part.strip().strip("<@!&>")
+        if not part:
+            continue
+        if not _SNOWFLAKE_RE.match(part):
+            raise ConfigValidationError(
+                key, f"'{part}' is not a Discord ID. Copy the bot's ID (Developer Mode, right-click, Copy User ID)."
+            )
+        if part not in ids:
+            ids.append(part)
+    limit = _SNOWFLAKE_LIST_KEYS[key]
+    if len(ids) > limit:
+        raise ConfigValidationError(key, f"'{key}' allows at most {limit} IDs.")
+    return ",".join(ids)
 
 
 def all_config_keys() -> List[str]:
@@ -1144,6 +1185,9 @@ def coerce_to_storage(key: str, value: Any) -> str:
 
     if ftype == "multiselect":
         return coerce_multiselect(key, field, value)
+
+    if key in _SNOWFLAKE_LIST_KEYS:
+        return _coerce_snowflake_list(key, value)
 
     # channel / string / text / csv / bosslist
     if value is None:

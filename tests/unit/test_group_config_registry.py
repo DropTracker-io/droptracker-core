@@ -129,6 +129,24 @@ class TestRegistry:
             with pytest.raises(reg.ConfigValidationError):
                 reg.coerce_to_storage("death_message_variants", bad)
 
+    def test_bridge_bot_allowlist_normalizes_ids(self):
+        key = "clan_chat_bridge_allowed_bots"
+        a, b = "123456789012345678", "234567890123456789"
+        assert reg.coerce_to_storage(key, f" {a}, <@{b}>\n{a} ") == f"{a},{b}"
+        assert reg.coerce_to_storage(key, [a, b]) == f"{a},{b}"
+        assert reg.coerce_to_storage(key, "") == ""
+        assert reg.coerce_to_storage(key, None) == ""
+
+    def test_bridge_bot_allowlist_rejects_names_and_long_lists(self):
+        key = "clan_chat_bridge_allowed_bots"
+        with pytest.raises(reg.ConfigValidationError):
+            reg.coerce_to_storage(key, "MEE6")  # a name, not an ID
+        too_many = ",".join(str(10**17 + i) for i in range(11))
+        with pytest.raises(reg.ConfigValidationError):
+            reg.coerce_to_storage(key, too_many)
+        ten = ",".join(str(10**17 + i) for i in range(10))
+        assert len(reg.coerce_to_storage(key, ten)) <= 255  # fits config_value
+
     def test_coerce_to_storage_rejects_bad(self):
         with pytest.raises(reg.ConfigValidationError):
             reg.coerce_to_storage("notify_pbs", "notabool")

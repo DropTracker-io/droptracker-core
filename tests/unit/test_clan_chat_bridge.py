@@ -225,6 +225,14 @@ class _FakeRedis:
     def expire(self, key, _ttl):
         return True
 
+    def lpush(self, key, *values):
+        lst = self.keys.setdefault(key, [])
+        for v in values:
+            lst.insert(0, v)
+
+    def lrange(self, key, start, end):
+        return list(self.keys.get(key, []))[start:end + 1]
+
     def pipeline(self):
         return self
 
@@ -498,3 +506,148 @@ def test_badge_keys_are_registered_for_every_game_mode():
     from utils.app_emojis import SPECS
 
     assert set(ACCOUNT_TYPES_BY_VARBIT) - {"normal"} <= set(SPECS)
+
+
+# ── allowlisted bots (Discord → game) ───────────────────────────────────────
+
+from types import SimpleNamespace as _NS
+
+_BOT = "111111111111111111"
+_HOOK = "222222222222222222"
+_US = "999999999999999999"
+
+
+def _msg(author_id=_BOT, bot=True, webhook_id=None, type=0, content="", embeds=None,
+         components=None, application_id=None):
+    return _NS(author=_NS(id=author_id, bot=bot), webhook_id=webhook_id, type=type,
+               content=content, embeds=embeds or [], components=components,
+               application_id=application_id)
+
+
+def test_allowlist_parsing_is_forgiving_and_capped():
+    assert bridge.parse_allowed_bots(f"{_BOT}, <@{_HOOK}>\n{_BOT} nonsense") == {_BOT, _HOOK}
+    assert bridge.parse_allowed_bots(None) == frozenset()
+    many = ",".join(str(10**17 + i) for i in range(15))
+    assert len(bridge.parse_allowed_bots(many)) == bridge.MAX_ALLOWED_BOTS
+
+
+def test_add_and_remove_keep_saved_order():
+    raw, status = bridge.add_allowed_bot("", _HOOK)
+    assert (raw, status) == (_HOOK, "added")
+    raw, status = bridge.add_allowed_bot(raw, _BOT)
+    assert (raw, status) == (f"{_HOOK},{_BOT}", "added")
+    assert bridge.add_allowed_bot(raw, _BOT)[1] == "already"
+    assert bridge.add_allowed_bot(raw, "MEE6")[1] == "invalid"
+    full = ",".join(str(10**17 + i) for i in range(bridge.MAX_ALLOWED_BOTS))
+    assert bridge.add_allowed_bot(full, _BOT)[1] == "full"
+    assert bridge.remove_allowed_bot(raw, _HOOK) == (_BOT, True)
+    assert bridge.remove_allowed_bot(raw, "123") == (raw, False)
+
+
+def test_bots_are_ignored_unless_listed():
+    assert bridge.allowed_bot_source(_msg(), frozenset()) is None
+    assert bridge.allowed_bot_source(_msg(), frozenset({_HOOK})) is None
+    assert bridge.allowed_bot_source(_msg(), frozenset({_BOT})) == _BOT
+
+
+def test_webhooks_match_by_webhook_id():
+    msg = _msg(author_id=_HOOK, webhook_id=_HOOK)
+    assert bridge.allowed_bot_source(msg, frozenset({_HOOK})) == _HOOK
+
+
+def test_our_own_application_is_never_admitted():
+    """Our mirrored game lines are posted in this channel — admitting them
+    would loop, whatever an admin typed into the list."""
+    own = (_US,)
+    assert bridge.allowed_bot_source(_msg(author_id=_US), frozenset({_US}), own) is None
+    via_app = _msg(author_id=_HOOK, webhook_id=_HOOK, application_id=_US)
+    assert bridge.allowed_bot_source(via_app, frozenset({_HOOK}), own) is None
+
+
+def test_system_messages_are_not_speech():
+    allowed = frozenset({_BOT})
+    for relayable in (0, 19, 20, 23):
+        assert bridge.allowed_bot_source(_msg(type=relayable), allowed) == _BOT
+    for system in (6, 7, 8, 18):  # pin, join, boost, thread created
+        assert bridge.allowed_bot_source(_msg(type=system), allowed) is None
+
+
+def test_bot_text_prefers_content_and_strips_markdown():
+    msg = _msg(content="**Bob**: check [the guide](https://x.y/z) `now`")
+    assert bridge.bot_message_text(msg) == "Bob: check the guide now"
+    assert bridge.bot_message_text(_msg(content="# Raid tonight")) == "Raid tonight"
+
+
+def test_bot_text_falls_back_to_the_first_embed():
+    embed = _NS(author=_NS(name="WOM"), title="Competition started", description="SOTW: *Mining*")
+    assert bridge.bot_message_text(_msg(embeds=[embed])) == "WOM - Competition started - SOTW: Mining"
+    as_dict = {"title": "Only a title", "description": None}
+    assert bridge.bot_message_text(_msg(embeds=[as_dict])) == "Only a title"
+
+
+def test_bot_text_reads_components_v2_text_blocks():
+    tree = [{"type": 17, "components": [{"type": 10, "content": "Hello"},
+                                        {"type": 9, "components": [{"type": 10, "content": "**clan**"}]}]}]
+    assert bridge.bot_message_text(_msg(components=tree)) == "Hello clan"
+    assert bridge.bot_message_text(_msg()) == ""
+
+
+def test_echo_match_rules():
+    norm = bridge.normalize_for_echo
+    assert norm("**Bob**: Hi there!") == "bob hi there"
+    recent = [norm("bob gz"), norm("gz"), norm("anyone up for a raid tonight")]
+    assert bridge.matches_recent_mirror(norm("Bob: gz"), recent)               # exact
+    assert bridge.matches_recent_mirror(norm("[Clan] Bob: gz"), recent)        # prefixed
+    assert bridge.matches_recent_mirror(norm("Alice: anyone up for a raid tonight?"), recent)
+    # A short line never matches inside an unrelated post.
+    assert not bridge.matches_recent_mirror(norm("gz to everyone on the 99"), recent)
+    assert not bridge.matches_recent_mirror("", recent)
+
+
+def test_staged_lines_are_remembered_and_recognized_when_a_bot_reposts_them(monkeypatch):
+    fake = _FakeRedis()
+    monkeypatch.setattr(bridge, "_redis", lambda: fake)
+    import sys as _sys, types as _types
+    mirror_ctx = _types.ModuleType("utils.mirror_context")
+    mirror_ctx.is_mirrored_submission = lambda: False
+    monkeypatch.setitem(_sys.modules, "utils.mirror_context", mirror_ctx)
+
+    assert bridge.push_mirror_line(10, "555", "Iron Bob", "anyone for cox?") is True
+    assert bridge.is_recent_mirror_echo("555", "**Iron Bob**: anyone for cox?") is True
+    assert bridge.is_recent_mirror_echo("555", "Raid starting at 8") is False
+    # Remembered per channel.
+    assert bridge.is_recent_mirror_echo("556", "**Iron Bob**: anyone for cox?") is False
+
+
+def test_echo_check_fails_open(monkeypatch):
+    def boom():
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(bridge, "_redis", boom)
+    assert bridge.is_recent_mirror_echo("555", "anything") is False
+    assert bridge.bot_within_rate_limit("555", _BOT) is True
+
+
+def test_bot_rate_limit_is_per_bot_and_channel(monkeypatch):
+    fake = _FakeRedis()
+    monkeypatch.setattr(bridge, "_redis", lambda: fake)
+    for _ in range(bridge.BOT_RELAY_RATE_LIMIT_PER_MIN):
+        assert bridge.bot_within_rate_limit("555", _BOT) is True
+    assert bridge.bot_within_rate_limit("555", _BOT) is False
+    assert bridge.bot_within_rate_limit("555", _HOOK) is True
+    assert bridge.bot_within_rate_limit("556", _BOT) is True
+
+
+def test_bot_lines_carry_a_flag_humans_do_not(monkeypatch):
+    import sys as _sys, types as _types
+    sent = []
+    notif = _types.ModuleType("services.plugin_notifications")
+    notif.build_envelope = lambda kind, payload: (kind, payload)
+    notif.push_to_inbox = lambda pid, env: sent.append(env) or True
+    monkeypatch.setitem(_sys.modules, "services.plugin_notifications", notif)
+    monkeypatch.setattr(bridge, "online_player_ids", lambda _slug: [1])
+
+    assert bridge.fan_out_discord_message("clan", "WOM", "hi", from_bot=True) == 1
+    assert bridge.fan_out_discord_message("clan", "Bob", "hi") == 1
+    assert sent[0][1] == {"sender": "WOM", "message": "hi", "bot": True}
+    assert sent[1][1] == {"sender": "Bob", "message": "hi"}
