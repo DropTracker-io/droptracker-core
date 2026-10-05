@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import sys
+import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -548,6 +549,20 @@ async def _maintenance(r, stop: asyncio.Event) -> None:
             if processing > _in_flight:
                 log.warning("%d entry(s) stranded in %s — reclaimed on next restart",
                             processing - _in_flight, PROCESSING_KEY)
+            # t275: the events worker has no supervisor but systemd. If it is
+            # crash-looping or wedged, say so (ERROR reaches Sentry) once per
+            # outage; its producers are parking envelopes meanwhile.
+            try:
+                from utils import event_end_hold
+
+                stalled = await asyncio.to_thread(
+                    event_end_hold.check_events_worker, r, time.time())
+                if stalled:
+                    log.error("droptracker-events has not completed a lifecycle "
+                              "tick for %ds; event credit is being parked in "
+                              "events:submissions:held until it is back", stalled)
+            except Exception:
+                pass
             # Anything the acceptor had to spool because Redis would not take
             # it (utils/webhook_spool). Redis is demonstrably writable again by
             # now — this very loop just read from it — so push the backlog back

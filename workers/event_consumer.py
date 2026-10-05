@@ -201,6 +201,25 @@ def _replay_prestart(r, state) -> dict:
     return event_engine.replay_prestart(r, list(state.events.keys()))
 
 
+def _requeue_held(r) -> int:
+    """t275: requeue the capped holding list; report (once) if it overflowed,
+    because that window's credit is gone."""
+    from services import event_engine
+
+    moved = event_engine.requeue_held(r)
+    try:
+        overflow = r.get(event_engine.HELD_OVERFLOW_KEY)
+        if overflow is not None:
+            r.delete(event_engine.HELD_OVERFLOW_KEY)
+            log.error("Held-envelope list hit its %d cap while the events worker "
+                      "was down (first overflow at %s); the oldest parked "
+                      "envelopes were dropped and their event credit is lost",
+                      event_engine.HELD_MAX_ENTRIES, overflow)
+    except Exception:
+        pass
+    return moved
+
+
 def _reconcile_effort(state) -> int:
     """Sync `web_event_effort.frozen_at` with the freeze gate (Bingo EHB)."""
     from api.core import get_db_session, reset_db_connections
@@ -662,6 +681,16 @@ async def run_consumer() -> None:
                     len(state.events), len(state.participants),
                     " (admin bump)" if bumped else "",
                 )
+                # t275: envelopes producers parked while this worker was down
+                # (or its gate lapsed) go back on the queue, oldest first.
+                # After the state load, so they are judged against it.
+                try:
+                    held = await asyncio.to_thread(_requeue_held, r)
+                    if held:
+                        log.warning("Requeued %d envelope(s) parked while the "
+                                    "events worker was unavailable", held)
+                except Exception:
+                    log.error("Held-envelope requeue failed:\n%s", traceback.format_exc())
                 # Envelopes parked while a scheduled draft waited on the
                 # sweep go back on the queue now that the event is live.
                 try:

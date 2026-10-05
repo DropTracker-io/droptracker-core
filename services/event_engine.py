@@ -129,6 +129,18 @@ ACTIVE_EVENTS_KEY = "events:active"        # set of active event ids (gate)
 # window and producers stop pushing — otherwise a dead consumer + an active
 # event would LPUSH events:submissions unboundedly (a Redis-memory incident).
 ACTIVE_EVENTS_TTL_SECONDS = 180
+# t275: what the gate's TTL used to cost. When the consumer dies, the gate
+# lapses and producers stopped enqueueing, so every submission until the
+# restart lost its event credit. Now, while the gate is down but this sticky
+# marker says the consumer last saw events to score, producers park envelopes
+# in a capped holding list instead, and the consumer requeues it once it is
+# back. The cap keeps P1-6's promise (bounded Redis memory); the sticky TTL
+# stops parking after a day; an empty view deletes the marker.
+STICKY_GATE_KEY = "events:active:sticky"
+STICKY_GATE_TTL_SECONDS = 24 * 3600
+HELD_KEY = "events:submissions:held"
+HELD_MAX_ENTRIES = 100_000                 # ~6.5 h of full traffic, ~40 MB
+HELD_OVERFLOW_KEY = "events:submissions:held:overflow"
 # Per-event "it's over" tombstone, stamped the moment an event ends (manual or
 # scheduled — services/event_lifecycle._mark_active_in_redis). The matcher's
 # state snapshot can stay stale for up to STATE_REFRESH_SECONDS after an end,
@@ -212,8 +224,13 @@ def queue_submission(kind: str, player_id, guid, data: dict,
         conn = getattr(redis_client, "client", None)
         if conn is None:
             return
+        target = QUEUE_KEY
         if not conn.exists(ACTIVE_EVENTS_KEY):
-            return
+            # Gate down. Normally that means nothing to score; with the sticky
+            # marker it means the consumer is gone (t275): park, bounded.
+            if not conn.exists(STICKY_GATE_KEY):
+                return
+            target = HELD_KEY
         envelope = {
             "v": 1,
             "kind": kind,
@@ -225,7 +242,16 @@ def queue_submission(kind: str, player_id, guid, data: dict,
         }
         if player_name:
             envelope["player_name"] = str(player_name)
-        conn.lpush(QUEUE_KEY, json.dumps(envelope, default=str))
+        if target == QUEUE_KEY:
+            conn.lpush(QUEUE_KEY, json.dumps(envelope, default=str))
+            return
+        pipe = conn.pipeline()
+        pipe.lpush(HELD_KEY, json.dumps(envelope, default=str))
+        pipe.ltrim(HELD_KEY, 0, HELD_MAX_ENTRIES - 1)  # keep the newest
+        length = pipe.execute()[0]
+        if int(length or 0) > HELD_MAX_ENTRIES:
+            conn.set(HELD_OVERFLOW_KEY, int(time.time()), nx=True,
+                     ex=STICKY_GATE_TTL_SECONDS)
     except Exception:
         pass
 
@@ -2367,11 +2393,55 @@ def set_active_events(redis_conn, event_ids) -> None:
         if ids:
             pipe.sadd(ACTIVE_EVENTS_KEY, *ids)
             # Fail-safe TTL (P1-6): refreshed on every set; a dead consumer
-            # lets it lapse so producers stop enqueuing.
+            # lets it lapse so producers stop enqueuing onto the live queue
+            # (and park in the capped holding list instead, t275).
             pipe.expire(ACTIVE_EVENTS_KEY, ACTIVE_EVENTS_TTL_SECONDS)
+            pipe.set(STICKY_GATE_KEY, 1, ex=STICKY_GATE_TTL_SECONDS)
+        else:
+            pipe.delete(STICKY_GATE_KEY)
         pipe.execute()
     except Exception:
         pass
+
+
+def requeue_held(redis_conn, batch: int = 1000) -> int:
+    """Move envelopes parked while the consumer was down (t275) onto the
+    consuming end of the live queue, oldest consumed first. Call after the
+    matcher state is loaded. The list is renamed away first, so producers
+    that park concurrently start a fresh list for the next pass. Returns the
+    count moved."""
+    if redis_conn is None:
+        return 0
+    try:
+        if not redis_conn.exists(HELD_KEY):
+            return 0
+        claim = f"{HELD_KEY}:requeue:{int(time.time() * 1000)}"
+        redis_conn.rename(HELD_KEY, claim)
+    except Exception:
+        return 0
+    moved = 0
+    try:
+        # LPUSHed: index 0 is the newest. RPUSH in that order puts the oldest
+        # rightmost, which is where the consumer pops.
+        while True:
+            chunk = redis_conn.lrange(claim, 0, batch - 1)
+            if not chunk:
+                break
+            pipe = redis_conn.pipeline()
+            pipe.rpush(QUEUE_KEY, *chunk)
+            pipe.ltrim(claim, len(chunk), -1)
+            pipe.execute()
+            moved += len(chunk)
+        redis_conn.delete(claim)
+    except Exception:
+        # Whatever is left stays in the claim list; the next pass can't see
+        # it, so say so loudly rather than lose it quietly.
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "held-envelope requeue stopped after %d; remainder left in %s",
+            moved, claim)
+    return moved
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -279,6 +279,42 @@ def note_boot(redis_conn, now_epoch: float) -> Optional[int]:
     return int(gap)
 
 
+# Raised once per outage by whoever notices the events worker went quiet.
+STALL_ALERTED_KEY = "events:consumer:stall-alerted"
+STALL_ALERT_AFTER_SECONDS = 5 * 60
+
+
+def heartbeat_age(redis_conn, now_epoch: float) -> Optional[int]:
+    """Seconds since the events worker's last lifecycle tick, or None when it
+    has never written one (or Redis can't say)."""
+    try:
+        raw = redis_conn.get(HEARTBEAT_KEY)
+        if raw is None:
+            return None
+        return max(0, int(now_epoch - float(_text(raw))))
+    except Exception:
+        return None
+
+
+def check_events_worker(redis_conn, now_epoch: float) -> Optional[int]:
+    """For another long-running process's maintenance loop (t275): the age
+    of a stalled events worker the FIRST time it is seen stalled, else None.
+    Re-arms once the heartbeat is fresh again."""
+    age = heartbeat_age(redis_conn, now_epoch)
+    if age is None:
+        return None
+    try:
+        if age < STALL_ALERT_AFTER_SECONDS:
+            redis_conn.delete(STALL_ALERTED_KEY)
+            return None
+        if redis_conn.set(STALL_ALERTED_KEY, int(now_epoch), nx=True,
+                          ex=HEARTBEAT_TTL_SECONDS):
+            return age
+    except Exception:
+        pass
+    return None
+
+
 def boot_gap_since(redis_conn) -> Optional[datetime]:
     """Start of the events worker's current boot gap, or None."""
     try:
