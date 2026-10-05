@@ -307,3 +307,40 @@ class TestScoringEnd:
     def test_unscheduled(self):
         now = datetime(2026, 1, 1)
         assert lc._scoring_end(_event(ends_at=None, ended_at=None), now) == now
+
+
+class TestBootGapLateStart:
+    """t274 phase 4: a draft whose start fell inside an events-worker outage
+    is activated with its scheduled start, so its window opens on time."""
+
+    @pytest.fixture()
+    def activations(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(lc, "activate_event",
+                            lambda s, e, now=None, activated_at=None, **k:
+                            calls.append((e.id, activated_at)))
+        monkeypatch.setattr(lc, "_clear_activation_failure", lambda *a: None)
+        monkeypatch.setattr(lc, "run_window_sweep", lambda *a, **k: None)
+        monkeypatch.setattr(lc, "run_reminder_sweep", lambda *a, **k: None)
+        monkeypatch.setattr(lc, "_gather_hold_signals", lambda r: [])
+        return calls
+
+    def _draft(self, eid, starts_at):
+        return _event(eid, status="draft", starts_at=starts_at, ends_at=starts_at + timedelta(days=2))
+
+    def test_start_inside_the_gap_keeps_its_schedule(self, activations):
+        down_from = datetime(2026, 10, 5, 9, 0)
+        r = FakeRedis(kv={eh.BOOT_RECOVERY_KEY: str(int(down_from.timestamp()))})
+        starts = datetime(2026, 10, 5, 10, 0)
+        lc.run_lifecycle_sweep(_Session([self._draft(3, starts)]), r,
+                               now=datetime(2026, 10, 5, 13, 0))
+        assert activations == [(3, starts)]
+
+    def test_start_before_the_gap_or_no_gap_is_stamped_now(self, activations):
+        down_from = datetime(2026, 10, 5, 9, 0)
+        r = FakeRedis(kv={eh.BOOT_RECOVERY_KEY: str(int(down_from.timestamp()))})
+        now = datetime(2026, 10, 5, 13, 0)
+        lc.run_lifecycle_sweep(_Session([self._draft(4, datetime(2026, 10, 5, 8, 0))]), r, now=now)
+        lc.run_lifecycle_sweep(_Session([self._draft(5, datetime(2026, 10, 5, 10, 0))]),
+                               FakeRedis(), now=now)
+        assert activations == [(4, None), (5, None)]

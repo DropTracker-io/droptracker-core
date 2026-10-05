@@ -1243,7 +1243,8 @@ def sync_auto_clan_rosters(session, event, now: Optional[datetime] = None) -> in
 
 
 def activate_event(session, event, *, actor_user_id=None, user=None,
-                   now: Optional[datetime] = None, start_now: bool = False) -> None:
+                   now: Optional[datetime] = None, start_now: bool = False,
+                   activated_at: Optional[datetime] = None) -> None:
     """draft -> active. Validates readiness and tier capacity, stamps
     status/activated_at (and ``starts_at`` when unscheduled), grants bingo
     free cells to every team, enqueues the ``event_started`` announcement,
@@ -1259,6 +1260,11 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
     month-long October bingo on 1 September and had to end it to undo the
     announcement, which left the event unrecoverable. Starting early is
     still possible, but only as an explicit choice.
+
+    ``activated_at`` overrides the activation stamp. The sweep passes
+    ``starts_at`` when the scheduled start fell inside an events-worker outage
+    (t274): the lateness was ours, so the window opens on schedule and the
+    outage's replayed submissions count.
     """
     now = now or datetime.now()
     if event.status == "past":
@@ -1289,7 +1295,7 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
 
     before = {"status": event.status, "starts_at": _ts(event.starts_at)}
     event.status = "active"
-    event.activated_at = now
+    event.activated_at = activated_at or now
     if event.starts_at is None:
         event.starts_at = now
     session.flush()
@@ -2150,10 +2156,22 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
     by_id = {e.id: e for e in rows}
     summary = {"activated": [], "ended": [], "failed": []}
 
+    # t274: a scheduled start that fell inside an events-worker outage keeps
+    # its scheduled time, however late the activation (past the usual
+    # LATE_START_GRACE_SECONDS, the window would open at activation and
+    # reject the outage's replayed submissions).
+    gap_since = _end_hold.boot_gap_since(redis_conn) if redis_conn is not None else None
     for event_id in due["activate"]:
         event = by_id[event_id]
+        stamp = None
+        if (gap_since is not None and event.starts_at is not None
+                and gap_since <= event.starts_at <= now):
+            stamp = event.starts_at
+            log.warning("Sweep: event %s was due at %s during an events-worker "
+                        "outage; activating with its scheduled start",
+                        event_id, event.starts_at)
         try:
-            activate_event(session, event, now=now)
+            activate_event(session, event, now=now, activated_at=stamp)
             session.commit()
             summary["activated"].append(event_id)
             _clear_activation_failure(redis_conn, event_id)
