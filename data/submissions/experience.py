@@ -23,6 +23,7 @@ from .common import (
     GroupConfiguration,
     award_points_to_player,
     envelope_from_plugin,
+    event_ts,
 )
 
 # All OSRS skills in lowercase (matching PlayerExperience model columns)
@@ -603,6 +604,7 @@ async def experience_processor(experience_data, external_session=None):
                         world_type=snapshot_world_type, player_name=player_name,
                         # Plugin traffic regardless of intake transport (API or
                         # Discord webhook); XP has no manual submission path.
+                        ts=event_ts(experience_data),
                         used_api=envelope_from_plugin(experience_data),
                     )
             except Exception:
@@ -673,6 +675,7 @@ async def experience_processor(experience_data, external_session=None):
                     world_type="main", player_name=player_name,
                     # Plugin traffic regardless of intake transport (API or
                     # Discord webhook); XP has no manual submission path.
+                    ts=event_ts(experience_data),
                     used_api=envelope_from_plugin(experience_data),
                 )
         except Exception:

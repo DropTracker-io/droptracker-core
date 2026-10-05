@@ -180,6 +180,22 @@ def received_at(submission_data: dict, *,
     return stamped
 
 
+def event_ts(submission_data: dict) -> int:
+    """Epoch seconds for an events-engine envelope's ``ts``: when we received
+    the submission, by the same rules as :func:`received_at`.
+
+    The matcher judges event windows, ``joined_at`` and recurring schedules by
+    this stamp (t274). Stamping at processing time let an outage replay credit
+    an event that started after the drop was earned, and let a queue backlog
+    push drops earned before an event's end past it. Never raises: an envelope
+    must never cost the submission.
+    """
+    try:
+        return int(received_at(submission_data).timestamp())
+    except Exception:
+        return int(time.time())
+
+
 def get_config_prefix(world_type: str) -> str:
     """Return the GroupConfiguration key prefix for the given world type.
 

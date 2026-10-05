@@ -8,6 +8,9 @@ for db/redis/services never interfere.
 import importlib.util
 import os
 import sys
+from datetime import datetime, timedelta
+
+import pytest
 
 _ENGINE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -1349,6 +1352,50 @@ class TestEndedTombstone:
 
         assert engine.is_event_ended(_NoExists(), 10) is False
         assert engine.is_event_ended(None, 10) is False
+
+
+# ── t274: windows are judged by the envelope's receive time ────────────────
+
+class TestReceiveTimeWindow:
+    """Producers stamp ``ts`` with the server's receive time (t274), so an
+    outage replay is judged as of when it reached us, not when it was
+    processed. session=None: a rejected envelope returns [] before any DB
+    work; an accepted one reaches record_match and raises AttributeError."""
+
+    START = datetime(2026, 10, 1, 12, 0)
+    END = datetime(2026, 10, 1, 18, 0)
+
+    def _state(self, joined_at=None):
+        return engine.MatcherState(
+            events={10: _event(window_start=self.START, window_end=self.END)},
+            tasks_by_event={10: [_task(target="Twisted bow")]},
+            participants={5: [(10, 77, joined_at)]},
+        )
+
+    def _env_at(self, when):
+        return _env("drop", {"item_name": "Twisted bow", "quantity": 1},
+                    ts=int(when.timestamp()))
+
+    def test_earned_before_the_start_is_not_credited(self):
+        env = self._env_at(self.START - timedelta(minutes=30))
+        assert engine.handle_envelope(None, _FakeRedis(), self._state(), env) == []
+
+    def test_earned_inside_but_processed_after_the_end_is_credited(self):
+        # The event is still loaded (its end is being held); the drop was
+        # received at 17:30, processed whenever.
+        env = self._env_at(self.END - timedelta(minutes=30))
+        with pytest.raises(AttributeError):
+            engine.handle_envelope(None, _FakeRedis(), self._state(), env)
+
+    def test_received_after_the_end_is_not_credited(self):
+        env = self._env_at(self.END + timedelta(minutes=1))
+        assert engine.handle_envelope(None, _FakeRedis(), self._state(), env) == []
+
+    def test_received_before_joining_is_not_credited(self):
+        joined = self.START + timedelta(hours=2)
+        env = self._env_at(joined - timedelta(minutes=5))
+        assert engine.handle_envelope(
+            None, _FakeRedis(), self._state(joined_at=joined), env) == []
 
 
 # ── WOM reconciler envelopes (kind=wom_kc, source=wom) ───────────────────────

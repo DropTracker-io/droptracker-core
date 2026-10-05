@@ -32,6 +32,7 @@ from .common import (
     debug_print,
     SEASONAL_WORLD_TYPE,
     envelope_from_plugin,
+    event_ts,
 )
 
 
@@ -185,6 +186,7 @@ async def slayer_processor(slayer_data, external_session=None, world_type="main"
                     "source_id": getattr(entry, "id", None),
                 },
                 world_type=world_type, player_name=player_name,
+                ts=event_ts(slayer_data),
                 used_api=envelope_from_plugin(slayer_data),
             )
         except Exception:

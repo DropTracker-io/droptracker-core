@@ -239,3 +239,57 @@ class TestClientsCannotDateTheirOwnRows:
         processed = await self._process(payload)
         assert processed["_received_at"] == stamp
         assert processed["_received_at_trusted"] is True
+
+
+class TestEventEnvelopeTimestamp:
+    """t274: the events engine judges windows by the envelope's ``ts``. It
+    must be the receive time (same trust rules as the row), not the moment a
+    worker processed the submission, or an outage replay credits an event that
+    started after the drop was earned and misses one that ended meanwhile."""
+
+    def test_matches_received_at_to_the_second(self, common):
+        stamp = (datetime.now() - timedelta(hours=2)).replace(microsecond=0)
+        data = {"_received_at": stamp.isoformat()}
+        assert datetime.fromtimestamp(common.event_ts(data)) == stamp
+
+    def test_live_submission_is_now(self, common):
+        assert abs(common.event_ts({}) - datetime.now().timestamp()) < 5
+
+    def test_untrusted_stamp_past_six_hours_falls_back_to_now(self, common):
+        stamp = datetime.now() - timedelta(hours=7)
+        ts = common.event_ts({"_received_at": stamp.isoformat()})
+        assert abs(ts - datetime.now().timestamp()) < 5
+
+    def test_trusted_replay_three_days_old_keeps_its_date(self, common):
+        stamp = (datetime.now() - timedelta(days=3)).replace(microsecond=0)
+        data = {"_received_at": stamp.isoformat(), "_received_at_trusted": True}
+        assert datetime.fromtimestamp(common.event_ts(data)) == stamp
+
+    def test_future_and_garbage_fall_back_to_now(self, common):
+        future = (datetime.now() + timedelta(hours=1)).isoformat()
+        for data in ({"_received_at": future}, {"_received_at": "nope"}, None):
+            assert abs(common.event_ts(data) - datetime.now().timestamp()) < 5
+
+
+class TestEveryEventProducerPassesTheReceiveTime:
+    """Structural guard: a processor that calls ``queue_submission`` without
+    ``ts=`` silently goes back to processing-time event credit."""
+
+    def test_all_queue_submission_calls_pass_ts(self):
+        import ast
+        import glob
+
+        root = os.path.dirname(_MODULE_PATH)
+        missing, seen = [], 0
+        for path in sorted(glob.glob(os.path.join(root, "*.py"))):
+            with open(path) as fh:
+                tree = ast.parse(fh.read())
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and getattr(node.func, "id", getattr(node.func, "attr", None))
+                        == "queue_submission"):
+                    seen += 1
+                    if not any(kw.arg == "ts" for kw in node.keywords):
+                        missing.append(f"{os.path.basename(path)}:{node.lineno}")
+        assert seen >= 8
+        assert missing == []

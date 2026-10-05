@@ -20,6 +20,7 @@ from .common import (
     award_points_to_player,
     get_config_prefix,
     envelope_from_plugin,
+    event_ts,
     SEASONAL_WORLD_TYPE,
     SeasonalPlayerPet,
 )
@@ -235,6 +236,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                 world_type=world_type, player_name=player_name,
                 # used_api means "came from the plugin" to the events engine
                 # (API and Discord-webhook intake both count; mirrors drop.py).
+                ts=event_ts(pet_data),
                 used_api=envelope_from_plugin(pet_data),
             )
         except Exception:

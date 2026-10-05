@@ -18,6 +18,7 @@ from .common import (
     debug_print,
     get_config_prefix,
     envelope_from_plugin,
+    event_ts,
     received_at,
     reraise_if_session_broken,
     SEASONAL_WORLD_TYPE,
@@ -247,6 +248,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                 world_type=world_type, player_name=player_name,
                 # used_api means "came from the plugin" to the events engine
                 # (API and Discord-webhook intake both count; mirrors drop.py).
+                ts=event_ts(ca_data),
                 used_api=envelope_from_plugin(ca_data),
             )
         except Exception:

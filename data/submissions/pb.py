@@ -34,6 +34,7 @@ from .common import (
     is_truthy_config,
     get_config_prefix,
     envelope_from_plugin,
+    event_ts,
     SEASONAL_WORLD_TYPE,
     SeasonalPersonalBestEntry,
     reraise_if_session_broken,
@@ -530,6 +531,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 world_type=world_type, player_name=player_name,
                 # used_api means "came from the plugin" to the events engine
                 # (API and Discord-webhook intake both count; mirrors drop.py).
+                ts=event_ts(pb_data),
                 used_api=envelope_from_plugin(pb_data),
             )
     except Exception:

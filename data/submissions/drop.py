@@ -30,6 +30,7 @@ from .common import (
     redis_updates,
     get_config_prefix,
     envelope_from_plugin,
+    event_ts,
     SEASONAL_WORLD_TYPE,
     SeasonalDrop,
     reraise_if_session_broken,
@@ -737,6 +738,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                 # events engine (submission_policy confirm_non_api/api_only) —
                 # independent of the Drop row's used_api column, which records
                 # the intake transport (API vs Discord webhook).
+                ts=event_ts(drop_data),
                 used_api=envelope_from_plugin(drop_data),
             )
         except Exception:

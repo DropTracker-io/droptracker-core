@@ -20,6 +20,7 @@ from .common import (
     award_points_to_player,
     get_config_prefix,
     envelope_from_plugin,
+    event_ts,
     SEASONAL_WORLD_TYPE,
     SeasonalCollectionLogEntry,
 )
@@ -251,6 +252,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                 world_type=world_type, player_name=player_name,
                 # used_api means "came from the plugin" to the events engine
                 # (API and Discord-webhook intake both count; mirrors drop.py).
+                ts=event_ts(clog_data),
                 used_api=envelope_from_plugin(clog_data),
             )
         except Exception:
