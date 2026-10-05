@@ -81,9 +81,10 @@ class TestReplayReusesIntake:
 
     def test_replay_stamps_the_original_receive_time(self):
         src = open(REPLAY).read()
-        assert "_received_at" in src, (
-            "the replay must stamp payloads with the Discord message time so "
-            "recovered rows keep their original date_added"
+        assert "stamp_bundle(" in src, (
+            "the replay must stamp payloads with the Discord message time "
+            "(services.webhook_catchup.stamp_bundle) so recovered rows keep "
+            "their original date_added"
         )
 
     def test_replay_defaults_to_a_dry_run(self):

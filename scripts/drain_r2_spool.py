@@ -43,9 +43,17 @@ Safety
     other response leaves it in place for the next pass.
   * Probes ``/ping`` first and refuses to run against a sick intake, so a pass
     during an ongoing outage does not burn the backlog against 503s.
-  * Bounded per pass (``--limit``) and rate-limited (``--rate``) so a large
-    backlog drains steadily instead of stampeding the consumer. The acceptor
-    rate-limits at 100/s per client IP and every replay shares one source IP.
+  * Rate-limited (``--rate``, shared by ``--workers`` concurrent replays) and
+    time-boxed (``--max-seconds``) rather than capped at a fixed count, so a
+    multi-hour outage drains in one or two passes instead of trickling out at
+    500 objects per 5 minutes. The acceptor rate-limits at 100/s per client IP
+    and every replay shares one source IP, hence the 50/s default.
+  * Backpressure: the pass pauses while ``webhook:queue`` is deeper than
+    ``--max-queue-depth``, so a backlog cannot bury live submissions behind it.
+    The acceptor answers in ~3ms; the consumer is the real bottleneck.
+  * Original dating: each replay carries the Worker's ``captured_at`` as a
+    signed ``X-DT-Received-At`` header (utils.replay_stamp), so recovered rows
+    are dated when the edge first received them, not when the drain ran.
 """
 from __future__ import annotations
 
@@ -53,7 +61,9 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
@@ -98,31 +108,85 @@ def intake_is_healthy(base_url: str, timeout: float = 5.0) -> bool:
         return False
 
 
-def replay_body(base_url: str, body: bytes, content_type: str, timeout: float = 30.0):
+def stamp_headers(captured_at: str) -> dict:
+    """Signed original-receive-time headers, or {} when the stamp can't be signed
+    (no key configured, or metadata missing/garbled): the row is then dated at
+    accept time, as before."""
+    from utils import replay_stamp
+
+    sig = replay_stamp.sign(captured_at) if captured_at else None
+    if not sig:
+        return {}
+    return {replay_stamp.STAMP_HEADER: replay_stamp.normalize(captured_at),
+            replay_stamp.SIG_HEADER: sig}
+
+
+def replay_body(base_url: str, body: bytes, content_type: str, timeout: float = 30.0,
+                captured_at: str = ""):
     """POST one captured body back to the intake. Returns (status, text)."""
     import requests
 
-    resp = requests.post(
-        f"{base_url}/webhook",
-        data=body,
-        headers={"Content-Type": content_type, "X-DT-Replay": "r2-spool"},
-        timeout=timeout,
-    )
+    headers = {"Content-Type": content_type, "X-DT-Replay": "r2-spool"}
+    headers.update(stamp_headers(captured_at))
+    resp = requests.post(f"{base_url}/webhook", data=body, headers=headers, timeout=timeout)
     return resp.status_code, resp.text[:200]
+
+
+class RateLimiter:
+    """Spaces calls ``1/rate`` apart across every thread sharing it."""
+
+    def __init__(self, rate: float):
+        self.interval = 1.0 / rate if rate and rate > 0 else 0.0
+        self._lock = threading.Lock()
+        self._next = time.monotonic()
+
+    def wait(self) -> None:
+        if not self.interval:
+            return
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._next)
+            self._next = slot + self.interval
+        if slot > now:
+            time.sleep(slot - now)
+
+
+def _queue_depth_reader():
+    """``() -> int | None`` for webhook:queue, or None when Redis is unreachable
+    (the drain then runs without backpressure rather than not at all)."""
+    try:
+        import redis
+
+        rc = redis.Redis(host="127.0.0.1", port=6379, db=0,
+                         password=os.environ.get("DB_PASS"),
+                         socket_timeout=5, socket_connect_timeout=5)
+        rc.ping()
+    except Exception as exc:
+        print(f"  (no backpressure: Redis unavailable: {exc})")
+        return None
+
+    def depth():
+        try:
+            return int(rc.llen("webhook:queue"))
+        except Exception:
+            return None
+
+    return depth
 
 
 def drain_r2(args) -> int:
     client = _r2_client()
     bucket = os.environ.get("R2_SPOOL_BUCKET", "droptracker-intake-spool")
+    limit = args.limit if args.limit and args.limit > 0 else None
 
     paginator = client.get_paginator("list_objects_v2")
     pending = []
     for page in paginator.paginate(Bucket=bucket, Prefix=args.prefix):
         for obj in page.get("Contents", []):
             pending.append(obj["Key"])
-            if len(pending) >= args.limit:
+            if limit and len(pending) >= limit:
                 break
-        if len(pending) >= args.limit:
+        if limit and len(pending) >= limit:
             break
 
     # Keys embed a zero-padded UTC date path and a millisecond timestamp, so
@@ -142,31 +206,64 @@ def drain_r2(args) -> int:
         print("\ndry run -- pass --apply to replay and delete")
         return 0
 
-    replayed = skipped = failed = 0
-    interval = 1.0 / args.rate if args.rate > 0 else 0.0
+    counts = {"replayed": 0, "rejected": 0, "deferred": 0}
+    counts_lock = threading.Lock()
+    stop = threading.Event()
+    limiter = RateLimiter(args.rate)
+    deadline = (time.monotonic() + args.max_seconds) if args.max_seconds else None
+    depth = _queue_depth_reader() if args.max_queue_depth else None
 
-    for key in pending:
+    def bump(name):
+        with counts_lock:
+            counts[name] += 1
+
+    def wait_for_consumer() -> None:
+        """Hold off while the consumer is behind; never past the deadline."""
+        if depth is None:
+            return
+        announced = False
+        while not stop.is_set():
+            d = depth()
+            if d is None or d <= args.max_queue_depth:
+                return
+            if deadline and time.monotonic() >= deadline:
+                stop.set()
+                return
+            if not announced:
+                print(f"  .. webhook:queue depth {d} > {args.max_queue_depth}, pausing")
+                announced = True
+            time.sleep(2)
+
+    def replay_one(key: str) -> None:
+        if stop.is_set():
+            return
         try:
             obj = client.get_object(Bucket=bucket, Key=key)
             body = obj["Body"].read()
             content_type = obj.get("ContentType") or "application/octet-stream"
-            guid = (obj.get("Metadata") or {}).get("guid", "")
+            meta = obj.get("Metadata") or {}
+            guid = meta.get("guid", "")
         except Exception as exc:
             print(f"  ! unreadable {key}: {exc}")
-            failed += 1
-            continue
+            bump("deferred")
+            return
 
+        if stop.is_set():
+            return
+        limiter.wait()
         try:
-            status, text = replay_body(args.intake, body, content_type)
+            status, text = replay_body(args.intake, body, content_type,
+                                       captured_at=meta.get("captured_at", ""))
         except Exception as exc:
             print(f"  ! replay failed {key}: {exc}")
-            failed += 1
+            bump("deferred")
             # A failing intake means the rest of this pass will fail too.
-            break
+            stop.set()
+            return
 
         if status == 200:
             client.delete_object(Bucket=bucket, Key=key)
-            replayed += 1
+            bump("replayed")
         elif status in (400, 401, 403):
             # The intake will never accept this body. Leaving it would retry
             # forever, so move it aside for inspection instead of deleting.
@@ -177,16 +274,48 @@ def drain_r2(args) -> int:
             )
             client.delete_object(Bucket=bucket, Key=key)
             print(f"  - rejected {status} {key} guid={guid} :: {text}")
-            skipped += 1
+            bump("rejected")
         else:
             print(f"  ? deferred {status} {key} guid={guid} :: {text}")
-            failed += 1
-            break
+            bump("deferred")
+            stop.set()
 
-        if interval:
-            time.sleep(interval)
+    def replay_one_safely(key: str) -> None:
+        try:
+            replay_one(key)
+        except Exception as exc:
+            # e.g. R2 refused the delete after a 200: the object stays and the
+            # next pass replays it again, which GUID dedup makes a no-op.
+            print(f"  ! {key}: {exc}")
+            bump("deferred")
+            stop.set()
 
-    print(f"\nreplayed={replayed} rejected={skipped} deferred={failed}")
+    workers = max(1, int(args.workers or 1))
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        in_flight = []
+        for i, key in enumerate(pending):
+            if stop.is_set():
+                break
+            if deadline and time.monotonic() >= deadline:
+                print(f"  .. time budget ({args.max_seconds}s) reached; "
+                      f"{len(pending) - i} object(s) left for the next pass")
+                break
+            if i % 50 == 0:
+                wait_for_consumer()
+                if stop.is_set():
+                    break
+            # Keep at most 2x workers queued so a stop or the deadline takes
+            # effect promptly instead of after the whole list was submitted.
+            in_flight = [f for f in in_flight if not f.done()]
+            while len(in_flight) >= workers * 2:
+                in_flight[0].result()
+                in_flight = [f for f in in_flight if not f.done()]
+            in_flight.append(pool.submit(replay_one_safely, key))
+
+    elapsed = time.monotonic() - started
+    print(f"\nreplayed={counts['replayed']} rejected={counts['rejected']} "
+          f"deferred={counts['deferred']} in {elapsed:.0f}s")
     return 0
 
 
@@ -201,7 +330,7 @@ def drain_dead(args) -> int:
         decode_responses=True,
     )
 
-    entries = rc.lrange("webhook:dead", 0, args.limit - 1)
+    entries = rc.lrange("webhook:dead", 0, (args.limit or 500) - 1)
     if not entries:
         print("webhook:dead is empty")
         return 0
@@ -244,10 +373,23 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="write (default: dry run)")
     ap.add_argument("--source", choices=("r2", "dead"), default="r2",
                     help="r2 spool (default) or the Redis dead-letter list")
-    ap.add_argument("--limit", type=int, default=500,
-                    help="max entries per pass (default: 500)")
-    ap.add_argument("--rate", type=float, default=20.0,
-                    help="replays per second against the intake (default: 20)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="max entries per pass (default: 0 = no cap; the pass is "
+                         "time-boxed by --max-seconds instead). For --source dead "
+                         "0 means 500.")
+    ap.add_argument("--rate", type=float, default=50.0,
+                    help="replays per second against the intake, shared by all "
+                         "workers (default: 50; the acceptor allows 100/s per IP)")
+    ap.add_argument("--workers", type=int, default=8,
+                    help="concurrent replays; R2 reads dominate per-object latency "
+                         "(default: 8)")
+    ap.add_argument("--max-seconds", type=int, default=1500,
+                    help="stop starting new replays after this long; the rest wait "
+                         "for the next pass (default: 1500, under the unit's 30m "
+                         "TimeoutStartSec; 0 = no limit)")
+    ap.add_argument("--max-queue-depth", type=int, default=1000,
+                    help="pause while webhook:queue is deeper than this, so live "
+                         "submissions are not buried (default: 1000; 0 = off)")
     ap.add_argument("--prefix", default="webhook/",
                     help="R2 key prefix to drain (default: webhook/)")
     ap.add_argument("--intake", default=os.environ.get("INTAKE_API_URL",

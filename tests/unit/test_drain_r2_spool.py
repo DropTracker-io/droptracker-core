@@ -66,7 +66,8 @@ class FakeR2:
 
 def _args(**over):
     base = dict(apply=True, source="r2", limit=500, rate=0, prefix="webhook/",
-                intake="http://127.0.0.1:31323", skip_health_check=True)
+                intake="http://127.0.0.1:31323", skip_health_check=True,
+                workers=1, max_seconds=0, max_queue_depth=0)
     base.update(over)
     return types.SimpleNamespace(**base)
 
@@ -156,6 +157,84 @@ class TestR2Drain:
 
         drain.drain_r2(_args(limit=10))
         assert len(r2.deleted) == 10
+
+
+class TestFasterRecovery:
+    """A multi-hour outage must drain in a pass or two, not 500 per 5 minutes."""
+
+    def test_no_cap_drains_everything_in_one_pass(self, drain, monkeypatch):
+        r2 = FakeR2({f"webhook/2026/08/21/00/{i:05d}-a.bin": _obj(i) for i in range(1200)})
+        monkeypatch.setattr(drain, "_r2_client", lambda: r2)
+        monkeypatch.setattr(drain, "replay_body", lambda *a, **k: (200, "Queued"))
+
+        drain.drain_r2(_args(limit=0, workers=8))
+        assert len(r2.deleted) == 1200 and not r2.objects
+
+    def test_concurrent_workers_still_stop_on_a_sick_intake(self, drain, monkeypatch):
+        r2 = FakeR2({f"webhook/2026/08/21/00/{i:04d}-a.bin": _obj(i) for i in range(200)})
+        monkeypatch.setattr(drain, "_r2_client", lambda: r2)
+        monkeypatch.setattr(drain, "replay_body", lambda *a, **k: (503, "down"))
+
+        drain.drain_r2(_args(limit=0, workers=4))
+        assert r2.deleted == [] and len(r2.objects) == 200
+
+    def test_the_time_budget_leaves_the_rest_for_next_pass(self, drain, monkeypatch):
+        r2 = FakeR2({f"webhook/2026/08/21/00/{i:04d}-a.bin": _obj(i) for i in range(20)})
+        monkeypatch.setattr(drain, "_r2_client", lambda: r2)
+        monkeypatch.setattr(drain, "replay_body", lambda *a, **k: (200, "Queued"))
+        clock = iter([0.0] + [0.0] * 5 + [10_000.0] * 100)
+        monkeypatch.setattr(drain.time, "monotonic", lambda: next(clock))
+
+        drain.drain_r2(_args(limit=0, max_seconds=60))
+        assert 0 < len(r2.deleted) < 20
+
+    def test_pauses_while_the_consumer_is_behind(self, drain, monkeypatch):
+        r2 = FakeR2({"webhook/2026/08/21/00/1-a.bin": _obj(1)})
+        monkeypatch.setattr(drain, "_r2_client", lambda: r2)
+        monkeypatch.setattr(drain, "replay_body", lambda *a, **k: (200, "Queued"))
+        depths = iter([5000, 5000, 10])
+        monkeypatch.setattr(drain, "_queue_depth_reader", lambda: lambda: next(depths))
+        slept = []
+        monkeypatch.setattr(drain.time, "sleep", lambda s: slept.append(s))
+
+        drain.drain_r2(_args(max_queue_depth=1000))
+        assert len(slept) == 2 and r2.deleted == ["webhook/2026/08/21/00/1-a.bin"]
+
+
+class TestOriginalDating:
+    def test_the_capture_time_is_sent_signed(self, drain, monkeypatch):
+        monkeypatch.setenv("JWT_TOKEN_KEY", "test-secret")
+        from utils import replay_stamp
+
+        headers = drain.stamp_headers("2026-10-05T12:21:00.000Z")
+        assert headers[replay_stamp.STAMP_HEADER] == "2026-10-05T12:21:00"
+        assert replay_stamp.verify(headers[replay_stamp.STAMP_HEADER],
+                                   headers[replay_stamp.SIG_HEADER])
+
+    def test_no_capture_time_sends_no_stamp(self, drain, monkeypatch):
+        monkeypatch.setenv("JWT_TOKEN_KEY", "test-secret")
+        assert drain.stamp_headers("") == {}
+
+    def test_the_drain_passes_the_objects_capture_time(self, drain, monkeypatch):
+        r2 = FakeR2({"webhook/2026/08/21/00/1-a.bin": _obj(1)})
+        orig_get = r2.get_object
+
+        def get_object(Bucket, Key):
+            obj = orig_get(Bucket, Key)
+            obj["Metadata"]["captured_at"] = "2026-08-21T00:00:01.000Z"
+            return obj
+
+        r2.get_object = get_object
+        monkeypatch.setattr(drain, "_r2_client", lambda: r2)
+        seen = {}
+
+        def replay(*a, **k):
+            seen.update(k)
+            return (200, "Queued")
+
+        monkeypatch.setattr(drain, "replay_body", replay)
+        drain.drain_r2(_args())
+        assert seen["captured_at"] == "2026-08-21T00:00:01.000Z"
 
 
 class FakeRedis:

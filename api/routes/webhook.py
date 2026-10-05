@@ -268,6 +268,24 @@ def _looks_like_clan_relay(webhook_payload) -> bool:
     return False
 
 
+def _replay_received_at():
+    """The original receive time a server-side replay vouched for, or None.
+
+    Only the R2 drain sends these headers, signed with a key that never leaves
+    the box (utils.replay_stamp). A missing or invalid signature is ignored, so
+    a client sending the header gets exactly the old behaviour.
+    """
+    from utils import replay_stamp
+
+    stamp = request.headers.get(replay_stamp.STAMP_HEADER)
+    if not stamp:
+        return None
+    verified = replay_stamp.verify(stamp, request.headers.get(replay_stamp.SIG_HEADER))
+    if verified is None:
+        logger.log_sync("warning", "[QueueAcceptor] Ignored an unverified replay stamp")
+    return verified
+
+
 async def _queue_webhook_request():
     """Fast-path acceptor: validate, save image to temp, push to Redis queue, return 200."""
     import json
@@ -291,6 +309,9 @@ async def _queue_webhook_request():
 
         if not webhook_payload:
             return jsonify({"error": "Empty payload"}), 400
+        if isinstance(webhook_payload, dict):
+            from utils.replay_stamp import strip_client_stamp_fields
+            strip_client_stamp_fields(webhook_payload)
 
         # Clan chat relaying is on by default in the plugin, so chat from a
         # clan no group opted in is dropped here, before it is queued or
@@ -327,13 +348,17 @@ async def _queue_webhook_request():
                     f"the temp stash failed for {image_filename!r}",
                 )
 
+        replayed_at = _replay_received_at()
         entry = {
             "payload": webhook_payload,
             "image_tmp_path": image_tmp_path,
             "image_filename": image_filename,
             "image_content_type": image_content_type,
-            "enqueued_at": datetime.utcnow().isoformat(),
+            # An outage replay keeps the time the edge first received it.
+            "enqueued_at": replayed_at or datetime.utcnow().isoformat(),
         }
+        if replayed_at:
+            entry["received_at_trusted"] = True
         if mirror_kind:
             entry["mirrored"] = mirror_kind
 
@@ -460,6 +485,14 @@ async def _process_webhook_request(req_start):
                 webhook_payload = json.loads(payload_json)
                 if webhook_payload is None:
                     return jsonify({"error": "Invalid JSON in payload_json"}), 400
+                if isinstance(webhook_payload, dict):
+                    from utils.replay_stamp import strip_client_stamp_fields
+                    strip_client_stamp_fields(webhook_payload)
+                    # Same replay dating as the queue path (enqueued_at there).
+                    replayed_at = _replay_received_at()
+                    if replayed_at:
+                        webhook_payload["_received_at"] = replayed_at
+                        webhook_payload["_received_at_trusted"] = True
 
                 files = await request.files
                 log_phase("files_read")
@@ -687,6 +720,8 @@ async def _process_webhook_request(req_start):
 
 
 async def process_webhook_data(webhook_data):
+    from utils.replay_stamp import strip_client_stamp_fields
+
     try:
         embeds = webhook_data.get("embeds", [])
         if not embeds:
@@ -697,6 +732,9 @@ async def process_webhook_data(webhook_data):
             processed_data = {
                 field["name"]: field["value"] for field in embed.get("fields", [])
             }
+            # Receive-time keys are the server's to set (below); a client
+            # field with one of these names must not date its own row.
+            strip_client_stamp_fields(processed_data)
             # Free text under the title. Only config snapshots use it (their
             # JSON is too big for embed fields); see data/submissions/config_snapshot.
             if embed.get("description"):
@@ -713,6 +751,8 @@ async def process_webhook_data(webhook_data):
             # the wrong month.
             if webhook_data.get("_received_at"):
                 processed_data["_received_at"] = webhook_data["_received_at"]
+                if webhook_data.get("_received_at_trusted") is True:
+                    processed_data["_received_at_trusted"] = True
             processed_data["world_type"] = _normalize_world_type(processed_data.get("world_type"))
             submission_type = str(processed_data.get("type", "")).lower()
             if submission_type in ("drop", "npc", "other"):

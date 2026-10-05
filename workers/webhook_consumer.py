@@ -305,6 +305,11 @@ async def _process_submission(entry_bytes: bytes) -> None:
     # design — the client's own clock is not trustworthy for this.
     if entry.get("enqueued_at"):
         payload["_received_at"] = entry["enqueued_at"]
+    # Set only by the acceptor after verifying a replay's signed stamp; the
+    # payload's own copy (a client's) was stripped before it was queued.
+    payload.pop("_received_at_trusted", None)
+    if entry.get("received_at_trusted") is True:
+        payload["_received_at_trusted"] = True
     image_tmp_path = entry.get("image_tmp_path")
     image_filename = entry.get("image_filename")
     image_content_type = entry.get("image_content_type")

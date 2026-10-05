@@ -25,8 +25,11 @@ Type=oneshot
 User=user
 WorkingDirectory=/store/droptracker/disc
 ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.drain_r2_spool --apply
-# A backlog from a long outage drains over several passes by design; one pass
-# is bounded by --limit (500) and --rate (20/s), so ~25s of work at most.
+# One pass replays with 8 workers at up to 50/s until the spool is empty or
+# --max-seconds (1500) runs out, pausing while webhook:queue is deeper than
+# 1000. A 3-hour outage (~46k objects) clears in about 15-20 minutes, consumer
+# permitting; anything left over goes in the next pass. Recovered rows keep
+# their original receive time via a signed header (utils/replay_stamp.py).
 TimeoutStartSec=30m
 # The script refuses to run against an unhealthy intake and exits 1. During an
 # ongoing outage that is the expected outcome, not something to alert on.

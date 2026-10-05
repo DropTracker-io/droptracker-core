@@ -158,3 +158,84 @@ class TestReceivedAtReachesTheProcessors:
         processed = await self._process(self._envelope(None))
         assert "_received_at" not in processed
         assert _close_to_now(common.received_at(processed))
+
+
+class TestTrustedReplayStamps:
+    """Outage replays keep their original receive time (utils.replay_stamp).
+
+    A recovered submission used to be dated when the replay ran once it was
+    more than 6 hours old, so a long outage booked hours of kills into the
+    recovery hour (or the next month). Our own replay code now vouches for
+    the stamp, and only that vouched-for stamp gets the longer window.
+    """
+
+    def test_a_trusted_two_day_old_stamp_is_believed(self, common):
+        original = datetime.now() - timedelta(days=2)
+        got = common.received_at({"_received_at": original.isoformat(),
+                                  "_received_at_trusted": True})
+        assert abs((got - original).total_seconds()) < 1
+
+    def test_the_same_stamp_untrusted_still_falls_back_to_now(self, common):
+        original = datetime.now() - timedelta(days=2)
+        assert _close_to_now(common.received_at({"_received_at": original.isoformat()}))
+
+    def test_a_truthy_string_is_not_trust(self, common):
+        # Embed fields arrive as strings; only our code sets a real True.
+        original = datetime.now() - timedelta(days=2)
+        got = common.received_at({"_received_at": original.isoformat(),
+                                  "_received_at_trusted": "true"})
+        assert _close_to_now(got)
+
+    def test_even_a_trusted_stamp_has_a_limit(self, common):
+        ancient = datetime.now() - timedelta(days=8)
+        got = common.received_at({"_received_at": ancient.isoformat(),
+                                  "_received_at_trusted": True})
+        assert _close_to_now(got)
+
+    def test_a_trusted_future_stamp_is_still_refused(self, common):
+        ahead = datetime.now() + timedelta(hours=1)
+        got = common.received_at({"_received_at": ahead.isoformat(),
+                                  "_received_at_trusted": True})
+        assert _close_to_now(got)
+
+
+class TestClientsCannotDateTheirOwnRows:
+    """Embed fields become payload keys verbatim, so a field named like the
+    server's stamp would otherwise date the row. Both must be stripped."""
+
+    async def _process(self, payload):
+        from api.routes.webhook import process_webhook_data
+        items = await process_webhook_data(payload)
+        assert items and len(items) == 1
+        return items[0]
+
+    @staticmethod
+    def _payload(**fields):
+        return {"embeds": [{"fields": [
+            {"name": k, "value": v} for k, v in
+            {"type": "drop", "player_name": "TestPlayer", "guid": "g-1", **fields}.items()
+        ]}]}
+
+    async def test_client_stamp_fields_are_dropped(self):
+        old = (datetime.now() - timedelta(hours=3)).isoformat()
+        processed = await self._process(self._payload(
+            _received_at=old, _received_at_trusted="true"))
+        assert "_received_at" not in processed
+        assert "_received_at_trusted" not in processed
+
+    async def test_the_envelope_stamp_wins_over_a_client_field(self):
+        server = datetime.now().isoformat()
+        payload = self._payload(_received_at="2020-01-01T00:00:00")
+        payload["_received_at"] = server
+        processed = await self._process(payload)
+        assert processed["_received_at"] == server
+        assert "_received_at_trusted" not in processed
+
+    async def test_trust_carries_over_only_from_the_envelope(self):
+        stamp = (datetime.now() - timedelta(days=1)).isoformat()
+        payload = self._payload()
+        payload["_received_at"] = stamp
+        payload["_received_at_trusted"] = True
+        processed = await self._process(payload)
+        assert processed["_received_at"] == stamp
+        assert processed["_received_at_trusted"] is True

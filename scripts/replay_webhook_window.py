@@ -31,17 +31,12 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import interactions
-from interactions import ChannelType, Intents
+from interactions import Intents
 
 # Discord snowflakes encode a millisecond timestamp, so a time window converts
-# straight into id bounds. That lets `history()` seek to the window server-side
-# instead of walking a channel back from "now" one page at a time.
-DISCORD_EPOCH_MS = 1420070400000
-
-
-def snowflake_for(dt: datetime) -> int:
-    return (int(dt.timestamp() * 1000) - DISCORD_EPOCH_MS) << 22
-
+# straight into id bounds. Shared with the reader's automatic startup catch-up.
+from services.webhook_catchup import collect_channels, snowflake_for, stamp_bundle
+from utils.replay_stamp import TRUSTED_RECEIVED_AT_MAX_LAG
 
 def parse_utc(value: str) -> datetime:
     """Accept 'YYYY-MM-DD HH:MM[:SS]' or ISO 8601; always interpreted as UTC."""
@@ -54,32 +49,6 @@ def parse_utc(value: str) -> datetime:
     raise argparse.ArgumentTypeError(
         f"unrecognised UTC timestamp {value!r} (try '2026-08-18 18:34')"
     )
-
-
-async def collect_channels(client, guild_ids, only_channels):
-    """Text channels the bot can actually read, across the target guilds."""
-    channels = []
-    for guild_id in guild_ids:
-        try:
-            guild = await client.fetch_guild(guild_id)
-        except Exception as e:
-            print(f"  ! guild {guild_id}: cannot fetch ({e})")
-            continue
-        if guild is None:
-            print(f"  ! guild {guild_id}: not found / bot not a member")
-            continue
-        try:
-            found = await guild.fetch_channels()
-        except Exception as e:
-            print(f"  ! guild {guild_id}: cannot list channels ({e})")
-            continue
-        for channel in found:
-            if channel.type not in (ChannelType.GUILD_TEXT, ChannelType.GUILD_NEWS):
-                continue
-            if only_channels and str(channel.id) not in only_channels:
-                continue
-            channels.append((guild, channel))
-    return channels
 
 
 async def replay(args) -> int:
@@ -109,12 +78,13 @@ async def replay(args) -> int:
     print(f"mode   : {'APPLY (dispatching)' if args.apply else 'dry run (nothing will be written)'}")
     print(f"muted  : {', '.join(args.suppress_notify) if args.suppress_notify else '(nothing — every notification fires)'}")
 
-    # common.received_at rejects stamps older than 6h and falls back to now().
+    # Trusted replay stamps are believed for TRUSTED_RECEIVED_AT_MAX_LAG (7 days);
+    # past that common.received_at falls back to now().
     age = datetime.now(timezone.utc) - args.start
-    if age > timedelta(hours=6):
-        print(f"WARNING: window starts {age.total_seconds() / 3600:.1f}h ago, past the "
-              f"6h _RECEIVED_AT_MAX_LAG — replayed rows will be stamped at the "
-              f"current time, not their original one.")
+    if age > TRUSTED_RECEIVED_AT_MAX_LAG:
+        print(f"WARNING: window starts {age.total_seconds() / 86400:.1f} days ago, past the "
+              f"{TRUSTED_RECEIVED_AT_MAX_LAG.days}-day trusted-stamp limit — older replayed "
+              f"rows will be stamped at the current time, not their original one.")
     print()
 
     # HTTP-only login. Deliberately not astart(): the reader bot is already on
@@ -148,8 +118,13 @@ async def _scan(args, client, guild_ids, only_channels, after_id, before_id,
 
     for guild, channel in channels:
         try:
-            history = channel.history(limit=args.limit, after=after_id, before=before_id)
+            # interactions.py ignores `before` once `after` is set and pages
+            # forward to the present, oldest first, so --end is enforced here.
+            # (Before this check a replay ran from --start all the way to now.)
+            history = channel.history(limit=args.limit, after=after_id)
             async for message in history:
+                if int(message.id) >= before_id:
+                    break
                 # Mirror the live listener's own filters so a replay cannot
                 # ingest something intake would have ignored.
                 if message.author is None or message.author.system:
@@ -167,13 +142,10 @@ async def _scan(args, client, guild_ids, only_channels, after_id, before_id,
                 # Stamp each payload with when Discord actually received it, so
                 # a replay books the drop at its real time instead of "whenever
                 # the backfill ran". Set here and never in the shared bundler:
-                # on the live path the two are the same instant anyway.
-                # common.received_at ignores stamps older than 6h
-                # (_RECEIVED_AT_MAX_LAG) and quietly falls back to now(), which
-                # is what the window-age warning above is about.
-                stamped_at = message.created_at.isoformat()
-                for _, embed_data in bundle:
-                    embed_data.setdefault("_received_at", stamped_at)
+                # on the live path the two are the same instant anyway. The
+                # stamp is marked trusted (it comes from Discord, not the
+                # client), so common.received_at believes it for up to 7 days.
+                stamp_bundle(bundle, message.created_at)
                 messages_with_bundle += 1
                 for submission_type, _ in bundle:
                     by_type[str(submission_type)] += 1

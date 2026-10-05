@@ -26,6 +26,7 @@ from services.points import award_points_to_player
 from services import discord_roles
 from services import nitro_attribution
 from services import nitro_notifications
+from services import webhook_catchup
 from utils.format import convert_to_ms, get_true_boss_name
 from services.ticket_system import Tickets
 from sqlalchemy.exc import OperationalError, DisconnectionError, InterfaceError, InternalError, DBAPIError
@@ -706,6 +707,10 @@ def _flag_bundle_duplicates(embed_dicts) -> None:
 def _embed_to_dict(embed: Embed):
     if embed.fields:
         data = {f.name: f.value for f in embed.fields}
+        # Receive-time keys are set by our replay code only; a client field
+        # with one of these names must not date its own row.
+        from utils.replay_stamp import strip_client_stamp_fields
+        strip_client_stamp_fields(data)
         # Config snapshots carry their JSON here (too big for embed fields);
         # same key as api.routes.webhook.process_webhook_data.
         if embed.description:
@@ -806,6 +811,8 @@ async def on_message_create(event: MessageCreate):
 
     if str(message.guild.id) in (str(guild) for guild in target_guilds) or message.guild.id == os.getenv("DISCORD_GUILD_ID"):
         await process_message_bundle(message)
+        # Where the next startup catch-up resumes from (services/webhook_catchup).
+        webhook_catchup.note_seen(message)
     else:
         print(f"Message is not in the target guilds: {message.guild.id}")
 
@@ -855,6 +862,16 @@ async def _status_heartbeat_loop():
         await asyncio.sleep(60)
 
 
+async def _run_webhook_catchup():
+    try:
+        await webhook_catchup.run_catchup(
+            bot, [str(g) for g in target_guilds],
+            build_message_bundle, process_message_bundle,
+        )
+    except Exception as e:
+        print(f"[WebhookCatchup] failed: {e}")
+
+
 @interactions.listen(Startup)
 async def on_startup(event: Startup):
 
@@ -880,6 +897,11 @@ async def on_startup(event: Startup):
     if not _status_heartbeat_started:
         _status_heartbeat_started = True
         asyncio.create_task(_status_heartbeat_loop())
+    # Replay whatever was posted to the webhook channels while this bot was
+    # down. Runs on every Startup (they re-fire on reconnects, which can lose
+    # events too); the watermark makes a no-gap run one history call per
+    # channel, and a run already in progress makes the next one a no-op.
+    asyncio.create_task(_run_webhook_catchup())
     # Then handle database operations with proper session management
     player_count = 0
     local_session = Session()

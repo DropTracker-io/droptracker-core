@@ -136,6 +136,8 @@ def envelope_from_plugin(submission_data: dict) -> bool:
 # the past would silently rewrite a closed month's totals.
 _RECEIVED_AT_MAX_LAG = timedelta(hours=6)
 
+from utils.replay_stamp import TRUSTED_RECEIVED_AT_MAX_LAG as _TRUSTED_RECEIVED_AT_MAX_LAG  # noqa: E402
+
 
 def received_at(submission_data: dict, *,
                 max_lag: timedelta | None = _RECEIVED_AT_MAX_LAG) -> datetime:
@@ -154,6 +156,12 @@ def received_at(submission_data: dict, *,
     ``max_lag=None`` believes a stamp of any age. That is for *ordering*
     readings rather than dating rows: a replayed day-old submission must sort
     as a day old (db/ca_points.py), not as though the game were read just now.
+
+    A stamp our own replay code vouched for (``_received_at_trusted``: the R2
+    drain's signed capture time, or the webhook reader's catch-up reading
+    Discord's message time) is believed for up to a week instead of 6 hours,
+    so outage recoveries date rows when they actually reached us. Clients can
+    never set that flag; see utils.replay_stamp.
     """
     raw = (submission_data or {}).get("_received_at")
     if not raw:
@@ -164,6 +172,8 @@ def received_at(submission_data: dict, *,
         return datetime.now()
     if stamped.tzinfo is not None:
         stamped = stamped.astimezone(timezone.utc).replace(tzinfo=None)
+    if max_lag is not None and (submission_data or {}).get("_received_at_trusted") is True:
+        max_lag = max(max_lag, _TRUSTED_RECEIVED_AT_MAX_LAG)
     now = datetime.now()
     if stamped > now or (max_lag is not None and (now - stamped) > max_lag):
         return now
