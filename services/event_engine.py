@@ -162,6 +162,19 @@ PRESTART_LOOKAHEAD_SECONDS = 120
 PRESTART_MAX_ENTRIES = 20000
 PRESTART_TTL_SECONDS = 6 * 3600
 ADMIN_BUMP_CHANNEL = "rt:event-admin"      # pubsub bump on event/task/roster mutations
+# Late arrivals (t274). A submission received inside an event's window that is
+# only processed after the event ended (results frozen, points paid) is not
+# scored; it is kept here for staff and the event's admins are told once.
+# Recently ended events stay in the matcher view this long, matching how old
+# a trusted replay stamp may be (utils.replay_stamp.TRUSTED_RECEIVED_AT_MAX_LAG).
+LATE_KEY = "events:late:{event_id}"
+LATE_GUIDS_KEY = "events:late:{event_id}:guids"
+LATE_NOTIFIED_KEY = "events:late:{event_id}:notified"
+LATE_TTL_SECONDS = 30 * 24 * 3600
+LATE_MAX_ENTRIES = 5000
+ENDED_RECENT_DAYS = 7
+# Rosters of ended events change rarely; reload them at most this often.
+ENDED_RECENT_REFRESH_SECONDS = 300
 
 _STATE_KEY_TTL = 60 * 60 * 24 * 60         # 60 days for xp-baseline / kc-dedupe keys
 
@@ -1570,6 +1583,11 @@ class MatcherState:
     # player_id -> [(event_id, joined_at)]. Never evaluated, only parked.
     prestart: dict = field(default_factory=dict)
     prestart_participants: dict = field(default_factory=dict)
+    # Recently ended events (t274), never scored: only consulted to keep a
+    # late arrival instead of dropping it. Same shapes as the live maps.
+    ended_events: dict = field(default_factory=dict)
+    ended_tasks_by_event: dict = field(default_factory=dict)
+    ended_participants: dict = field(default_factory=dict)
     loaded_at: float = 0.0
 
 
@@ -1972,53 +1990,19 @@ def replay_prestart(redis_conn, event_ids) -> dict:
     return replayed
 
 
-def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
-    """Load all active events + tasks + bingo cells + rosters into a
-    :class:`MatcherState`. One query burst per refresh, not per submission."""
-    from db.models import Event, EventTask, EventTeam, EventTeamMember, EventBingoCell
+def _load_participants(session, teams) -> dict:
+    """player_id -> [(event_id, team_id, joined_at)] for ``teams``: explicit
+    roster rows plus whole-clan (auto_clan) teams. Shared by the live view
+    and the recently-ended view (t274)."""
+    from db.models import EventTeamMember
 
-    state = MatcherState(loaded_at=time.time())
-    _load_prestart(session, state, now or datetime.now())
-    events = session.query(Event).filter(Event.status == "active").all()
-    if not events:
-        return state
-    event_ids = [e.id for e in events]
-    state.events = {e.id: _event_to_dict(e) for e in events}
-
-    # Recurring schedules (web82a): attach each scheduled event's compiled
-    # scoring windows. Windows are static data (rule edits rewrite the rows
-    # and bump the matcher), so the per-envelope gate needs no Redis — plain
-    # containment against this snapshot.
-    scheduled_ids = [e.id for e in events if getattr(e, "schedule_config", None)]
-    if scheduled_ids:
-        from db.models import EventWindow
-
-        for w in (session.query(EventWindow)
-                  .filter(EventWindow.event_id.in_(scheduled_ids))
-                  .order_by(EventWindow.event_id, EventWindow.starts_at)
-                  .all()):
-            state.events[w.event_id].setdefault("windows", []).append(
-                (w.starts_at, w.ends_at))
-
-    for task in session.query(EventTask).filter(EventTask.event_id.in_(event_ids)).all():
-        if task.type not in AUTO_TASK_TYPES:
-            continue
-        state.tasks_by_event.setdefault(task.event_id, []).append(_task_to_dict(task))
-
-    for cell in session.query(EventBingoCell).filter(
-            EventBingoCell.event_id.in_(event_ids), EventBingoCell.task_id.isnot(None)).all():
-        state.cells_by_task.setdefault(cell.task_id, []).append(
-            {"id": cell.id, "idx": cell.idx, "event_id": cell.event_id,
-             "label": cell.label})
-
-    teams = session.query(EventTeam).filter(EventTeam.event_id.in_(event_ids)).all()
-    state.team_names = {t.id: t.name for t in teams}
+    participants: dict = {}
     team_event = {t.id: t.event_id for t in teams}
     if teams:
         members = session.query(EventTeamMember).filter(
             EventTeamMember.team_id.in_(list(team_event.keys()))).all()
         for m in members:
-            state.participants.setdefault(m.player_id, []).append(
+            participants.setdefault(m.player_id, []).append(
                 (team_event[m.team_id], m.team_id, m.joined_at))
 
     # Whole-clan fallback teams (clan_vs_clan, no explicit roster): credit every
@@ -2065,10 +2049,186 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
             for pid in members_by_gid.get(t.group_id, ()):  # noqa: E501
                 if pid in excluded:
                     continue  # multi-clan member: never auto-credited (G7)
-                existing = state.participants.setdefault(pid, [])
+                existing = participants.setdefault(pid, [])
                 if any(e == event_id for (e, _tid, _j) in existing):
                     continue  # already mapped to a team for this event
                 existing.append((event_id, t.id, None))
+
+    return participants
+
+
+_ENDED_CACHE: dict = {"at": 0.0, "view": None}
+
+
+def _load_ended_recent(session, state: "MatcherState", now: datetime,
+                       *, use_cache: bool = True) -> None:
+    """Attach the recently-ended view (t274): events that ended within
+    :data:`ENDED_RECENT_DAYS`, their auto tasks and rosters. Cached for
+    :data:`ENDED_RECENT_REFRESH_SECONDS` (an ended event's roster and tasks
+    are frozen; a newly ended one just waits a few minutes for the view)."""
+    from db.models import Event, EventTask, EventTeam
+
+    if use_cache and _ENDED_CACHE["view"] is not None and (
+            time.time() - _ENDED_CACHE["at"]) < ENDED_RECENT_REFRESH_SECONDS:
+        view = _ENDED_CACHE["view"]
+    else:
+        cutoff = now - timedelta(days=ENDED_RECENT_DAYS)
+        rows = (session.query(Event)
+                .filter(Event.status == "past", Event.ended_at.isnot(None),
+                        Event.ended_at >= cutoff)
+                .all())
+        events = {e.id: _event_to_dict(e) for e in rows}
+        tasks: dict = {}
+        participants: dict = {}
+        if events:
+            ids = list(events)
+            for task in session.query(EventTask).filter(EventTask.event_id.in_(ids)).all():
+                if task.type in AUTO_TASK_TYPES:
+                    tasks.setdefault(task.event_id, []).append(_task_to_dict(task))
+            # Events with nothing auto-scorable can never have a late match.
+            for eid in [e for e in ids if e not in tasks]:
+                events.pop(eid, None)
+            if events:
+                teams = session.query(EventTeam).filter(
+                    EventTeam.event_id.in_(list(events))).all()
+                participants = _load_participants(session, teams)
+        view = (events, tasks, participants)
+        if use_cache:
+            _ENDED_CACHE["at"] = time.time()
+            _ENDED_CACHE["view"] = view
+    state.ended_events, state.ended_tasks_by_event, state.ended_participants = view
+
+
+def capture_late(redis_conn, event_id: int, team_id, envelope: dict) -> Optional[bool]:
+    """Keep an envelope that arrived after its event ended (t274). Returns
+    True for the event's FIRST capture (the caller tells its admins), False
+    for a later one, None when nothing was kept (duplicate guid, no Redis)."""
+    if redis_conn is None:
+        return None
+    try:
+        member = envelope.get("guid") or hashlib.sha1(
+            json.dumps(envelope, sort_keys=True, default=str).encode()).hexdigest()
+        guids = LATE_GUIDS_KEY.format(event_id=int(event_id))
+        if not redis_conn.sadd(guids, member):
+            return None
+        key = LATE_KEY.format(event_id=int(event_id))
+        record = {"team_id": team_id, "captured_at": int(time.time()),
+                  "envelope": envelope}
+        pipe = redis_conn.pipeline()
+        pipe.expire(guids, LATE_TTL_SECONDS)
+        pipe.rpush(key, json.dumps(record, default=str))
+        pipe.ltrim(key, -LATE_MAX_ENTRIES, -1)
+        pipe.expire(key, LATE_TTL_SECONDS)
+        pipe.execute()
+        return bool(redis_conn.set(LATE_NOTIFIED_KEY.format(event_id=int(event_id)),
+                                   1, nx=True, ex=LATE_TTL_SECONDS))
+    except Exception:
+        return None
+
+
+def _late_match(event: dict, tasks, envelope: dict, submitted_at: datetime,
+                joined_at) -> bool:
+    """Would this envelope have scored for ``event`` had it arrived in time?
+    The live loop's gates (joined_at, window, recurring windows, submission
+    policy) plus a task match. Pure."""
+    if (envelope.get("data") or {}).get("effort_only"):
+        return False
+    if envelope.get("source") == "wom" or (envelope.get("data") or {}).get("source") == "wom":
+        return False  # WOM reconciles from the window itself, never late
+    if joined_at is not None and submitted_at < joined_at:
+        return False
+    if event.get("window_start") is not None and submitted_at < event["window_start"]:
+        return False
+    if event.get("window_end") is not None and submitted_at > event["window_end"]:
+        return False
+    if schedule_window_seq(event, submitted_at) is None:
+        return False
+    if not accepts_submission_source(event, envelope):
+        return False
+    return any(match_task_all(task, envelope) for task in tasks or ())
+
+
+def _report_late(session, redis_conn, event: dict, tasks, team_id, joined_at,
+                 envelope: dict, submitted_at: datetime, player_id: int) -> bool:
+    """Capture + (first time per event) notify. True when kept."""
+    if not _late_match(event, tasks, envelope, submitted_at, joined_at):
+        return False
+    first = capture_late(redis_conn, event["id"], team_id, envelope)
+    if first is None:
+        return False
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "late arrival for ended event %s: player=%s guid=%s kind=%s received=%s "
+        "(kept in %s, not scored)", event["id"], player_id, envelope.get("guid"),
+        envelope.get("kind"), submitted_at, LATE_KEY.format(event_id=event["id"]))
+    if first and session is not None:
+        try:
+            _enqueue_notification(session, "event_recovery_notice", event, player_id, {
+                "variant": "late",
+                "notice_title": f"{event.get('name')}: late submissions were not scored",
+                "notice_body": (
+                    "A service interruption delayed submissions that were earned "
+                    "during this event, and they reached us after its final "
+                    "results were posted. They were not scored. We keep them for "
+                    "30 days, so contact the DropTracker team if the result "
+                    "should be reviewed."),
+            })
+        except Exception:
+            pass
+    return True
+
+
+def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
+    """Load all active events + tasks + bingo cells + rosters into a
+    :class:`MatcherState`. One query burst per refresh, not per submission."""
+    from db.models import Event, EventTask, EventTeam, EventBingoCell
+
+    state = MatcherState(loaded_at=time.time())
+    _load_prestart(session, state, now or datetime.now())
+    try:
+        _load_ended_recent(session, state, now or datetime.now())
+    except Exception:
+        # Only the late-arrival report depends on it; never the live view.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "recently-ended event view failed to load", exc_info=True)
+    events = session.query(Event).filter(Event.status == "active").all()
+    if not events:
+        return state
+    event_ids = [e.id for e in events]
+    state.events = {e.id: _event_to_dict(e) for e in events}
+
+    # Recurring schedules (web82a): attach each scheduled event's compiled
+    # scoring windows. Windows are static data (rule edits rewrite the rows
+    # and bump the matcher), so the per-envelope gate needs no Redis — plain
+    # containment against this snapshot.
+    scheduled_ids = [e.id for e in events if getattr(e, "schedule_config", None)]
+    if scheduled_ids:
+        from db.models import EventWindow
+
+        for w in (session.query(EventWindow)
+                  .filter(EventWindow.event_id.in_(scheduled_ids))
+                  .order_by(EventWindow.event_id, EventWindow.starts_at)
+                  .all()):
+            state.events[w.event_id].setdefault("windows", []).append(
+                (w.starts_at, w.ends_at))
+
+    for task in session.query(EventTask).filter(EventTask.event_id.in_(event_ids)).all():
+        if task.type not in AUTO_TASK_TYPES:
+            continue
+        state.tasks_by_event.setdefault(task.event_id, []).append(_task_to_dict(task))
+
+    for cell in session.query(EventBingoCell).filter(
+            EventBingoCell.event_id.in_(event_ids), EventBingoCell.task_id.isnot(None)).all():
+        state.cells_by_task.setdefault(cell.task_id, []).append(
+            {"id": cell.id, "idx": cell.idx, "event_id": cell.event_id,
+             "label": cell.label})
+
+    teams = session.query(EventTeam).filter(EventTeam.event_id.in_(event_ids)).all()
+    state.team_names = {t.id: t.name for t in teams}
+    state.participants = _load_participants(session, teams)
 
     # Board-game turn pointers (web44a): only a team's CURRENT instance task
     # may match. Loaded last so a roll mid-refresh still lands next tick.
@@ -5484,7 +5644,8 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
     except (TypeError, ValueError):
         return results
     memberships = state.participants.get(player_id) or []
-    if not memberships:
+    ended_memberships = state.ended_participants.get(player_id) or []
+    if not memberships and not ended_memberships:
         return results
     try:
         submitted_at = datetime.fromtimestamp(int(envelope.get("ts") or time.time()))
@@ -5494,6 +5655,17 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
     # Pre-start replays (park_prestart) are pinned to the one event they were
     # parked for; the player's other events already saw the original.
     only_event_id = envelope.get("only_event_id")
+
+    # Recently ended events (t274): never scored, but a submission received
+    # inside one's window that only got here now is kept and reported.
+    if only_event_id is None:
+        for event_id, team_id, joined_at in ended_memberships:
+            event = state.ended_events.get(event_id)
+            if event is None or event_id in state.events:
+                continue
+            _report_late(session, redis_conn, event,
+                         state.ended_tasks_by_event.get(event_id), team_id,
+                         joined_at, envelope, submitted_at, player_id)
 
     for event_id, team_id, joined_at in memberships:
         if only_event_id is not None and event_id != only_event_id:
@@ -5506,6 +5678,11 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
         # it (ends_at is still in the future) — an ended event must not keep
         # scoring or notifying off the stale snapshot.
         if is_event_ended(redis_conn, event_id):
+            # Ended since the snapshot loaded (t274): keep a late arrival
+            # rather than drop it. The ended view picks it up next refresh.
+            _report_late(session, redis_conn, event,
+                         state.tasks_by_event.get(event_id), team_id, joined_at,
+                         envelope, submitted_at, player_id)
             continue
         # PRD D10: joined_at is the credit cutoff; window rules (A5) freeze
         # evaluation outside the active window.

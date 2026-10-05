@@ -6,6 +6,7 @@ for db/redis/services never interfere.
 """
 
 import importlib.util
+import json
 import os
 import sys
 from datetime import datetime, timedelta
@@ -1398,6 +1399,142 @@ class TestReceiveTimeWindow:
             None, _FakeRedis(), self._state(joined_at=joined), env) == []
 
 
+# ── t274: late arrivals for ended events are kept, not scored ───────────────
+
+class _LateRedis:
+    """Enough Redis for capture_late + the tombstone check."""
+
+    def __init__(self):
+        self.kv, self.sets, self.lists = {}, {}, {}
+
+    def exists(self, key):
+        return 1 if key in self.kv else 0
+
+    def get(self, key):
+        return self.kv.get(key)
+
+    def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.kv:
+            return None
+        self.kv[key] = str(value)
+        return True
+
+    def sadd(self, key, member):
+        s = self.sets.setdefault(key, set())
+        if member in s:
+            return 0
+        s.add(member)
+        return 1
+
+    def pipeline(self):
+        outer = self
+
+        class P:
+            def __init__(self):
+                self.ops = []
+
+            def __getattr__(self, name):
+                return lambda *a, **k: self.ops.append((name, a))
+
+            def execute(self):
+                for name, a in self.ops:
+                    if name == "rpush":
+                        outer.lists.setdefault(a[0], []).extend(a[1:])
+        return P()
+
+
+class TestLateArrivals:
+    START = datetime(2026, 10, 1, 12, 0)
+    END = datetime(2026, 10, 1, 18, 0)
+
+    def _ended_state(self, joined_at=None):
+        ev = _event(window_start=self.START, window_end=self.END)
+        return engine.MatcherState(
+            ended_events={10: ev},
+            ended_tasks_by_event={10: [_task(target="Twisted bow")]},
+            ended_participants={5: [(10, 77, joined_at)]},
+        )
+
+    def _env_at(self, when, item="Twisted bow", guid="g-1"):
+        return _env("drop", {"item_name": item, "quantity": 1}, guid=guid,
+                    ts=int(when.timestamp()))
+
+    def _kept(self, r):
+        return [json.loads(x) for x in r.lists.get("events:late:10", [])]
+
+    def test_earned_inside_the_window_is_kept_not_scored(self):
+        r = _LateRedis()
+        env = self._env_at(self.END - timedelta(minutes=10))
+        assert engine.handle_envelope(None, r, self._ended_state(), env) == []
+        kept = self._kept(r)
+        assert len(kept) == 1 and kept[0]["team_id"] == 77
+        assert kept[0]["envelope"]["guid"] == "g-1"
+        assert "events:late:10:notified" in r.kv
+
+    def test_a_replayed_duplicate_is_kept_once(self):
+        r = _LateRedis()
+        env = self._env_at(self.END - timedelta(minutes=10))
+        engine.handle_envelope(None, r, self._ended_state(), env)
+        engine.handle_envelope(None, r, self._ended_state(), env)
+        assert len(self._kept(r)) == 1
+
+    def test_only_the_first_capture_notifies(self):
+        r = _LateRedis()
+        first = engine.capture_late(r, 10, 77, self._env_at(self.START, guid="a"))
+        second = engine.capture_late(r, 10, 77, self._env_at(self.START, guid="b"))
+        assert first is True and second is False
+
+    def test_outside_the_window_or_before_joining_is_ignored(self):
+        r = _LateRedis()
+        after = self._env_at(self.END + timedelta(minutes=1))
+        before = self._env_at(self.START - timedelta(minutes=1))
+        engine.handle_envelope(None, r, self._ended_state(), after)
+        engine.handle_envelope(None, r, self._ended_state(), before)
+        joined = self.START + timedelta(hours=3)
+        early = self._env_at(joined - timedelta(minutes=5))
+        engine.handle_envelope(None, r, self._ended_state(joined_at=joined), early)
+        assert self._kept(r) == []
+
+    def test_a_drop_no_task_wanted_is_ignored(self):
+        r = _LateRedis()
+        env = self._env_at(self.END - timedelta(minutes=10), item="Bones")
+        engine.handle_envelope(None, r, self._ended_state(), env)
+        assert self._kept(r) == []
+
+    def test_wom_and_effort_only_envelopes_are_never_late(self):
+        ev = _event(window_start=self.START, window_end=self.END)
+        t = [_task(target="Twisted bow")]
+        wom = dict(self._env_at(self.START), source="wom")
+        effort = _env("drop", {"item_name": "Twisted bow", "effort_only": True},
+                      ts=int(self.START.timestamp()))
+        assert not engine._late_match(ev, t, wom, self.START, None)
+        assert not engine._late_match(ev, t, effort, self.START, None)
+
+    def test_tombstoned_live_event_keeps_the_late_arrival(self):
+        # The snapshot still lists the event as live; the end tombstone is up.
+        r = _LateRedis()
+        engine.set_ended_tombstone(r, 10)
+        state = engine.MatcherState(
+            events={10: _event(window_start=self.START, window_end=self.END)},
+            tasks_by_event={10: [_task(target="Twisted bow")]},
+            participants={5: [(10, 77, None)]},
+        )
+        env = self._env_at(self.END - timedelta(minutes=10))
+        assert engine.handle_envelope(None, r, state, env) == []
+        assert len(self._kept(r)) == 1
+
+    def test_no_redis_keeps_nothing_and_never_raises(self):
+        env = self._env_at(self.END - timedelta(minutes=10))
+        assert engine.capture_late(None, 10, 77, env) is None
+        assert engine.handle_envelope(None, None, self._ended_state(), env) == []
+
+    def test_prestart_replays_skip_the_ended_view(self):
+        r = _LateRedis()
+        env = dict(self._env_at(self.END - timedelta(minutes=10)), only_event_id=99)
+        engine.handle_envelope(None, r, self._ended_state(), env)
+        assert self._kept(r) == []
+
+
 # ── WOM reconciler envelopes (kind=wom_kc, source=wom) ───────────────────────
 
 class TestWomKcMatch:
@@ -1756,3 +1893,119 @@ class TestSlayerTarget:
 
     def test_is_an_auto_task_type(self):
         assert "slayer_target" in engine.AUTO_TASK_TYPES
+
+
+# ── t274: recently-ended view + the shared roster loader ────────────────────
+
+class _ModelSession:
+    """Fake session that answers query(<model>) from a per-model row list.
+    Filters are opaque under the db stubs, so each list is pre-filtered."""
+
+    def __init__(self, rows_by_model):
+        self.rows_by_model = rows_by_model
+        self.queried = []
+
+    def query(self, *cols):
+        key = cols[0]
+        self.queried.append(key)
+        rows = self.rows_by_model.get(id(key), [])
+
+        class Q:
+            def filter(self, *a, **k):
+                return self
+
+            def all(self):
+                return list(rows)
+        return Q()
+
+
+def _ns(**kw):
+    from types import SimpleNamespace
+    return SimpleNamespace(**kw)
+
+
+def _past_event(eid, ended_at):
+    return _ns(id=eid, name=f"E{eid}", group_id=1, requires_confirmation=False,
+               submission_policy="all", message_config=None, has_bingo=False,
+               kind="standard", board_size=5, bonus_line_points=0,
+               bonus_blackout_points=0, starts_at=ended_at - timedelta(days=1),
+               activated_at=None, ends_at=ended_at, ended_at=ended_at,
+               schedule_config=None, status="past")
+
+
+def _task_row(tid, eid, type_="item_collection"):
+    return _ns(id=tid, event_id=eid, type=type_, label="t", target="Twisted bow",
+               target_value=None, points=1, requires_confirmation=False,
+               config=None, difficulty=None)
+
+
+class _Col:
+    """Column stand-in: comparisons build an (ignored) filter expression."""
+
+    def __eq__(self, other):
+        return True
+
+    __ge__ = __le__ = __gt__ = __lt__ = __eq__
+    __hash__ = object.__hash__
+
+    def isnot(self, other):
+        return True
+
+    def in_(self, other):
+        return True
+
+
+class _EventModel:
+    status = _Col()
+    ended_at = _Col()
+
+
+@pytest.fixture()
+def _event_model(monkeypatch):
+    models = sys.modules["db.models"]
+    monkeypatch.setattr(models, "Event", _EventModel, raising=False)
+    return models
+
+
+class TestEndedRecentView:
+    @pytest.fixture(autouse=True)
+    def _models(self, _event_model):
+        pass
+
+    def test_loads_events_with_auto_tasks_and_their_rosters(self):
+        models = sys.modules["db.models"]
+        now = datetime(2026, 10, 5, 12, 0)
+        ended = now - timedelta(days=1)
+        session = _ModelSession({
+            id(models.Event): [_past_event(10, ended), _past_event(11, ended)],
+            # Event 11 has only a manual task: nothing could ever match late.
+            id(models.EventTask): [_task_row(1, 10), _task_row(2, 11, type_="manual")],
+            id(models.EventTeam): [_ns(id=77, event_id=10, auto_clan=False, group_id=None)],
+            id(models.EventTeamMember): [_ns(team_id=77, player_id=5, joined_at=None)],
+        })
+        state = engine.MatcherState()
+        engine._load_ended_recent(session, state, now, use_cache=False)
+        assert list(state.ended_events) == [10]
+        assert state.ended_events[10]["window_end"] == ended
+        assert [t["id"] for t in state.ended_tasks_by_event[10]] == [1]
+        assert state.ended_participants == {5: [(10, 77, None)]}
+
+    def test_nothing_ended_skips_the_roster_queries(self):
+        models = sys.modules["db.models"]
+        session = _ModelSession({})
+        state = engine.MatcherState()
+        engine._load_ended_recent(session, state, datetime(2026, 10, 5), use_cache=False)
+        assert state.ended_events == {} and state.ended_participants == {}
+        assert models.EventTeam not in session.queried
+
+    def test_load_participants_explicit_rows(self):
+        models = sys.modules["db.models"]
+        joined = datetime(2026, 10, 1)
+        session = _ModelSession({id(models.EventTeamMember): [
+            _ns(team_id=7, player_id=5, joined_at=joined),
+            _ns(team_id=8, player_id=6, joined_at=None)]})
+        teams = [_ns(id=7, event_id=1, auto_clan=False, group_id=None),
+                 _ns(id=8, event_id=2, auto_clan=False, group_id=None)]
+        assert engine._load_participants(session, teams) == {
+            5: [(1, 7, joined)], 6: [(2, 8, None)]}
+        assert engine._load_participants(_ModelSession({}), []) == {}

@@ -183,9 +183,12 @@ def _refresh_state(r):
         db_session.close()
         reset_db_connections()
     # Due drafts open the producer gate too, so their members' submissions
-    # reach the queue to be parked even when nothing else is running.
+    # reach the queue to be parked even when nothing else is running. So do
+    # recently ended events (t274): a late arrival must reach the matcher to
+    # be kept and reported rather than silently not enqueued.
     event_engine.set_active_events(
-        r, list(state.events.keys()) + list(state.prestart.keys()))
+        r, list(state.events.keys()) + list(state.prestart.keys())
+        + list(state.ended_events.keys()))
     return state
 
 
