@@ -2009,3 +2009,31 @@ class TestEndedRecentView:
         assert engine._load_participants(session, teams) == {
             5: [(1, 7, joined)], 6: [(2, 8, None)]}
         assert engine._load_participants(_ModelSession({}), []) == {}
+
+
+class TestLoadMatcherStateRuns:
+    """Regression (t274 deploy, 2026-10-05): extracting the roster loader left
+    load_matcher_state referencing a name that moved into the helper, and only
+    tests/integration ever ran it, so every state refresh in production raised
+    NameError. Drive the whole function through a fake session."""
+
+    def test_active_event_with_a_team_loads(self, _event_model, monkeypatch):
+        models = sys.modules["db.models"]
+        monkeypatch.setattr(engine, "_load_prestart", lambda *a, **k: None)
+        monkeypatch.setattr(engine, "_load_ended_recent", lambda *a, **k: None)
+        monkeypatch.setattr(engine, "load_effort_npcs", lambda *a, **k: {})
+        monkeypatch.setattr(engine, "_refresh_done_tasks", lambda *a, **k: {})
+        monkeypatch.setattr(engine, "_EFFORT_ENABLED", True)
+        active = _past_event(10, datetime(2026, 10, 6))
+        active.status = "active"
+        session = _ModelSession({
+            id(_EventModel): [active],
+            id(models.EventTask): [_task_row(1, 10)],
+            id(models.EventTeam): [_ns(id=77, event_id=10, name="Reds",
+                                       auto_clan=False, group_id=None)],
+            id(models.EventTeamMember): [_ns(team_id=77, player_id=5, joined_at=None)],
+        })
+        state = engine.load_matcher_state(session, now=datetime(2026, 10, 5))
+        assert list(state.events) == [10]
+        assert state.participants == {5: [(10, 77, None)]}
+        assert state.team_names == {77: "Reds"}

@@ -2254,6 +2254,7 @@ def load_matcher_state(session, now: Optional[datetime] = None) -> MatcherState:
 
     teams = session.query(EventTeam).filter(EventTeam.event_id.in_(event_ids)).all()
     state.team_names = {t.id: t.name for t in teams}
+    team_event = {t.id: t.event_id for t in teams}
     state.participants = _load_participants(session, teams)
 
     # Board-game turn pointers (web44a): only a team's CURRENT instance task
