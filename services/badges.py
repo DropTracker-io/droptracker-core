@@ -439,7 +439,7 @@ def evaluate_boss_records(session, badge: Badge, dry_run: bool = False) -> Dict[
                 "SELECT player_id, personal_best FROM personal_best "
                 "WHERE npc_id = :npc AND team_size = :team AND personal_best > 0 "
                 "AND player_id IS NOT NULL "
-                "ORDER BY personal_best ASC, date_added ASC, id ASC LIMIT 1"
+                "ORDER BY personal_best ASC, (precise_timing <=> 1) DESC, date_added ASC, id ASC LIMIT 1"
             ),
             {"npc": npc_id, "team": team_size},
         ).first()

@@ -23,6 +23,10 @@ class PersonalBestEntry(Base):
     date_added = Column(DateTime, nullable=True, default=func.now())
     used_api = Column(Boolean, default=False)
     unique_id = Column(String(255), nullable=True)
+    # True when the time was printed with precise timing on, False when it was
+    # a whole-second display rounded up onto the tick grid, NULL when unknown
+    # (rows older than web127a, raw-ms form submissions). See utils.pb_time.
+    precise_timing = Column(Boolean, nullable=True)
 
     # Relationships
     player = relationship("Player", back_populates="pbs")

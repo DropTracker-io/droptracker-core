@@ -403,6 +403,8 @@ def _player_personal_bests(s, player_id: int):
             "boss": names.get(pb.npc_id, f"NPC {pb.npc_id}"),
             "time_ms": int(pb.personal_best),
             "time_display": _convert_from_ms(pb.personal_best),
+            # Whole-second time (precise timing off); see utils.pb_time.
+            "approximate": pb.precise_timing is False,
             "team_size": pb.team_size or "Solo",
             "date_ts": date_ts,
         })

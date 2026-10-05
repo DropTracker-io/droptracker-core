@@ -124,7 +124,7 @@ async def adventure_log_processor(adventure_log_data, external_session=None):
                 # Snapped onto the game's tick grid: the adventure log renders
                 # the player's own times, so it inherits their precise-timing
                 # setting the same way the chat line does (utils.pb_time).
-                from utils.pb_time import snap_to_tick
+                from utils.pb_time import snap_to_tick, time_is_precise
 
                 time_ms = snap_to_tick(int(convert_to_ms(kill_time)))
             except Exception:
@@ -156,6 +156,7 @@ async def adventure_log_processor(adventure_log_data, external_session=None):
                     old_pb = existing_pb.personal_best
                     existing_pb.personal_best = time_ms
                     existing_pb.kill_time = time_ms
+                    existing_pb.precise_timing = time_is_precise(kill_time)
                     existing_pb.new_pb = True
                     existing_pb.date_added = datetime.now()
                     pb_updates += 1
@@ -177,6 +178,7 @@ async def adventure_log_processor(adventure_log_data, external_session=None):
                         team_size=team_size,
                         personal_best=time_ms,
                         kill_time=time_ms,
+                        precise_timing=time_is_precise(kill_time),
                         new_pb=True,
                         used_api=True,
                         unique_id=adventure_log_data.get("guid"),

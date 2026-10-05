@@ -53,6 +53,8 @@ a record is never credited to someone who did not set it, and turning precise
 timing on removes the penalty entirely.
 """
 
+import re
+
 #: One OSRS game tick, in milliseconds. Every real duration is a multiple.
 TICK_MS = 600
 
@@ -84,3 +86,40 @@ def is_tick_aligned(ms) -> bool:
     except (TypeError, ValueError):
         return False
     return value > 0 and value % TICK_MS == 0
+
+
+def time_is_precise(value, flag=None):
+    """Whether a submitted time came from a client with precise timing on.
+
+    ``flag`` is the plugin's own ``precise_timing`` field (6.1.0+), which wins
+    when present. Without it the formatted time still says so: a precise client
+    always prints hundredths (``"28:14.40"``, even ``"28:15.00"``), a
+    non-precise one never does (``"28:14"``). Returns None when neither tells
+    us — a raw millisecond value from a form, an untimed kill, or junk.
+    """
+    if flag is not None and str(flag).strip() != "":
+        text = str(flag).strip().lower()
+        if text in ("true", "1", "yes"):
+            return True
+        if text in ("false", "0", "no"):
+            return False
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if ":" not in text:
+        return None
+    # Fractional digits, not merely a dot: a broadcast sentence can end the
+    # time with a full stop ("personal best: 28:14.").
+    return re.search(r":\d{2}\.\d", text) is not None
+
+
+def board_sort_key(time_ms, precise, date_ts=0):
+    """Ordering for a PB board: fastest first, then a measured time ahead of an
+    approximate or unknown one, then the earlier date.
+
+    A whole-second time is already credited with the slowest tick it could
+    stand for, so when it lands on exactly the same value as a precise time the
+    two genuinely cannot be told apart. The tie goes to the one that was
+    measured.
+    """
+    return (int(time_ms or 0), 0 if precise is True else 1, int(date_ts or 0))

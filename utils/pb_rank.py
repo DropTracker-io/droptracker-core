@@ -16,6 +16,8 @@ from statistics import median
 
 from sqlalchemy import text
 
+from utils.pb_time import board_sort_key
+
 # See web_api/routes/personal_bests.py::_IMPLAUSIBLE_FACTOR — entries faster
 # than (board median / 4) are corrupt legacy ms/ticks conversions, not kills.
 _IMPLAUSIBLE_FACTOR = 4
@@ -64,7 +66,7 @@ def pb_board_rank(session, npc_id: int, team_size, player_id: int) -> tuple[int,
 
     rows = session.execute(
         text(
-            "SELECT pb.team_size, pb.player_id, pb.personal_best, pb.date_added "
+            "SELECT pb.team_size, pb.player_id, pb.personal_best, pb.date_added, pb.precise_timing "
             "FROM personal_best pb "
             "JOIN players p ON p.player_id = pb.player_id "
             "LEFT JOIN users u ON u.user_id = p.user_id "
@@ -74,9 +76,9 @@ def pb_board_rank(session, npc_id: int, team_size, player_id: int) -> tuple[int,
         {"npc": int(npc_id)},
     ).fetchall()
 
-    # Per-player best on this board: (time_ms, date_ts).
-    best_by_player: dict[int, tuple[int, int]] = {}
-    for raw_ts, pid, pb_ms, date_added in rows:
+    # Per-player best on this board: (time_ms, date_ts, precise).
+    best_by_player: dict[int, tuple[int, int, bool | None]] = {}
+    for raw_ts, pid, pb_ms, date_added, precise in rows:
         if pid is None:
             continue
         if normalize_team_size(raw_ts) != board_token:
@@ -88,20 +90,20 @@ def pb_board_rank(session, npc_id: int, team_size, player_id: int) -> tuple[int,
             date_ts = 0
         cur = best_by_player.get(pid)
         if cur is None or pb_ms < cur[0]:
-            best_by_player[pid] = (pb_ms, date_ts)
+            best_by_player[pid] = (pb_ms, date_ts, precise)
 
     if int(player_id) not in best_by_player:
         return None
 
     entries = sorted(
-        ((t, d, pid) for pid, (t, d) in best_by_player.items()),
-        key=lambda e: (e[0], e[1]),
+        ((t, d, pid, precise) for pid, (t, d, precise) in best_by_player.items()),
+        key=lambda e: board_sort_key(e[0], e[3], e[1]),
     )
     if len(entries) >= 2:
-        floor = median(t for t, _, _ in entries) / _IMPLAUSIBLE_FACTOR
+        floor = median(e[0] for e in entries) / _IMPLAUSIBLE_FACTOR
         entries = [e for e in entries if e[0] >= floor]
 
-    for i, (_, _, pid) in enumerate(entries):
+    for i, (_, _, pid, _) in enumerate(entries):
         if pid == int(player_id):
             return i + 1, len(entries)
     return None

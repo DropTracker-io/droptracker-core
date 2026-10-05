@@ -4442,8 +4442,12 @@ class NotificationService:
             image_url = data.get('image_url')
             team_size = data.get('team_size')
             npc_id = data.get('npc_id')
-            # Format times
+            # Format times. A whole-second time (precise timing off) is
+            # stored as the slowest tick it could stand for, so it is shown
+            # as approximate.
             time_formatted = convert_from_ms(time_ms)
+            if data.get('precise_timing') is False:
+                time_formatted = f"~{time_formatted}"
             old_time_formatted = convert_from_ms(old_time_ms) if old_time_ms else None
             
             # Get embed template
@@ -4472,38 +4476,37 @@ class NotificationService:
             player_ids = await associate_player_ids(wom_member_list)
             
             group_ranks = db_session.query(PersonalBestEntry).filter(PersonalBestEntry.player_id.in_(player_ids), PersonalBestEntry.npc_id == int(npc_id),
-                                                                        PersonalBestEntry.team_size == team_size).order_by(PersonalBestEntry.personal_best.asc()).all()
+                                                                        PersonalBestEntry.team_size == team_size).all()
             all_ranks = db_session.query(PersonalBestEntry).filter(PersonalBestEntry.npc_id == int(npc_id),
-                                                                    PersonalBestEntry.team_size == team_size).order_by(PersonalBestEntry.personal_best.asc()).all()
-                #print("Group ranks:",group_ranks)
-                #print("All ranks:",all_ranks)
+                                                                    PersonalBestEntry.team_size == team_size).all()
+            # Same order as the website board: time, then a measured time
+            # ahead of an approximate one on an exact tie, then the date.
+            from utils.pb_time import board_sort_key
+
+            def _board_key(entry):
+                stamp = entry.date_added.timestamp() if entry.date_added else 0
+                return board_sort_key(entry.personal_best, entry.precise_timing, stamp)
+
+            group_ranks.sort(key=_board_key)
+            all_ranks.sort(key=_board_key)
             total_ranked_group = len(group_ranks)
             total_ranked_global = len(all_ranks)
             current_user_best_ms = time_ms
-                ## player's rank in group
-            group_placement = None
-            global_placement = None
-            #print("Assembling rankings....")
-            ## For some reason, players occassionally don't appear in group rank listings...
-            if str(player_id) not in [str(entry.player_id) for entry in group_ranks]:
-                # Find where this time would be inserted in the sorted list
-                group_placement = len(group_ranks) + 1  # Default to last place (worst time)
-                for idx, entry in enumerate(group_ranks, start=1):
+
+            def _placement(entries):
+                # The player's own row when it is on the board (it normally
+                # is: the PB was just written); otherwise where the time
+                # would slot in.
+                for idx, entry in enumerate(entries, start=1):
+                    if str(entry.player_id) == str(player_id):
+                        return idx
+                for idx, entry in enumerate(entries, start=1):
                     if current_user_best_ms <= entry.personal_best:
-                        # Current user's time is faster or equal, so they rank at this position
-                        group_placement = idx
-                        break
-            else:
-                for idx, entry in enumerate(group_ranks, start=1): 
-                    if entry.personal_best == current_user_best_ms:
-                        group_placement = idx
-                        break
-            ## player's rank globally
-            global_placement = len(all_ranks) + 1  # Default to last place (worst time)
-            for idx, entry in enumerate(all_ranks, start=1):
-                if current_user_best_ms <= entry.personal_best:
-                    global_placement = idx
-                    break
+                        return idx
+                return len(entries) + 1
+
+            group_placement = _placement(group_ranks)
+            global_placement = _placement(all_ranks)
             if group_placement is None:
                 group_placement = "`?`"
                 # Replace placeholders

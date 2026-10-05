@@ -1028,6 +1028,11 @@ async def _process_chat_pb(
             True, f"PB activity {parsed.extra.get('activity')!r} is not a known boss; skipped"
         )
     team_size = _pb_bracket(parsed)
+    # The broadcast prints the achiever's own timing mode: hundredths when
+    # precise timing is on, whole seconds when it is off.
+    from utils.pb_time import time_is_precise
+
+    precise = time_is_precise(str(parsed.extra.get("time_text") or ""))
 
     from db.models import PersonalBestEntry
 
@@ -1048,6 +1053,7 @@ async def _process_chat_pb(
         old_time = row.personal_best
         row.personal_best = time_ms
         row.kill_time = time_ms
+        row.precise_timing = precise
         row.new_pb = True
         row.date_added = stamp
     else:
@@ -1058,6 +1064,7 @@ async def _process_chat_pb(
             new_pb=True,
             personal_best=time_ms,
             kill_time=time_ms,
+            precise_timing=precise,
             date_added=stamp,
             image_url="",
             video_url=None,

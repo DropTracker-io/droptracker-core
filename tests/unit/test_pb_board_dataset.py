@@ -23,9 +23,9 @@ ZULRAH = 2042
 T0 = datetime(2026, 9, 1, 12, 0)
 
 
-def row(pb_id, pid, ms, *, has_loadout=0, ts="Solo", when=T0, image=None):
+def row(pb_id, pid, ms, *, has_loadout=0, ts="Solo", when=T0, image=None, precise=None):
     # Column order of the SELECT in _build_dataset.
-    return (pb_id, ZULRAH, "Zulrah", ts, pid, ms, when, image, has_loadout)
+    return (pb_id, ZULRAH, "Zulrah", ts, pid, ms, when, image, precise, has_loadout)
 
 
 @pytest.fixture
@@ -106,9 +106,41 @@ class TestBossIndexRecord:
             "player_name": "Ashey",
             "pb_id": 7,
             "has_loadout": True,
+            "approximate": False,
         }
 
     def test_an_unknown_name_and_no_loadout_still_serialise(self, build):
         info = self._info(build([row(7, 1, 60_000)]))
         payload = pb._record_payload(pb._fastest_on_any_board(info), {})
         assert (payload["player_name"], payload["has_loadout"]) == ("Unknown", False)
+
+
+class TestPreciseTiming:
+    """A whole-second time (precise timing off) is credited with the slowest
+    tick it could stand for, so on an exact tie with a measured time the two
+    cannot be told apart. The measured one ranks first, whatever the dates."""
+
+    def test_measured_time_wins_an_exact_tie(self, build):
+        entries = solo_entries(build([
+            row(1, 1, 60_600, precise=False, when=datetime(2026, 9, 1)),
+            row(2, 2, 60_600, precise=True, when=datetime(2026, 9, 2)),
+        ]))
+        assert [e["player_id"] for e in entries] == [2, 1]
+
+    def test_unknown_precision_ranks_with_the_approximate(self, build):
+        entries = solo_entries(build([
+            row(1, 1, 60_600, precise=None, when=datetime(2026, 9, 1)),
+            row(2, 2, 60_600, precise=True, when=datetime(2026, 9, 2)),
+        ]))
+        assert [e["player_id"] for e in entries] == [2, 1]
+
+    def test_a_faster_time_still_wins_regardless(self, build):
+        entries = solo_entries(build([
+            row(1, 1, 60_000, precise=False),
+            row(2, 2, 60_600, precise=True),
+        ]))
+        assert [e["player_id"] for e in entries] == [1, 2]
+
+    def test_the_entry_carries_its_precision(self, build):
+        entries = solo_entries(build([row(1, 1, 60_000, precise=False), row(2, 2, 61_200)]))
+        assert [e["precise"] for e in entries] == [False, None]

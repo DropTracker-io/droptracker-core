@@ -2,7 +2,7 @@
 
 import pytest
 
-from utils.pb_time import TICK_MS, is_tick_aligned, snap_to_tick
+from utils.pb_time import TICK_MS, board_sort_key, is_tick_aligned, snap_to_tick, time_is_precise
 
 
 def test_every_tick_aligned_time_is_a_fixed_point():
@@ -105,3 +105,45 @@ def test_string_and_float_inputs_coerce():
 )
 def test_is_tick_aligned(ms, aligned):
     assert is_tick_aligned(ms) is aligned
+
+
+class TestTimeIsPrecise:
+    def test_hundredths_mean_precise(self):
+        assert time_is_precise("28:14.40") is True
+        assert time_is_precise("28:15.00") is True
+        assert time_is_precise("1:02:03.60") is True
+
+    def test_whole_seconds_mean_not_precise(self):
+        assert time_is_precise("28:14") is False
+        assert time_is_precise("00:43") is False
+
+    def test_a_sentence_full_stop_is_not_a_fraction(self):
+        # Clan broadcasts end the time with the sentence: "personal best: 28:14."
+        assert time_is_precise("28:14.") is False
+
+    def test_unknown_when_the_value_cannot_say(self):
+        assert time_is_precise(1_694_000) is None
+        assert time_is_precise("N/A") is None
+        assert time_is_precise(None) is None
+        assert time_is_precise("") is None
+
+    def test_the_plugin_flag_wins(self):
+        assert time_is_precise("28:14", "true") is True
+        assert time_is_precise("28:14.40", False) is False
+        assert time_is_precise(1_694_000, True) is True
+
+    def test_a_blank_flag_falls_back_to_the_format(self):
+        assert time_is_precise("28:14", "") is False
+        assert time_is_precise("28:14.40", None) is True
+
+
+class TestBoardSortKey:
+    def test_time_first(self):
+        assert board_sort_key(60_000, False, 9) < board_sort_key(60_600, True, 1)
+
+    def test_measured_before_approximate_or_unknown_on_a_tie(self):
+        assert board_sort_key(60_600, True, 9) < board_sort_key(60_600, False, 1)
+        assert board_sort_key(60_600, True, 9) < board_sort_key(60_600, None, 1)
+
+    def test_then_the_earlier_date(self):
+        assert board_sort_key(60_600, False, 1) < board_sort_key(60_600, False, 2)

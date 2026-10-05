@@ -41,6 +41,7 @@ from services.hof_layout import HofEntry, Row, Scope
 from utils.doom_delve import DOOM_NPC_ID, format_level
 from utils.format import NPC_IMG_DIR, convert_from_ms, format_number
 from utils.hof import RAID_GROUPS, SEPULCHRE_CANONICAL, canonical_display_name, npc_name_candidates
+from utils.pb_time import board_sort_key
 from utils.site_urls import WEBSITE_URL, npc_url
 
 log = logging.getLogger(__name__)
@@ -230,6 +231,13 @@ def common_tokens(directory_url: Optional[str]) -> Dict[str, str]:
 
 # ── Collection ───────────────────────────────────────────────────────────────
 
+
+def _pb_time_text(pb) -> str:
+    """A PB time for display; "~" marks a whole-second time (precise timing
+    off) that was credited with the slowest tick it could stand for."""
+    text = convert_from_ms(pb.personal_best)
+    return f"~{text}" if getattr(pb, "precise_timing", None) is False else text
+
 class HofDataCollector:
     """Reads a group's standings for one boss message at a time.
 
@@ -295,7 +303,11 @@ class HofDataCollector:
             keep = sorted(buckets.keys(), key=team_size_sort_key)[:_MAX_PB_BRACKETS]
             buckets = {k: buckets[k] for k in keep}
         for entries in buckets.values():
-            entries.sort(key=lambda pb: pb.personal_best)
+            # Fastest first; on an exact tie the measured time (precise timing
+            # on) ahead of an approximate one, then the earlier date.
+            entries.sort(key=lambda pb: board_sort_key(
+                pb.personal_best, pb.precise_timing,
+                pb.date_added.timestamp() if pb.date_added else 0))
         return buckets
 
     def _pb_scope_parts(self, npc_name: str, rows: int):
@@ -312,12 +324,12 @@ class HofDataCollector:
                     fastest, fastest_size = pb, team_size
             brackets.append((
                 team_size_label(team_size),
-                [self._row(getattr(pb, "player", None), convert_from_ms(pb.personal_best))
+                [self._row(getattr(pb, "player", None), _pb_time_text(pb))
                  for pb in entries[:rows]],
             ))
         tokens = {
             "{total_pbs}": str(total) if total else "",
-            "{fastest_time}": convert_from_ms(fastest.personal_best) if fastest else "",
+            "{fastest_time}": _pb_time_text(fastest) if fastest else "",
             "{fastest_team_size}": team_size_label(fastest_size) if fastest else "",
             "{fastest_player}": self._display(getattr(fastest, "player", None)) if fastest else "",
         }

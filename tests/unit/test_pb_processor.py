@@ -396,3 +396,44 @@ class TestLoadoutModel:
             _run(payload)
         assert store.call_args.args[5] == "2f3ab1c"
         assert store.call_args.args[6] == _FakePlayer.player_id
+
+
+class TestPreciseTiming:
+    """Each row records whether its time was measured (precise timing on) or a
+    whole-second display rounded up, so boards can label and tie-break it."""
+
+    def _formatted(self, kill, best, **extra):
+        payload = _payload(current_ms=0, pb_ms=0, is_pb=True)
+        del payload["current_time_ms"], payload["personal_best_ms"]
+        payload.update(kill_time=kill, best_time=best, **extra)
+        return payload
+
+    def test_hundredths_mark_a_new_row_precise(self):
+        _run(self._formatted("14:48.00", "14:48.00"), row=None)
+        assert db.PersonalBestEntry.call_args.kwargs["precise_timing"] is True
+
+    def test_whole_seconds_mark_a_new_row_approximate(self):
+        _run(self._formatted("14:50", "14:50"), row=None)
+        kwargs = db.PersonalBestEntry.call_args.kwargs
+        assert kwargs["precise_timing"] is False
+        assert kwargs["personal_best"] == 890400
+
+    def test_the_plugin_flag_wins_over_the_format(self):
+        _run(self._formatted("14:48.00", "14:48.00", precise_timing="false"), row=None)
+        assert db.PersonalBestEntry.call_args.kwargs["precise_timing"] is False
+
+    def test_raw_milliseconds_are_unknown(self):
+        _run(_payload(current_ms=888000, pb_ms=888000, is_pb=True), row=None)
+        assert db.PersonalBestEntry.call_args.kwargs["precise_timing"] is None
+
+    def test_an_improved_row_takes_the_new_times_precision(self):
+        row = _existing_row(900000)
+        row.precise_timing = True
+        _run(self._formatted("14:50", "N/A"), row=row)
+        assert row.personal_best == 890400
+        assert row.precise_timing is False
+
+    def test_the_notification_carries_the_precision(self):
+        _, notify = _run(self._formatted("14:50", "N/A"), row=None)
+        data = notify.call_args.args[2]
+        assert data["precise_timing"] is False

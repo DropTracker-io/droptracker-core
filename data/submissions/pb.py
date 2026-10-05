@@ -180,8 +180,19 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     player_name = pb_data["player_name"]
     account_hash = pb_data["acc_hash"]
     boss_name = pb_data.get("npc_name", pb_data.get("boss_name", None))
-    current_ms = _time_to_ms(pb_data.get("current_time_ms", pb_data.get("kill_time", 0)))
-    pb_ms = _time_to_ms(pb_data.get("personal_best_ms", pb_data.get("best_time", 0)))
+    raw_current = pb_data.get("current_time_ms", pb_data.get("kill_time", 0))
+    raw_best = pb_data.get("personal_best_ms", pb_data.get("best_time", 0))
+    current_ms = _time_to_ms(raw_current)
+    pb_ms = _time_to_ms(raw_best)
+    # Whether each time was measured (precise timing on) or is a whole-second
+    # display we rounded up. 6.1.0+ plugins say so outright; older ones still
+    # show it in the format. Stored on the row so boards can label and
+    # tie-break it — see utils.pb_time.
+    from utils.pb_time import time_is_precise
+
+    precise_flag = pb_data.get("precise_timing")
+    current_precise = time_is_precise(raw_current, precise_flag)
+    best_precise = time_is_precise(raw_best, precise_flag)
     if pb_ms == 0 and current_ms == 0:
         return
     # Canonical team encoding ("Solo", "2", …, "11-15") — see suggestion #50 —
@@ -199,6 +210,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     time_ms = (
         current_ms if current_ms < pb_ms and current_ms != 0 else (pb_ms if pb_ms != 0 else current_ms)
     )
+    time_precise = current_precise if time_ms == current_ms else best_precise
     auth_key = pb_data.get("auth_key", "")
     attachment_url = pb_data.get("attachment_url", None)
     attachment_type = pb_data.get("attachment_type", None)
@@ -371,6 +383,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             pb_entry.personal_best = time_ms
             pb_entry.new_pb = True
             pb_entry.kill_time = current_ms
+            pb_entry.precise_timing = time_precise
             pb_entry.date_added = datetime.now()
             pb_entry.image_url = dl_path if dl_path else ""
             if video_url:
@@ -388,6 +401,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             if 0 < pb_ms < pb_entry.personal_best:
                 pb_entry.personal_best = pb_ms
                 pb_entry.kill_time = pb_ms
+                pb_entry.precise_timing = best_precise
                 pb_entry.new_pb = False
                 pb_entry.date_added = datetime.now()
                 pb_row_changed = True
@@ -403,6 +417,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             new_pb=is_personal_best,
             personal_best=time_ms,
             kill_time=current_ms,
+            precise_timing=time_precise,
             date_added=datetime.now(),
             image_url=dl_path if dl_path else "",
             video_url=video_url,
@@ -630,6 +645,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     "npc_id": npc_id,
                     "boss_name": boss_name,
                     "time_ms": time_ms,
+                    "precise_timing": time_precise,
                     "old_time_ms": old_time,
                     "team_size": team_size,
                     "kill_time_ms": current_ms,

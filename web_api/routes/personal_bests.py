@@ -29,6 +29,8 @@ from statistics import median
 from quart import Blueprint, jsonify, request
 from sqlalchemy import text
 
+from utils.pb_time import board_sort_key
+
 from db import Group, Player
 from web_api.common import (
     abort_problem,
@@ -155,7 +157,7 @@ def _build_dataset(group_id: int | None) -> dict:
         params["gid"] = group_id
     sql = text(
         "SELECT pb.id, pb.npc_id, n.npc_name, pb.team_size, pb.player_id, "
-        "       pb.personal_best, pb.date_added, pb.image_url, "
+        "       pb.personal_best, pb.date_added, pb.image_url, pb.precise_timing, "
         "       (l.pb_id IS NOT NULL) AS has_loadout "
         "FROM personal_best pb "
         "JOIN npc_list n ON n.npc_id = pb.npc_id "
@@ -169,11 +171,11 @@ def _build_dataset(group_id: int | None) -> dict:
         rows = s.execute(sql, params).fetchall()
 
     npcs: dict[int, dict] = {}
-    # (npc_id, ts) -> {player_id: (time_ms, date_ts, image_url, pb_id, has_loadout)}
+    # (npc_id, ts) -> {player_id: (time_ms, date_ts, image_url, pb_id, has_loadout, precise)}
     best: dict[tuple, dict] = {}
     entry_counts: dict[int, int] = {}
     players_by_npc: dict[int, set] = {}
-    for pb_id, npc_id, npc_name, raw_ts, pid, pb_ms, date_added, image_url, has_loadout in rows:
+    for pb_id, npc_id, npc_name, raw_ts, pid, pb_ms, date_added, image_url, precise, has_loadout in rows:
         if pid is None or int(pid) in hidden:
             continue
         ts = normalize_team_size(raw_ts)
@@ -191,7 +193,8 @@ def _build_dataset(group_id: int | None) -> dict:
             except Exception:
                 date_ts = None
             board[int(pid)] = (
-                int(pb_ms), date_ts, proof_url(image_url), int(pb_id), bool(has_loadout)
+                int(pb_ms), date_ts, proof_url(image_url), int(pb_id), bool(has_loadout),
+                None if precise is None else bool(precise),
             )
 
     for (npc_id, ts), by_player in best.items():
@@ -204,10 +207,13 @@ def _build_dataset(group_id: int | None) -> dict:
                     "image_url": img,
                     "pb_id": pb_id,
                     "has_loadout": has_loadout,
+                    "precise": precise,
                 }
-                for pid, (t, d, img, pb_id, has_loadout) in by_player.items()
+                for pid, (t, d, img, pb_id, has_loadout, precise) in by_player.items()
             ),
-            key=lambda e: (e["time_ms"], e["date_ts"] or 0),
+            # Fastest first; on an exact tie a measured time (precise timing
+            # on) ahead of an approximate one, then the earlier date.
+            key=lambda e: board_sort_key(e["time_ms"], e["precise"], e["date_ts"] or 0),
         )
         if len(entries) >= 2:
             floor = median(e["time_ms"] for e in entries) / _IMPLAUSIBLE_FACTOR
@@ -289,6 +295,7 @@ def _record_payload(fastest: dict, names: dict) -> dict:
     return {
         "time_ms": fastest["time_ms"],
         "time_display": _convert_from_ms(fastest["time_ms"]),
+        "approximate": fastest.get("precise") is False,
         "team_size": fastest["team_size"],
         "player_id": fastest["player_id"],
         "player_name": names.get(fastest["player_id"], "Unknown"),
@@ -382,6 +389,9 @@ async def pb_board():
                     "player_name": names.get(e["player_id"], "Unknown"),
                     "time_ms": e["time_ms"],
                     "time_display": _convert_from_ms(e["time_ms"]),
+                    # Whole-second time (precise timing off), credited with
+                    # the slowest tick it could stand for.
+                    "approximate": e.get("precise") is False,
                     "date_ts": e["date_ts"],
                     # The site fetches the gear and character model for a
                     # time from /personal-bests/<pb_id>/loadout, and only
