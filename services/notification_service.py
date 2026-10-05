@@ -4473,7 +4473,13 @@ class NotificationService:
                 except Exception as e:
                     #print("Couldn't get the member list", e)
                     return
-            player_ids = await associate_player_ids(wom_member_list)
+                player_ids = await associate_player_ids(wom_member_list)
+            elif int(group_id) != 2:
+                # No WOM group (a badge group, db/badge_groups.py): its stored members.
+                from db.badge_groups import member_player_ids
+                player_ids = list(member_player_ids(db_session, group_id))
+            else:
+                player_ids = []
             
             group_ranks = db_session.query(PersonalBestEntry).filter(PersonalBestEntry.player_id.in_(player_ids), PersonalBestEntry.npc_id == int(npc_id),
                                                                         PersonalBestEntry.team_size == team_size).all()

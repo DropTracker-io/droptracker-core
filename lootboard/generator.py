@@ -592,17 +592,22 @@ async def generate_server_board_temporary(group_id: int = 0, wom_group_id: int =
             print(f"Error getting wom_group_id: {e}")
             wom_group_id = 0
     #f"Group ID: {group_id}")
-    if group_id != 2:
-        # Fetch player WOM IDs and associated Player IDs
-            player_wom_ids = await fetch_group_members(wom_group_id, session_to_use=session)
+    if group_id != 2 and not wom_group_id:
+        # No WOM group (a badge group, db/badge_groups.py): its stored members.
+        from db.badge_groups import member_player_ids
+        player_ids = sorted(member_player_ids(session, group_id))
     else:
-        #print("Group ID is 2...")
-        player_wom_ids = []
-        all_players = session.query(Player.wom_id).all()
-        #print(f"Got all players: {len(all_players)}")
-        for p in all_players:
-            player_wom_ids.append(p.wom_id)
-    player_ids = await associate_player_ids(player_wom_ids, session_to_use=session)
+        if group_id != 2:
+            # Fetch player WOM IDs and associated Player IDs
+            player_wom_ids = await fetch_group_members(wom_group_id, session_to_use=session)
+        else:
+            #print("Group ID is 2...")
+            player_wom_ids = []
+            all_players = session.query(Player.wom_id).all()
+            #print(f"Got all players: {len(all_players)}")
+            for p in all_players:
+                player_wom_ids.append(p.wom_id)
+        player_ids = await associate_player_ids(player_wom_ids, session_to_use=session)
     ignored_players_existing = session.query(IgnoredPlayer).filter(IgnoredPlayer.group_id == group_id).all()
     if ignored_players_existing:
         ignored_players = [player.player_id for player in ignored_players_existing]

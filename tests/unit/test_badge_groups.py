@@ -131,6 +131,18 @@ class TestSync:
         assert _members(db) == []
 
 
+class TestMemberPlayerIds:
+    def test_only_player_rows_of_that_group(self, db):
+        uga = tdb.user_group_association
+        with db() as s:
+            s.execute(uga.insert(), [
+                {"player_id": 10, "user_id": None, "group_id": GID},
+                {"player_id": None, "user_id": 2, "group_id": GID},
+                {"player_id": 30, "user_id": None, "group_id": 999},
+            ])
+            assert bg.member_player_ids(s, GID) == {10}
+
+
 class TestOpsHook:
     """db/ops.update_group_members runs the rule next to group 2's, both paths."""
 

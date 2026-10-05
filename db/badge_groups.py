@@ -5,14 +5,16 @@
 commas. Every account of every user who holds that badge is a member, and
 nobody else is.
 
-It exists for the dev instance's Bug Testers group, which has no WOM group and
-must never need one. Production leaves it unset, so nothing here runs there.
+It exists for the Bug Testers groups, which have no WOM group and must never
+need one: the dev instance's (``{"10000001": "bug_tester_helper"}``) and
+production's test server, group 267 (``{"267": "bug_tester_helper"}``).
 
-The rule runs in two places: at the end of the hourly membership sync
+The rule runs in three places: at the end of the hourly membership sync
 (``db.ops.update_group_members``), where group 2's "every player" rule
-already runs, and straight after a tester roster is applied on dev
-(``api/routes/dev_sync.py``), which is what makes a new tester a member
-within seconds.
+already runs; straight after a tester roster is applied on dev
+(``api/routes/dev_sync.py``); and in production's ``droptracker-dev-sync``
+worker whenever the roster changes (``workers/dev_sync.py``). The last two are
+what make a new tester a member within seconds.
 
 Only player rows are managed. A row linking a Discord *user* to the group
 (``user_id`` set, ``player_id`` NULL) belongs to someone else and is left alone.
@@ -122,6 +124,22 @@ def sync_badge_group(session, group_id: int, badge_key: str) -> Tuple[int, int]:
             uga.delete().where(uga.c.group_id == group.group_id, uga.c.player_id.in_(to_remove))
         )
     return len(to_add), len(to_remove)
+
+
+def member_player_ids(session, group_id: int) -> Set[int]:
+    """The group's player members as stored, for a group with no WOM group.
+
+    Lootboards and PB group ranks fetch a WOM group's members live; a group
+    without one (a badge group) uses its own membership rows instead.
+    """
+    from db.models import user_group_association as uga
+
+    return {
+        int(pid)
+        for (pid,) in session.query(uga.c.player_id)
+        .filter(uga.c.group_id == int(group_id), uga.c.player_id.isnot(None))
+        .all()
+    }
 
 
 def sync_configured(session, commit: bool = True) -> Dict[int, Tuple[int, int]]:

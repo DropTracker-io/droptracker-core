@@ -225,7 +225,22 @@ class TestPush:
         assert pusher.due("abc", requested=False)
 
 
+class TestLocalGroups:
+    def test_first_look_and_changes_and_requests_sync(self):
+        local = worker.LocalGroups()
+        assert local.due("abc", requested=False)
+        local.last_fingerprint = "abc"
+        assert not local.due("abc", requested=False)
+        assert local.due("abd", requested=False)
+        assert local.due("abc", requested=True)
+
+
 class TestMain:
+    @pytest.fixture(autouse=True)
+    def badge_groups_module(self, monkeypatch):
+        tdb.load("_badge_groups_for_dev_sync", "db", "badge_groups.py",
+                 register_as="db.badge_groups", monkeypatch=monkeypatch)
+
     def test_a_dev_instance_never_pushes(self, monkeypatch):
         monkeypatch.setenv("STATE", "dev")
         monkeypatch.setenv("DEV_SYNC_URL", URL)
@@ -238,14 +253,31 @@ class TestMain:
         monkeypatch.delenv("STATUS", raising=False)
         monkeypatch.delenv("DEV_SYNC_URL", raising=False)
         monkeypatch.delenv("DEV_SYNC_KEY", raising=False)
+        monkeypatch.delenv("BADGE_GROUPS", raising=False)
         monkeypatch.setattr(worker, "load_current", lambda: pytest.fail("must not read or push"))
         assert worker.main(["--once"]) == 1
+
+    def test_badge_groups_alone_still_sync_locally(self, monkeypatch):
+        monkeypatch.setenv("STATE", "live")
+        monkeypatch.delenv("STATUS", raising=False)
+        monkeypatch.delenv("DEV_SYNC_URL", raising=False)
+        monkeypatch.delenv("DEV_SYNC_KEY", raising=False)
+        monkeypatch.setenv("BADGE_GROUPS", '{"267":"bug_tester_helper"}')
+        roster = tr.empty_roster()
+        monkeypatch.setattr(worker, "load_current", lambda: (roster, tr.fingerprint(roster)))
+        synced = []
+        monkeypatch.setattr(worker.LocalGroups, "sync",
+                            lambda self, f: synced.append(f) or True)
+        monkeypatch.setattr(worker.Pusher, "push", lambda *a: pytest.fail("nowhere to push"))
+        assert worker.main(["--once"]) == 0
+        assert synced == [tr.fingerprint(roster)]
 
     def test_once_pushes_one_snapshot(self, monkeypatch):
         monkeypatch.setenv("STATE", "live")
         monkeypatch.delenv("STATUS", raising=False)
         monkeypatch.setenv("DEV_SYNC_URL", URL)
         monkeypatch.setenv("DEV_SYNC_KEY", KEY)
+        monkeypatch.delenv("BADGE_GROUPS", raising=False)
         roster = tr.empty_roster()
         monkeypatch.setattr(worker, "load_current", lambda: (roster, tr.fingerprint(roster)))
         pushed = []

@@ -17,8 +17,13 @@ Configuration (production ``.env``)::
     DEV_SYNC_URL = https://dev-api.droptracker.io/dev-sync/testers
     DEV_SYNC_KEY = <a Fernet key; the same value goes in dev's .env>
 
-With either unset the worker idles and says so once. On a dev instance it
-refuses outright: dev only ever receives a roster.
+With either unset nothing is pushed. On a dev instance it refuses outright:
+dev only ever receives a roster.
+
+It also keeps production's own badge groups (``BADGE_GROUPS``, the test
+server's group 267) in step with the roster, on the same signal, so a new
+tester joins that group within seconds instead of at the hourly sync. With
+neither a push target nor a badge group the worker idles.
 
 Usage::
 
@@ -132,6 +137,32 @@ class Pusher:
         return False
 
 
+class LocalGroups:
+    """Applies ``BADGE_GROUPS`` here when the roster changes (db/badge_groups.py)."""
+
+    def __init__(self):
+        self.last_fingerprint = None
+
+    def due(self, fingerprint: str, requested: bool) -> bool:
+        return requested or fingerprint != self.last_fingerprint
+
+    def sync(self, fingerprint: str) -> bool:
+        from db.badge_groups import sync_configured
+        from db.models import Session
+
+        try:
+            with Session() as session:
+                results = sync_configured(session)
+        except Exception as exc:
+            log.warning("badge group sync failed: %s", exc)
+            return False
+        self.last_fingerprint = fingerprint
+        for group_id, (added, removed) in results.items():
+            if added or removed:
+                log.info("badge group %s: +%s / -%s members", group_id, added, removed)
+        return True
+
+
 def load_current():
     from db.models import Session
     from services import tester_roster
@@ -171,13 +202,18 @@ def wait_for_request(client) -> bool:
     return True
 
 
-def run(pusher: Pusher, client) -> None:
-    log.info("pushing the Bug Tester roster to %s", pusher.url)
+def run(pusher, client, local: LocalGroups = None) -> None:
+    if pusher is not None:
+        log.info("pushing the Bug Tester roster to %s", pusher.url)
+    if local is not None:
+        log.info("keeping badge groups in step with the roster")
     requested = True
     while not _stop.is_set():
         try:
             roster, fingerprint = load_current()
-            if pusher.due(fingerprint, requested):
+            if local is not None and local.due(fingerprint, requested):
+                local.sync(fingerprint)
+            if pusher is not None and pusher.due(fingerprint, requested):
                 pusher.push(roster, fingerprint)
         except Exception as exc:
             log.warning("reading the roster failed: %s", exc)
@@ -211,15 +247,24 @@ def main(argv=None) -> int:
         log.error("this is a dev instance; it receives the roster and never pushes one")
         return 0 if args.once else _idle()
 
+    from db.badge_groups import configured_badge_groups
+
+    local = LocalGroups() if configured_badge_groups() else None
     url, key = tester_roster.sync_url(), tester_roster.sync_key()
-    if not url or not key:
-        log.warning("DEV_SYNC_URL and DEV_SYNC_KEY are not both set; nothing to do")
+    pusher = Pusher(url, key) if url and key else None
+    if pusher is None:
+        log.warning("DEV_SYNC_URL and DEV_SYNC_KEY are not both set; not pushing to dev")
+    if pusher is None and local is None:
         return 1 if args.once else _idle()
 
-    pusher = Pusher(url, key)
     if args.once:
         roster, fingerprint = load_current()
-        return 0 if pusher.push(roster, fingerprint) else 1
+        ok = True
+        if local is not None:
+            ok = local.sync(fingerprint) and ok
+        if pusher is not None:
+            ok = pusher.push(roster, fingerprint) and ok
+        return 0 if ok else 1
 
     signal.signal(signal.SIGTERM, _stop_on_signal)
     signal.signal(signal.SIGINT, _stop_on_signal)
@@ -228,7 +273,7 @@ def main(argv=None) -> int:
     except Exception as exc:
         log.warning("no Redis (%s); polling every %ss instead", exc, POLL_SECONDS)
         client = None
-    run(pusher, client)
+    run(pusher, client, local)
     return 0
 
 
