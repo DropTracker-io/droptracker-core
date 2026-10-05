@@ -491,6 +491,16 @@ async def run_consumer() -> None:
 
     log.info("Event consumer starting (queue=%s)", QUEUE_KEY)
     r = await asyncio.to_thread(_get_redis)
+    # t274: was this worker down long enough to call it an outage? The marker
+    # makes the lifecycle sweep hold scheduled ends that fell in the gap until
+    # the R2 drain and webhook catch-up have had a chance to replay it, and
+    # lets a draft whose start fell in the gap keep its scheduled start.
+    from utils import event_end_hold
+
+    gap = await asyncio.to_thread(event_end_hold.note_boot, r, time.time())
+    if gap:
+        log.warning("Events worker was down for ~%ds; holding scheduled ends "
+                    "that fell in the gap until intake recovery catches up", gap)
     # Recover envelopes left in-flight by a previous crash/restart (P1-1).
     await asyncio.to_thread(_reclaim_inflight, r, QUEUE_KEY)
     pubsub = r.pubsub(ignore_subscribe_messages=True)
@@ -558,8 +568,12 @@ async def run_consumer() -> None:
 
             # Lifecycle sweep (Task 21): scheduled activations / ends. Events
             # about to be ended get their final WOM pass (and a queue drain)
-            # first, while they're still in the matcher state.
-            if (time.time() - last_sweep) >= LIFECYCLE_SWEEP_SECONDS:
+            # first, while they're still in the matcher state — so the first
+            # sweep after a boot waits for the first state load (t274: it
+            # used to run before it, skipping that final pass).
+            if state is not None and (time.time() - last_sweep) >= LIFECYCLE_SWEEP_SECONDS:
+                # Liveness for the next boot's outage check (t274).
+                await asyncio.to_thread(event_end_hold.write_heartbeat, r, time.time())
                 if state is not None:
                     try:
                         await _run_wom_final_passes(r, shared, lane_queues)
@@ -575,6 +589,9 @@ async def run_consumer() -> None:
                     summary = {}
                     log.error("Lifecycle sweep failed:\n%s", traceback.format_exc())
                 last_sweep = time.time()
+                if summary.get("held"):
+                    log.info("Lifecycle sweep: holding end of %s for intake recovery",
+                             summary.get("held"))
                 if summary.get("activated") or summary.get("ended") or summary.get("failed"):
                     log.info("Lifecycle sweep: activated=%s ended=%s failed=%s",
                              summary.get("activated"), summary.get("ended"),

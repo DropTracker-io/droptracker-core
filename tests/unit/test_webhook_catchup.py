@@ -228,3 +228,21 @@ class TestStampBundle:
         wc.stamp_bundle(bundle, datetime(2026, 10, 5, 14, 0, tzinfo=timezone(timedelta(hours=2))))
         assert all(d["_received_at"] == "2026-10-05T12:00:00" for _, d in bundle)
         assert all(d["_received_at_trusted"] is True for _, d in bundle)
+
+
+class TestEventEndHoldMarker:
+    """t274: while a catch-up replays, ``webhookbot:catchup_active`` names its
+    start so the events sweep holds scheduled ends inside the gap. It must be
+    gone when the catch-up finishes."""
+
+    def test_raised_during_the_run_and_cleared_after(self):
+        from utils.event_end_hold import CATCHUP_ACTIVE_KEY, _from_snowflake
+
+        gap_start = NOW - timedelta(hours=2)
+        store = FakeStore(**{wc.WATERMARK_KEY: str(wc.snowflake_for(gap_start))})
+        _run([FakeChannel("a", [_msg(NOW - timedelta(hours=1))])], store)
+        raised = [v for op, k, *v in store.history if op == "set" and k == CATCHUP_ACTIVE_KEY]
+        assert raised, "marker never raised"
+        since = _from_snowflake(raised[0][0])
+        assert since == (gap_start - wc.MARGIN).replace(tzinfo=None)
+        assert CATCHUP_ACTIVE_KEY not in store.data

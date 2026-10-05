@@ -435,6 +435,17 @@ DEFAULT_LAYOUTS = {
             },
         ],
     },
+    "event_recovery_notice": {
+        "accent_color": "#FAA61A",
+        "blocks": [
+            {"type": "text", "content": "## {notice_title}"},
+            {"type": "text", "content": "{notice_body}"},
+            {
+                "type": "buttons",
+                "buttons": [{"label": "Open the event manager", "url": "{event_url}"}],
+            },
+        ],
+    },
     "event_multi_clan_skipped": {
         "accent_color": "#FAA61A",
         "blocks": [

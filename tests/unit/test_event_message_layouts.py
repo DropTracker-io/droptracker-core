@@ -302,7 +302,7 @@ class TestDefaultLayouts:
             "event_task_progress", "event_line",
             "event_blackout", "event_lead_change", "event_pending",
             "event_activation_failed", "event_end_failed",
-            "event_multi_clan_skipped",
+            "event_multi_clan_skipped", "event_recovery_notice",
             "event_signup_prompt", "event_signup_closed", "event_board",
             "event_board_turn", "event_board_win", "event_pot",
             "event_board_roll_prompt", "event_board_action",
@@ -345,6 +345,10 @@ class TestDefaultLayouts:
                               "team_name": "Reds", "review_url": "https://x/review"},
             "event_activation_failed": {"event_id": 7, "event_name": "E", "reason": "no tasks",
                                         "starts_at": 1700000000},
+            "event_recovery_notice": {"event_id": 7, "event_name": "E",
+                                      "variant": "held",
+                                      "notice_title": "E: final results are delayed",
+                                      "notice_body": "Still processing."},
             "event_multi_clan_skipped": {"event_id": 7, "event_name": "E",
                                          "skipped_players": "`Zed`, `Bob`",
                                          "skipped_count": 2},
@@ -968,7 +972,7 @@ class TestEditorMeta:
         # (db/models/events.py) — compare against the seeded default set,
         # which the seed script asserts matches the canonical tuple.
         for key in ml.DEFAULT_LAYOUTS:
-            if key == "event_multi_clan_skipped":
+            if key in ("event_multi_clan_skipped", "event_recovery_notice"):
                 continue  # code-default only, not editable (not in the type list)
             assert key in ml.TYPE_META, key
         for key in ml.TYPE_META:

@@ -49,6 +49,10 @@ KIND_FOR_TYPE = {
     # G7: players left off the whole-clan teams at activation because they
     # belong to more than one participating clan (need a manual team add).
     "event_multi_clan_skipped": "admin",
+    # t274: a scheduled end is being held while intake recovers from an
+    # outage, or the hold hit its cap, or submissions earned during an ended
+    # event arrived late. Code-default only, not toggleable.
+    "event_recovery_notice": "admin",
     # Interactive "Sign up" prompt (posted on demand by an admin) — carries a
     # button the notification sender attaches (services/notification_service).
     "event_signup_prompt": "announcements",
@@ -105,6 +109,7 @@ POST_END_ALLOWED_TYPES = (
     "event_ended",
     "event_end_failed",
     "event_activation_failed",
+    "event_recovery_notice",
 )
 
 _MEDALS = ("\U0001F947", "\U0001F948", "\U0001F949")  # gold / silver / bronze
@@ -127,6 +132,7 @@ _COLORS = {
     "event_activation_failed": 0xED4245,
     "event_end_failed": 0xED4245,
     "event_multi_clan_skipped": 0xFAA61A,  # amber — an admin needs to act
+    "event_recovery_notice": 0xFAA61A,  # amber — results delayed / late data
     "event_signup_prompt": 0x5865F2,  # Discord blurple — a call to action
     "event_pot": 0xFFD700,  # gold — the prize pot
     "event_task_progress": 0x3498DB,  # informational blue — progress, not victory
@@ -1013,6 +1019,12 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
         ends = _fmt_ts(data.get("ends_at"))
         if ends:
             field("Scheduled end", ends)
+        if url:
+            field("Review it", f"[Open the event manager]({url})", inline=False)
+
+    elif notification_type == "event_recovery_notice":
+        spec["title"] = data.get("notice_title") or f"{event_name}: processing notice"
+        spec["description"] = data.get("notice_body") or ""
         if url:
             field("Review it", f"[Open the event manager]({url})", inline=False)
 

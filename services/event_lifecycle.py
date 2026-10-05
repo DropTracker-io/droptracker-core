@@ -29,6 +29,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
+from utils import event_end_hold as _end_hold
+
 log = logging.getLogger(__name__)
 
 # One-time "scheduled activation failed" notification guard (per event). The
@@ -626,11 +628,16 @@ def assert_activation_capacity(session, event, user=None) -> None:
         )
     limit = int(entitlements.get("events_max_active") or 0)
 
+    from sqlalchemy import or_
+
     from db.models import Event
 
     active = (
         session.query(Event)
-        .filter(Event.group_id == event.group_id, Event.status == "active")
+        .filter(Event.group_id == event.group_id, Event.status == "active",
+                # Past its scheduled end = over, even while the sweep holds
+                # the end for recovery (t274); it must not block the next one.
+                or_(Event.ends_at.is_(None), Event.ends_at > datetime.now()))
         .count()
     )
     if active >= limit:
@@ -1405,6 +1412,14 @@ def activate_event(session, event, *, actor_user_id=None, user=None,
     })
 
 
+def _scoring_end(event, now: datetime) -> datetime:
+    """When scoring actually stopped: the earlier of the scheduled end and the
+    real end. They differ when a scheduled end was held for recovery (t274)
+    or the sweep ran late; a premature manual end is the real end."""
+    ends = [d for d in (event.ends_at, event.ended_at) if d is not None]
+    return min(ends) if ends else now
+
+
 def end_event(session, event, *, actor_user_id=None,
               now: Optional[datetime] = None) -> list:
     """active -> past. The status flip + audit row commit FIRST — a failure in
@@ -1495,7 +1510,7 @@ def end_event(session, event, *, actor_user_id=None,
         try:
             from services.conquest_engine import finalize_conquest
 
-            finalize_conquest(session, event, now=event.ended_at or now)
+            finalize_conquest(session, event, now=_scoring_end(event, now))
             session.commit()
         except Exception:
             session.rollback()
@@ -2018,6 +2033,101 @@ def sync_averaged_team_scores(session, redis_conn, event) -> bool:
     return bool(changed)
 
 
+def _gather_hold_signals(redis_conn) -> list:
+    """Recovery signals for this tick (fail-open, see utils.event_end_hold)."""
+    try:
+        from utils.webhook_spool import pending_count as spool_count
+    except Exception:
+        spool_count = None
+    try:
+        return _end_hold.gather_signals(redis_conn, spool_count=spool_count)
+    except Exception:
+        log.error("Sweep: end-hold signal read failed; ending on schedule",
+                  exc_info=True)
+        return []
+
+
+def _fmt_hold_cap(seconds: int) -> str:
+    hours, rem = divmod(int(seconds), 3600)
+    if hours and not rem:
+        return f"{hours} hour" + ("s" if hours != 1 else "")
+    return f"{max(1, int(seconds) // 60)} minutes"
+
+
+def _enqueue_recovery_notice(session, event, variant: str, title: str,
+                             body: str) -> None:
+    """Admin-channel ``event_recovery_notice`` (t274). Best-effort."""
+    from services import event_engine
+
+    try:
+        event_engine._enqueue_notification(
+            session, "event_recovery_notice", event_engine._event_to_dict(event),
+            _representative_player_id(session, event.id),
+            {"variant": variant, "notice_title": title, "notice_body": body,
+             "ends_at": _ts(event.ends_at)},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        log.error("event %s: recovery notice (%s) enqueue failed",
+                  event.id, variant, exc_info=True)
+
+
+def _note_end_held(session, redis_conn, event, decision, hold_cap: int) -> None:
+    """First tick of a hold: log it and tell the event's admins, once."""
+    try:
+        fresh = redis_conn.set(
+            _end_hold.HOLD_MARKER_KEY.format(event_id=event.id),
+            int(datetime.now().timestamp()), nx=True, ex=hold_cap + 3600,
+        )
+    except Exception:
+        fresh = False
+    if not fresh:
+        return
+    why = _end_hold.describe(decision.reasons)
+    log.warning("Sweep: holding the scheduled end of event %s (%s): %s",
+                event.id, ", ".join(decision.reasons), why)
+    ends = _ts(event.ends_at)
+    _enqueue_recovery_notice(
+        session, event, "held",
+        f"{event.name}: final results are delayed",
+        (f"Scoring closed on schedule at <t:{ends}:f>, but we are still "
+         f"processing submissions from a service interruption ({why}). "
+         f"Anything received before the end still counts. Final results post "
+         f"automatically once processing catches up, at most "
+         f"{_fmt_hold_cap(hold_cap)} after the scheduled end."),
+    )
+
+
+def _note_end_released(session, redis_conn, event, decision, hold_cap: int,
+                       now: datetime) -> None:
+    """After an end: clear the hold marker, and if the hold hit its cap with
+    a recovery still running, say so (late arrivals are reported, not
+    scored)."""
+    if redis_conn is not None:
+        try:
+            key = _end_hold.HOLD_MARKER_KEY.format(event_id=event.id)
+            if redis_conn.get(key) is not None:
+                redis_conn.delete(key)
+                held_for = (now - event.ends_at).total_seconds() if event.ends_at else 0
+                log.info("Sweep: event %s ended after a %ds hold", event.id, held_for)
+        except Exception:
+            pass
+    if decision is None or not decision.capped:
+        return
+    why = _end_hold.describe(decision.reasons)
+    log.error("Sweep: event %s ended at the %ds hold cap with recovery still "
+              "running: %s", event.id, hold_cap, why)
+    _enqueue_recovery_notice(
+        session, event, "capped",
+        f"{event.name} ended while recovery was still running",
+        (f"We held the final results for {_fmt_hold_cap(hold_cap)} after the "
+         f"scheduled end, but processing had not caught up ({why}). The "
+         f"standings were finalized anyway. Submissions from before the end "
+         f"that arrive now are reported here and are not scored automatically."),
+    )
+
+
 def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None) -> dict:
     """One scheduler tick: activate due drafts / end due actives through the
     exact same transition functions the routes use. Commits per transition
@@ -2071,12 +2181,28 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
                 session.rollback()
             summary["failed"].append({"id": event_id, "detail": detail})
 
+    # t274: a scheduled end waits while a recovery could still deliver
+    # submissions received before it (see utils.event_end_hold). Held events
+    # stay in due["end"], so the per-tick loops below keep skipping them.
+    summary["held"] = []
+    hold_cap = _end_hold.hold_max_seconds() if redis_conn is not None else 0
+    hold_signals = None
     for event_id in due["end"]:
         event = by_id[event_id]
+        decision = None
+        if hold_cap > 0:
+            if hold_signals is None:
+                hold_signals = _gather_hold_signals(redis_conn)
+            decision = _end_hold.decide(event.ends_at, now, hold_signals, hold_cap)
+            if decision.hold:
+                summary["held"].append(event_id)
+                _note_end_held(session, redis_conn, event, decision, hold_cap)
+                continue
         try:
             end_event(session, event, now=now)
             session.commit()
             summary["ended"].append(event_id)
+            _note_end_released(session, redis_conn, event, decision, hold_cap, now)
         except LifecycleError as exc:
             session.rollback()
             summary["failed"].append({"id": event_id, "detail": exc.detail})

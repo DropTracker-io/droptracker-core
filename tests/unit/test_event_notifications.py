@@ -25,6 +25,7 @@ ALL_TYPES = (
     "event_completion",
     "event_line", "event_blackout", "event_lead_change", "event_pending",
     "event_activation_failed", "event_end_failed", "event_multi_clan_skipped",
+    "event_recovery_notice",
     "event_signup_prompt", "event_task_progress",
     "event_board_turn", "event_pot", "event_board_roll_prompt",
     "event_board_action",
@@ -57,6 +58,7 @@ class TestKindMapping:
             "event_activation_failed": "admin",
             "event_end_failed": "admin",
             "event_multi_clan_skipped": "admin",
+            "event_recovery_notice": "admin",
             "event_signup_prompt": "announcements",
             "event_pot": "announcements",
             "event_task_progress": "completions",
@@ -90,6 +92,8 @@ class TestKindMapping:
         # sender skips everything else at send time.
         assert set(en.POST_END_ALLOWED_TYPES) == {
             "event_ended", "event_end_failed", "event_activation_failed",
+            # t274: "ended while recovery was still running" / late arrivals.
+            "event_recovery_notice",
         }
         assert set(en.POST_END_ALLOWED_TYPES) <= set(en.EVENT_NOTIFICATION_TYPES)
 

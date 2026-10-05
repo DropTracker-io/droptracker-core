@@ -27,7 +27,11 @@ def drain(monkeypatch):
     # boto3/requests/redis are imported lazily inside the functions, so the
     # module itself imports cleanly with nothing stubbed.
     mod = importlib.import_module("scripts.drain_r2_spool")
-    return importlib.reload(mod)
+    mod = importlib.reload(mod)
+    # Never reach the box's real Redis: the recovery marker holds live event
+    # ends (t274). Tests that care install a FakeStore.
+    monkeypatch.setattr(mod, "_recovery_redis", lambda: None)
+    return mod
 
 
 class FakeR2:
@@ -281,3 +285,108 @@ class TestDeadLetterDrain:
 
         drain.drain_dead(_args(source="dead", apply=True))
         assert len(fake.queue) == 2
+
+
+class FakeStore:
+    def __init__(self):
+        self.kv = {}
+
+    def set(self, key, value, ex=None):
+        self.kv[key] = value
+
+    def delete(self, key):
+        self.kv.pop(key, None)
+
+
+class _HeadR2(FakeR2):
+    """FakeR2 plus head_object, with per-key sample flags / capture times."""
+
+    def __init__(self, objects, samples=(), captured=None):
+        super().__init__(objects)
+        self.samples = set(samples)
+        self.captured = captured or {}
+
+    def head_object(self, Bucket, Key):
+        meta = {"sample": "1" if Key in self.samples else "0"}
+        if Key in self.captured:
+            meta["captured_at"] = self.captured[Key]
+        return {"Metadata": meta}
+
+
+def _key(ms):
+    return f"webhook/2026/10/05/12/{ms}-ray.bin"
+
+
+class TestRecoveryMarker:
+    """t274: while the spool holds real captures, ``intake:recovery:r2``
+    carries the oldest one's time so the events sweep holds scheduled ends
+    that fall before it. Health samples must never raise it."""
+
+    KEY = "intake:recovery:r2"
+
+    def _run(self, drain, monkeypatch, r2, replay=(200, "Queued"), **args):
+        store = FakeStore()
+        monkeypatch.setattr(drain, "_recovery_redis", lambda: store)
+        monkeypatch.setattr(drain, "_r2_client", lambda: r2)
+        seen = {}
+
+        def _replay(*a, **k):
+            seen.setdefault("marker", store.kv.get(self.KEY))
+            return replay
+
+        monkeypatch.setattr(drain, "replay_body", _replay)
+        drain.drain_r2(_args(**args))
+        return store, seen
+
+    def test_real_capture_raises_it_then_a_clean_pass_clears_it(self, drain, monkeypatch):
+        k1, k2 = _key(1759665600000), _key(1759665601000)
+        r2 = _HeadR2({k1: _obj(1), k2: _obj(2)},
+                     captured={k1: "2026-10-05T12:00:00.000Z"})
+        store, seen = self._run(drain, monkeypatch, r2)
+        assert seen["marker"] == "2026-10-05T12:00:00.000Z"
+        assert self.KEY not in store.kv
+
+    def test_samples_only_never_raise_it(self, drain, monkeypatch):
+        k1 = _key(1759665600000)
+        r2 = _HeadR2({k1: _obj(1)}, samples={k1})
+        store, seen = self._run(drain, monkeypatch, r2)
+        assert seen["marker"] is None
+        assert self.KEY not in store.kv
+
+    def test_oldest_sample_is_skipped_for_the_first_real_capture(self, drain, monkeypatch):
+        k1, k2 = _key(1759665600000), _key(1759665700000)
+        r2 = _HeadR2({k1: _obj(1), k2: _obj(2)}, samples={k1})
+        store, seen = self._run(drain, monkeypatch, r2)
+        assert seen["marker"] == "2025-10-05T12:01:40"  # from k2's key time
+
+    def test_a_deferred_pass_keeps_it(self, drain, monkeypatch):
+        k1 = _key(1759665600000)
+        r2 = _HeadR2({k1: _obj(1)})
+        store, _ = self._run(drain, monkeypatch, r2, replay=(503, "down"))
+        assert self.KEY in store.kv
+
+    def test_a_sick_intake_still_raises_it(self, drain, monkeypatch):
+        k1 = _key(1759665600000)
+        r2 = _HeadR2({k1: _obj(1)})
+        store = FakeStore()
+        monkeypatch.setattr(drain, "_recovery_redis", lambda: store)
+        monkeypatch.setattr(drain, "_r2_client", lambda: r2)
+        monkeypatch.setattr(drain, "intake_is_healthy", lambda *a, **k: False)
+        assert drain.drain_r2(_args(skip_health_check=False)) == 1
+        assert self.KEY in store.kv
+        assert r2.deleted == []
+
+    def test_empty_spool_clears_it(self, drain, monkeypatch):
+        store = FakeStore()
+        store.kv[self.KEY] = "stale"
+        monkeypatch.setattr(drain, "_recovery_redis", lambda: store)
+        monkeypatch.setattr(drain, "_r2_client", lambda: FakeR2({}))
+        drain.drain_r2(_args())
+        assert self.KEY not in store.kv
+
+    def test_dry_run_never_touches_it(self, drain, monkeypatch):
+        calls = []
+        monkeypatch.setattr(drain, "_recovery_redis", lambda: calls.append(1))
+        monkeypatch.setattr(drain, "_r2_client", lambda: _HeadR2({_key(1): _obj(1)}))
+        drain.drain_r2(_args(apply=False))
+        assert calls == []

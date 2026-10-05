@@ -174,6 +174,76 @@ def _queue_depth_reader():
     return depth
 
 
+# How many of the oldest objects to HEAD looking for a real capture. The
+# Worker also spools ~0.1% of successful requests as samples, so a healthy
+# spool holds a handful of those at any time; an outage's captures are
+# contiguous and oldest-first, so a real one turns up within the first few.
+RECOVERY_SCAN_LIMIT = 200
+
+
+def _recovery_redis():
+    """Redis for the t274 recovery marker, or None (the marker is best-effort:
+    without it the events sweep ends events on schedule, as before)."""
+    try:
+        import redis
+
+        rc = redis.Redis(host="127.0.0.1", port=6379, db=0,
+                         password=os.environ.get("DB_PASS"),
+                         socket_timeout=5, socket_connect_timeout=5)
+        rc.ping()
+        return rc
+    except Exception:
+        return None
+
+
+def _key_time(key: str):
+    """Capture time from a spool key's ``<epoch ms>-<ray>.bin`` basename."""
+    from datetime import datetime, timezone
+
+    try:
+        ms = int(key.rsplit("/", 1)[-1].split("-", 1)[0])
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).replace(
+            tzinfo=None).isoformat()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def oldest_real_capture(client, bucket: str, pending: list,
+                        scan_limit: int = RECOVERY_SCAN_LIMIT):
+    """ISO capture time of the oldest non-sample object in ``pending``
+    (sorted oldest first), or None when every object is a health sample.
+    Past ``scan_limit`` samples the first unscanned key's time is used: we
+    can't rule out a real capture there."""
+    for i, key in enumerate(pending):
+        if i >= scan_limit:
+            return _key_time(key) or ""
+        try:
+            meta = client.head_object(Bucket=bucket, Key=key).get("Metadata") or {}
+        except Exception:
+            meta = {}
+        if meta.get("sample") == "1":
+            continue
+        return meta.get("captured_at") or _key_time(key) or ""
+    return None
+
+
+def update_recovery_marker(store, since) -> None:
+    """Raise (``since`` = ISO time) or clear (None) ``intake:recovery:r2``,
+    which holds scheduled event ends until the replay is done (t274)."""
+    from utils import event_end_hold
+
+    if store is None:
+        return
+    try:
+        if since is None:
+            store.delete(event_end_hold.R2_RECOVERY_KEY)
+        else:
+            store.set(event_end_hold.R2_RECOVERY_KEY, since,
+                      ex=event_end_hold.R2_RECOVERY_TTL_SECONDS)
+    except Exception as exc:
+        print(f"  (recovery marker not updated: {exc})")
+
+
 def drain_r2(args) -> int:
     client = _r2_client()
     bucket = os.environ.get("R2_SPOOL_BUCKET", "droptracker-intake-spool")
@@ -193,7 +263,9 @@ def drain_r2(args) -> int:
     # lexicographic order is chronological. Oldest first.
     pending.sort()
 
+    marker = _recovery_redis() if args.apply else None
     if not pending:
+        update_recovery_marker(marker, None)
         print("nothing to drain")
         return 0
 
@@ -205,6 +277,19 @@ def drain_r2(args) -> int:
             print(f"  ... and {len(pending) - 20} more")
         print("\ndry run -- pass --apply to replay and delete")
         return 0
+
+    # Before the health check on purpose: an intake outage is exactly when
+    # the events sweep must learn that captures are waiting.
+    since = oldest_real_capture(client, bucket, pending)
+    update_recovery_marker(marker, since)
+    if since is not None:
+        print(f"  recovery marker raised (oldest capture {since or 'unknown'})")
+
+    if not getattr(args, "skip_health_check", False) and not intake_is_healthy(args.intake):
+        print(f"intake at {args.intake} is not healthy -- refusing to drain.\n"
+              f"Replaying into a sick intake burns the backlog against 503s.\n"
+              f"Pass --skip-health-check to override.")
+        return 1
 
     counts = {"replayed": 0, "rejected": 0, "deferred": 0}
     counts_lock = threading.Lock()
@@ -292,6 +377,7 @@ def drain_r2(args) -> int:
 
     workers = max(1, int(args.workers or 1))
     started = time.monotonic()
+    walked_all = False
     with ThreadPoolExecutor(max_workers=workers) as pool:
         in_flight = []
         for i, key in enumerate(pending):
@@ -312,6 +398,14 @@ def drain_r2(args) -> int:
                 in_flight[0].result()
                 in_flight = [f for f in in_flight if not f.done()]
             in_flight.append(pool.submit(replay_one_safely, key))
+        else:
+            walked_all = True
+
+    # Everything listed was replayed or set aside: nothing left to hold for.
+    # (A listing cut short by --limit may have left objects unlisted; keep it.)
+    truncated = bool(limit) and len(pending) >= limit
+    if walked_all and not stop.is_set() and counts["deferred"] == 0 and not truncated:
+        update_recovery_marker(marker, None)
 
     elapsed = time.monotonic() - started
     print(f"\nreplayed={counts['replayed']} rejected={counts['rejected']} "
@@ -402,12 +496,8 @@ def main() -> int:
     if args.source == "dead":
         return drain_dead(args)
 
-    if not args.skip_health_check and not intake_is_healthy(args.intake):
-        print(f"intake at {args.intake} is not healthy -- refusing to drain.\n"
-              f"Replaying into a sick intake burns the backlog against 503s.\n"
-              f"Pass --skip-health-check to override.")
-        return 1
-
+    # The health check runs inside drain_r2, after the recovery marker is
+    # raised (t274).
     return drain_r2(args)
 
 

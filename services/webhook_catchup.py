@@ -65,6 +65,30 @@ def _default_store():
     return redis_client
 
 
+def _mark_active(store, after_id) -> None:
+    """Tell the events sweep a catch-up is replaying from ``after_id`` (t274:
+    scheduled ends inside the gap wait for it). Expires on its own, unlike
+    PENDING_KEY, so a crashed catch-up stops holding events within the TTL."""
+    from utils.event_end_hold import CATCHUP_ACTIVE_KEY, CATCHUP_ACTIVE_TTL_SECONDS
+
+    try:
+        try:
+            store.set(CATCHUP_ACTIVE_KEY, str(after_id), ex=CATCHUP_ACTIVE_TTL_SECONDS)
+        except TypeError:  # a store without TTL support (tests)
+            store.set(CATCHUP_ACTIVE_KEY, str(after_id))
+    except Exception:
+        pass
+
+
+def _clear_active(store) -> None:
+    from utils.event_end_hold import CATCHUP_ACTIVE_KEY
+
+    try:
+        store.delete(CATCHUP_ACTIVE_KEY)
+    except Exception:
+        pass
+
+
 def _read_id(store, key) -> Optional[int]:
     raw = store.get(key)
     try:
@@ -230,12 +254,14 @@ async def run_catchup(client, guild_ids, build_message_bundle, process_message_b
                 f"{MAX_LOOKBACK.days} days; older messages need "
                 f"scripts/replay_webhook_window.py (rows would be dated now)")
 
+        _mark_active(store, after_id)
         own_id = getattr(getattr(client, "user", None), "id", None)
         counts = {"channels": 0, "messages": 0, "dispatched": 0, "failed": 0,
                   "unreadable_channels": 0}
         channels = await collect_channels(client, guild_ids, log=log)
         counts["channels"] = len(channels)
         for guild, channel in channels:
+            _mark_active(store, after_id)
             try:
                 # interactions.py ignores `before` once `after` is set and pages
                 # forward to the present (oldest first), so the upper bound is
@@ -250,6 +276,8 @@ async def run_catchup(client, guild_ids, build_message_bundle, process_message_b
                         continue
                     stamp_bundle(bundle, getattr(message, "created_at", None))
                     counts["messages"] += 1
+                    if counts["messages"] % 200 == 0:
+                        _mark_active(store, after_id)
                     try:
                         counts["dispatched"] += await process_message_bundle(message, bundle)
                     except Exception as e:
@@ -263,6 +291,7 @@ async def run_catchup(client, guild_ids, build_message_bundle, process_message_b
 
         # Done: the next catch-up starts from the live watermark again.
         store.delete(PENDING_KEY)
+        _clear_active(store)
         log(f"[WebhookCatchup] done: {counts['messages']} message(s) with submissions "
             f"across {counts['channels']} channel(s), {counts['dispatched']} embed(s) "
             f"dispatched, {counts['failed']} failed, "

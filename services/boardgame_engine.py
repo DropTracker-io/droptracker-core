@@ -1349,6 +1349,10 @@ def mercy_sweep(session, redis_conn, now: Optional[datetime] = None) -> list:
                     EventBoardPosition.mercy_deadline <= now)
             .all())
     for pos, ev in rows:
+        # Past its scheduled end, the event is only held open for recovery
+        # (t274): the board is frozen, so no mercy completions or rolls.
+        if ev.ends_at is not None and ev.ends_at <= now:
+            continue
         settings = load_board_settings(session, ev.id)
         if not (settings.get("mercy") or {}).get("enabled", True):
             pos.mercy_deadline = None
