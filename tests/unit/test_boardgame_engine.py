@@ -1084,3 +1084,76 @@ class TestTurnNotificationData:
         finish = bg.turn_notification_data(
             team_id=1, roll={"dice": [2], "from": 7, "to": 9, "finish_task": True})
         assert "complete its task to win" in finish["finish_line"]
+
+
+class TestAdminMoveTeam:
+    """admin_move_team: an event admin places a piece on a chosen tile."""
+
+    def _session(self, pos, tiles):
+        return FakeSession(positions=[pos], tiles=tiles)
+
+    def test_places_exactly_and_ignores_links_by_default(self, board_models):
+        tiles = _linked(_tiles(), 3, 7)
+        pos = _pos(tile=1, status="active")
+        pos.current_task_id = 55
+        summary = bg.admin_move_team(self._session(pos, tiles), EVENT_ID, TEAM, 3,
+                                     settings=_fixed(1))
+        assert pos.tile_idx == 3 and summary["to"] == 3 and summary["from"] == 1
+        assert "jump" not in summary
+        assert pos.status == "awaiting_roll"          # rest tile
+        assert summary["previous_task_id"] == 55
+
+    def test_follow_links_takes_the_ladder(self, board_models):
+        tiles = _linked(_tiles(), 3, 7)
+        pos = _pos(tile=1)
+        summary = bg.admin_move_team(self._session(pos, tiles), EVENT_ID, TEAM, 3,
+                                     follow_links=True, settings=_fixed(1))
+        assert pos.tile_idx == 7 and summary["jump"]["to"] == 7
+
+    def test_backwards_and_clears_a_stall(self, board_models):
+        pos = _pos(tile=6, status="blocked", blocked_until=4)
+        bg.admin_move_team(self._session(pos, _tiles()), EVENT_ID, TEAM, 2,
+                           settings=_fixed(1))
+        assert pos.tile_idx == 2 and pos.blocked_until_turn is None
+        assert pos.status == "awaiting_roll"
+
+    def test_finish_needs_confirmation(self, board_models):
+        pos = _pos(tile=2)
+        with pytest.raises(bg.BoardMoveError) as e:
+            bg.admin_move_team(self._session(pos, _tiles()), EVENT_ID, TEAM, 9,
+                               settings=_fixed(1))
+        assert e.value.status == 409
+        assert e.value.extra["finish_confirmation_required"] is True
+        assert e.value.extra["finish_has_task"] is False
+        assert pos.tile_idx == 2                       # nothing moved
+
+    def test_ladder_onto_finish_needs_confirmation_only_when_followed(self, board_models):
+        tiles = _linked(_tiles(), 3, 9)
+        pos = _pos(tile=1)
+        with pytest.raises(bg.BoardMoveError):
+            bg.admin_move_team(self._session(pos, tiles), EVENT_ID, TEAM, 3,
+                               follow_links=True, settings=_fixed(1))
+        bg.admin_move_team(self._session(pos, tiles), EVENT_ID, TEAM, 3,
+                           settings=_fixed(1))
+        assert pos.tile_idx == 3
+
+    def test_confirmed_plain_finish_wins(self, board_models):
+        pos = _pos(tile=2)
+        summary = bg.admin_move_team(self._session(pos, _tiles()), EVENT_ID, TEAM, 9,
+                                     confirm_finish=True, settings=_fixed(1))
+        assert summary["won"] is True and pos.status == "finished"
+
+    @pytest.mark.parametrize("dest,status", [(4, 409), (42, 422)])
+    def test_rejects_same_and_unknown_tiles(self, board_models, dest, status):
+        pos = _pos(tile=4)
+        with pytest.raises(bg.BoardMoveError) as e:
+            bg.admin_move_team(self._session(pos, _tiles()), EVENT_ID, TEAM, dest,
+                               settings=_fixed(1))
+        assert e.value.status == status
+
+    def test_finished_team_cannot_move(self, board_models):
+        pos = _pos(tile=9, status="finished")
+        with pytest.raises(bg.BoardMoveError) as e:
+            bg.admin_move_team(self._session(pos, _tiles()), EVENT_ID, TEAM, 3,
+                               settings=_fixed(1))
+        assert e.value.status == 409

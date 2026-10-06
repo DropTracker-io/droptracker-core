@@ -1156,6 +1156,92 @@ async def roll_board(event_id: int):
     return private_no_store(jsonify(summary))
 
 
+@event_board_bp.post("/events/<int:event_id>/board/teams/<int:team_id>/position")
+async def move_board_team(event_id: int, team_id: int):
+    """Admin placement: put a team's piece on a chosen tile. Body
+    {tile_idx, follow_links?, confirm_finish?, reason?}. The new tile's task
+    is drawn as on any landing; the old task instance is discarded. Landing
+    on the finish 409s with ``finish_confirmation_required`` until the caller
+    resends with confirm_finish (a plain finish then wins and ends the event)."""
+    user_id = current_user_id()
+    body = await json_body()
+    tile_idx = body.get("tile_idx")
+    if not isinstance(tile_idx, int) or isinstance(tile_idx, bool) or tile_idx < 0:
+        abort_problem(422, "Invalid tile_idx", "'tile_idx' must be a non-negative integer.")
+    follow_links = body.get("follow_links") is True
+    confirm_finish = body.get("confirm_finish") is True
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        abort_problem(422, "Invalid reason", "'reason' must be a string.")
+    reason = (reason or "").strip()[:200] or None
+
+    def _apply():
+        from services.boardgame_engine import BoardMoveError, admin_move_team
+        from services.boardgame_shop import _discard_task_instance
+
+        with db_session() as s:
+            ev = _load_board_event(s, event_id, for_write=True)
+            _assert_event_admin(s, user_id, ev)
+            if ev.status != "active":
+                abort_problem(409, "Event not live",
+                              "Teams can only be moved while the event is active.")
+            team = (s.query(EventTeam)
+                    .filter(EventTeam.id == team_id, EventTeam.event_id == ev.id)
+                    .first())
+            if team is None:
+                abort_problem(404, "Team not found", "That team is not in this event.")
+            try:
+                summary = admin_move_team(
+                    s, ev.id, team_id, tile_idx,
+                    follow_links=follow_links, confirm_finish=confirm_finish)
+            except BoardMoveError as e:
+                abort_problem(e.status, e.title, e.detail, extra=e.extra)
+            previous_task_id = summary.pop("previous_task_id", None)
+            if previous_task_id:
+                pos = (s.query(EventBoardPosition)
+                       .filter(EventBoardPosition.team_id == team_id).first())
+                if pos is None or pos.current_task_id != previous_task_id:
+                    _discard_task_instance(s, ev.id, previous_task_id)
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id, event_id=ev.id,
+                action="event.board.move", target=f"team:{team_id}",
+                before=json.dumps({"tile_idx": summary["from"]}),
+                after=json.dumps({
+                    "tile_idx": summary["to"], "requested_tile_idx": tile_idx,
+                    "follow_links": follow_links, "won": bool(summary.get("won")),
+                    "reason": reason,
+                })[:2000],
+            ))
+            if summary.get("won"):
+                from services import event_lifecycle
+
+                event_lifecycle.end_event(s, ev, actor_user_id=user_id)
+            s.commit()
+            summary["team_id"] = team_id
+            summary["team_name"] = team.name
+            return summary
+
+    summary = await asyncio.to_thread(_apply)
+    try:
+        from services.event_engine import publish_event_admin_bump
+
+        publish_event_admin_bump(event_id)
+    except Exception:
+        pass
+    try:
+        from services.realtime import publish_event_update
+
+        publish_event_update(event_id, {
+            "kind": "board_roll", "event_id": event_id, "team_id": team_id,
+            "dice": [], "from": summary["from"], "to": summary["to"],
+            "won": bool(summary.get("won")), "admin_move": True,
+        })
+    except Exception:
+        pass
+    _bump(event_id)
+    return private_no_store(jsonify(summary))
+
+
 # --------------------------------------------------------------------------- #
 # Procedural generation (web46a)
 # --------------------------------------------------------------------------- #

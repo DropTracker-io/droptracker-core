@@ -1178,7 +1178,8 @@ def _required_stop(session, event_id: int, team_id: int, by_idx: dict,
 
 def _resolve_landing(session, event_id: int, team_id: int, pos, by_idx: dict,
                      fin: Optional[int], dest: int, settings: dict, summary: dict,
-                     rng: Optional[random.Random] = None) -> dict:
+                     rng: Optional[random.Random] = None,
+                     follow_links: bool = True) -> dict:
     """Shared landing resolution — every way a piece comes to rest (a roll, a
     teleport, a knockback, a bounce) ends here so tile rules hold for all of
     them: follow a landing-triggered link ONCE (a chute or a ladder; the
@@ -1186,9 +1187,11 @@ def _resolve_landing(session, event_id: int, team_id: int, pos, by_idx: dict,
     task. A finish tile that carries a task is not a win on arrival — the
     team must complete it (``finish_task``); a plain finish wins outright.
 
+    ``follow_links=False`` (an admin placement) lands exactly on ``dest``.
+
     Mutates ``pos`` and ``summary`` (``to``, ``jump``, ``won``, task keys)."""
     tile = by_idx.get(dest)
-    jump = tile_jump(tile)
+    jump = tile_jump(tile) if follow_links else None
     if jump is not None and jump[1] == "land" and jump[0] in by_idx:
         target = jump[0]
         summary["jump"] = {"kind": "ladder" if target > dest else "chute",
@@ -1211,6 +1214,81 @@ def _resolve_landing(session, event_id: int, team_id: int, pos, by_idx: dict,
         summary["task_difficulty"] = instance.difficulty
     if fin is not None and dest >= fin:
         summary["finish_task"] = True
+    return summary
+
+
+class BoardMoveError(Exception):
+    """A refused admin placement; the route maps it to a problem response."""
+
+    def __init__(self, status: int, title: str, detail: str,
+                 extra: Optional[dict] = None):
+        super().__init__(detail)
+        self.status = status
+        self.title = title
+        self.detail = detail
+        self.extra = extra
+
+
+def admin_move_team(session, event_id: int, team_id: int, dest: int, *,
+                    follow_links: bool = False, confirm_finish: bool = False,
+                    settings: Optional[dict] = None,
+                    rng: Optional[random.Random] = None) -> dict:
+    """Place a team's piece on tile ``dest`` (an event admin's manual move).
+
+    The piece lands through ``_resolve_landing`` like any other move, so the
+    new tile's task is drawn and a plain finish wins. Not applied: required
+    checkpoints, path effects (roadblocks, tolls) and turn counters.
+    ``follow_links`` also takes a chute or ladder on ``dest``.
+
+    Landing on the finish (directly or via a link) needs ``confirm_finish``:
+    without it a 409 carries ``finish_confirmation_required`` and whether the
+    finish has a task (task = must complete it; no task = the team wins and
+    the event ends). Returns the landing summary plus ``previous_task_id``
+    for the caller to discard. Caller commits (and ends the event on won)."""
+    from db.models import EventBoardPosition
+
+    pos = (session.query(EventBoardPosition)
+           .filter(EventBoardPosition.team_id == team_id,
+                   EventBoardPosition.event_id == event_id)
+           .with_for_update().first())
+    if pos is None:
+        raise BoardMoveError(404, "No board position", "That team has no board state.")
+    if pos.status == "finished":
+        raise BoardMoveError(409, "Team finished", "That team has already finished.")
+    tiles = load_tiles(session, event_id)
+    by_idx = {int(t.idx): t for t in tiles}
+    if dest not in by_idx:
+        raise BoardMoveError(422, "Unknown tile", f"The board has no tile {dest}.")
+    start = int(pos.tile_idx or 0)
+    if dest == start:
+        raise BoardMoveError(409, "Already there", f"The team is already on tile {dest}.")
+
+    fin = finish_idx(tiles)
+    landing = dest
+    if follow_links:
+        jump = tile_jump(by_idx.get(dest))
+        if jump is not None and jump[1] == "land" and jump[0] in by_idx:
+            landing = jump[0]
+    if fin is not None and landing >= fin and not confirm_finish:
+        has_task = tile_has_task(by_idx.get(landing))
+        raise BoardMoveError(
+            409, "Confirm finish",
+            ("That puts the team on the finish tile. They will need to complete "
+             "its task to win.") if has_task else
+            ("That puts the team on the finish tile. It has no task, so the team "
+             "wins and the event ends."),
+            extra={"finish_confirmation_required": True,
+                   "finish_has_task": has_task, "landing_tile_idx": landing})
+
+    if settings is None:
+        settings = load_board_settings(session, event_id)
+    previous_task_id = pos.current_task_id
+    summary = _resolve_landing(
+        session, event_id, team_id, pos, by_idx, fin, dest, settings,
+        {"from": start, "to": dest, "won": False}, rng=rng,
+        follow_links=follow_links)
+    session.flush()
+    summary["previous_task_id"] = previous_task_id
     return summary
 
 
