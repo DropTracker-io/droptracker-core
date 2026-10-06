@@ -103,6 +103,14 @@ class TestDesiredRows:
         assert not unresolved
         assert len(rows["Some Boss"]) == 1
 
+    def test_item_name_case_mismatch_resolves(self):
+        # The wiki writes "Little Nightmare"; the catalog has "Little nightmare".
+        rows, unresolved = desired_rows_for_page(
+            "Some Boss", [_bucket_row("Uncut Diamond"),
+                          _bucket_row("CRYSTAL SHARD#Variant")], ITEM_IDS)
+        assert not unresolved
+        assert {r[0] for r in rows["Some Boss"]} == {1617, 23962}
+
     def test_noted_from_quantity_annotation(self):
         rows, _ = desired_rows_for_page(
             "Some Boss", [_bucket_row("Coins", quantity="100 (noted)")],

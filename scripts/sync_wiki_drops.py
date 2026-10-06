@@ -205,6 +205,11 @@ def desired_rows_for_page(
         base = ALT_NAMES.get(page_name, page_name)
         base_names = base if isinstance(base, list) else [base]
 
+    # The wiki capitalizes some item names differently from our catalog
+    # ("Little Nightmare" vs "Little nightmare"), and an exact miss silently
+    # dropped 20 boss pets from the tables. Exact match first, then casefold.
+    folded = {str(k).casefold(): v for k, v in item_ids.items()}
+
     out: dict[str, set] = {}
     unresolved: set = set()
     for row in page_rows:
@@ -215,7 +220,9 @@ def desired_rows_for_page(
         name = drop.get("Dropped item") or row.get("item_name") or ""
         # Multi-variant items link as "Bird nest (egg)#Blue egg" — the base
         # page name is the item.
-        item_id = item_ids.get(name) or item_ids.get(name.partition("#")[0])
+        base = name.partition("#")[0]
+        item_id = (item_ids.get(name) or item_ids.get(base)
+                   or folded.get(name.casefold()) or folded.get(base.casefold()))
         if item_id is None:
             if name:
                 unresolved.add(name)
