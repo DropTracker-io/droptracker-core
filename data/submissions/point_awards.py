@@ -212,19 +212,26 @@ async def modify_for_event(
         if not (event_start <= effective_timestamp <= event_end):
             continue
 
+        try:
+            target_type = (event.target_type or "any").lower()
+        except Exception:
+            target_type = "any"
+
         # Optional filter by reason/event type
         try:
             event_type = (event.event_type or "any").lower()
         except Exception:
             event_type = "any"
-        if event_type not in ("any", str(reason).lower()):
-            continue
+        reason_type = str(reason).lower()
+        if event_type not in ("any", reason_type):
+            # Pets never arrive as drops (pet.py awards them as "pet"), so a
+            # pet item listed on an item-targeted drop boost could never match.
+            # Let those boosts cover the listed pets; the item check below
+            # still decides whether this particular pet is one of them.
+            if not (event_type == "drop" and reason_type == "pet" and target_type == "item"):
+                continue
 
         # Target matching
-        try:
-            target_type = (event.target_type or "any").lower()
-        except Exception:
-            target_type = "any"
 
         try:
             target_id = int(event.target_id) if event.target_id not in (None, "") else 0

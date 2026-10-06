@@ -292,6 +292,8 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                             group_id,
                             player_id,
                             1,
+                            item_id=pet_item_id,
+                            npc_id=npc_id,
                             entry_id=pet_entry_id,
                             submission_timestamp=pet_data.get("timestamp"),
                             external_session=session,
