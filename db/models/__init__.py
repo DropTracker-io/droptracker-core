@@ -43,6 +43,7 @@ from .player_npc_kc import PlayerNpcKc
 from .player_deepest_delve import PlayerDeepestDelve
 from .player_plugin_config import PlayerPluginConfig
 from .tester_builds import PluginTestDownload, PlayerPluginVersion
+from .admin_widget_token import AdminWidgetToken
 from .player_notification_prefs import PlayerNotificationPrefs
 from .member_message import PlayerCustomMessage, GroupMemberMessageBlock
 from .embed import GroupEmbed, Field
@@ -287,6 +288,7 @@ __all__ = [
     "PlayerDeepestDelve",
     "PlayerPluginConfig",
     "PluginTestDownload",
+    "AdminWidgetToken",
     "PlayerPluginVersion",
     "PlayerNotificationPrefs",
     "PlayerCustomMessage",

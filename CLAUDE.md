@@ -452,4 +452,5 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Subscriptions / billing | `web_api/billing.py` (Stripe), `payments.py`, `routes/subscriptions.py` |
 | Tickets / suggestions | `services/ticket_system.py`, `services/suggestion_sync.py`, `web_api/routes/{tickets,suggestions}.py` |
 | Group creation / RSN claims | `db/group_creation.py`, `db/player_claims.py` (shared by bot + web) |
+| Owner's Android admin widget (device pairing + token-gated summary) | `web_api/routes/admin_widget.py` (`/admin/widget-tokens`, `/admin/widget/summary` — the only endpoint a `dtw_` token opens; owner must still be superadmin), `db/models/admin_widget_token.py` (web128a, SHA-256 only); web BFF `/api/widget/admin` + page `/admin/widget`; the app itself lives outside both repos at `~/droptracker-widget` |
 | Owner's project/task board (agents: log progress here) | `scripts/project_tracker.py` (CLI — `list`/`show`/`add-task`/`task-status`/…), `web_api/routes/dev_tracker.py`, `db/models/dev_tracker.py`; UI at `/admin/projects` |

@@ -83,6 +83,7 @@ from web_api.routes.inbox import inbox_bp
 from web_api.routes.staff_chats import staff_chats_bp
 from web_api.routes.suggestions import suggestions_bp
 from web_api.routes.tester_builds import tester_builds_bp
+from web_api.routes.admin_widget import admin_widget_bp
 from web_api.routes.tickets import tickets_bp
 
 API_PREFIX = "/api/v1"
@@ -263,6 +264,7 @@ def create_app() -> Quart:
     app.register_blueprint(group_notices_bp, url_prefix=API_PREFIX)
     app.register_blueprint(popup_notices_bp, url_prefix=API_PREFIX)
     app.register_blueprint(tester_builds_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(admin_widget_bp, url_prefix=API_PREFIX)
 
     return app
 

@@ -1701,6 +1701,41 @@ async def delete_item_value(override_id: int):
 # --------------------------------------------------------------------------- #
 # Site overview KPIs (dashboard landing)
 # --------------------------------------------------------------------------- #
+def active_subscriptions_query(s):
+    """Active group subscriptions, the /admin/overview headline count.
+
+    Nitro-boost credit isn't a subscription; comps and legacy NULL providers
+    count. Shared with the admin phone widget (routes/admin_widget.py)."""
+    return s.query(GroupSubscription).filter(
+        GroupSubscription.status == "active",
+        or_(
+            GroupSubscription.provider.is_(None),
+            GroupSubscription.provider != NITRO_PROVIDER,
+        ),
+    )
+
+
+def headline_mrr_cents(s) -> int:
+    """Live paid subscriptions, monthly-normalized, in cents.
+
+    Comped grants and Nitro-boost credit (NON_REVENUE_PROVIDERS) keep their
+    entitlements but are not income, so they are excluded from every revenue
+    figure. Shared with the admin phone widget (routes/admin_widget.py)."""
+    tiers_by_key = {t.key: t for t in s.query(SubscriptionTier).all()}
+    mrr = sum(
+        leg_monthly_cents(leg, tiers_by_key)
+        for leg in s.query(GroupSubscription).all()
+        if subscription_is_live(leg) and leg.provider not in NON_REVENUE_PROVIDERS
+    )
+    for u in s.query(UserSubscription).all():
+        if not subscription_is_live(u) or u.provider in NON_REVENUE_PROVIDERS:
+            continue
+        tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
+        amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
+        mrr += _monthly_cents(amount, tier.interval if tier else "month")
+    return mrr
+
+
 @admin_bp.get("/admin/overview")
 async def admin_overview():
     # Developers see operational tiles; the business metrics (subscription
@@ -1735,35 +1770,12 @@ async def admin_overview():
             if superadmin:
                 stats.append({
                     "key": "active_subscriptions", "label": "Active subscriptions",
-                    "value": _count(
-                        s.query(GroupSubscription).filter(
-                            GroupSubscription.status == "active",
-                            # Nitro-boost credit isn't a subscription; keep comps + legacy NULL.
-                            or_(
-                                GroupSubscription.provider.is_(None),
-                                GroupSubscription.provider != NITRO_PROVIDER,
-                            ),
-                        )
-                    ),
+                    "value": _count(active_subscriptions_query(s)),
                 })
             # Headline MRR — the full breakdown lives on /admin/subscriptions.
-            # Comped grants and Nitro-boost credit (NON_REVENUE_PROVIDERS) keep
-            # their entitlements but are not income, so they are excluded from
-            # every revenue figure.
             if superadmin:
                 try:
-                    tiers_by_key = {t.key: t for t in s.query(SubscriptionTier).all()}
-                    mrr = sum(
-                        leg_monthly_cents(leg, tiers_by_key)
-                        for leg in s.query(GroupSubscription).all()
-                        if subscription_is_live(leg) and leg.provider not in NON_REVENUE_PROVIDERS
-                    )
-                    for u in s.query(UserSubscription).all():
-                        if not subscription_is_live(u) or u.provider in NON_REVENUE_PROVIDERS:
-                            continue
-                        tier = tiers_by_key.get(u.tier_key) if u.tier_key else None
-                        amount = u.amount_cents if u.amount_cents else (tier.price_cents if tier else 0)
-                        mrr += _monthly_cents(amount, tier.interval if tier else "month")
+                    mrr = headline_mrr_cents(s)
                     stats.append({
                         "key": "mrr", "label": "Monthly recurring revenue",
                         "value": f"${mrr / 100:,.2f}",
