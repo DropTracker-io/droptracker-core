@@ -226,6 +226,18 @@ def _create_announcement(user_id, scope_type, group_id, body):
                     )
             except Exception as e:
                 print(f"[announcements] syndication enqueue failed: {e}")
+        # Global: the public news channel, published to following servers
+        # (DMed to the pilot accounts instead until LEADER_UPDATES_LIVE).
+        elif post_to_discord and scope_type == "global":
+            try:
+                from services.leader_updates import enqueue_global_announcement
+
+                enqueue_global_announcement(
+                    s, ann_id=ann_id, title=title, body_md=body_md,
+                    actor_user_id=user_id,
+                )
+            except Exception as e:
+                print(f"[announcements] global syndication enqueue failed: {e}")
 
     # Realtime: notify open browsers instantly.
     try:

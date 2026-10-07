@@ -72,6 +72,9 @@ def enqueue(
     ``kind='dm'`` sends a direct message; ``channel_id`` then holds the
     recipient's Discord **user** id and the drain opens the DM channel itself.
 
+    ``kind='news_post'`` sends like a plain message and then publishes it, so
+    an Announcement channel's followers receive it (``services/leader_updates``).
+
     ``components`` is a list of ``{"label", "url"}`` link buttons (web96a).
     Link buttons only — see :func:`_build_components`.
     """
@@ -396,6 +399,14 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                 message = await channel.send(**kwargs) if kwargs else None
                 row.status = "sent"
                 row.processed_at = datetime.now()
+                if message is not None and row.kind == "news_post":
+                    # Announcement channel: publishing is what sends it on to
+                    # the servers that follow the channel. The post itself is
+                    # already out, so a failed publish is noted, not retried.
+                    try:
+                        await message.publish()
+                    except Exception as e:  # noqa: BLE001
+                        row.error = f"posted but not published: {str(e)[:400]}"
                 if message is not None:
                     row.discord_message_id = str(getattr(message, "id", "") or "")
                     # Write the message id back onto the announcement for sync.

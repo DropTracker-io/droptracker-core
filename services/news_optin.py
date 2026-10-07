@@ -20,6 +20,12 @@ if missing, grant it view access on each channel, and seed any initial
 followers. The ``@listen(Component)`` handler is persistent (matches on
 custom_id) so the posted button keeps working across restarts.
 
+Clan leaders follow by default (``services/leader_updates.py``): a sweep hands
+the role to every group owner/admin in the server, and the button is their way
+out. Pressing it stores the choice, so a leader who turned it off is never
+given the role back. Until ``LEADER_UPDATES_LIVE`` is on, the sweep only
+touches the pilot accounts.
+
 Author: joelhalen
 """
 
@@ -27,8 +33,9 @@ import asyncio
 
 import interactions
 from interactions import (
-    ActionRow, Button, ButtonStyle, ComponentContext, Extension, OverwriteType,
-    Permissions, SlashContext, check, is_owner, listen, slash_command,
+    ActionRow, Button, ButtonStyle, ComponentContext, Extension, IntervalTrigger,
+    OverwriteType, Permissions, SlashContext, Task, check, is_owner, listen,
+    slash_command,
 )
 from interactions.api.events import Component
 from interactions.client import errors as ix_errors
@@ -36,13 +43,14 @@ from interactions.models import (
     ContainerComponent, SeparatorComponent, TextDisplayComponent,
 )
 from db.app_logger import AppLogger
+from services import leader_updates
 
 app_logger = AppLogger()
 
 # --- Configuration -------------------------------------------------------
 # Guild the update channels live in (used by the startup setup pass, which has
 # no interaction context to infer it from).
-GUILD_ID = 1172737525069135962
+GUILD_ID = leader_updates.HQ_GUILD_ID
 
 # The opt-in role. Resolved/created by name, so no id needs hardcoding.
 FOLLOW_ROLE_NAME = "Follows Updates"
@@ -56,7 +64,7 @@ UPDATE_CHANNELS = [
 ]
 
 # Public channel anyone can rely on without opting in.
-NEWS_CHANNEL_ID = 1527845346582073426
+NEWS_CHANNEL_ID = leader_updates.NEWS_CHANNEL_ID
 
 # One-time migration seed: members from the old update threads who should keep
 # access on the new channels. Granted the role during setup.
@@ -67,6 +75,47 @@ _FOLLOW_ALLOW = [Permissions.VIEW_CHANNEL, Permissions.READ_MESSAGE_HISTORY]
 
 # Stable custom_id linking the button to the handler below.
 OPTIN_BUTTON_ID = "news_optin_all"
+
+# How often the leader sweep runs. Cheap when there is nothing new: one query
+# plus a Redis set read; Discord is only asked about leaders not yet handled.
+LEADER_SWEEP_MINUTES = 10
+# Spacing between member lookups, to stay well inside the rate limit.
+LEADER_LOOKUP_SPACING_SECONDS = 1.0
+
+
+def _redis_conn():
+    try:
+        from utils.redis import redis_client
+
+        return redis_client.client
+    except Exception:
+        return None
+
+
+def _load_pending_grants() -> list:
+    """Thread-side: the next leaders the sweep should look up."""
+    from db.models.base import Session
+
+    session = Session()
+    try:
+        return leader_updates.pending_role_grants(session, _redis_conn())
+    finally:
+        session.rollback()
+        session.close()
+
+
+def _save_follow_pref(discord_id, following: bool) -> None:
+    """Thread-side: remember a button press so the sweep respects it."""
+    from db.models.base import Session
+
+    session = Session()
+    try:
+        leader_updates.set_follow_pref(session, discord_id, following)
+        conn = _redis_conn()
+        if conn is not None:
+            leader_updates.mark_handled(conn, discord_id)
+    finally:
+        session.close()
 
 
 def _channel_mentions():
@@ -152,6 +201,8 @@ class NewsOptin(Extension):
                 app_name="core",
                 description="news_optin",
             )
+        # Started here, not in __init__: Task.start needs the running loop.
+        self.leader_role_sweep.start()
 
     # --- role resolution / setup ----------------------------------------
     def _find_role(self, guild):
@@ -203,6 +254,67 @@ class NewsOptin(Extension):
                 )
         return role
 
+    # --- leader sweep ---------------------------------------------------
+    @Task.create(IntervalTrigger(minutes=LEADER_SWEEP_MINUTES))
+    async def leader_role_sweep(self):
+        try:
+            await self._leader_role_sweep()
+        except Exception as e:
+            app_logger.log(
+                log_type="warning",
+                data=f"news opt-in: leader sweep failed: {e}",
+                app_name="core",
+                description="news_optin",
+            )
+
+    async def _leader_role_sweep(self) -> dict:
+        """Give the Follows Updates role to clan leaders who don't have it yet.
+
+        Pilot accounts only until LEADER_UPDATES_LIVE. Returns counts for logs."""
+        todo = await asyncio.to_thread(_load_pending_grants)
+        counts = {"granted": 0, "had_role": 0, "absent": 0, "errors": 0}
+        if not todo:
+            return counts
+        guild = await self.bot.fetch_guild(GUILD_ID)
+        role = self._find_role(guild) if guild else None
+        if role is None:
+            return counts
+        conn = _redis_conn()
+        if conn is None:
+            return counts
+
+        for discord_id in todo:
+            try:
+                member = await guild.fetch_member(int(discord_id), force=True)
+                if member is None:
+                    leader_updates.mark_absent(conn, discord_id)
+                    counts["absent"] += 1
+                elif member.has_role(role):
+                    leader_updates.mark_handled(conn, discord_id)
+                    counts["had_role"] += 1
+                else:
+                    await member.add_role(role, reason="Clan leader: follows updates by default")
+                    leader_updates.mark_handled(conn, discord_id)
+                    counts["granted"] += 1
+            except Exception as e:
+                # Transient: left unmarked, so the next sweep tries again.
+                counts["errors"] += 1
+                app_logger.log(
+                    log_type="warning",
+                    data=f"news opt-in: leader {discord_id} not handled: {e}",
+                    app_name="core",
+                    description="news_optin",
+                )
+            await asyncio.sleep(LEADER_LOOKUP_SPACING_SECONDS)
+
+        app_logger.log(
+            log_type="info",
+            data=f"news opt-in: leader sweep {counts} (live={leader_updates.is_live()})",
+            app_name="core",
+            description="news_optin",
+        )
+        return counts
+
     # --- button ---------------------------------------------------------
     @listen(Component)
     async def on_component(self, event: Component):
@@ -229,18 +341,30 @@ class NewsOptin(Extension):
 
         chans = _channel_mentions()
         try:
-            if member.has_role(role):
-                await member.remove_role(role, reason="Opted out of updates")
-                await ctx.send(
-                    f"🔕 You've unfollowed updates — {chans} are hidden again.\n"
-                    "Press the button any time to re-follow.",
-                    ephemeral=True,
-                )
-            else:
+            following = not member.has_role(role)
+            if following:
                 await member.add_role(role, reason="Opted in to updates")
+            else:
+                await member.remove_role(role, reason="Opted out of updates")
+            try:
+                await asyncio.to_thread(_save_follow_pref, member.id, following)
+            except Exception as e:
+                app_logger.log(
+                    log_type="warning",
+                    data=f"news opt-in: couldn't save choice for {member.id}: {e}",
+                    app_name="core",
+                    description="news_optin",
+                )
+            if following:
                 await ctx.send(
                     f"✅ You're now following updates! You can see {chans}.\n"
                     "Press the button again any time to unfollow.",
+                    ephemeral=True,
+                )
+            else:
+                await ctx.send(
+                    f"🔕 You've unfollowed updates. {chans} are hidden again, "
+                    "and they'll stay off until you press the button again.",
                     ephemeral=True,
                 )
         except ix_errors.Forbidden:

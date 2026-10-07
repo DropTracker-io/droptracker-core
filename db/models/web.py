@@ -141,7 +141,8 @@ class DiscordOutbox(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    # message|announcement|forum_post|delete_message|dm
+    # message|announcement|news_post|forum_post|delete_message|dm
+    # (news_post = send, then publish to the channel's followers)
     kind = Column(String(24), nullable=False, default="message")
     # A channel snowflake for every kind EXCEPT 'dm', where it holds the
     # recipient's Discord *user* id (the drain opens the DM channel itself).
