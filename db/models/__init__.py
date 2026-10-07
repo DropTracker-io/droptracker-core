@@ -44,6 +44,14 @@ from .player_deepest_delve import PlayerDeepestDelve
 from .player_plugin_config import PlayerPluginConfig
 from .tester_builds import PluginTestDownload, PlayerPluginVersion
 from .admin_widget_token import AdminWidgetToken
+from .group_bank import (
+    GroupBankEntry,
+    BANK_ENTRY_KINDS,
+    BANK_ENTRY_SOURCES,
+    BANK_ENTRY_STATUSES,
+    BANK_INFLOW_KINDS,
+    BANK_OUTFLOW_KINDS,
+)
 from .player_notification_prefs import PlayerNotificationPrefs
 from .member_message import PlayerCustomMessage, GroupMemberMessageBlock
 from .embed import GroupEmbed, Field
@@ -289,6 +297,12 @@ __all__ = [
     "PlayerPluginConfig",
     "PluginTestDownload",
     "AdminWidgetToken",
+    "GroupBankEntry",
+    "BANK_ENTRY_KINDS",
+    "BANK_ENTRY_SOURCES",
+    "BANK_ENTRY_STATUSES",
+    "BANK_INFLOW_KINDS",
+    "BANK_OUTFLOW_KINDS",
     "PlayerPluginVersion",
     "PlayerNotificationPrefs",
     "PlayerCustomMessage",

@@ -197,6 +197,24 @@ def _assert_team_in_event(s, event_id: int, team_id) -> None:
         abort_problem(404, "Team not found", f"No team {team_id} in this event.")
 
 
+def _bank_transfer_for(s, row: EventBuyin, lock: bool = False):
+    """The clan-bank transfer that wrote this pot row (web131a), if any.
+
+    Transfers always land as a player-less donation, so every other row skips
+    the lookup."""
+    if row.kind != "donation" or row.player_id is not None:
+        return None
+    from db import GroupBankEntry
+
+    q = s.query(GroupBankEntry).filter(
+        GroupBankEntry.event_buyin_id == row.id,
+        GroupBankEntry.kind == "event_transfer",
+    )
+    if lock:
+        q = q.with_for_update()
+    return q.first()
+
+
 # --------------------------------------------------------------------------- #
 # Read — public pot (respects Event.visibility + show_contributors)
 # --------------------------------------------------------------------------- #
@@ -519,6 +537,12 @@ async def update_buyin(event_id: int, buyin_id: int):
                     "voiding a contribution (or restoring a voided one) "
                     "changes the advertised pot and is done by event admins.",
                 )
+            if ("amount" in body or "status" in body) and _bank_transfer_for(s, row):
+                abort_problem(
+                    409, "Funded from the clan bank",
+                    "This donation came from the clan bank. Remove the transfer "
+                    "on the group's Bank tab to take it back.",
+                )
             before = _snapshot(row)
             if "amount" in body:
                 row.amount = _clean_amount(body.get("amount"))
@@ -585,6 +609,21 @@ async def delete_buyin(event_id: int, buyin_id: int):
                 row.status = "void"
                 row.acted_by_user_id = user_id
                 after = _snapshot(row)
+                # A bank-funded donation: the GP goes back to the bank, so the
+                # transfer row is voided with it (web131a).
+                transfer = _bank_transfer_for(s, row, lock=True)
+                if transfer is not None and transfer.status != "void":
+                    transfer.status = "void"
+                    transfer.acted_by_user_id = user_id
+                    s.add(AuditLog(
+                        actor_user_id=user_id,
+                        group_id=transfer.group_id,
+                        event_id=ev.id,
+                        action="group.bank.delete",
+                        target=f"group_bank_entries.{transfer.id}",
+                        before=json.dumps({"status": "confirmed"}),
+                        after=json.dumps({"status": "void", "via": f"web_event_buyins.{buyin_id}"}),
+                    ))
             else:
                 s.delete(row)
                 after = None

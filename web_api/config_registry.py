@@ -43,6 +43,7 @@ CONFIG_CATEGORIES: List[Dict[str, str]] = [
     {"key": "board", "label": "Lootboard"},
     {"key": "recaps", "label": "Monthly recaps"},
     {"key": "clan_log", "label": "Clan Log"},
+    {"key": "bank", "label": "Clan bank"},
     {"key": "clan_chat", "label": "Clan chat"},
     {"key": "voice", "label": "Voice channel counters"},
     {"key": "integration", "label": "WiseOldMan & API"},
@@ -975,6 +976,26 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "type": "string",
         "help": "Message the bot edits when updating the board. Managed automatically.",
         "default": None,
+    },
+
+    # --- Clan bank ---
+    # Who sees the bank (web131a, web_api/routes/group_bank.py). Staff always
+    # see everything on the Bank tab; these only shape the public group page.
+    {
+        "key": "bank_show_on_profile",
+        "label": "Show the clan bank on your group page",
+        "category": "bank",
+        "type": "boolean",
+        "help": "Show the bank balance and totals on your public group page once you've recorded something. Turn off to keep the bank visible to admins only.",
+        "default": True,
+    },
+    {
+        "key": "bank_show_donors",
+        "label": "Show donor names",
+        "category": "bank",
+        "type": "boolean",
+        "help": "List top donors and recent bank activity by name on your group page. Turn off to show only the totals.",
+        "default": True,
     },
 ]
 

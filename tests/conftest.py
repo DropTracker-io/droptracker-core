@@ -272,6 +272,17 @@ if "services.task_generator" not in sys.modules:
     # the attribute off the stub package, not sys.modules.
     setattr(sys.modules["services"], "task_generator", _mod)
 
+# services/group_bank.py — the clan bank's pure rules (signs, amount limits,
+# status moves, summary roll-ups). stdlib-only, so load the real module: the
+# bank route tests depend on its decisions, not a MagicMock's.
+_GROUP_BANK_PATH = _Path(__file__).resolve().parent.parent / "services" / "group_bank.py"
+if "services.group_bank" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.group_bank", _GROUP_BANK_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.group_bank"] = _mod
+    _spec.loader.exec_module(_mod)
+    setattr(sys.modules["services"], "group_bank", _mod)
+
 # services/activity_launch_core.py — the Discord Activity launcher's pure half
 # (deliberately free of any `interactions` import; db access is lazy). web_api's
 # /events/by-channel deep-link fallback calls pick_channel_event, so the route
