@@ -340,8 +340,13 @@ class PopupNotice(Base):
     recipient, so "everyone" costs the same as one user.
 
     ``status`` is the staff-controlled lifecycle: ``draft`` (never shown),
+    ``review`` (sent by a non-approver, waiting for the owner, web130a),
     ``live`` (shown inside the optional ``starts_at``/``expires_at`` window) and
-    ``ended`` (stopped by hand). ``audience_estimate`` is the matched user count
+    ``ended`` (stopped by hand, or a post-only notice once it went out).
+
+    Delivery (web130a): ``show_popup`` is the targeted pop-up; ``publish_post``
+    also makes a public news post (``announcement_id``), and
+    ``post_to_discord`` sends that post to the Discord news channel. ``audience_estimate`` is the matched user count
     when it was sent, kept so the list can say how far a notice reached.
     """
 
@@ -359,13 +364,20 @@ class PopupNotice(Base):
     tone = Column(String(12), nullable=False, default="info")  # info|important|success
     size = Column(String(8), nullable=False, default="md")  # sm|md|lg
     audience_json = Column(Text, nullable=False)
-    status = Column(String(12), nullable=False, default="draft")  # draft|live|ended
+    status = Column(String(12), nullable=False, default="draft")  # draft|review|live|ended
     starts_at = Column(DateTime, nullable=True)
     expires_at = Column(DateTime, nullable=True)
     audience_estimate = Column(Integer, nullable=True)
     created_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     sent_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
+    show_popup = Column(Boolean, default=True, nullable=False)
+    publish_post = Column(Boolean, default=False, nullable=False)
+    post_to_discord = Column(Boolean, default=False, nullable=False)
+    announcement_id = Column(Integer, nullable=True)
+    source_label = Column(String(64), nullable=True)
+    reviewed_by = Column(Integer, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

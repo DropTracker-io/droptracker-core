@@ -327,5 +327,70 @@ class TestReviewDraft(unittest.TestCase):
             self.assertEqual(eg.call_count, expected)
 
 
+class TestNoticeHelpers(unittest.TestCase):
+    def test_destinations_read_naturally(self):
+        self.assertEqual(
+            lu.notice_destinations(show_popup=True, publish_post=True, post_to_discord=True,
+                                   audience_summary="Clan owners"),
+            "a pop-up for Clan owners, a post on the public news page, the Discord news channel",
+        )
+        self.assertEqual(
+            lu.notice_destinations(show_popup=False, publish_post=False, post_to_discord=False),
+            "nowhere",
+        )
+
+    def _notice(self, **kw):
+        base = dict(id=3, title="T", body_md="B", created_by=None, source_label="agent",
+                    show_popup=True, publish_post=True, post_to_discord=False,
+                    announcement_id=None, cta_label=None, cta_url=None)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def _publish(self, notice):
+        session = MagicMock()
+
+        def _flush():
+            for call in session.add.call_args_list:
+                call.args[0].id = 55
+
+        session.flush.side_effect = _flush
+        with patch.dict(sys.modules, {"db.models": types.SimpleNamespace(Announcement=_Ann)}), \
+                patch.object(lu, "enqueue_global_announcement") as eg:
+            ann = lu.publish_notice_post(session, notice, 0)
+        return ann, eg
+
+    def test_post_made_and_popup_button_points_at_it(self):
+        n = self._notice()
+        ann, eg = self._publish(n)
+        self.assertEqual(ann.status, "published")
+        self.assertEqual(ann.reviewed_by, 0)
+        self.assertEqual(n.announcement_id, 55)
+        self.assertEqual(n.cta_url, "/announcements/55")
+        eg.assert_not_called()
+
+    def test_own_button_kept_and_discord_sent_when_asked(self):
+        n = self._notice(cta_label="Go", cta_url="/premium", post_to_discord=True)
+        ann, eg = self._publish(n)
+        self.assertEqual(n.cta_url, "/premium")
+        eg.assert_called_once()
+
+    def test_no_post_twice_or_when_not_asked(self):
+        self.assertIsNone(self._publish(self._notice(announcement_id=9))[0])
+        self.assertIsNone(self._publish(self._notice(publish_post=False))[0])
+
+    def test_review_notice_has_no_audience_without_popup(self):
+        session = MagicMock()
+        with patch.dict(sys.modules, {"db.models": types.SimpleNamespace(PopupNotice=_Ann)}), \
+                patch.object(lu, "queue_notice_review_dm") as dm:
+            n = lu.create_notice_for_review(
+                session, title="T", body_md="B", audience=[{"type": "everyone"}], show_popup=False,
+                publish_post=False, post_to_discord=True, source_label="agent",
+            )
+        self.assertEqual(n.status, "review")
+        self.assertEqual(n.audience_json, "[]")
+        self.assertFalse(n.post_to_discord)  # Discord needs the news post
+        dm.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,12 +15,21 @@ Admin (superadmin):
   GET    /api/v1/admin/notices/{id}               -> AdminPopupNotice + receipts
   POST   /api/v1/admin/notices                    { ...fields, send? } -> AdminPopupNotice
   PATCH  /api/v1/admin/notices/{id}               partial fields -> AdminPopupNotice
-  POST   /api/v1/admin/notices/{id}/send          draft -> live
+  POST   /api/v1/admin/notices/{id}/send          draft -> live (approver) | review (anyone else)
+  POST   /api/v1/admin/notices/{id}/approve       review -> live (approver only)
+  POST   /api/v1/admin/notices/{id}/return        review -> draft (approver only)
   POST   /api/v1/admin/notices/{id}/end           live  -> ended
   DELETE /api/v1/admin/notices/{id}               -> { ok }
   POST   /api/v1/admin/notices/audience-preview   { audience } -> { count, everyone, sample, notes, summary }
   GET    /api/v1/admin/notices/options            -> { tiers }
   GET    /api/v1/admin/notices/lookup?kind=user|group&q=  -> { items }
+
+Delivery and review (web130a, ``services/leader_updates.py``): a notice can be
+a targeted pop-up (``show_popup``), a public news post (``publish_post``) and a
+Discord news-channel post through that news post (``post_to_discord``), in any
+mix. Only an approver (the owner by default) sends one out: when anyone else
+presses Send it goes to ``review`` and the approver is DMed, then edits and
+approves it or sends it back. A live notice can only be edited by an approver.
 
 The visitor read is on every signed-in page load, so it is built to cost
 nothing in the usual case: the live-notice list is cached in-process for
@@ -98,6 +107,8 @@ def state_of(notice, now: datetime) -> str:
     or ended. Only ``live`` is shown to visitors."""
     if notice.status == "draft":
         return "draft"
+    if notice.status == "review":
+        return "review"
     if notice.status == "ended":
         return "ended"
     if notice.expires_at and notice.expires_at <= now:
@@ -160,6 +171,7 @@ def _live_notices() -> list[dict]:
                 s.query(PopupNotice)
                 .filter(
                     PopupNotice.status == "live",
+                    PopupNotice.show_popup.is_(True),
                     or_(PopupNotice.expires_at.is_(None), PopupNotice.expires_at > now),
                 )
                 .order_by(PopupNotice.sent_at.asc(), PopupNotice.id.asc())
@@ -379,12 +391,34 @@ def _validate_fields(body: dict, *, partial: bool) -> dict:
             abort_problem(422, "Invalid width", f"size must be one of {', '.join(SIZES)}.")
         out["size"] = size
 
+    for key, default in (("show_popup", True), ("publish_post", False), ("post_to_discord", False)):
+        if not partial or key in body:
+            out[key] = bool(body.get(key, default))
+
     if not partial or "starts_at" in body:
         out["starts_at"] = _from_ts(body.get("starts_at"), "starts_at")
     if not partial or "expires_at" in body:
         out["expires_at"] = _from_ts(body.get("expires_at"), "expires_at")
 
     return out
+
+
+def _check_delivery(n, *, sending: bool) -> None:
+    """Where a notice goes must make sense. ``n`` is the row with its new
+    values applied."""
+    if not n.show_popup and not n.publish_post:
+        abort_problem(422, "Nowhere to send it", "Pick a pop-up, a news post, or both.")
+    if n.post_to_discord and not n.publish_post:
+        abort_problem(
+            422, "Discord needs the news post",
+            "The Discord post links to the news post, so turn on the news post too.",
+        )
+    if sending and n.publish_post and n.starts_at and n.starts_at > datetime.now():
+        abort_problem(
+            422, "News posts can't be scheduled",
+            "The news post and Discord go out when it's sent. Clear the start time, "
+            "or schedule the pop-up on its own.",
+        )
 
 
 def _check_window(starts_at, expires_at, *, sending: bool) -> None:
@@ -449,6 +483,12 @@ def _admin_payload(n: PopupNotice, stats: dict, labels: dict, now: datetime) -> 
         "audience_estimate": n.audience_estimate,
         "seen_count": int(seen),
         "dismissed_count": int(closed),
+        "show_popup": bool(n.show_popup),
+        "publish_post": bool(n.publish_post),
+        "post_to_discord": bool(n.post_to_discord),
+        "announcement_id": n.announcement_id,
+        "source_label": n.source_label,
+        "reviewed_at": _ts(n.reviewed_at),
     }
 
 
@@ -486,6 +526,50 @@ def _assert_admin(s, actor: int) -> None:
     assert_superadmin(load_user(s, actor))
 
 
+def _actor_name(s, user_id) -> str:
+    if user_id is None:
+        return "staff"
+    name = s.query(User.username).filter(User.user_id == user_id).scalar()
+    return name or f"User {user_id}"
+
+
+def _go_out(s, n: PopupNotice, actor: int) -> str:
+    """Send a notice. An approver's goes out now (pop-up live, news post and
+    Discord made); anyone else's waits in review and DMs the approver.
+    Returns "sent" or "review"."""
+    from services import leader_updates
+
+    rules = parse_stored_audience(n.audience_json)
+    if n.show_popup and not rules:
+        abort_problem(422, "Invalid audience", "Choose who should see this notice first.")
+    _check_window(n.starts_at, n.expires_at, sending=True)
+    _check_delivery(n, sending=True)
+
+    if not leader_updates.is_approver(actor):
+        n.status = "review"
+        n.source_label = n.source_label or _actor_name(s, actor)[:64]
+        s.flush()
+        summary = _summary(rules, _labels(s, [rules])) if n.show_popup else None
+        leader_updates.queue_notice_review_dm(s, n, summary)
+        s.commit()
+        return "review"
+
+    now = datetime.now()
+    n.sent_at = now
+    n.reviewed_by = actor
+    n.reviewed_at = now
+    if n.show_popup:
+        n.status = "live"
+        n.audience_estimate = _estimate(s, rules)[0]
+    else:
+        # A news post with no pop-up has nothing left to show: it's done.
+        n.status = "ended"
+        n.ended_at = now
+    s.commit()
+    leader_updates.publish_notice_post(s, n, actor)
+    return "sent"
+
+
 def _full(s, n: PopupNotice) -> dict:
     rules = parse_stored_audience(n.audience_json)
     labels = _labels(s, [rules])
@@ -513,9 +597,12 @@ async def admin_list():
             stats = _stats(s, [r.id for r in rows])
             labels = _labels(s, [parse_stored_audience(r.audience_json) for r in rows])
             now = datetime.now()
+            from services import leader_updates
+
             return {
                 "items": [_admin_payload(r, stats, labels, now) for r in rows],
                 "labels": labels,
+                "can_approve": bool(leader_updates.is_approver(actor)),
             }
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
@@ -563,26 +650,25 @@ async def admin_create():
     def _create():
         with db_session() as s:
             _assert_admin(s, actor)
-            rules = _validate_audience(s, body.get("audience"))
+            rules = _validate_audience(s, body.get("audience")) if fields["show_popup"] else []
             n = PopupNotice(
                 created_by=actor,
                 audience_json=json.dumps(rules),
                 status="draft",
                 **fields,
             )
-            if send:
-                n.status = "live"
-                n.sent_at = datetime.now()
-                n.audience_estimate = _estimate(s, rules)[0]
+            _check_delivery(n, sending=False)
             s.add(n)
+            s.flush()
+            outcome = _go_out(s, n, actor) if send else "create"
             s.commit()
-            return _full(s, n)
+            return outcome, _full(s, n)
 
-    payload = await asyncio.to_thread(_create)
+    outcome, payload = await asyncio.to_thread(_create)
     _invalidate_live()
     _audit(
         actor,
-        "notice.send" if send else "notice.create",
+        {"sent": "notice.send", "review": "notice.review"}.get(outcome, "notice.create"),
         f"popup_notices:{payload['id']}",
         after=json.dumps({"title": payload["title"], "audience": payload["audience_summary"]}),
     )
@@ -601,12 +687,24 @@ async def admin_update(notice_id: int):
             n = _one(s, notice_id)
             if n.status == "ended":
                 abort_problem(409, "Notice ended", "An ended notice can't be edited. Duplicate it instead.")
+            if n.status == "live":
+                from services import leader_updates
+
+                # A sent notice stays as approved: only an approver edits it.
+                if not leader_updates.is_approver(actor):
+                    abort_problem(403, "Not an approver", "Only the owner can edit a notice that has gone out.")
+                if any(k in fields and bool(fields[k]) != bool(getattr(n, k))
+                       for k in ("show_popup", "publish_post", "post_to_discord")):
+                    abort_problem(409, "Already sent", "Where a notice goes can't change once it's out.")
             before = {"title": n.title, "audience": n.audience_json}
-            if "audience" in body:
-                n.audience_json = json.dumps(_validate_audience(s, body["audience"]))
             for key, value in fields.items():
                 setattr(n, key, value)
+            if not n.show_popup:
+                n.audience_json = "[]"
+            elif "audience" in body:
+                n.audience_json = json.dumps(_validate_audience(s, body["audience"]))
             _check_window(n.starts_at, n.expires_at, sending=False)
+            _check_delivery(n, sending=False)
             s.commit()
             return before, _full(s, n)
 
@@ -632,24 +730,79 @@ async def admin_send(notice_id: int):
             n = _one(s, notice_id)
             if n.status != "draft":
                 abort_problem(409, "Already sent", "Only a draft can be sent.")
-            rules = parse_stored_audience(n.audience_json)
-            if not rules:
-                abort_problem(422, "Invalid audience", "Choose who should see this notice first.")
-            _check_window(n.starts_at, n.expires_at, sending=True)
-            n.status = "live"
-            n.sent_at = datetime.now()
-            n.audience_estimate = _estimate(s, rules)[0]
-            s.commit()
+            outcome = _go_out(s, n, actor)
+            return outcome, _full(s, n)
+
+    outcome, payload = await asyncio.to_thread(_apply)
+    _invalidate_live()
+    _audit(
+        actor,
+        "notice.send" if outcome == "sent" else "notice.review",
+        f"popup_notices:{notice_id}",
+        after=json.dumps({"title": payload["title"], "audience": payload["audience_summary"]}),
+    )
+    return private_no_store(jsonify(payload))
+
+
+def _assert_approver(actor) -> None:
+    from services import leader_updates
+
+    if not leader_updates.is_approver(actor):
+        abort_problem(403, "Not an approver", "Only the owner can approve or return notices.")
+
+
+@popup_notices_bp.post("/admin/notices/<int:notice_id>/approve")
+async def admin_approve(notice_id: int):
+    """Approve a notice waiting in review: it goes out exactly as it now reads
+    (edit first with PATCH)."""
+    actor = current_user_id()
+
+    def _apply():
+        with db_session() as s:
+            _assert_admin(s, actor)
+            _assert_approver(actor)
+            n = (
+                s.query(PopupNotice)
+                .filter(PopupNotice.id == notice_id)
+                .with_for_update()
+                .first()
+            )
+            if n is None:
+                abort_problem(404, "Notice not found", f"No pop-up notice {notice_id}.")
+            if n.status != "review":
+                abort_problem(409, "Not waiting for review", "Only a notice in review can be approved.")
+            _go_out(s, n, actor)
             return _full(s, n)
 
     payload = await asyncio.to_thread(_apply)
     _invalidate_live()
     _audit(
         actor,
-        "notice.send",
+        "notice.approve",
         f"popup_notices:{notice_id}",
         after=json.dumps({"title": payload["title"], "audience": payload["audience_summary"]}),
     )
+    return private_no_store(jsonify(payload))
+
+
+@popup_notices_bp.post("/admin/notices/<int:notice_id>/return")
+async def admin_return(notice_id: int):
+    """Send a notice in review back to draft: it won't go out."""
+    actor = current_user_id()
+
+    def _apply():
+        with db_session() as s:
+            _assert_admin(s, actor)
+            _assert_approver(actor)
+            n = _one(s, notice_id)
+            if n.status != "review":
+                abort_problem(409, "Not waiting for review", "Only a notice in review can be returned.")
+            n.status = "draft"
+            s.commit()
+            return _full(s, n)
+
+    payload = await asyncio.to_thread(_apply)
+    _audit(actor, "notice.return", f"popup_notices:{notice_id}")
     return private_no_store(jsonify(payload))
 
 

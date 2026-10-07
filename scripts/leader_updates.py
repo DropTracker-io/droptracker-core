@@ -12,17 +12,21 @@ choice and the sweep's markers are cleared, so within one sweep (10 minutes)
 the core bot hands it the Follows Updates role again. Meant for testing the
 default grant on a pilot account. Dry run unless ``--apply``.
 
-``draft`` is how agents and scripts propose a site-wide post. It can ONLY make
-a draft: the post waits in the review queue on /admin/announcements and the
-owner gets a DM. Nothing is public until the owner approves it there, and the
-owner can edit or cancel it first. Dry run unless ``--apply``.
+``draft`` is how agents and scripts propose an update. It can ONLY make a
+notice waiting for review: it sits in "Waiting for your review" on
+/admin/notices and the owner gets a DM. Nothing is shown or posted until the
+owner approves it there, and the owner can edit it or send it back first. By
+default it is a pop-up for clan leaders (owners and admins); ``--post`` also
+makes a public news post, ``--discord`` sends that post to the news channel,
+and ``--no-popup`` drops the pop-up. Dry run unless ``--apply``.
 
 Usage:
     python scripts/leader_updates.py status
     python scripts/leader_updates.py forget 528746710042804247            # dry run
     python scripts/leader_updates.py forget 528746710042804247 --apply
     python scripts/leader_updates.py draft --title "..." --body-file post.md \
-        [--discord] [--source "weekly roundup"] [--apply]
+        [--audience leaders|owners|everyone|staff] [--no-popup] [--post] [--discord] \
+        [--source "weekly roundup"] [--apply]
 """
 
 from __future__ import annotations
@@ -87,16 +91,36 @@ def _forget(discord_id: str, apply: bool) -> int:
     return 0
 
 
-def _draft(title: str, body_file: str, discord: bool, source: str, apply: bool) -> int:
+AUDIENCES = {
+    "leaders": [{"type": "group_leaders", "roles": ["owner", "admin"]}],
+    "owners": [{"type": "group_leaders", "roles": ["owner"]}],
+    "everyone": [{"type": "everyone"}],
+    "staff": [{"type": "staff"}],
+}
+
+
+def _draft(title: str, body_file: str, audience: str, popup: bool, post: bool,
+           discord: bool, source: str, apply: bool) -> int:
+    from web_api.popup_audience import describe_audience, normalize_audience
+
     title = (title or "").strip()
     body = Path(body_file).read_text(encoding="utf-8").strip()
-    if not (1 <= len(title) <= 200) or not body:
-        print("title must be 1-200 characters and the body must not be empty")
+    if not (1 <= len(title) <= 120) or not body:
+        print("title must be 1-120 characters and the body must not be empty")
         return 2
-    where = "site + Discord" if discord else "site only"
+    if not popup and not post:
+        print("nowhere to send it: keep the pop-up or add --post")
+        return 2
+    if discord and not post:
+        print("--discord needs --post (the Discord post links to the news post)")
+        return 2
+    rules = normalize_audience(AUDIENCES[audience]) if popup else []
+    summary = describe_audience(rules) if popup else None
     print(f"title:   {title}")
     print(f"source:  {source}")
-    print(f"targets: {where} (only once the owner approves it)")
+    print("goes to: " + lu.notice_destinations(
+        show_popup=popup, publish_post=post, post_to_discord=discord, audience_summary=summary,
+    ) + " (only once the owner approves it)")
     print("-" * 60)
     print(body)
     print("-" * 60)
@@ -105,11 +129,12 @@ def _draft(title: str, body_file: str, discord: bool, source: str, apply: bool) 
         return 0
     session = Session()
     try:
-        ann = lu.create_review_draft(
-            session, title=title, body_md=body, post_to_discord=discord,
-            source_label=source, author_user_id=None,
+        notice = lu.create_notice_for_review(
+            session, title=title, body_md=body, audience=rules, show_popup=popup,
+            publish_post=post, post_to_discord=discord, source_label=source,
+            audience_summary=summary,
         )
-        print(f"draft {ann.id} is waiting for review at {lu.REVIEW_PATH}; the owner has been DMed.")
+        print(f"notice {notice.id} is waiting for review at {lu.NOTICES_PATH}; the owner has been DMed.")
     finally:
         session.close()
     return 0
@@ -125,14 +150,19 @@ def main() -> int:
     draft = sub.add_parser("draft")
     draft.add_argument("--title", required=True)
     draft.add_argument("--body-file", required=True)
-    draft.add_argument("--discord", action="store_true", help="post to Discord too, once approved")
+    draft.add_argument("--audience", choices=sorted(AUDIENCES), default="leaders",
+                       help="who gets the pop-up (default: clan owners and admins)")
+    draft.add_argument("--no-popup", action="store_true", help="news post only, no pop-up")
+    draft.add_argument("--post", action="store_true", help="also a public news post")
+    draft.add_argument("--discord", action="store_true", help="also the Discord news channel (needs --post)")
     draft.add_argument("--source", default="agent", help="shown in the review queue")
     draft.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     if args.cmd == "status":
         return _status()
     if args.cmd == "draft":
-        return _draft(args.title, args.body_file, args.discord, args.source, args.apply)
+        return _draft(args.title, args.body_file, args.audience, not args.no_popup, args.post,
+                      args.discord, args.source, args.apply)
     return _forget(args.discord_id, args.apply)
 
 

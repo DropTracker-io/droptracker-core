@@ -314,32 +314,41 @@ def _approver_discord_ids(session) -> list[str]:
     return sorted({str(d) for (d,) in rows if d is not None and str(d).strip().isdigit()})
 
 
-def _queue_review_dm(session, ann) -> None:
-    """Tell the approvers a post is waiting. The DM shows the text so it can be
-    read on a phone, but approving only happens on the website."""
+def queue_review_dm(session, *, ref_type: str, ref_id: int, title: str, body_md: str,
+                    source_label: Optional[str], destinations: str, path: str) -> None:
+    """Tell the approvers something is waiting. The DM shows the text so it
+    can be read on a phone, but approving only happens on the website."""
     from services.discord_outbox import enqueue
     from utils.site_urls import WEBSITE_URL
 
-    body = ann.body_md
+    body = body_md
     if len(body) > _REVIEW_PREVIEW_MAX:
         body = body[:_REVIEW_PREVIEW_MAX].rstrip() + "\n..."
-    where = "the website and Discord" if ann.post_to_discord else "the website"
     content = (
-        f"**A post is waiting for your review.** Drafted by {ann.source_label or 'staff'}. "
-        f"Nothing goes out until you approve it; it would be published on {where}."
+        f"**Waiting for your review.** Drafted by {source_label or 'staff'}. "
+        f"Nothing goes out until you approve it. Once approved: {destinations}."
     )
     for discord_id in _approver_discord_ids(session):
         enqueue(
             session,
             channel_id=discord_id,
             content=content,
-            embed=announcement_embed(ann.title, body),
-            components=[{"label": "Review, edit or cancel", "url": f"{WEBSITE_URL}{REVIEW_PATH}"}],
+            embed=announcement_embed(title, body),
+            components=[{"label": "Review, edit or cancel", "url": f"{WEBSITE_URL}{path}"}],
             kind="dm",
-            ref_type="announcement_review",
-            ref_id=ann.id,
+            ref_type=ref_type,
+            ref_id=ref_id,
             commit=False,
         )
+
+
+def _queue_review_dm(session, ann) -> None:
+    where = "the news page and Discord" if ann.post_to_discord else "the news page"
+    queue_review_dm(
+        session, ref_type="announcement_review", ref_id=ann.id, title=ann.title,
+        body_md=ann.body_md, source_label=ann.source_label, destinations=where,
+        path=REVIEW_PATH,
+    )
 
 
 def create_review_draft(session, *, title: str, body_md: str, post_to_discord: bool,
@@ -388,3 +397,110 @@ def publish_reviewed(session, ann, reviewer_user_id) -> None:
             session, ann_id=ann.id, title=ann.title, body_md=ann.body_md,
             actor_user_id=reviewer_user_id,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Pop-up notices as the one composer (web130a)
+# --------------------------------------------------------------------------- #
+# /admin/notices writes every staff update. A notice can be a targeted pop-up,
+# a public news post, a Discord post (through the news post), or any mix. Like
+# site-wide posts, one sent by anyone but an approver waits in review.
+NOTICES_PATH = "/admin/notices"
+POST_CTA_LABEL = "Read the full post"
+
+
+def notice_destinations(*, show_popup: bool, publish_post: bool, post_to_discord: bool,
+                        audience_summary: Optional[str] = None) -> str:
+    parts = []
+    if show_popup:
+        parts.append(f"a pop-up for {audience_summary}" if audience_summary else "a pop-up")
+    if publish_post:
+        parts.append("a post on the public news page")
+    if post_to_discord:
+        parts.append("the Discord news channel")
+    return ", ".join(parts) or "nowhere"
+
+
+def queue_notice_review_dm(session, notice, audience_summary: Optional[str] = None) -> None:
+    queue_review_dm(
+        session, ref_type="notice_review", ref_id=notice.id, title=notice.title,
+        body_md=notice.body_md, source_label=notice.source_label,
+        destinations=notice_destinations(
+            show_popup=bool(notice.show_popup), publish_post=bool(notice.publish_post),
+            post_to_discord=bool(notice.post_to_discord), audience_summary=audience_summary,
+        ),
+        path=NOTICES_PATH,
+    )
+
+
+def publish_notice_post(session, notice, approver_user_id):
+    """Make the news post for an approved notice and, if asked, send it to
+    Discord (still pilot-gated). Points the pop-up's button at the post when it
+    has none. Returns the Announcement, or None when the notice has no post."""
+    if not notice.publish_post or notice.announcement_id is not None:
+        return None
+    from datetime import datetime
+
+    from db.models import Announcement
+
+    now = datetime.now()
+    ann = Announcement(
+        scope_type="global",
+        group_id=None,
+        author_user_id=notice.created_by,
+        title=notice.title,
+        body_md=notice.body_md,
+        pinned=False,
+        status="published",
+        published_at=now,
+        post_to_discord=bool(notice.post_to_discord),
+        source_label=notice.source_label,
+        reviewed_by=int(approver_user_id),
+        reviewed_at=now,
+    )
+    session.add(ann)
+    session.flush()
+    notice.announcement_id = ann.id
+    if notice.show_popup and not notice.cta_url:
+        notice.cta_label = POST_CTA_LABEL
+        notice.cta_url = f"/announcements/{ann.id}"
+    session.commit()
+    if notice.post_to_discord:
+        enqueue_global_announcement(
+            session, ann_id=ann.id, title=ann.title, body_md=ann.body_md,
+            actor_user_id=approver_user_id,
+        )
+    return ann
+
+
+def create_notice_for_review(session, *, title: str, body_md: str, audience: list,
+                             show_popup: bool, publish_post: bool, post_to_discord: bool,
+                             source_label: Optional[str], created_by: Optional[int] = None,
+                             tone: str = "info", size: str = "md", audience_summary: Optional[str] = None):
+    """The agent/roundup door: a notice waiting in the owner's review queue.
+    ``audience`` must already be normalised (``web_api.popup_audience``)."""
+    import json
+
+    from db.models import PopupNotice
+
+    notice = PopupNotice(
+        title=title,
+        body_md=body_md,
+        tone=tone,
+        size=size,
+        audience_json=json.dumps(audience if show_popup else []),
+        status="review",
+        show_popup=bool(show_popup),
+        publish_post=bool(publish_post),
+        post_to_discord=bool(publish_post and post_to_discord),
+        source_label=(source_label or None) and str(source_label)[:64],
+        created_by=created_by,
+    )
+    session.add(notice)
+    session.flush()
+    try:
+        queue_notice_review_dm(session, notice, audience_summary)
+    except Exception as e:  # the notice is what matters; the DM is a nudge
+        print(f"[leader_updates] review DM not queued for notice {notice.id}: {e}")
+    session.commit()
+    return notice

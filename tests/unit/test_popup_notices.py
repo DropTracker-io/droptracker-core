@@ -292,3 +292,111 @@ class TestLiveNoticesFailSafe:
         assert mod._live_notices() == []
         assert mod._live_notices() == []
         assert len(calls) == 1
+
+
+# ── delivery + owner review (web130a) ─────────────────────────────────────────
+
+class TestDeliveryAndReview:
+    """Where a notice goes, and that only an approver sends one out."""
+
+    def _problem(self):
+        from web_api.common import ProblemException
+
+        return ProblemException
+
+    def _notice(self, **kw):
+        base = dict(
+            id=7, title="T", body_md="B", status="draft", show_popup=True, publish_post=False,
+            post_to_discord=False, starts_at=None, expires_at=None, source_label=None,
+            audience_json='[{"type": "everyone"}]', sent_at=None, ended_at=None,
+            reviewed_by=None, reviewed_at=None, audience_estimate=None,
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def _lu(self, monkeypatch, approver):
+        import sys
+        from unittest.mock import MagicMock
+
+        lu = MagicMock()
+        lu.is_approver.side_effect = lambda uid: approver
+        monkeypatch.setattr(sys.modules["services"], "leader_updates", lu, raising=False)
+        monkeypatch.setitem(sys.modules, "services.leader_updates", lu)
+        return lu
+
+    def _helpers(self, monkeypatch):
+        import web_api.routes.popup_notices as pn
+
+        monkeypatch.setattr(pn, "_estimate", lambda s, rules: (42, False, [], []))
+        monkeypatch.setattr(pn, "_labels", lambda s, rs: {"users": {}, "groups": {}, "tiers": {}})
+        monkeypatch.setattr(pn, "_actor_name", lambda s, uid: "Some Staff")
+        return pn
+
+    def test_state_of_review(self):
+        from web_api.routes.popup_notices import state_of
+
+        assert state_of(SimpleNamespace(status="review", starts_at=None, expires_at=None), datetime.now()) == "review"
+
+    def test_delivery_defaults_to_popup_only(self):
+        from web_api.routes.popup_notices import _validate_fields
+
+        out = _validate_fields({"title": "Hello", "body_md": "Hi"}, partial=False)
+        assert (out["show_popup"], out["publish_post"], out["post_to_discord"]) == (True, False, False)
+
+    def test_delivery_rules(self):
+        from web_api.routes.popup_notices import _check_delivery
+
+        with pytest.raises(self._problem()):
+            _check_delivery(self._notice(show_popup=False), sending=False)
+        with pytest.raises(self._problem()):
+            _check_delivery(self._notice(post_to_discord=True), sending=False)
+        _check_delivery(self._notice(show_popup=False, publish_post=True, post_to_discord=True), sending=True)
+
+    def test_news_post_cannot_be_scheduled(self):
+        from web_api.routes.popup_notices import _check_delivery
+
+        later = datetime.now() + timedelta(days=1)
+        n = self._notice(publish_post=True, starts_at=later)
+        _check_delivery(n, sending=False)  # saving a draft is fine
+        with pytest.raises(self._problem()):
+            _check_delivery(n, sending=True)
+
+    def test_non_approver_send_goes_to_review(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        pn = self._helpers(monkeypatch)
+        lu = self._lu(monkeypatch, approver=False)
+        n = self._notice(publish_post=True, post_to_discord=True)
+        assert pn._go_out(MagicMock(), n, actor=5) == "review"
+        assert n.status == "review" and n.sent_at is None
+        assert n.source_label == "Some Staff"
+        lu.queue_notice_review_dm.assert_called_once()
+        lu.publish_notice_post.assert_not_called()
+
+    def test_approver_send_goes_out_and_posts(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        pn = self._helpers(monkeypatch)
+        lu = self._lu(monkeypatch, approver=True)
+        n = self._notice(status="review", publish_post=True)
+        assert pn._go_out(MagicMock(), n, actor=0) == "sent"
+        assert n.status == "live" and n.reviewed_by == 0 and n.audience_estimate == 42
+        lu.publish_notice_post.assert_called_once()
+        lu.queue_notice_review_dm.assert_not_called()
+
+    def test_post_only_notice_finishes_when_sent(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        pn = self._helpers(monkeypatch)
+        self._lu(monkeypatch, approver=True)
+        n = self._notice(show_popup=False, publish_post=True, audience_json="[]")
+        assert pn._go_out(MagicMock(), n, actor=0) == "sent"
+        assert n.status == "ended" and n.ended_at is not None
+
+    def test_popup_still_needs_an_audience(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        pn = self._helpers(monkeypatch)
+        self._lu(monkeypatch, approver=True)
+        with pytest.raises(self._problem()):
+            pn._go_out(MagicMock(), self._notice(audience_json="[]"), actor=0)
