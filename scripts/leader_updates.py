@@ -17,15 +17,16 @@ notice waiting for review: it sits in "Waiting for your review" on
 /admin/notices and the owner gets a DM. Nothing is shown or posted until the
 owner approves it there, and the owner can edit it or send it back first. By
 default it is a pop-up for clan leaders (owners and admins); ``--post`` also
-makes a public news post, ``--discord`` sends that post to the news channel,
-and ``--no-popup`` drops the pop-up. Dry run unless ``--apply``.
+makes a public news post; ``--discord news`` posts it in #news (needs
+``--post``) and ``--discord updates`` posts a smaller change in #updates;
+``--no-popup`` drops the pop-up. Dry run unless ``--apply``.
 
 Usage:
     python scripts/leader_updates.py status
     python scripts/leader_updates.py forget 528746710042804247            # dry run
     python scripts/leader_updates.py forget 528746710042804247 --apply
     python scripts/leader_updates.py draft --title "..." --body-file post.md \
-        [--audience leaders|owners|everyone|staff] [--no-popup] [--post] [--discord] \
+        [--audience leaders|owners|everyone|staff] [--no-popup] [--post] [--discord news|updates] \
         [--source "weekly roundup"] [--apply]
 """
 
@@ -100,7 +101,7 @@ AUDIENCES = {
 
 
 def _draft(title: str, body_file: str, audience: str, popup: bool, post: bool,
-           discord: bool, source: str, apply: bool) -> int:
+           discord: str | None, source: str, apply: bool) -> int:
     from web_api.popup_audience import describe_audience, normalize_audience
 
     title = (title or "").strip()
@@ -108,18 +109,20 @@ def _draft(title: str, body_file: str, audience: str, popup: bool, post: bool,
     if not (1 <= len(title) <= 120) or not body:
         print("title must be 1-120 characters and the body must not be empty")
         return 2
-    if not popup and not post:
-        print("nowhere to send it: keep the pop-up or add --post")
+    if not popup and not post and not discord:
+        print("nowhere to send it: keep the pop-up, or add --post or --discord")
         return 2
-    if discord and not post:
-        print("--discord needs --post (the Discord post links to the news post)")
+    if discord == "news" and not post:
+        print("--discord news needs --post (a #news post links to the news post); "
+              "use --discord updates for a smaller change")
         return 2
     rules = normalize_audience(AUDIENCES[audience]) if popup else []
     summary = describe_audience(rules) if popup else None
     print(f"title:   {title}")
     print(f"source:  {source}")
     print("goes to: " + lu.notice_destinations(
-        show_popup=popup, publish_post=post, post_to_discord=discord, audience_summary=summary,
+        show_popup=popup, publish_post=post, post_to_discord=bool(discord),
+        audience_summary=summary, discord_target=discord,
     ) + " (only once the owner approves it)")
     print("-" * 60)
     print(body)
@@ -131,8 +134,8 @@ def _draft(title: str, body_file: str, audience: str, popup: bool, post: bool,
     try:
         notice = lu.create_notice_for_review(
             session, title=title, body_md=body, audience=rules, show_popup=popup,
-            publish_post=post, post_to_discord=discord, source_label=source,
-            audience_summary=summary,
+            publish_post=post, post_to_discord=bool(discord), source_label=source,
+            audience_summary=summary, discord_target=discord or "news",
         )
         print(f"notice {notice.id} is waiting for review at {lu.NOTICES_PATH}; the owner has been DMed.")
     finally:
@@ -154,7 +157,8 @@ def main() -> int:
                        help="who gets the pop-up (default: clan owners and admins)")
     draft.add_argument("--no-popup", action="store_true", help="news post only, no pop-up")
     draft.add_argument("--post", action="store_true", help="also a public news post")
-    draft.add_argument("--discord", action="store_true", help="also the Discord news channel (needs --post)")
+    draft.add_argument("--discord", choices=sorted(lu.DISCORD_TARGETS),
+                       help="also post in #news (needs --post) or #updates")
     draft.add_argument("--source", default="agent", help="shown in the review queue")
     draft.add_argument("--apply", action="store_true")
     args = parser.parse_args()

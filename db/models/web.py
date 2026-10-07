@@ -346,7 +346,8 @@ class PopupNotice(Base):
 
     Delivery (web130a): ``show_popup`` is the targeted pop-up; ``publish_post``
     also makes a public news post (``announcement_id``), and
-    ``post_to_discord`` sends that post to the Discord news channel. ``audience_estimate`` is the matched user count
+    ``post_to_discord`` posts it in HQ: #news (``discord_target`` 'news', needs
+    the news post) or #updates ('updates', for smaller changes, web133a). ``audience_estimate`` is the matched user count
     when it was sent, kept so the list can say how far a notice reached.
     """
 
@@ -374,6 +375,8 @@ class PopupNotice(Base):
     show_popup = Column(Boolean, default=True, nullable=False)
     publish_post = Column(Boolean, default=False, nullable=False)
     post_to_discord = Column(Boolean, default=False, nullable=False)
+    # 'news' (NULL reads as news) or 'updates': which HQ channel (web133a).
+    discord_target = Column(String(12), nullable=True)
     announcement_id = Column(Integer, nullable=True)
     source_label = Column(String(64), nullable=True)
     reviewed_by = Column(Integer, nullable=True)

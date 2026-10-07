@@ -307,7 +307,7 @@ class TestDeliveryAndReview:
     def _notice(self, **kw):
         base = dict(
             id=7, title="T", body_md="B", status="draft", show_popup=True, publish_post=False,
-            post_to_discord=False, starts_at=None, expires_at=None, source_label=None,
+            post_to_discord=False, discord_target=None, starts_at=None, expires_at=None, source_label=None,
             audience_json='[{"type": "everyone"}]', sent_at=None, ended_at=None,
             reviewed_by=None, reviewed_at=None, audience_estimate=None,
         )
@@ -352,6 +352,26 @@ class TestDeliveryAndReview:
             _check_delivery(self._notice(post_to_discord=True), sending=False)
         _check_delivery(self._notice(show_popup=False, publish_post=True, post_to_discord=True), sending=True)
 
+    def test_updates_channel_needs_no_news_post(self):
+        from web_api.routes.popup_notices import _check_delivery, _validate_fields
+
+        _check_delivery(self._notice(show_popup=False, post_to_discord=True, discord_target="updates"),
+                        sending=True)
+        with pytest.raises(self._problem()):
+            _check_delivery(self._notice(show_popup=False, post_to_discord=True, discord_target="news"),
+                            sending=True)
+        assert _validate_fields({"title": "a", "body_md": "b"}, partial=False)["discord_target"] == "news"
+        with pytest.raises(self._problem()):
+            _validate_fields({"title": "a", "body_md": "b", "discord_target": "plugin"}, partial=False)
+
+    def test_discord_post_cannot_be_scheduled(self):
+        from web_api.routes.popup_notices import _check_delivery
+
+        later = datetime.now() + timedelta(days=1)
+        n = self._notice(post_to_discord=True, discord_target="updates", starts_at=later)
+        with pytest.raises(self._problem()):
+            _check_delivery(n, sending=True)
+
     def test_news_post_cannot_be_scheduled(self):
         from web_api.routes.popup_notices import _check_delivery
 
@@ -372,6 +392,7 @@ class TestDeliveryAndReview:
         assert n.source_label == "Some Staff"
         lu.queue_notice_review_dm.assert_called_once()
         lu.publish_notice_post.assert_not_called()
+        lu.send_notice_to_discord.assert_not_called()
 
     def test_approver_send_goes_out_and_posts(self, monkeypatch):
         from unittest.mock import MagicMock
@@ -382,6 +403,7 @@ class TestDeliveryAndReview:
         assert pn._go_out(MagicMock(), n, actor=0) == "sent"
         assert n.status == "live" and n.reviewed_by == 0 and n.audience_estimate == 42
         lu.publish_notice_post.assert_called_once()
+        lu.send_notice_to_discord.assert_called_once()
         lu.queue_notice_review_dm.assert_not_called()
 
     def test_post_only_notice_finishes_when_sent(self, monkeypatch):

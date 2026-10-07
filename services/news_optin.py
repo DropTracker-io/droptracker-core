@@ -1,10 +1,11 @@
 """
 News / update-channel opt-in.
 
-Members opt into three private update channels (plugin / website / discord) by
-pressing a single button, which toggles the ``Follows Updates`` role. That role
-is granted view access to all three channels, so one role toggle unlocks (or
-hides) the whole set.
+Members follow the private #updates channel (smaller changes: fixes, tweaks,
+new options) by pressing a single button, which toggles the ``Follows Updates``
+role. That role is what grants view access. Important changes go to the public
+#news channel instead. #updates replaced three separate plugin / website /
+discord update channels on 2026-10-07 (``scripts/setup_updates_channel.py``).
 
 Why a role and not per-user channel adds? Two reasons:
   * Discord caps permission overwrites at 500 per channel; this guild already
@@ -55,12 +56,10 @@ GUILD_ID = leader_updates.HQ_GUILD_ID
 # The opt-in role. Resolved/created by name, so no id needs hardcoding.
 FOLLOW_ROLE_NAME = "Follows Updates"
 
-# The three private update channels the role unlocks.
+# The private update channel(s) the role unlocks.
 # (emoji, label, one-line description, channel_id)
 UPDATE_CHANNELS = [
-    ("🔌", "Plugin updates",  "RuneLite plugin releases & fixes", 1528029600104583208),  # forum
-    ("🌐", "Website updates", "website & dashboard changes",      1528029728483704873),  # text
-    ("💬", "Discord updates", "server & bot changes",             1528029693079588924),  # text
+    ("📝", "Updates", "smaller changes: fixes, tweaks and new options", leader_updates.UPDATES_CHANNEL_ID),
 ]
 
 # Public channel anyone can rely on without opting in.
@@ -123,51 +122,38 @@ def _channel_mentions():
 
 
 def build_optin_components():
-    """Build the components-v2 message: explanation + single follow button."""
-    bullets = "\n".join(
-        f"-# {emoji} <#{cid}> — {desc}"
-        for (emoji, label, desc, cid) in UPDATE_CHANNELS
-    )
+    """Build the components-v2 message: explanation + single follow button.
+
+    No role ping in here on purpose: re-posting the message with
+    ``/post-update-optin`` should never mass-ping anyone."""
+    updates = ", ".join(f"<#{cid}>" for (_e, _l, _d, cid) in UPDATE_CHANNELS)
     return [
         ContainerComponent(
             TextDisplayComponent(
-                content="Hey, <@&1279163761218949204>! :wave:"
-            ),
-            SeparatorComponent(divider=True),
-            TextDisplayComponent(
                 content=(
                     "## Staying in the loop\n"
-                    "We're aiming to reduce the amount of clutter sent when we make "
-                    "changes to our app and services. To continue staying updated, "
-                    "you have two options:"
+                    f"Important changes are posted in <#{NEWS_CHANNEL_ID}> for everyone. "
+                    f"Smaller ones, like fixes, tweaks and new options, go in {updates}."
                 )
             ),
             SeparatorComponent(divider=True),
             TextDisplayComponent(
                 content=(
-                    "### 1. Follow the update channels\n"
-                    "-# Press the button below and I'll unlock these three channels "
-                    "for you:\n"
-                    f"{bullets}\n"
-                    "-# Press it again any time to unfollow and hide them."
-                )
-            ),
-            SeparatorComponent(divider=True),
-            TextDisplayComponent(
-                content=(
-                    "### 2. Or just stay put\n"
-                    "-# Prefer not to? No action needed — any *important* news will "
-                    f"still go out in the public <#{NEWS_CHANNEL_ID}> channel regardless."
+                    f"### Follow {updates}\n"
+                    "-# Clan leaders follow it automatically. Anyone else can press the "
+                    "button below to see it.\n"
+                    "-# Press it again any time to stop following, and it stays off.\n"
+                    "-# Both channels have a **Follow** button at the top, so you can get "
+                    "every post in a channel in your own server."
                 )
             ),
             ActionRow(
                 Button(
-                    label="🔔 Follow the update channels",
+                    label="🔔 Follow or unfollow updates",
                     style=ButtonStyle.SUCCESS,
                     custom_id=OPTIN_BUTTON_ID,
                 )
             ),
-            SeparatorComponent(divider=True),
         )
     ]
 
@@ -363,8 +349,8 @@ class NewsOptin(Extension):
                 )
             else:
                 await ctx.send(
-                    f"🔕 You've unfollowed updates. {chans} are hidden again, "
-                    "and they'll stay off until you press the button again.",
+                    f"🔕 You've unfollowed updates. {chans} is hidden again, "
+                    "and it stays off until you press the button again.",
                     ephemeral=True,
                 )
         except ix_errors.Forbidden:

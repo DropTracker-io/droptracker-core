@@ -4,11 +4,15 @@ Two pieces share this module:
 
 * **The Follows Updates role by default.** Every clan leader (a ``group_admins``
   row, owner or admin) who is in the HQ server gets the role that unlocks the
-  plugin / website / discord update channels (``services/news_optin.py``). The
+  #updates channel (``services/news_optin.py``), where smaller changes go. The
   opt-in button there now doubles as the opt-out, and pressing it off stores
   ``follows_updates = 0`` in ``user_configurations`` so the sweep never hands
   the role back. Granting a role sends no message; it only changes what the
   leader can see.
+* **Two HQ channels.** #news (public) takes important changes; #updates
+  (role-gated) takes the smaller ones. Both are Announcement channels, so a
+  server that follows one gets a copy of every post. They replaced the
+  separate plugin / website / discord update channels on 2026-10-07.
 * **Site-wide announcements on Discord.** A global announcement published with
   "Also post to Discord" goes to the public news channel (an Announcement
   channel) and is published there, so servers that follow the channel get a
@@ -35,10 +39,13 @@ ENV_LIVE = "LEADER_UPDATES_LIVE"
 ENV_PILOT_IDS = "LEADER_UPDATES_PILOT_DISCORD_IDS"
 DEFAULT_PILOT_DISCORD_IDS = ("528746710042804247",)
 
-# HQ server, the public news channel (an Announcement channel), and the
-# per-user preference key. news_optin imports these so there is one copy.
+# HQ server, its two Announcement channels and the per-user preference key.
+# news_optin imports these so there is one copy. #updates was created by
+# scripts/setup_updates_channel.py.
 HQ_GUILD_ID = 1172737525069135962
 NEWS_CHANNEL_ID = 1527845346582073426
+UPDATES_CHANNEL_ID = 1557440610062045295
+DISCORD_TARGETS = {"news": NEWS_CHANNEL_ID, "updates": UPDATES_CHANNEL_ID}
 FOLLOW_PREF_KEY = "follows_updates"
 
 LEADER_ROLES = ("owner", "admin")
@@ -222,35 +229,50 @@ def announcement_embed(title: str, body_md: str) -> dict:
     }
 
 
-def enqueue_global_announcement(session, *, ann_id: int, title: str, body_md: str,
-                                actor_user_id: Optional[int] = None) -> list:
-    """Queue a published global announcement for Discord.
+def _absolute(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    if url.startswith("/"):
+        from utils.site_urls import WEBSITE_URL
 
-    Live: one ``news_post`` row for the news channel; the drain posts and then
+        return f"{WEBSITE_URL}{url}"
+    return url
+
+
+def enqueue_discord_post(session, *, target: str, title: str, body_md: str,
+                         link_url: Optional[str], link_label: str = "Read on the website",
+                         ref_type: Optional[str] = None, ref_id: Optional[int] = None,
+                         actor_user_id: Optional[int] = None) -> list:
+    """Queue a post for #news or #updates.
+
+    Live: one ``news_post`` row for that channel; the drain posts and then
     publishes it so following servers receive it. Pilot: one ``dm`` per pilot
     account carrying the same embed, so the post can be checked before anyone
     else sees it. Returns the queued rows."""
     from services.discord_outbox import enqueue
 
+    channel_id = DISCORD_TARGETS[target]
     embed = announcement_embed(title, body_md)
-    components = [{"label": "Read on the website", "url": announcement_url(ann_id)}]
+    url = _absolute(link_url)
+    components = [{"label": link_label, "url": url}] if url else None
 
     if is_live():
         return [enqueue(
             session,
-            channel_id=str(NEWS_CHANNEL_ID),
+            channel_id=str(channel_id),
             embed=embed,
             components=components,
             kind="news_post",
-            ref_type="announcement",
-            ref_id=ann_id,
+            ref_type=ref_type,
+            ref_id=ref_id,
             actor_user_id=actor_user_id,
         )]
 
     note = (
         "-# Pilot preview. When this goes live, the post below goes to "
-        f"<#{NEWS_CHANNEL_ID}> and is published to every server that follows it."
+        f"<#{channel_id}> and is published to every server that follows it."
     )
+    preview_ref = "announcement_preview" if ref_type == "announcement" else "discord_preview"
     return [
         enqueue(
             session,
@@ -259,12 +281,22 @@ def enqueue_global_announcement(session, *, ann_id: int, title: str, body_md: st
             embed=embed,
             components=components,
             kind="dm",
-            ref_type="announcement_preview",
-            ref_id=ann_id,
+            ref_type=preview_ref,
+            ref_id=ref_id,
             actor_user_id=actor_user_id,
         )
         for discord_id in sorted(pilot_discord_ids())
     ]
+
+
+def enqueue_global_announcement(session, *, ann_id: int, title: str, body_md: str,
+                                actor_user_id: Optional[int] = None) -> list:
+    """A published global announcement in #news, linking to its page."""
+    return enqueue_discord_post(
+        session, target="news", title=title, body_md=body_md,
+        link_url=announcement_url(ann_id), ref_type="announcement", ref_id=ann_id,
+        actor_user_id=actor_user_id,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -403,21 +435,29 @@ def publish_reviewed(session, ann, reviewer_user_id) -> None:
 # Pop-up notices as the one composer (web130a)
 # --------------------------------------------------------------------------- #
 # /admin/notices writes every staff update. A notice can be a targeted pop-up,
-# a public news post, a Discord post (through the news post), or any mix. Like
-# site-wide posts, one sent by anyone but an approver waits in review.
+# a public news post, a Discord post, or any mix. Discord means #news (which
+# links to, so needs, the news post) or #updates (smaller changes, no news post
+# needed). Like site-wide posts, one sent by anyone but an approver waits in
+# review.
 NOTICES_PATH = "/admin/notices"
 POST_CTA_LABEL = "Read the full post"
 
 
+def notice_target(notice) -> str:
+    target = getattr(notice, "discord_target", None) or "news"
+    return target if target in DISCORD_TARGETS else "news"
+
+
 def notice_destinations(*, show_popup: bool, publish_post: bool, post_to_discord: bool,
-                        audience_summary: Optional[str] = None) -> str:
+                        audience_summary: Optional[str] = None,
+                        discord_target: Optional[str] = None) -> str:
     parts = []
     if show_popup:
         parts.append(f"a pop-up for {audience_summary}" if audience_summary else "a pop-up")
     if publish_post:
         parts.append("a post on the public news page")
     if post_to_discord:
-        parts.append("the Discord news channel")
+        parts.append("#updates on Discord" if discord_target == "updates" else "#news on Discord")
     return ", ".join(parts) or "nowhere"
 
 
@@ -428,15 +468,16 @@ def queue_notice_review_dm(session, notice, audience_summary: Optional[str] = No
         destinations=notice_destinations(
             show_popup=bool(notice.show_popup), publish_post=bool(notice.publish_post),
             post_to_discord=bool(notice.post_to_discord), audience_summary=audience_summary,
+            discord_target=notice_target(notice),
         ),
         path=NOTICES_PATH,
     )
 
 
 def publish_notice_post(session, notice, approver_user_id):
-    """Make the news post for an approved notice and, if asked, send it to
-    Discord (still pilot-gated). Points the pop-up's button at the post when it
-    has none. Returns the Announcement, or None when the notice has no post."""
+    """Make the news post for an approved notice. Points the pop-up's button
+    at the post when it has none. Returns the Announcement, or None when the
+    notice has no post. Discord is :func:`send_notice_to_discord`."""
     if not notice.publish_post or notice.announcement_id is not None:
         return None
     from datetime import datetime
@@ -453,7 +494,7 @@ def publish_notice_post(session, notice, approver_user_id):
         pinned=False,
         status="published",
         published_at=now,
-        post_to_discord=bool(notice.post_to_discord),
+        post_to_discord=bool(notice.post_to_discord) and notice_target(notice) == "news",
         source_label=notice.source_label,
         reviewed_by=int(approver_user_id),
         reviewed_at=now,
@@ -465,18 +506,38 @@ def publish_notice_post(session, notice, approver_user_id):
         notice.cta_label = POST_CTA_LABEL
         notice.cta_url = f"/announcements/{ann.id}"
     session.commit()
-    if notice.post_to_discord:
-        enqueue_global_announcement(
-            session, ann_id=ann.id, title=ann.title, body_md=ann.body_md,
-            actor_user_id=approver_user_id,
-        )
     return ann
+
+
+def send_notice_to_discord(session, notice, approver_user_id) -> list:
+    """Post an approved notice in #news or #updates (still pilot-gated). Call
+    after :func:`publish_notice_post`, so a #news post can link to its page."""
+    if not notice.post_to_discord:
+        return []
+    target = notice_target(notice)
+    if target == "news":
+        if notice.announcement_id is None:
+            return []  # #news always links to the news post; validation requires it
+        return enqueue_global_announcement(
+            session, ann_id=notice.announcement_id, title=notice.title,
+            body_md=notice.body_md, actor_user_id=approver_user_id,
+        )
+    if notice.announcement_id is not None:
+        link, label = announcement_url(notice.announcement_id), "Read on the website"
+    else:
+        link, label = notice.cta_url, (notice.cta_label or "Take a look")
+    return enqueue_discord_post(
+        session, target=target, title=notice.title, body_md=notice.body_md,
+        link_url=link, link_label=label, ref_type="popup_notice", ref_id=notice.id,
+        actor_user_id=approver_user_id,
+    )
 
 
 def create_notice_for_review(session, *, title: str, body_md: str, audience: list,
                              show_popup: bool, publish_post: bool, post_to_discord: bool,
                              source_label: Optional[str], created_by: Optional[int] = None,
-                             tone: str = "info", size: str = "md", audience_summary: Optional[str] = None):
+                             tone: str = "info", size: str = "md", audience_summary: Optional[str] = None,
+                             discord_target: str = "news"):
     """The agent/roundup door: a notice waiting in the owner's review queue.
     ``audience`` must already be normalised (``web_api.popup_audience``)."""
     import json
@@ -492,7 +553,9 @@ def create_notice_for_review(session, *, title: str, body_md: str, audience: lis
         status="review",
         show_popup=bool(show_popup),
         publish_post=bool(publish_post),
-        post_to_discord=bool(publish_post and post_to_discord),
+        # #news links to the news post, so it needs one; #updates doesn't.
+        post_to_discord=bool(post_to_discord and (publish_post or discord_target == "updates")),
+        discord_target=discord_target if discord_target in DISCORD_TARGETS else "news",
         source_label=(source_label or None) and str(source_label)[:64],
         created_by=created_by,
     )

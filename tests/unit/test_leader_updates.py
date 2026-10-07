@@ -332,7 +332,7 @@ class TestNoticeHelpers(unittest.TestCase):
         self.assertEqual(
             lu.notice_destinations(show_popup=True, publish_post=True, post_to_discord=True,
                                    audience_summary="Clan owners"),
-            "a pop-up for Clan owners, a post on the public news page, the Discord news channel",
+            "a pop-up for Clan owners, a post on the public news page, #news on Discord",
         )
         self.assertEqual(
             lu.notice_destinations(show_popup=False, publish_post=False, post_to_discord=False),
@@ -342,7 +342,7 @@ class TestNoticeHelpers(unittest.TestCase):
     def _notice(self, **kw):
         base = dict(id=3, title="T", body_md="B", created_by=None, source_label="agent",
                     show_popup=True, publish_post=True, post_to_discord=False,
-                    announcement_id=None, cta_label=None, cta_url=None)
+                    discord_target=None, announcement_id=None, cta_label=None, cta_url=None)
         base.update(kw)
         return types.SimpleNamespace(**base)
 
@@ -354,29 +354,64 @@ class TestNoticeHelpers(unittest.TestCase):
                 call.args[0].id = 55
 
         session.flush.side_effect = _flush
-        with patch.dict(sys.modules, {"db.models": types.SimpleNamespace(Announcement=_Ann)}), \
-                patch.object(lu, "enqueue_global_announcement") as eg:
+        with patch.dict(sys.modules, {"db.models": types.SimpleNamespace(Announcement=_Ann)}):
             ann = lu.publish_notice_post(session, notice, 0)
-        return ann, eg
+        return ann
 
     def test_post_made_and_popup_button_points_at_it(self):
         n = self._notice()
-        ann, eg = self._publish(n)
+        ann = self._publish(n)
         self.assertEqual(ann.status, "published")
         self.assertEqual(ann.reviewed_by, 0)
         self.assertEqual(n.announcement_id, 55)
         self.assertEqual(n.cta_url, "/announcements/55")
-        eg.assert_not_called()
 
-    def test_own_button_kept_and_discord_sent_when_asked(self):
+    def test_own_button_kept(self):
         n = self._notice(cta_label="Go", cta_url="/premium", post_to_discord=True)
-        ann, eg = self._publish(n)
+        self._publish(n)
         self.assertEqual(n.cta_url, "/premium")
-        eg.assert_called_once()
 
     def test_no_post_twice_or_when_not_asked(self):
-        self.assertIsNone(self._publish(self._notice(announcement_id=9))[0])
-        self.assertIsNone(self._publish(self._notice(publish_post=False))[0])
+        self.assertIsNone(self._publish(self._notice(announcement_id=9)))
+        self.assertIsNone(self._publish(self._notice(publish_post=False)))
+
+    def _discord(self, notice):
+        with patch.object(lu, "enqueue_global_announcement", return_value=["news"]) as eg, \
+                patch.object(lu, "enqueue_discord_post", return_value=["updates"]) as ed:
+            rows = lu.send_notice_to_discord(MagicMock(), notice, 0)
+        return rows, eg, ed
+
+    def test_discord_news_links_the_news_post(self):
+        rows, eg, ed = self._discord(self._notice(post_to_discord=True, announcement_id=55))
+        self.assertEqual(rows, ["news"])
+        self.assertEqual(eg.call_args.kwargs["ann_id"], 55)
+        ed.assert_not_called()
+
+    def test_discord_news_without_a_post_sends_nothing(self):
+        rows, eg, ed = self._discord(self._notice(post_to_discord=True, publish_post=False))
+        self.assertEqual(rows, [])
+        eg.assert_not_called()
+
+    def test_discord_updates_links_the_button_when_no_post(self):
+        n = self._notice(post_to_discord=True, discord_target="updates", publish_post=False,
+                         cta_label="See it", cta_url="/premium")
+        rows, eg, ed = self._discord(n)
+        self.assertEqual(rows, ["updates"])
+        kw = ed.call_args.kwargs
+        self.assertEqual((kw["target"], kw["link_url"], kw["link_label"]), ("updates", "/premium", "See it"))
+        eg.assert_not_called()
+
+    def test_no_discord_unless_asked(self):
+        self.assertEqual(self._discord(self._notice())[0], [])
+
+    def test_updates_post_goes_to_updates_channel(self):
+        enqueue = MagicMock(side_effect=lambda s, **kw: kw)
+        with _Env(live="true"), patch.dict(sys.modules, {"services.discord_outbox": types.SimpleNamespace(enqueue=enqueue)}):
+            rows = lu.enqueue_discord_post(MagicMock(), target="updates", title="t", body_md="b",
+                                           link_url=None, ref_type="popup_notice", ref_id=3)
+        self.assertEqual(rows[0]["channel_id"], str(lu.UPDATES_CHANNEL_ID))
+        self.assertEqual(rows[0]["kind"], "news_post")
+        self.assertIsNone(rows[0]["components"])
 
     def test_review_notice_has_no_audience_without_popup(self):
         session = MagicMock()
@@ -388,8 +423,19 @@ class TestNoticeHelpers(unittest.TestCase):
             )
         self.assertEqual(n.status, "review")
         self.assertEqual(n.audience_json, "[]")
-        self.assertFalse(n.post_to_discord)  # Discord needs the news post
+        self.assertFalse(n.post_to_discord)  # #news needs the news post
         dm.assert_called_once()
+
+    def test_review_notice_for_updates_needs_no_post(self):
+        with patch.dict(sys.modules, {"db.models": types.SimpleNamespace(PopupNotice=_Ann)}), \
+                patch.object(lu, "queue_notice_review_dm"):
+            n = lu.create_notice_for_review(
+                MagicMock(), title="T", body_md="B", audience=[], show_popup=False,
+                publish_post=False, post_to_discord=True, source_label="agent",
+                discord_target="updates",
+            )
+        self.assertTrue(n.post_to_discord)
+        self.assertEqual(n.discord_target, "updates")
 
 
 if __name__ == "__main__":

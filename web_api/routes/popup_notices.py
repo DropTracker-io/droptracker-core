@@ -26,8 +26,9 @@ Admin (superadmin):
 
 Delivery and review (web130a, ``services/leader_updates.py``): a notice can be
 a targeted pop-up (``show_popup``), a public news post (``publish_post``) and a
-Discord news-channel post through that news post (``post_to_discord``), in any
-mix. Only an approver (the owner by default) sends one out: when anyone else
+Discord post (``post_to_discord``) in HQ's #news (``discord_target`` 'news',
+which links to, so needs, the news post) or #updates ('updates', smaller
+changes, web133a), in any mix. Only an approver (the owner by default) sends one out: when anyone else
 presses Send it goes to ``review`` and the approver is DMed, then edits and
 approves it or sends it back. A live notice can only be edited by an approver.
 
@@ -67,6 +68,7 @@ popup_notices_bp = Blueprint("v1_popup_notices", __name__)
 logger = logging.getLogger("web_api.popup_notices")
 
 TONES = ("info", "important", "success")
+DISCORD_TARGETS = ("news", "updates")
 SIZES = ("sm", "md", "lg")
 TITLE_MAX = 120
 BODY_MAX = 20_000
@@ -394,6 +396,11 @@ def _validate_fields(body: dict, *, partial: bool) -> dict:
     for key, default in (("show_popup", True), ("publish_post", False), ("post_to_discord", False)):
         if not partial or key in body:
             out[key] = bool(body.get(key, default))
+    if not partial or "discord_target" in body:
+        target = body.get("discord_target") or "news"
+        if target not in DISCORD_TARGETS:
+            abort_problem(422, "Invalid Discord channel", "discord_target must be 'news' or 'updates'.")
+        out["discord_target"] = target
 
     if not partial or "starts_at" in body:
         out["starts_at"] = _from_ts(body.get("starts_at"), "starts_at")
@@ -406,16 +413,16 @@ def _validate_fields(body: dict, *, partial: bool) -> dict:
 def _check_delivery(n, *, sending: bool) -> None:
     """Where a notice goes must make sense. ``n`` is the row with its new
     values applied."""
-    if not n.show_popup and not n.publish_post:
-        abort_problem(422, "Nowhere to send it", "Pick a pop-up, a news post, or both.")
-    if n.post_to_discord and not n.publish_post:
+    if not n.show_popup and not n.publish_post and not n.post_to_discord:
+        abort_problem(422, "Nowhere to send it", "Pick a pop-up, a news post or a Discord channel.")
+    if n.post_to_discord and (n.discord_target or "news") == "news" and not n.publish_post:
         abort_problem(
-            422, "Discord needs the news post",
-            "The Discord post links to the news post, so turn on the news post too.",
+            422, "#news needs the news post",
+            "A #news post links to the news post, so turn that on too, or post it in #updates.",
         )
-    if sending and n.publish_post and n.starts_at and n.starts_at > datetime.now():
+    if sending and (n.publish_post or n.post_to_discord) and n.starts_at and n.starts_at > datetime.now():
         abort_problem(
-            422, "News posts can't be scheduled",
+            422, "Posts can't be scheduled",
             "The news post and Discord go out when it's sent. Clear the start time, "
             "or schedule the pop-up on its own.",
         )
@@ -486,6 +493,7 @@ def _admin_payload(n: PopupNotice, stats: dict, labels: dict, now: datetime) -> 
         "show_popup": bool(n.show_popup),
         "publish_post": bool(n.publish_post),
         "post_to_discord": bool(n.post_to_discord),
+        "discord_target": n.discord_target or "news",
         "announcement_id": n.announcement_id,
         "source_label": n.source_label,
         "reviewed_at": _ts(n.reviewed_at),
@@ -562,11 +570,13 @@ def _go_out(s, n: PopupNotice, actor: int) -> str:
         n.status = "live"
         n.audience_estimate = _estimate(s, rules)[0]
     else:
-        # A news post with no pop-up has nothing left to show: it's done.
+        # With no pop-up there is nothing left to show once the posts are out.
         n.status = "ended"
         n.ended_at = now
     s.commit()
     leader_updates.publish_notice_post(s, n, actor)
+    leader_updates.send_notice_to_discord(s, n, actor)
+    s.commit()
     return "sent"
 
 
@@ -694,7 +704,9 @@ async def admin_update(notice_id: int):
                 if not leader_updates.is_approver(actor):
                     abort_problem(403, "Not an approver", "Only the owner can edit a notice that has gone out.")
                 if any(k in fields and bool(fields[k]) != bool(getattr(n, k))
-                       for k in ("show_popup", "publish_post", "post_to_discord")):
+                       for k in ("show_popup", "publish_post", "post_to_discord")) or (
+                        "discord_target" in fields and n.post_to_discord
+                        and fields["discord_target"] != (n.discord_target or "news")):
                     abort_problem(409, "Already sent", "Where a notice goes can't change once it's out.")
             before = {"title": n.title, "audience": n.audience_json}
             for key, value in fields.items():
