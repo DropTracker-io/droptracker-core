@@ -645,6 +645,7 @@ async def process_submission_with_session(submission_type, embed_data):
         if success:
             _record_status_metrics(embed_data)
             _record_plugin_version(embed_data)
+            _record_last_seen(embed_data)
         return result
         
     except Exception as e:
@@ -841,6 +842,17 @@ def _record_plugin_version(embed_data) -> None:
         from utils.plugin_versions import record_sighting
 
         record_sighting(embed_data)
+    except Exception:
+        pass
+
+
+def _record_last_seen(embed_data) -> None:
+    """Stamp when this account's plugin was last seen, for the data API's
+    identity.last_seen (utils/player_last_seen.py). Fail-open."""
+    try:
+        from utils.player_last_seen import record_submission
+
+        record_submission(embed_data)
     except Exception:
         pass
 

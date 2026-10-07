@@ -90,6 +90,17 @@ def _record_plugin_version(processed_data) -> None:
         pass
 
 
+def _record_last_seen(processed_data) -> None:
+    """Stamp when this account's plugin was last seen, for the data API's
+    identity.last_seen (utils/player_last_seen.py). Fail-open."""
+    try:
+        from utils.player_last_seen import record_submission
+
+        record_submission(processed_data)
+    except Exception:
+        pass
+
+
 def _status_heartbeat(r) -> None:
     try:
         from services.status_metrics import HEARTBEAT_CONSUMER, heartbeat
@@ -427,6 +438,7 @@ async def _process_submission(entry_bytes: bytes) -> None:
                     _push_plugin_notice(db_session, processed_data, response)
                     _record_status_metrics(processed_data)
                     _record_plugin_version(processed_data)
+                    _record_last_seen(processed_data)
                     continue
                 elif world_type != "main":
                     continue
@@ -455,6 +467,7 @@ async def _process_submission(entry_bytes: bytes) -> None:
                 _push_plugin_notice(db_session, processed_data, response)
                 _record_status_metrics(processed_data)
                 _record_plugin_version(processed_data)
+                _record_last_seen(processed_data)
             except Exception:
                 db_session.rollback()
                 raise

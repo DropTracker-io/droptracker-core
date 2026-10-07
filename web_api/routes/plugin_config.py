@@ -10,12 +10,12 @@ The data is self-reported by the client, and the page should say so.
 from __future__ import annotations
 
 import asyncio
-import json
 
 from quart import Blueprint, jsonify
 
 from db import Group, Player
 from db.models import PlayerPluginConfig
+from utils.plugin_config_view import flat as _flat, loads as _loads, snapshot_fields
 from web_api.common import abort_problem, db_session, private_no_store
 from web_api.deps import (
     assert_group_admin,
@@ -26,23 +26,6 @@ from web_api.deps import (
 )
 
 plugin_config_bp = Blueprint("v1_plugin_config", __name__)
-
-
-def _loads(raw):
-    try:
-        value = json.loads(raw) if raw else None
-    except (TypeError, ValueError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _flat(snapshot) -> dict:
-    """{key: value} across every section of a snapshot's settings."""
-    out = {}
-    for values in ((snapshot or {}).get("settings") or {}).values():
-        if isinstance(values, dict):
-            out.update(values)
-    return out
 
 
 def _iso(dt):
@@ -66,12 +49,7 @@ def payload(player, row) -> dict:
         ]
     body["snapshot"] = {
         "captured_at": _iso(row.captured_at),
-        "plugin_version": row.plugin_version,
-        "runelite_version": row.runelite_version,
-        "transport": None if row.used_api is None else ("api" if row.used_api else "webhook"),
-        "settings": (current or {}).get("settings") or {},
-        "customized": (current or {}).get("customized") or [],
-        "env": (current or {}).get("env") or {},
+        **snapshot_fields(row, current),
         "previous_captured_at": _iso(row.previous_captured_at),
         "changed_since_previous": changed,
     }

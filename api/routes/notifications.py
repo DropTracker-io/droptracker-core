@@ -78,6 +78,15 @@ async def get_notifications():
             player_id = _resolve_player_id(db_session, player_name, acc_hash)
             if player_id is None:
                 return None
+            # The plugin polls this continuously while logged in, so it is
+            # the "online but not submitting" signal for identity.last_seen.
+            # Throttled and fail-open (utils/player_last_seen.py).
+            try:
+                from utils.player_last_seen import record_player
+
+                record_player(player_id)
+            except Exception:
+                pass
             try:
                 active_event = player_has_active_event(db_session, player_id)
             except Exception as e:

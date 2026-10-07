@@ -180,6 +180,9 @@ async def serve(endpoint: str, resolve: Callable, build: Callable,
         "days": days,
         "sections": requested,
         "per_player_limit": per_player_limit,
+        # Read by sections whose output depends on who is asking
+        # (plugin_config withholds private fields from global keys).
+        "key_scope": key.get("scope"),
     }
     if "drops" in requested:
         # Parsed only when asked for: a caller of the profile sections should

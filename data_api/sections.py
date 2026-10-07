@@ -134,8 +134,9 @@ def _load_identity(session, player_ids: List[int], ctx) -> Dict[int, dict]:
         WHERE p.player_id IN :ids
     """).bindparams(ids=tuple(player_ids)))
 
-    out = {}
+    out, state_synced = {}, {}
     for r in rows:
+        state_synced[int(r[0])] = r[9]
         # The state-sync varbit is the live value; players.account_type is the
         # older wire-string path and only fills the gap before a first sync.
         account_type = account_type_from_varbit(r[7]) or r[6] or None
@@ -148,8 +149,49 @@ def _load_identity(session, player_ids: List[int], ctx) -> Dict[int, dict]:
             "ehb": float(r[3]) if r[3] is not None else None,
             "first_seen": _iso(r[5]),
             "last_synced": _iso(r[9]),
+            "last_seen": None,
         }
+
+    # Only for players the query found: an empty IN () is a syntax error.
+    seen = _last_seen(session, list(out)) if out else {}
+    for player_id, entry in out.items():
+        # The account sync is also the plugin talking to us, and it does not
+        # pass through the submission path the tracker hooks.
+        entry["last_seen"] = _iso(_latest(seen.get(player_id),
+                                          state_synced.get(player_id)))
     return out
+
+
+def _latest(*values):
+    """The newest of some DATETIME values, ignoring NULLs and zero-dates."""
+    real = [v for v in values if v is not None and hasattr(v, "timetuple")]
+    return max(real) if real else None
+
+
+def _last_seen(session, player_ids: List[int]) -> Dict[int, object]:
+    """``{player_id: datetime}`` from ``player_last_seen``; ``{}`` on any error.
+
+    Kept out of the identity query and allowed to fail on its own:
+    ``identity`` is in every response, and a missing table or grant here must
+    cost a caller ``last_seen: null``, never the whole player object.
+    """
+    try:
+        rows = session.execute(text("""
+            SELECT player_id, last_seen_at FROM player_last_seen
+            WHERE player_id IN :ids
+        """).bindparams(ids=tuple(player_ids)))
+        return {int(pid): seen for pid, seen in rows}
+    except Exception as exc:
+        from data_api.core import is_statement_timeout
+
+        if is_statement_timeout(exc):
+            raise
+        logger.warning("data_api last_seen unavailable: %s", exc)
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return {}
 
 
 def _load_discord(session, player_ids: List[int], ctx) -> Dict[int, dict]:
@@ -764,6 +806,45 @@ def _load_drop_ids(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     return {}
 
 
+def _load_plugin_config(session, player_ids: List[int], ctx) -> Dict[int, dict]:
+    """The player's DropTracker plugin settings, as their client last sent them.
+
+    Same fields as the website's plugin-config page (shared through
+    ``utils.plugin_config_view``), current snapshot only. ``None`` for a
+    player whose plugin has never sent one (plugin 6.0.16+ sends it after
+    login and whenever a setting changes).
+
+    A global key does not see ``env.custom_api_endpoint``: that can be a
+    private server's address, and a global key is a third party rather than
+    the player's own clan or the player themselves.
+    """
+    from types import SimpleNamespace
+
+    from utils.plugin_config_view import snapshot_fields
+
+    # Fail closed: only the scopes that read their own players get it.
+    redact = ctx.get("key_scope") not in ("user", "group")
+    rows = session.execute(text("""
+        SELECT player_id, config_json, plugin_version, runelite_version,
+               used_api, captured_at
+        FROM player_plugin_config WHERE player_id IN :ids
+    """).bindparams(ids=tuple(player_ids)))
+
+    out: Dict[int, dict] = {}
+    for player_id, config_json, plugin_version, runelite_version, used_api, captured in rows:
+        row = SimpleNamespace(
+            config_json=config_json,
+            plugin_version=plugin_version,
+            runelite_version=runelite_version,
+            used_api=None if used_api is None else bool(used_api),
+        )
+        out[int(player_id)] = {
+            "captured_at": _iso(captured),
+            **snapshot_fields(row, redact_private=redact),
+        }
+    return out
+
+
 def _load_meta(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     """Where each player sits on the boards, and which groups they are in.
 
@@ -798,7 +879,10 @@ def _load_meta(session, player_ids: List[int], ctx) -> Dict[int, dict]:
 
 _SECTIONS = (
     Section("identity", 0, _load_identity,
-            "Name, account type, combat/total level, EHB, last sync."),
+            "Name, account type, combat/total level, EHB, last sync, and "
+            "last_seen: when the player's DropTracker plugin was last seen "
+            "(any submission, account sync or event poll; accurate to about "
+            "5 minutes; null if never seen)."),
     Section("discord", 1, _load_discord,
             "The Discord account that has claimed this player, from /claim-rsn: "
             "discord_id (a string) and claimed. One indexed lookup for the whole "
@@ -845,6 +929,15 @@ _SECTIONS = (
             "Top NPCs by loot value over the requested window."),
     Section("loot_items", 121, _load_loot_items,
             "Top items by loot value over the requested window."),
+    Section("plugin_config", 1, _load_plugin_config,
+            "The player's DropTracker plugin settings as their client last "
+            "reported them (plugin 6.0.16+): captured_at, plugin and RuneLite "
+            "versions, transport, settings by section, the keys changed from "
+            "their defaults (customized), and client environment. null if the "
+            "plugin has never sent one. Self-reported by the client. Global "
+            "keys do not receive env.custom_api_endpoint. Must be asked for "
+            "by name: not part of 'all'.",
+            in_all=False),
     Section("drops", 50, _load_drops,
             "Individual drops, newest first, inside a bounded window "
             "(?since / ?until as unix seconds, default the last 24 hours, "
