@@ -300,6 +300,8 @@ A full walkthrough is in `docs/SUBMISSION_PIPELINE.md`. Short version:
 
 **Events v2 pipeline.** Processors call `services/event_engine.queue_submission()` (LPUSH `events:submissions`, gated on `events:active`); `workers/event_consumer.py` matches against active event tasks (pure `match_task()`), applies progress/bingo/team points, and routes Discord notifications via `services/event_notifications.py`. Each event's `submission_policy` gates credit by intake path (envelope `used_api` flag): `all` (default), `confirm_non_api` (non-plugin submissions land as pending completions), or `api_only`. Lifecycle transitions live in `services/event_lifecycle.py`; the admin surface is `web_api/routes/events.py` + `event_admin.py` + `event_discord.py`. Event **kinds** beyond the default task/bingo model: `loot_sweep` (`services/loot_sweep.py`, `docs/LOOT_SWEEP.md`) and the board game (`services/boardgame_*.py`, `services/boardgen/`).
 
+**Agents never publish site-wide posts or leader updates.** A global announcement goes on the public site and, once live, to the news channel and every server following it. Propose one only with `scripts/leader_updates.py draft --title ... --body-file ... [--discord] --apply`: it lands as a draft in the owner's review queue on `/admin/announcements` (and DMs the owner), and only the owner can edit, approve or cancel it. Never set `status='published'`, call the approve endpoint, mint a session to publish, or queue `news_post` outbox rows yourself (`services/leader_updates.py`).
+
 **Maintenance scripts follow one idiom:** dry-run by default, `--apply`/`--commit` to write, idempotent. Run the dry-run, show the owner, then apply.
 
 ---

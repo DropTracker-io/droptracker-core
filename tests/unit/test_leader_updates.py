@@ -8,6 +8,9 @@ What matters here:
 * **An opt-out sticks.** Leaders who turned the role off are never candidates.
 * **Each leader is looked up once.** Handled leaders and recently-absent ones
   are skipped, and a sweep is capped.
+* **Only an approver publishes a site-wide post.** Everything else is a draft
+  that DMs the approver; approving publishes, and only then does Discord get
+  it. The owner is user_id 0, which must never be truthiness-tested away.
 * **news_post publishes.** The drain sends, then publishes to followers; a
   failed publish leaves the row sent with a note, never failed or resent.
 """
@@ -257,6 +260,71 @@ class TestNewsPostDrain(unittest.TestCase):
             asyncio.run(outbox.drain_once(bot, lambda: session))
         channel.send.assert_awaited_once()
         message.publish.assert_not_awaited()
+
+
+class TestApprovers(unittest.TestCase):
+    def test_owner_user_zero_is_the_default_approver(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(lu.ENV_APPROVER_USER_IDS, None)
+            self.assertTrue(lu.is_approver(0))
+            self.assertFalse(lu.is_approver(None))
+            self.assertFalse(lu.is_approver(5))
+
+    def test_env_list(self):
+        with patch.dict(os.environ, {lu.ENV_APPROVER_USER_IDS: "0, 12,junk"}):
+            self.assertEqual(lu.approver_user_ids(), {0, 12})
+            self.assertTrue(lu.is_approver("12"))
+
+
+class _Ann:
+    def __init__(self, **kw):
+        self.id = None
+        self.__dict__.update(kw)
+
+
+class TestReviewDraft(unittest.TestCase):
+    def _session(self):
+        session = MagicMock()
+
+        def _flush():
+            for call in session.add.call_args_list:
+                call.args[0].id = 99
+
+        session.flush.side_effect = _flush
+        return session
+
+    def test_draft_is_private_and_dms_the_approver(self):
+        session = self._session()
+        fake_models = types.SimpleNamespace(Announcement=_Ann)
+        enqueue = MagicMock()
+        with patch.dict(sys.modules, {"db.models": fake_models,
+                                      "services.discord_outbox": types.SimpleNamespace(enqueue=enqueue)}), \
+                patch.object(lu, "_approver_discord_ids", return_value=[OWNER]):
+            ann = lu.create_review_draft(
+                session, title="Roundup", body_md="b" * 3000, post_to_discord=True,
+                source_label="weekly roundup",
+            )
+        self.assertEqual(ann.status, "draft")
+        self.assertIsNone(ann.published_at)
+        self.assertTrue(ann.post_to_discord)
+        enqueue.assert_called_once()
+        kw = enqueue.call_args.kwargs
+        self.assertEqual(kw["kind"], "dm")
+        self.assertEqual(kw["channel_id"], OWNER)
+        self.assertEqual(kw["ref_id"], 99)
+        self.assertIn("Nothing goes out until you approve it", kw["content"])
+        self.assertLess(len(kw["embed"]["description"]), 1600)
+        session.commit.assert_called()
+
+    def test_publish_reviewed_sends_to_discord_only_when_asked(self):
+        for post, expected in ((True, 1), (False, 0)):
+            ann = _Ann(id=5, title="t", body_md="b", status="draft", post_to_discord=post)
+            with patch.object(lu, "enqueue_global_announcement") as eg:
+                lu.publish_reviewed(MagicMock(), ann, 0)
+            self.assertEqual(ann.status, "published")
+            self.assertEqual(ann.reviewed_by, 0)
+            self.assertIsNotNone(ann.published_at)
+            self.assertEqual(eg.call_count, expected)
 
 
 if __name__ == "__main__":

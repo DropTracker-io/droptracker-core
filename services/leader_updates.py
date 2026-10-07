@@ -14,6 +14,10 @@ Two pieces share this module:
   channel) and is published there, so servers that follow the channel get a
   copy in their own staff channel. Before this, global announcements never
   left the website.
+* **Owner review.** Only an approver (the owner, user_id 0, by default)
+  publishes a site-wide post. Anyone else's, and anything an agent or the
+  weekly roundup drafts, is saved as a draft and DMed to the approver, who
+  edits, approves or cancels it on /admin/announcements (web129a).
 
 Pilot first. Until ``LEADER_UPDATES_LIVE`` is switched on, both pieces act on
 the pilot accounts only (``LEADER_UPDATES_PILOT_DISCORD_IDS``, defaulting to
@@ -261,3 +265,126 @@ def enqueue_global_announcement(session, *, ann_id: int, title: str, body_md: st
         )
         for discord_id in sorted(pilot_discord_ids())
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Owner review (web129a)
+# --------------------------------------------------------------------------- #
+# Site-wide posts are public on the site and, once live, in every following
+# server. So only an approver (the owner by default) publishes one: anything
+# written by anyone else, and everything an agent or the roundup job drafts,
+# lands as a draft in the review queue on /admin/announcements, where the
+# approver can edit it, approve it, or cancel it. Approvers are site user ids,
+# because approving happens on the website under their own session.
+ENV_APPROVER_USER_IDS = "LEADER_UPDATES_APPROVER_USER_IDS"
+DEFAULT_APPROVER_USER_IDS = (0,)
+REVIEW_PATH = "/admin/announcements"
+_REVIEW_PREVIEW_MAX = 1500
+
+
+def approver_user_ids() -> set[int]:
+    raw = os.getenv(ENV_APPROVER_USER_IDS)
+    if raw is None or not raw.strip():
+        return set(DEFAULT_APPROVER_USER_IDS)
+    out = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            out.add(int(part))
+    return out
+
+
+def is_approver(user_id) -> bool:
+    # user_id 0 is the owner: never truthiness-test it.
+    if user_id is None:
+        return False
+    try:
+        return int(user_id) in approver_user_ids()
+    except (TypeError, ValueError):
+        return False
+
+
+def _approver_discord_ids(session) -> list[str]:
+    from db.models import User
+
+    ids = list(approver_user_ids())
+    if not ids:
+        return []
+    rows = session.query(User.discord_id).filter(User.user_id.in_(ids)).all()
+    return sorted({str(d) for (d,) in rows if d is not None and str(d).strip().isdigit()})
+
+
+def _queue_review_dm(session, ann) -> None:
+    """Tell the approvers a post is waiting. The DM shows the text so it can be
+    read on a phone, but approving only happens on the website."""
+    from services.discord_outbox import enqueue
+    from utils.site_urls import WEBSITE_URL
+
+    body = ann.body_md
+    if len(body) > _REVIEW_PREVIEW_MAX:
+        body = body[:_REVIEW_PREVIEW_MAX].rstrip() + "\n..."
+    where = "the website and Discord" if ann.post_to_discord else "the website"
+    content = (
+        f"**A post is waiting for your review.** Drafted by {ann.source_label or 'staff'}. "
+        f"Nothing goes out until you approve it; it would be published on {where}."
+    )
+    for discord_id in _approver_discord_ids(session):
+        enqueue(
+            session,
+            channel_id=discord_id,
+            content=content,
+            embed=announcement_embed(ann.title, body),
+            components=[{"label": "Review, edit or cancel", "url": f"{WEBSITE_URL}{REVIEW_PATH}"}],
+            kind="dm",
+            ref_type="announcement_review",
+            ref_id=ann.id,
+            commit=False,
+        )
+
+
+def create_review_draft(session, *, title: str, body_md: str, post_to_discord: bool,
+                        source_label: Optional[str], author_user_id: Optional[int] = None,
+                        pinned: bool = False, cover_image_url: Optional[str] = None):
+    """Save a global post as a draft for review and DM the approvers.
+    Returns the Announcement row. Nothing about it is public."""
+    from db.models import Announcement
+
+    ann = Announcement(
+        scope_type="global",
+        group_id=None,
+        author_user_id=author_user_id,
+        title=title,
+        body_md=body_md,
+        cover_image_url=cover_image_url,
+        pinned=bool(pinned),
+        status="draft",
+        published_at=None,
+        post_to_discord=bool(post_to_discord),
+        source_label=(source_label or None) and str(source_label)[:64],
+    )
+    session.add(ann)
+    session.flush()
+    try:
+        _queue_review_dm(session, ann)
+    except Exception as e:  # the draft is what matters; the DM is a nudge
+        print(f"[leader_updates] review DM not queued for {ann.id}: {e}")
+    session.commit()
+    return ann
+
+
+def publish_reviewed(session, ann, reviewer_user_id) -> None:
+    """Publish an approved global post: it goes public on the site and, if the
+    author asked for Discord, out through ``enqueue_global_announcement``
+    (still pilot-gated). Caller has checked ``is_approver``."""
+    from datetime import datetime
+
+    ann.status = "published"
+    ann.published_at = datetime.now()
+    ann.reviewed_by = int(reviewer_user_id)
+    ann.reviewed_at = ann.published_at
+    session.commit()
+    if ann.post_to_discord:
+        enqueue_global_announcement(
+            session, ann_id=ann.id, title=ann.title, body_md=ann.body_md,
+            actor_user_id=reviewer_user_id,
+        )

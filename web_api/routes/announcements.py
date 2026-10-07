@@ -5,10 +5,17 @@ Public reads (cached):
   GET /api/v1/announcements/{id}                              -> Announcement
 
 Writes (session + authorization):
-  POST   /api/v1/groups/{groupId}/announcements  (group admin) -> { id }
-  POST   /api/v1/announcements                    (superadmin)  -> { id }
+  POST   /api/v1/groups/{groupId}/announcements  (group admin) -> { id, status }
+  POST   /api/v1/announcements                    (superadmin)  -> { id, status }
   PATCH  /api/v1/announcements/{id}               (author/admin)-> Announcement
   DELETE /api/v1/announcements/{id}               (author/admin)-> { ok }
+
+Owner review for global posts (web129a, ``services/leader_updates.py``):
+  GET    /api/v1/announcements/review             (superadmin)  -> { items, can_approve }
+  POST   /api/v1/announcements/{id}/approve       (approver)    -> Announcement
+
+A global post from anyone but an approver is saved as a draft (status
+``draft``) and published only when an approver approves it, edits included.
 
 Web pages are canonical; Discord is a syndication target via the outbox
 (``services/discord_outbox.py``) — never a direct Discord call from the API.
@@ -177,6 +184,8 @@ def _ping_content(role_ids: list[str], user_ids: list[str], everyone: bool) -> s
 
 
 def _create_announcement(user_id, scope_type, group_id, body):
+    """Create and publish, or (global post from a non-approver) save as a draft
+    for review. Returns ``(id, status)``."""
     title, body_md = _validate_input(body)
     pinned = bool(body.get("pinned", False))
     cover = body.get("cover_image_url")
@@ -184,6 +193,18 @@ def _create_announcement(user_id, scope_type, group_id, body):
     ping_role_ids = _validate_ping_ids(body.get("ping_role_ids"), "ping_role_ids")
     ping_user_ids = _validate_ping_ids(body.get("ping_user_ids"), "ping_user_ids")
     ping_everyone = bool(body.get("ping_everyone", False))
+
+    if scope_type == "global":
+        from services import leader_updates
+
+        if not leader_updates.is_approver(user_id):
+            with db_session() as s:
+                ann = leader_updates.create_review_draft(
+                    s, title=title, body_md=body_md, post_to_discord=post_to_discord,
+                    source_label=_author_name(s, user_id), author_user_id=user_id,
+                    pinned=pinned, cover_image_url=cover,
+                )
+                return ann.id, "draft"
 
     with db_session() as s:
         ann = Announcement(
@@ -196,7 +217,12 @@ def _create_announcement(user_id, scope_type, group_id, body):
             pinned=pinned,
             status="published",
             published_at=datetime.now(),
+            post_to_discord=post_to_discord,
         )
+        if scope_type == "global":
+            # Written by an approver, so writing it was the review.
+            ann.reviewed_by = user_id
+            ann.reviewed_at = ann.published_at
         s.add(ann)
         s.commit()
         ann_id = ann.id
@@ -253,7 +279,7 @@ def _create_announcement(user_id, scope_type, group_id, body):
     except Exception:
         pass
 
-    return ann_id
+    return ann_id, "published"
 
 
 @announcements_bp.get("/groups/<int:group_id>/discord/roles")
@@ -313,8 +339,8 @@ async def create_group_announcement(group_id: int):
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
 
     await asyncio.to_thread(_authorize)
-    ann_id = await asyncio.to_thread(_create_announcement, user_id, "group", group_id, body)
-    return jsonify({"id": ann_id})
+    ann_id, status = await asyncio.to_thread(_create_announcement, user_id, "group", group_id, body)
+    return jsonify({"id": ann_id, "status": status})
 
 
 @announcements_bp.post("/announcements")
@@ -327,8 +353,96 @@ async def create_global_announcement():
             assert_superadmin(load_user(s, user_id))
 
     await asyncio.to_thread(_authorize)
-    ann_id = await asyncio.to_thread(_create_announcement, user_id, "global", None, body)
-    return jsonify({"id": ann_id})
+    ann_id, status = await asyncio.to_thread(_create_announcement, user_id, "global", None, body)
+    return jsonify({"id": ann_id, "status": status})
+
+
+def _serialize_draft(s, ann: Announcement) -> dict:
+    out = _serialize(ann, _author_name(s, ann.author_user_id))
+    out.update({
+        "status": ann.status,
+        "post_to_discord": bool(ann.post_to_discord),
+        "source_label": ann.source_label,
+        "created_at": int(ann.created_at.timestamp()) if ann.created_at else 0,
+    })
+    return out
+
+
+@announcements_bp.get("/announcements/review")
+async def list_review_queue():
+    """Global drafts waiting for an approver. Superadmins can see the queue;
+    only approvers get ``can_approve``."""
+    user_id = current_user_id()
+
+    def _load():
+        from services import leader_updates
+
+        with db_session() as s:
+            assert_superadmin(load_user(s, user_id))
+            rows = (
+                s.query(Announcement)
+                .filter(Announcement.scope_type == "global", Announcement.status == "draft")
+                .order_by(Announcement.created_at.asc(), Announcement.id.asc())
+                .limit(50)
+                .all()
+            )
+            return {
+                "items": [_serialize_draft(s, a) for a in rows],
+                "can_approve": leader_updates.is_approver(user_id),
+            }
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@announcements_bp.post("/announcements/<int:announcement_id>/approve")
+async def approve_announcement(announcement_id: int):
+    """Approve a draft, applying any last edits in the same request, and
+    publish it (site, and Discord if the author asked for it)."""
+    user_id = current_user_id()
+    body = await json_body()
+
+    def _approve():
+        from services import leader_updates
+
+        with db_session() as s:
+            assert_superadmin(load_user(s, user_id))
+            if not leader_updates.is_approver(user_id):
+                abort_problem(403, "Not an approver", "Only the owner can approve site-wide posts.")
+            ann = (
+                s.query(Announcement)
+                .filter(Announcement.id == announcement_id)
+                .with_for_update()
+                .first()
+            )
+            if not ann or ann.scope_type != "global":
+                abort_problem(404, "Draft not found", f"No site-wide draft {announcement_id}.")
+            if ann.status != "draft":
+                abort_problem(409, "Not a draft", f"This post is already {ann.status}.")
+            if "title" in body or "body_md" in body:
+                title, body_md = _validate_input({
+                    "title": body.get("title", ann.title),
+                    "body_md": body.get("body_md", ann.body_md),
+                })
+                ann.title, ann.body_md = title, body_md
+            if "pinned" in body:
+                ann.pinned = bool(body["pinned"])
+            if "post_to_discord" in body:
+                ann.post_to_discord = bool(body["post_to_discord"])
+            leader_updates.publish_reviewed(s, ann, user_id)
+            payload = _serialize(ann, _author_name(s, ann.author_user_id))
+
+        try:
+            from services.realtime import publish_event
+
+            publish_event("announcement", "global", {
+                "id": payload["id"], "title": payload["title"], "scope_type": "global",
+                "group_id": None, "published_at": payload["published_at"],
+            })
+        except Exception:
+            pass
+        return payload
+
+    return private_no_store(jsonify(await asyncio.to_thread(_approve)))
 
 
 def _assert_can_edit(s, user_id, ann: Announcement):
@@ -356,6 +470,13 @@ async def update_announcement(announcement_id: int):
             if not ann:
                 abort_problem(404, "Announcement not found", f"No announcement {announcement_id}.")
             _assert_can_edit(s, user_id, ann)
+            if ann.scope_type == "global" and ann.status == "published":
+                from services import leader_updates
+
+                # An approved post stays as approved: only an approver edits it.
+                if not leader_updates.is_approver(user_id):
+                    abort_problem(403, "Not an approver",
+                                  "Only the owner can edit a published site-wide post.")
 
             if "title" in body:
                 title = (body.get("title") or "").strip()

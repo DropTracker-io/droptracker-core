@@ -12,10 +12,17 @@ choice and the sweep's markers are cleared, so within one sweep (10 minutes)
 the core bot hands it the Follows Updates role again. Meant for testing the
 default grant on a pilot account. Dry run unless ``--apply``.
 
+``draft`` is how agents and scripts propose a site-wide post. It can ONLY make
+a draft: the post waits in the review queue on /admin/announcements and the
+owner gets a DM. Nothing is public until the owner approves it there, and the
+owner can edit or cancel it first. Dry run unless ``--apply``.
+
 Usage:
     python scripts/leader_updates.py status
     python scripts/leader_updates.py forget 528746710042804247            # dry run
     python scripts/leader_updates.py forget 528746710042804247 --apply
+    python scripts/leader_updates.py draft --title "..." --body-file post.md \
+        [--discord] [--source "weekly roundup"] [--apply]
 """
 
 from __future__ import annotations
@@ -80,6 +87,34 @@ def _forget(discord_id: str, apply: bool) -> int:
     return 0
 
 
+def _draft(title: str, body_file: str, discord: bool, source: str, apply: bool) -> int:
+    title = (title or "").strip()
+    body = Path(body_file).read_text(encoding="utf-8").strip()
+    if not (1 <= len(title) <= 200) or not body:
+        print("title must be 1-200 characters and the body must not be empty")
+        return 2
+    where = "site + Discord" if discord else "site only"
+    print(f"title:   {title}")
+    print(f"source:  {source}")
+    print(f"targets: {where} (only once the owner approves it)")
+    print("-" * 60)
+    print(body)
+    print("-" * 60)
+    if not apply:
+        print("[dry run] re-run with --apply to put this in the owner's review queue.")
+        return 0
+    session = Session()
+    try:
+        ann = lu.create_review_draft(
+            session, title=title, body_md=body, post_to_discord=discord,
+            source_label=source, author_user_id=None,
+        )
+        print(f"draft {ann.id} is waiting for review at {lu.REVIEW_PATH}; the owner has been DMed.")
+    finally:
+        session.close()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -87,9 +122,17 @@ def main() -> int:
     forget = sub.add_parser("forget")
     forget.add_argument("discord_id")
     forget.add_argument("--apply", action="store_true")
+    draft = sub.add_parser("draft")
+    draft.add_argument("--title", required=True)
+    draft.add_argument("--body-file", required=True)
+    draft.add_argument("--discord", action="store_true", help="post to Discord too, once approved")
+    draft.add_argument("--source", default="agent", help="shown in the review queue")
+    draft.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     if args.cmd == "status":
         return _status()
+    if args.cmd == "draft":
+        return _draft(args.title, args.body_file, args.discord, args.source, args.apply)
     return _forget(args.discord_id, args.apply)
 
 

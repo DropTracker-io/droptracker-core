@@ -121,6 +121,12 @@ class Announcement(Base):
     # Discord syndication refs (§10.1/§10.2), written back by the bot.
     discord_message_id = Column(String(32), nullable=True)
     discord_channel_id = Column(String(32), nullable=True)
+    # Owner review for global posts (web129a): a draft waits for an approver;
+    # post_to_discord is applied only on approval.
+    post_to_discord = Column(Boolean, default=False, nullable=False)
+    source_label = Column(String(64), nullable=True)
+    reviewed_by = Column(Integer, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
