@@ -211,6 +211,28 @@ def _tasks_summary(session, event) -> Optional[str]:
         .filter(EventProgress.event_id == event.id, EventProgress.completed.is_(True))
         .count()
     )
+    # Repeatable tasks (utils.task_repeat) count every lap; laps below the cap
+    # leave ``completed`` unset, so they are added from the running totals.
+    from utils import task_repeat
+
+    kind = getattr(event, "kind", None) or "standard"
+    if task_repeat.event_allows(kind):
+        from db.models import EventTask
+
+        repeat_tasks = {
+            t.id: t for t in session.query(EventTask)
+            .filter(EventTask.event_id == event.id).all()
+            if task_repeat.is_repeatable(
+                task_repeat.repeat_cap(t.type, t.config, event_kind=kind))
+        }
+        if repeat_tasks:
+            for p in (session.query(EventProgress)
+                      .filter(EventProgress.task_id.in_(list(repeat_tasks))).all()):
+                t = repeat_tasks[p.task_id]
+                laps = task_repeat.rollup_completions(
+                    t.type, t.target_value, t.config, kind, p.progress, False)
+                # A capped rollup is already in ``completed`` once.
+                completed += max(laps - (1 if p.completed else 0), 0)
     parts = []
     if completed:
         parts.append(f"\U0001F4CB {completed} task completion{'s' if completed != 1 else ''}")

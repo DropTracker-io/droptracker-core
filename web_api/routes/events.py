@@ -130,6 +130,24 @@ def _ts(dt) -> int | None:
     return int(dt.timestamp()) if dt else None
 
 
+def _repeat_fields(task, ev, progress_row) -> dict:
+    """``completions`` (laps finished) for a repeatable task's progress row —
+    utils.task_repeat. Empty for ordinary tasks, so their payload is unchanged."""
+    if task is None:
+        return {}
+    from utils import task_repeat
+
+    kind = getattr(ev, "kind", None) or "standard"
+    if not task_repeat.is_repeatable(
+            task_repeat.repeat_cap(task.get("type"), task.get("config"), event_kind=kind)):
+        return {}
+    if progress_row is None:
+        return {"completions": 0}
+    return {"completions": task_repeat.rollup_completions(
+        task.get("type"), task.get("target_value"), task.get("config"), kind,
+        progress_row.progress, bool(progress_row.completed))}
+
+
 def _dt(unix) -> datetime | None:
     if unix is None:
         return None
@@ -921,6 +939,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
     # either — the team scores on the standings are the participant's view.
     progress_rows = (s.query(EventProgress).filter(EventProgress.event_id == ev.id).all()
                      if show_tasks else [])
+    tasks_by_id_for_repeat = {t["id"]: t for t in tasks}
     row_targets: dict = {}
     try:
         from services.event_engine import effective_threshold
@@ -943,6 +962,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
             "completed_at": _ts(p.completed_at),
             **({"target": row_targets[(p.task_id, p.team_id)]}
                if (p.task_id, p.team_id) in row_targets else {}),
+            **_repeat_fields(tasks_by_id_for_repeat.get(p.task_id), ev, p),
         }
         for p in progress_rows
     ]
@@ -1567,6 +1587,8 @@ async def get_event_team(event_id: int, team_id: int):
                     "progress": int(p.progress or 0) if p else 0,
                     "completed": bool(p.completed) if p else False,
                     "completed_at": _ts(p.completed_at) if p else None,
+                    **_repeat_fields({"type": t.type, "target_value": t.target_value,
+                                      "config": t.config}, ev, p),
                 })
             _attach_task_tiles(s, tasks)
 
@@ -1952,6 +1974,25 @@ async def get_event_teams(event_id: int):
                     .all()
                 )
             }
+            # A repeatable task below its cap is never "completed", but one
+            # with a lap behind it is done as far as this count goes.
+            from utils import task_repeat
+
+            ev_kind = getattr(ev, "kind", None) or "standard"
+            repeat_tasks = {
+                t.id: t for t in s.query(EventTask).filter(EventTask.event_id == event_id).all()
+                if task_repeat.is_repeatable(
+                    task_repeat.repeat_cap(t.type, t.config, event_kind=ev_kind))
+            } if task_repeat.event_allows(ev_kind) else {}
+            if repeat_tasks:
+                for p in (s.query(EventProgress)
+                          .filter(EventProgress.task_id.in_(list(repeat_tasks)),
+                                  EventProgress.completed.is_(False)).all()):
+                    t = repeat_tasks[p.task_id]
+                    if task_repeat.rollup_completions(
+                            t.type, t.target_value, t.config, ev_kind,
+                            p.progress, False):
+                        done_by_team[p.team_id] = done_by_team.get(p.team_id, 0) + 1
 
             # Items each team pulled to earn points (applied ledger, bucketed).
             items_by_team: dict[int, list] = {}
@@ -6709,7 +6750,24 @@ async def delete_task(event_id: int, task_id: int):
             # leave every team score standing.
             deltas: dict[int, int] = {}
             points = int(task.points or 0)
-            if points:
+            from utils import task_repeat
+
+            ev_kind = getattr(ev, "kind", None) or "standard"
+            if points and task_repeat.is_repeatable(
+                    task_repeat.repeat_cap(task.type, task.config, event_kind=ev_kind)):
+                # A repeatable task paid once per lap and may have paid laps
+                # without being "completed" (its cap not reached yet).
+                for p in (
+                    s.query(EventProgress)
+                    .filter(EventProgress.task_id == task_id)
+                    .all()
+                ):
+                    laps = task_repeat.rollup_completions(
+                        task.type, task.target_value, task.config, ev_kind,
+                        p.progress, bool(p.completed))
+                    if laps:
+                        deltas[p.team_id] = deltas.get(p.team_id, 0) + points * laps
+            elif points:
                 for p in (
                     s.query(EventProgress)
                     .filter(EventProgress.task_id == task_id,

@@ -175,6 +175,7 @@ def _fake_engine(monkeypatch, result=None):
     class _Eng:
         @staticmethod
         def recompute_task_rollups(s, ev, task, *, old_points=None,
+                                   old_task=None,
                                    rescreen_vestige_rings=False,
                                    rescreen_duplicate_pets=False):
             calls.append({"old_points": old_points, "task_id": task.id})

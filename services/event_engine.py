@@ -114,6 +114,7 @@ from utils import duplicate_pets as _dp
 from utils.event_window import (LATE_START_GRACE_SECONDS,  # noqa: F401 — re-exported
                                 effective_window_start)
 from utils import task_progress as _tp
+from utils import task_repeat as _tr
 from utils import vestige_rings as _vr
 
 # ── Redis keys / channels ─────────────────────────────────────────────────────
@@ -803,6 +804,15 @@ def completion_threshold(task: dict) -> int:
         return 1
 
 
+def repeat_cap(event: Optional[dict], task: dict) -> Optional[int]:
+    """How many times one team may complete ``task`` (utils.task_repeat):
+    1 for an ordinary task, N for a repeatable one capped at N, None for
+    unlimited. ``event`` may be None where only the task is known — the
+    event-kind gate is then skipped."""
+    kind = (event.get("kind") or "standard") if event is not None else None
+    return _tr.repeat_cap(task.get("type"), task.get("config"), event_kind=kind)
+
+
 def effective_threshold(session, task: dict, team_id) -> int:
     """:func:`completion_threshold`, resolving ``whole_team`` pb tasks against
     the team's actual roster: explicit ``EventTeamMember`` rows, else — for
@@ -1055,6 +1065,18 @@ def pending_projection(session, task: dict, team_id) -> Optional[dict]:
             )
         applied = _fold(applied_rows)
         projected = applied + _fold(pending_rows)
+        cap = repeat_cap(None, task)
+        if _tr.is_repeatable(cap):
+            # "Confirming would finish ANOTHER lap" — a repeatable task's
+            # running total is past the threshold after its first lap.
+            return {
+                "applied": applied,
+                "projected": projected,
+                "pending_count": len(pending_rows),
+                "pending_complete": (
+                    _tr.completion_count(projected, threshold, False, cap)
+                    > _tr.completion_count(applied, threshold, False, cap)),
+            }
     return {
         "applied": applied,
         "projected": projected,
@@ -5047,6 +5069,13 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     # whole_team pb thresholds depend on the team's roster — resolve once and
     # use it for the completion decision AND every frame/payload target.
     threshold = effective_threshold(session, task, team_id)
+    # Repeatable tasks (utils.task_repeat): progress keeps running past the
+    # threshold and each whole multiple is another completion. ``completed``
+    # only flips once the cap is reached (never, when unlimited).
+    cap = repeat_cap(event, task)
+    repeatable = _tr.is_repeatable(cap)
+    prev_count = _tr.completion_count(previous_progress, threshold,
+                                      already_completed, cap)
     if _pb_distinct_players(task):
         # Distinct-player semantics: a grinder re-beating the time is still
         # one player; recompute from the applied ledger like all_of items.
@@ -5073,8 +5102,14 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         "target": threshold,
     }
 
-    newly_completed = (not already_completed
-                       and progress.progress >= threshold)
+    if repeatable:
+        new_count = _tr.completion_count(progress.progress, threshold, False, cap)
+        result["completions"] = new_count
+        result["completed"] = _tr.is_maxed(new_count, cap)
+    else:
+        new_count = 1 if (already_completed or progress.progress >= threshold) else 0
+    gained = new_count - prev_count
+    newly_completed = not already_completed and gained > 0
     if not newly_completed:
         # Once completed, further ledger rows still record but don't
         # re-complete or re-score.
@@ -5084,26 +5119,34 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
             if player_name:
                 frame["player_name"] = player_name
             _publish(event["id"], frame)
+            # Milestones are measured inside the current lap of a
+            # repeatable task (50% of the NEXT 100k), not on the running total.
+            base = prev_count * threshold if repeatable else 0
             _maybe_enqueue_progress(
                 session, event, task, team_id, player_id, player_name,
-                previous_progress, int(progress.progress or 0),
+                previous_progress - base, int(progress.progress or 0) - base,
                 proof_url=completion.proof_url,
                 matched_target=completion.matched_target,
                 threshold=threshold)
         return result
 
-    progress.completed = True
+    if not repeatable or _tr.is_maxed(new_count, cap):
+        progress.completed = True
     progress.completed_at = datetime.now()
     result["kind"] = "completion"
-    # Effort freeze (Bingo EHB): the NPCs feeding this task stop accruing once
-    # every task they feed is done for this team. Written through immediately
-    # so the farm that continues right after a tile completes doesn't score;
-    # the set is rebuilt from EventProgress on each state load, which is what
-    # makes a later revoke un-freeze it.
-    mark_task_done(redis_conn, event["id"], team_id, task["id"])
+    if progress.completed:
+        # Effort freeze (Bingo EHB): the NPCs feeding this task stop accruing
+        # once every task they feed is done for this team. Written through
+        # immediately so the farm that continues right after a tile completes
+        # doesn't score; the set is rebuilt from EventProgress on each state
+        # load, which is what makes a later revoke un-freeze it. A repeatable
+        # task is only "done" at its cap — until then the farm still counts.
+        mark_task_done(redis_conn, event["id"], team_id, task["id"])
 
     team_score = None
-    points = int(task.get("points") or 0)
+    points_each = int(task.get("points") or 0)
+    # One big drop can finish several laps of a repeatable task at once.
+    points = points_each * gained
     # Leader BEFORE any of this apply's score writes — the task's own points
     # here AND the bingo line/blackout bonuses _complete_bingo_cells awards
     # below. Compared once at the end (_announce_lead_change): comparing around
@@ -5125,16 +5168,20 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     if team_score is not None:
         result["team_score"] = team_score
 
-    new_cells = _complete_bingo_cells(
+    # A tile / board turn is finished by the FIRST completion only (repeat
+    # laps never reach these kinds, but the guard keeps that true by code).
+    first_completion = prev_count == 0
+    new_cells = (_complete_bingo_cells(
         session, event, task, team_id, player_id, cells or [],
-        player_name=player_name)
+        player_name=player_name) if first_completion else [])
     session.flush()
 
     # Board-game turn side-effects (web44a): coins, awaiting_roll, and — in
     # auto-trigger mode — the dice roll itself. Same transaction; a board
     # failure must not lose the completion, hence the broad guard.
     board = None
-    if event.get("kind") == "board_game" and team_id is not None:
+    if (event.get("kind") == "board_game" and team_id is not None
+            and first_completion):
         try:
             from services.boardgame_engine import handle_board_completion
 
@@ -5189,11 +5236,17 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
     # over the line — the completion message folds them all in, and the
     # task's points are split across them by net contribution share.
     contributors = _task_contributors(session, task["id"], team_id)
-    _award_contribution_points(session, event, task, team_id, contributors, points)
+    # Shares cover everything the task has paid so far: every lap of a
+    # repeatable task, split by each player's share of the running total.
+    _award_contribution_points(session, event, task, team_id, contributors,
+                               points_each * new_count)
 
     notification = {
         "task_id": task["id"],
-        "task_label": task.get("label"),
+        # "Acquire 100k gp from Zulrah (×3)" from the second lap on — every
+        # renderer (Discord embed + layouts, in-game popup) reads this label.
+        "task_label": (f"{task.get('label') or 'Task'}{_tr.repeat_suffix(new_count)}"
+                       if repeatable else task.get("label")),
         "team_id": team_id,
         "player_id": player_id,
         "player_name": player_name,
@@ -5205,6 +5258,9 @@ def apply_ledger_row(session, redis_conn, event: dict, task: dict, completion,
         "proof_url": completion.proof_url,
         "contributors": contributors,
     }
+    if repeatable:
+        notification["completions"] = new_count
+        notification["max_completions"] = cap
     # Manual awards carry the organizer's reason — surface it so the
     # completion message can say WHY credit was granted, not just "manual".
     _note = display_note(completion.note)
@@ -6089,7 +6145,15 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
                 .first())
     was_completed = bool(progress.completed) if progress is not None else False
     threshold = effective_threshold(session, task, team_id)
-    now_completed = new_progress >= threshold if new_progress > 0 else False
+    cap = repeat_cap(event, task)
+    old_count = _tr.completion_count(
+        progress.progress if progress is not None else 0, threshold,
+        was_completed, cap)
+    if _tr.is_repeatable(cap):
+        new_count = _tr.completion_count(new_progress, threshold, False, cap)
+    else:
+        new_count = 1 if (new_progress > 0 and new_progress >= threshold) else 0
+    now_completed = _tr.is_maxed(new_count, cap)
     if progress is None:
         if new_progress <= 0:
             return {"progress": 0, "completed": False, "team_score": None}
@@ -6098,25 +6162,27 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         session.add(progress)
     progress.progress = new_progress
     progress.completed = now_completed
-    if not now_completed:
+    if not new_count:
         progress.completed_at = None
 
     team_score = None
     points = int(task.get("points") or 0)
-    if points and team_id is not None and was_completed != now_completed:
+    # A repeatable task pays per lap, so a revoke takes back exactly the laps
+    # the surviving ledger no longer reaches (0, 1 or several).
+    if points and team_id is not None and new_count != old_count:
         team = (session.query(EventTeam).filter(EventTeam.id == team_id)
                 .with_for_update().first())  # P0-7: locked score RMW
         if team is not None:
-            team.score = int(team.score or 0) + (points if now_completed else -points)
+            team.score = int(team.score or 0) + points * (new_count - old_count)
             team_score = team.score
 
     # Keep per-player contribution points honest: still complete → shares are
     # redistributed over the surviving ledger; no longer complete → deleted.
-    if now_completed:
+    if new_count:
         _award_contribution_points(
             session, event, task, team_id,
-            _task_contributors(session, task["id"], team_id), points)
-    elif was_completed:
+            _task_contributors(session, task["id"], team_id), points * new_count)
+    elif old_count:
         from db.models import EventPlayerPoints
         (session.query(EventPlayerPoints)
          .filter(EventPlayerPoints.task_id == task["id"],
@@ -6151,6 +6217,8 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
         "team_id": team_id, "progress": new_progress, "target": threshold,
         "completed": now_completed,
     }
+    if _tr.is_repeatable(cap):
+        frame["completions"] = new_count
     if team_score is not None:
         frame["team_score"] = team_score
     if revoked_bonuses:
@@ -6159,8 +6227,11 @@ def revoke_ledger_row(session, completion) -> Optional[dict]:
     # After the points unwind AND the bonus unwind above.
     _announce_lead_change(session, event, lead_before, completion.player_id,
                           reason="revoke", extra=lead_extra)
-    return {"progress": new_progress, "completed": now_completed,
-            "team_score": team_score, "revoked_bonuses": revoked_bonuses}
+    out = {"progress": new_progress, "completed": now_completed,
+           "team_score": team_score, "revoked_bonuses": revoked_bonuses}
+    if _tr.is_repeatable(cap):
+        out["completions"] = new_count
+    return out
 
 
 # Marks a ledger row that a vestige_rings switch-off took back, so switching it
@@ -6356,8 +6427,53 @@ def _rescreen_duplicate_pet_credits(session, task: dict) -> dict:
     return {"restored": restored}
 
 
+def sync_repeat_flags(session, event_row, task_row, old_task: dict) -> dict:
+    """Re-derive only the ``completed`` flags after a live edit flipped a
+    task's repeat setting under ``retro='keep'``. No score, progress or ledger
+    is touched — the laps already paid stand — but the flag must follow the
+    new rule, or the record gate stays shut on a task that was just made
+    repeatable (and stays open on one that just stopped repeating).
+
+    Turning repeat ON: a rollup is done only once it reaches the new cap.
+    Turning it OFF: any rollup that completed at least one lap is done.
+    Returns ``{team_id: completed}`` for the flags that changed."""
+    from db.models import EventProgress
+
+    event = _event_to_dict(event_row)
+    task = _task_to_dict(task_row)
+    before = {"type": old_task.get("type") or task.get("type"),
+              "target_value": old_task.get("target_value"),
+              "config": parse_task_config(old_task.get("config"))}
+    old_cap, new_cap = repeat_cap(event, before), repeat_cap(event, task)
+    if old_cap == new_cap:
+        return {}
+    old_threshold = completion_threshold(before)
+    changed: dict = {}
+    for progress in (session.query(EventProgress)
+                     .filter(EventProgress.task_id == task["id"])
+                     .order_by(EventProgress.team_id.asc())
+                     .with_for_update().all()):
+        was = bool(progress.completed)
+        laps = _tr.completion_count(progress.progress, old_threshold, was, old_cap)
+        if _tr.is_repeatable(new_cap):
+            threshold = effective_threshold(session, task, progress.team_id)
+            now = _tr.is_maxed(
+                _tr.completion_count(progress.progress, threshold, False, new_cap),
+                new_cap)
+        else:
+            now = laps >= 1
+        if now != was:
+            progress.completed = now
+            if now and progress.completed_at is None:
+                progress.completed_at = datetime.now()
+            changed[progress.team_id] = now
+    session.flush()
+    return changed
+
+
 def recompute_task_rollups(session, event_row, task_row, *,
                            old_points: Optional[int] = None,
+                           old_task: Optional[dict] = None,
                            preserve_completed: bool = False,
                            rescreen_vestige_rings: bool = False,
                            rescreen_duplicate_pets: bool = False) -> dict:
@@ -6376,6 +6492,12 @@ def recompute_task_rollups(session, event_row, task_row, *,
     ``old_points``: the task's points value BEFORE the edit — when provided
     and a rollup STAYS completed, the team score absorbs the (new − old)
     delta so past awards match the new value.
+
+    ``old_task``: the task's ``type``/``target_value``/``config`` BEFORE the
+    edit. A repeatable task pays once per lap and the lap count is derived
+    from the stored progress against the goal, so the laps already paid must
+    be counted against the OLD goal and repeat setting. Omitted = the goal is
+    unchanged (the task row as it stands now).
 
     ``preserve_completed``: a rollup that is ALREADY completed stays completed
     even if the surviving ledger no longer reaches the threshold. For retro
@@ -6462,6 +6584,15 @@ def recompute_task_rollups(session, event_row, task_row, *,
 
     new_points = int(task.get("points") or 0)
     is_sweep = _list_kind(task) == "loot_sweep"
+    new_cap = repeat_cap(event, task)
+    if old_task is not None:
+        before = {"type": old_task.get("type") or task.get("type"),
+                  "target_value": old_task.get("target_value"),
+                  "config": parse_task_config(old_task.get("config"))}
+    else:
+        before = task
+    old_cap = repeat_cap(event, before)
+    old_threshold = completion_threshold(before)
     teams_summary: dict = {}
     # One snapshot for the whole re-fold (every team's delta plus the bonus
     # reconcile below), compared once at the end — a live task edit that moves
@@ -6516,13 +6647,21 @@ def recompute_task_rollups(session, event_row, task_row, *,
 
         new_progress = _derive_applied_progress(session, task, team_id)
         threshold = effective_threshold(session, task, team_id)
-        now_completed = new_progress >= threshold if new_progress > 0 else False
+        old_count = _tr.completion_count(
+            progress.progress if progress is not None else 0,
+            old_threshold if _tr.is_repeatable(old_cap) else threshold,
+            was_completed, old_cap)
+        if _tr.is_repeatable(new_cap):
+            new_count = _tr.completion_count(new_progress, threshold, False, new_cap)
+        else:
+            new_count = 1 if (new_progress > 0 and new_progress >= threshold) else 0
         if preserve_completed and was_completed:
             # Post-completion credit was never recorded, so the surviving
             # ledger cannot prove the task is still finished — and cannot
             # disprove it either. Hold the flag; score, bingo cells and bonuses
             # then stay untouched while progress/contributions are corrected.
-            now_completed = True
+            new_count = max(new_count, old_count, 1)
+        now_completed = _tr.is_maxed(new_count, new_cap)
         if progress is None:
             if new_progress <= 0:
                 continue
@@ -6531,7 +6670,7 @@ def recompute_task_rollups(session, event_row, task_row, *,
             session.add(progress)
         progress.progress = new_progress
         progress.completed = now_completed
-        if now_completed and not was_completed:
+        if new_count and not old_count:
             # Honest timeline: when the surviving ledger last advanced, not
             # "when an admin edited the goal".
             last = (session.query(EventCompletion.created_at)
@@ -6541,15 +6680,14 @@ def recompute_task_rollups(session, event_row, task_row, *,
                     .order_by(EventCompletion.created_at.desc())
                     .first())
             progress.completed_at = (last[0] if last and last[0] else datetime.now())
-        elif not now_completed:
+        elif not new_count:
             progress.completed_at = None
 
-        score_delta = 0
-        if was_completed != now_completed and new_points:
-            score_delta += new_points if now_completed else -new_points
-        elif (was_completed and now_completed and old_points is not None
-              and int(old_points) != new_points):
-            score_delta += new_points - int(old_points)
+        # What the team was paid (laps x the OLD points) vs what the ledger is
+        # worth now (laps x the NEW points). For an ordinary task that is the
+        # usual 0/1 completion flip plus a points re-price when it stays done.
+        paid_each = int(old_points) if old_points is not None else new_points
+        score_delta = new_points * new_count - paid_each * old_count
         team_score = None
         if score_delta:
             if announce_lead and lead_before is _NO_LEAD_SNAPSHOT:
@@ -6561,13 +6699,14 @@ def recompute_task_rollups(session, event_row, task_row, *,
                 team_score = team.score
 
         # Per-player contribution points follow the completed flag (Task 18
-        # semantics): complete → idempotent rewrite at the NEW points value;
-        # no longer complete → rows deleted.
-        if now_completed:
+        # semantics): complete → idempotent rewrite at the NEW points value
+        # (every lap of a repeatable task); no longer complete → rows deleted.
+        if new_count:
             _award_contribution_points(
                 session, event, task, team_id,
-                _task_contributors(session, task["id"], team_id), new_points)
-        elif was_completed:
+                _task_contributors(session, task["id"], team_id),
+                new_points * new_count)
+        elif old_count:
             (session.query(EventPlayerPoints)
              .filter(EventPlayerPoints.task_id == task["id"],
                      EventPlayerPoints.team_id == team_id)
@@ -6598,6 +6737,9 @@ def recompute_task_rollups(session, event_row, task_row, *,
             "completed": now_completed, "was_completed": was_completed,
             "score_delta": score_delta, "team_score": team_score,
         }
+        if _tr.is_repeatable(new_cap) or _tr.is_repeatable(old_cap):
+            teams_summary[team_id]["completions"] = new_count
+            teams_summary[team_id]["was_completions"] = old_count
 
     session.flush()
     # One event-wide bonus reconcile: unwinds lines the new state no longer
@@ -6623,6 +6765,8 @@ def recompute_task_rollups(session, event_row, task_row, *,
             if "progress" in entry:
                 frame["progress"] = entry["progress"]
                 frame["completed"] = entry["completed"]
+            if "completions" in entry:
+                frame["completions"] = entry["completions"]
             if "target" in entry:
                 frame["target"] = entry["target"]
             if team_id in scores:

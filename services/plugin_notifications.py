@@ -1006,8 +1006,26 @@ def compose_event_state(session, player_id) -> dict:
             targets = {t.id: max(int(t.target_value or 0), 1) for t in task_rows}
             for task_id, state in progress_by_task.items():
                 state["progress"] = state["progress"] % targets.get(task_id, 1)
+        # Repeatable tasks (utils.task_repeat): the running total keeps going
+        # past the target, so show progress toward the NEXT lap, the laps
+        # done so far, and count a task with a lap behind it as done.
+        from utils import task_repeat
+
+        repeat_laps: dict = {}
+        for t in task_rows:
+            cap = task_repeat.repeat_cap(t.type, t.config, event_kind=event.kind)
+            state = progress_by_task.get(t.id)
+            if not task_repeat.is_repeatable(cap) or state is None:
+                continue
+            lap = task_repeat.lap_threshold(t.type, t.target_value, t.config)
+            laps = task_repeat.completion_count(state["progress"], lap, False, cap)
+            repeat_laps[t.id] = laps
+            state["completions"] = laps
+            state["progress"] = int(task_repeat.cycle_progress(
+                state["progress"], lap, laps, cap))
         tasks_total = len(task_rows)
-        tasks_completed = sum(1 for p in progress_rows if p.completed)
+        tasks_completed = sum(1 for p in progress_rows
+                              if p.completed or repeat_laps.get(p.task_id))
         tiles = _batch_task_tiles(session, task_rows)
         # Counts stay either way — "3 of 25 done" gives nothing away.
         blind = tasks_kept_to_admins(event)

@@ -15,7 +15,7 @@ import json
 import os
 
 from db import ItemList, NpcList
-from utils import duplicate_pets, vestige_rings
+from utils import duplicate_pets, task_repeat, vestige_rings
 from utils.task_progress import DISTINCT_ITEM_KINDS
 from web_api.common import abort_problem
 from web_api.routes.npc_source_aliases import expand_source_names
@@ -1597,6 +1597,22 @@ def validate_task_payload(s, body: dict) -> dict:
     if duplicate_pets_flag is not None and not isinstance(duplicate_pets_flag, bool):
         abort_problem(422, "Invalid config",
                       f"'{duplicate_pets.CONFIG_KEY}' must be true or false.")
+    # Repeatable task (utils.task_repeat): popped before the per-type branches
+    # rebuild config, folded back in at the end once the final shape is known.
+    repeat_flag = config.pop(task_repeat.CONFIG_KEY, None) if config else None
+    repeat_max = config.pop(task_repeat.MAX_KEY, None) if config else None
+    if repeat_flag is not None and not isinstance(repeat_flag, bool):
+        abort_problem(422, "Invalid config",
+                      f"'{task_repeat.CONFIG_KEY}' must be true or false.")
+    if repeat_max is not None and (
+            not isinstance(repeat_max, int) or isinstance(repeat_max, bool)
+            or not (task_repeat.MIN_MAX_COMPLETIONS <= repeat_max
+                    <= task_repeat.MAX_MAX_COMPLETIONS)):
+        abort_problem(
+            422, "Invalid repeat limit",
+            "The most times a task can be completed must be a whole number "
+            f"from {task_repeat.MIN_MAX_COMPLETIONS} to "
+            f"{task_repeat.MAX_MAX_COMPLETIONS:,}, or empty for no limit.")
     if config == {}:
         config = None
 
@@ -1880,6 +1896,18 @@ def validate_task_payload(s, body: dict) -> dict:
             and duplicate_pets_flag != duplicate_pets.default_for(ttype)
             and duplicate_pets.has_pet_goal(ttype, config)):
         config = {**(config or {}), duplicate_pets.CONFIG_KEY: duplicate_pets_flag}
+    if repeat_flag is True:
+        if not task_repeat.eligible(ttype, config):
+            abort_problem(
+                422, "Can't repeat this task",
+                "Only tasks that count up can repeat: an item or any-of list, "
+                "points from a list, kills, XP gained, loot value, pets, combat "
+                "achievements, slayer tasks, kills under a time, or a manual "
+                "task. Sets, groups, either-or tasks, levels and "
+                "unique-player goals finish once.")
+        config = {**(config or {}), task_repeat.CONFIG_KEY: True}
+        if repeat_max is not None:
+            config[task_repeat.MAX_KEY] = repeat_max
     config = {**(config or {}), **passthrough} or None
     serialized = json.dumps(config) if config else None
     # web_event_tasks.config is a MySQL TEXT column (~64KB). A pathological

@@ -761,7 +761,14 @@ async def award_completion(event_id: int):
                         "This task is already complete for that team — "
                         "nothing to mark.")
                 done = int(current.progress or 0) if current else 0
-                quantity = max(threshold - done, 1)
+                # Repeatable task: "complete" means the NEXT lap — fill up to
+                # the following multiple of the threshold.
+                from utils import task_repeat
+
+                cap = eng.repeat_cap(eng._event_to_dict(ev), eng._task_to_dict(task))
+                laps = (task_repeat.completion_count(done, threshold, False, cap)
+                        if task_repeat.is_repeatable(cap) else 0)
+                quantity = max((laps + 1) * threshold - done, 1)
             from services import event_credit_receipt
 
             receipt_task = eng._task_to_dict(task)
@@ -1078,6 +1085,11 @@ async def update_task(event_id: int, task_id: int):
                     s.flush()  # the engine re-reads the task row post-edit
                     recompute_summary = _engine().recompute_task_rollups(
                         s, ev, task, old_points=_before_task["points"],
+                        # Laps a repeatable task already paid are counted
+                        # against the goal + repeat setting they were paid under.
+                        old_task={"type": task.type,
+                                  "target_value": _before_task["target_value"],
+                                  "config": _before_task["config"]},
                         # A flipped "Gold rings count as vestiges" switch also
                         # takes back (or restores) the ring credits themselves.
                         rescreen_vestige_rings=(
@@ -1089,6 +1101,24 @@ async def update_task(event_id: int, task_id: int):
                             duplicate_pets.duplicates_count(task.type, _before_task["config"])
                             != duplicate_pets.duplicates_count(task.type, _after_task["config"])))
 
+            from utils import task_repeat
+
+            ev_kind = getattr(ev, "kind", None) or "standard"
+            repeat_flags = None
+            if (scoring_affecting and _effective_status(ev) == "active"
+                    and recompute_summary is None and not forward_only
+                    and task_repeat.repeat_cap(task.type, _before_task["config"],
+                                               event_kind=ev_kind)
+                    != task_repeat.repeat_cap(task.type, task.config,
+                                              event_kind=ev_kind)):
+                # "keep" leaves scores alone, but a flipped repeat setting must
+                # still move the completed flags: a task just made repeatable
+                # would otherwise stay shut at its first completion.
+                repeat_flags = _engine().sync_repeat_flags(
+                    s, ev, task, {"type": task.type,
+                                  "target_value": _before_task["target_value"],
+                                  "config": _before_task["config"]}) or None
+
             if _after_task != _before_task:
                 # Record the edit — and, on a live event, the maker's retro
                 # choice + per-team score deltas — so the audit log can explain
@@ -1097,6 +1127,8 @@ async def update_task(event_id: int, task_id: int):
                 if scoring_affecting and _effective_status(ev) == "active":
                     after_payload["retro"] = retro or (
                         "forward_only" if forward_only else "none")
+                if repeat_flags:
+                    after_payload["repeat_flags"] = repeat_flags
                 if recompute_summary is not None:
                     after_payload["recompute"] = recompute_summary["teams"]
                     if recompute_summary.get("vestige_rings"):
