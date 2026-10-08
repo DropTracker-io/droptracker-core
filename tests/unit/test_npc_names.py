@@ -86,6 +86,10 @@ def test_encounter_members_rewrite_to_the_encounter_name():
     # npc_list rows (7851 / 13960), so every GG kill split across two ids until
     # this was added (2026-08-03).
     assert canonical_encounter_name("Dusk") == "Grotesque Guardians"
+    # The stray "NPC Reward pool (Tempoross)" row: a manual submission that
+    # picked it missed every event task scoped to the reward pool (2026-10-08).
+    assert canonical_encounter_name("NPC Reward pool (Tempoross)") == "Reward pool (Tempoross)"
+    assert npc_match_key("NPC Reward pool (Tempoross)") == npc_match_key("Reward pool (Tempoross)")
     # Non-members and empties pass through untouched.
     assert canonical_encounter_name("Vorkath") == "Vorkath"
     assert canonical_encounter_name("The Gauntlet") == "The Gauntlet"

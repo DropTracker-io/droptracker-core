@@ -55,6 +55,10 @@ NPC_ALIASES = {
     "mta": "mage-training-arena",
     "agility-pyramid-laps": "agility-pyramid",
     "trawling": "deep-sea-trawling",
+    # Stray catalogue row 13952 "NPC Reward pool (Tempoross)" (ticket #456).
+    # It collapses into the real reward pool in NPC pickers so it can't be
+    # chosen as a manual-submission source.
+    "npc-reward-pool-tempoross": "reward-pool-tempoross",
 }
 
 #: Multi-boss encounters where the plugin/source may name the individual boss
@@ -80,6 +84,9 @@ ENCOUNTER_NAME_ALIASES = {
     # canonicalization only reached one of those paths before v5.4.0, the same
     # kill was submitted twice under two different names.
     "Dusk": "Grotesque Guardians",
+    # A manual submission that picked the stray row stored its drop on 13952,
+    # and event tasks scoped to the reward pool never matched it.
+    "NPC Reward pool (Tempoross)": "Reward pool (Tempoross)",
 }
 
 #: ``ENCOUNTER_NAME_ALIASES`` keyed by slug, so a source that disagrees on
