@@ -131,3 +131,75 @@ class TestNormalPassExclusion:
         body = source.split("def main(", 1)[1]
         # Once for the --partials-only branch, once in the normal path.
         assert body.count("_run_partials(") >= 2
+
+
+class TestKcSessionRate:
+    """``kc_sessions`` measures fast monsters from the loot kill count.
+
+    ``drop_gaps`` merges kills under 10s apart into one and discards gaps under
+    15s, so it can never publish more than 240/h: on 2026-10-08 that priced
+    Hobgoblins at 170.6/h against a measured 848/h, inflating EHE ~5x.
+    """
+
+    @staticmethod
+    def _rows(start_kc, count, every_s, start=None):
+        from datetime import datetime, timedelta
+
+        start = start or datetime(2026, 10, 1, 12, 0, 0)
+        return [(start_kc + i, start + timedelta(seconds=i * every_s))
+                for i in range(count)]
+
+    def test_measures_rates_far_above_the_drop_gaps_ceiling(self, rates_script):
+        # One kill every 4s for 20 minutes = 900/h, nearly 4x what drop_gaps
+        # can ever report.
+        kills, seconds = rates_script.kc_session_rate(self._rows(1, 301, 4))
+        assert round(kills * 3600 / seconds) == 900
+
+    def test_a_break_splits_the_session_and_is_not_billed(self, rates_script):
+        from datetime import timedelta
+
+        first = self._rows(1, 151, 4)
+        later = self._rows(151, 151, 4, start=first[-1][1] + timedelta(hours=2))
+        kills, seconds = rates_script.kc_session_rate(first + later)
+        assert round(kills * 3600 / seconds) == 900
+        assert seconds == 2 * 600
+
+    def test_kills_without_a_reported_drop_still_count(self, rates_script):
+        # Every 3rd kill reported: the kc step covers the unreported ones.
+        rows = [(kc, t) for kc, t in self._rows(1, 301, 4) if kc % 3 == 1]
+        kills, seconds = rates_script.kc_session_rate(rows)
+        assert round(kills * 3600 / seconds) == 900
+
+    def test_short_sessions_and_counter_jumps_are_ignored(self, rates_script):
+        assert rates_script.kc_session_rate(self._rows(1, 60, 4)) is None
+        # A huge kc jump is a different counter, not 5000 kills in 4 seconds.
+        rows = self._rows(1, 151, 4)
+        rows += self._rows(5000, 151, 4, start=rows[-1][1])
+        kills, seconds = rates_script.kc_session_rate(rows)
+        assert round(kills * 3600 / seconds) == 900
+
+    def test_no_rows_is_no_rate(self, rates_script):
+        assert rates_script.kc_session_rate([]) is None
+
+    def test_ceiling_admits_measured_four_figure_rates(self, rates_script):
+        # H.A.M. Member pickpocketing measured 2125/h; 400 dropped it.
+        assert rates_script.RATE_MAX_KPH >= 2200
+
+
+class TestBankedRewards:
+    def test_bankable_reward_sources_skip_kc_sessions(self, rates_script):
+        for name in ("Reward pool (Tempoross)", "Reward cart (Wintertodt)",
+                     "Guardians of the Rift", "Opulent salvage",
+                     "Brimstone Chest", "Supply crate (Wintertodt)"):
+            assert rates_script.is_banked_reward(name), name
+
+    def test_monsters_are_not_banked_rewards(self, rates_script):
+        # "chest" must match as a word: Barrelchest is a boss.
+        for name in ("Hobgoblin", "Barrelchest", "H.A.M. Member", None):
+            assert not rates_script.is_banked_reward(name), name
+
+    def test_banked_guard_runs_before_kc_sessions(self):
+        source = (REPO_ROOT / "scripts/compute_npc_ehb_rates.py").read_text()
+        body = source.split("def main(", 1)[1]
+        assert "not is_banked_reward(name)" in body
+        assert body.index("_kc_sessions_rate(") < body.index("_drop_gaps_rate(")

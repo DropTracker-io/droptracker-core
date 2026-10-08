@@ -19,8 +19,33 @@ in fidelity order:
     40, grotesque 36.8 vs 37):
     WOM's "efficient" rates match in-fight kill cadence.
 
+``kc_sessions``
+    For NPCs the plugin doesn't time, measured from the loot kill count every
+    drop carries. Per player: walk drops in kill-count order, split into
+    sessions at any idle gap over ``SESSION_BREAK_SECONDS`` (or a kill-count
+    step that is backwards or implausibly large), keep sessions of at least
+    ``MIN_SESSION_SECONDS`` / ``MIN_SESSION_KILLS``, and take total kills over
+    total session time. Published rate is the p90 across players, same
+    convention as ``drop_gaps``. Calibrated 2026-10-08 against 16 WOM-priced
+    bosses: 0.64-0.92 of WOM (Vorkath 0.91, Hydra 0.92, Cerberus 0.87, Kraken
+    0.81), never above it.
+
+    Kill counts are what make this work for fast monsters. Drop timing alone
+    cannot tell one kill from the next once kills land within
+    ``BURST_SECONDS`` of each other, and ``MIN_GAP_SECONDS`` throws away any
+    gap shorter than 15s, so ``drop_gaps`` can never publish more than
+    3600/15 = 240 kills/hour. On 2026-10-08 that held every slayer and
+    low-level monster at 120-200/h: Hobgoblin was priced at 170.6/h against a
+    measured 848/h (one event player sustained 830-900/h for four sessions,
+    and booked ~33 EHE hours for ~6.5h of play). Pickpocket targets were off
+    by up to 18x.
+
+    Not used for :data:`BANKED_REWARD_TOKENS` NPCs, see there.
+
 ``drop_gaps``
-    For bosses the plugin doesn't time (Zalcano). Per player: collapse drops
+    Last resort, for NPCs whose drops carry no usable kill count. NOTE: it
+    cannot measure anything faster than ~240/h (see ``kc_sessions``).
+    Per player: collapse drops
     within ``BURST_SECONDS`` into one kill event (a kill's multi-item loot
     arrives as one burst — this is what keeps loot-events from counting as
     kills), take the median gap between events (gaps bounded to
@@ -72,6 +97,7 @@ Usage
 """
 
 import argparse
+import re
 import statistics
 import sys
 from datetime import datetime
@@ -103,15 +129,41 @@ GAPS_PERCENTILE = 90
 GAPS_WINDOW_DAYS = 30
 GAPS_MAX_PLAYERS = 200
 
+# ── kc_sessions ──────────────────────────────────────────────────────────────
+#: Idle time that ends a session (bank trip, break, logout).
+SESSION_BREAK_SECONDS = 300
+#: A session must be at least this long, with this many kills, to count —
+#: short bursts overstate a sustainable rate.
+MIN_SESSION_SECONDS = 600
+MIN_SESSION_KILLS = 10
+#: A kill-count step bigger than this inside one session is a counter
+#: discontinuity (a different counter, a reset), not kills — start a new one.
+MAX_KC_STEP = 50
+#: Fewest qualifying players to trust the cross-player percentile.
+SESSIONS_MIN_PLAYERS = 15
+
+#: Reward "NPCs" whose kill count counts loot OPENINGS that a player can bank
+#: and open in bulk (reward permits, cart rewards, rift searches, salvage,
+#: keyed chests). kc_sessions would measure how fast a stack is opened, not how
+#: fast one is earned. These keep the drop_gaps estimate until they get their
+#: own model (the clue tiers needed the same treatment, see
+#: services/event_effort.CLUE_TIERS). Matched as whole words against the name.
+BANKED_REWARD_TOKENS = (
+    "reward pool", "reward cart", "supply crate", "salvage",
+    "guardians of the rift", "chest", "lockbox", "offerings",
+)
+
 #: Never derive a rate for clue pseudo-NPCs: stacked caskets opened in bulk
 #: give a meaningless cadence, and clue sources are excluded from effort.
 CLUE_NAME_TOKENS = ("clue scroll", "casket")
 
-#: Sanity bounds on any published rate (kills/hour). Nothing in OSRS is
-#: legitimately killed 4-figure times an hour; sub-1 rates price a single
-#: kill at over an hour of EHB, which overstates more than it informs.
+#: Sanity bounds on any published rate (kills/hour). The ceiling is NOT 400:
+#: fast monsters and pickpocket targets genuinely run 4 figures an hour
+#: (measured 2026-10-08: Hill Giant 914, Goblin 1754, H.A.M. Member 2125).
+#: Sub-1 rates price a single kill at over an hour of EHB, which overstates
+#: more than it informs.
 RATE_MIN_KPH = 1.0
-RATE_MAX_KPH = 400.0
+RATE_MAX_KPH = 3000.0
 
 
 def _pct(sorted_vals, p):
@@ -161,6 +213,78 @@ def _pb_median_rate(session, npc_id):
     if len(times) < PB_MIN_SAMPLES:
         return None
     return 3_600_000.0 / statistics.median(times), len(times)
+
+
+def is_banked_reward(name) -> bool:
+    """Whether ``name`` is a :data:`BANKED_REWARD_TOKENS` reward source."""
+    lowered = (name or "").lower()
+    return any(re.search(rf"\b{re.escape(tok)}\b", lowered)
+               for tok in BANKED_REWARD_TOKENS)
+
+
+def kc_session_rate(rows):
+    """``(kills, seconds)`` of qualifying sessions for one player, or ``None``.
+
+    ``rows`` are ``(kill_count, first_seen_at)`` in kill-count order — one per
+    kill the player reported. Kills between two reports with no drop
+    submitted are still counted, because the kill-count step covers them.
+    """
+    sessions, start, prev = [], None, None
+    for kc, at in rows:
+        kc = int(kc)
+        if prev is None:
+            start = prev = (kc, at)
+            continue
+        dt = (at - prev[1]).total_seconds()
+        step = kc - prev[0]
+        if dt > SESSION_BREAK_SECONDS or dt < 0 or step <= 0 or step > MAX_KC_STEP:
+            sessions.append((start, prev))
+            start = (kc, at)
+        prev = (kc, at)
+    if prev is not None:
+        sessions.append((start, prev))
+    kills = seconds = 0
+    for (kc0, t0), (kc1, t1) in sessions:
+        span = (t1 - t0).total_seconds()
+        if span >= MIN_SESSION_SECONDS and kc1 - kc0 >= MIN_SESSION_KILLS:
+            kills += kc1 - kc0
+            seconds += span
+    if not seconds:
+        return None
+    return kills, seconds
+
+
+def _kc_sessions_rate(session, npc_id):
+    """(rate_kph, qualifying_players) from kill-count sessions, or None."""
+    from sqlalchemy import text
+
+    since_hour = session.execute(text(
+        "SELECT DATE_FORMAT(NOW() - INTERVAL :d DAY, '%Y-%m-%d-%H')"),
+        {"d": GAPS_WINDOW_DAYS}).scalar()
+    players = [p for (p,) in session.execute(text("""
+        SELECT player_id FROM player_npc_hourly_totals
+        WHERE npc_id = :n AND date_hour >= :h
+        GROUP BY player_id ORDER BY SUM(drop_count) DESC LIMIT :lim
+    """), {"n": npc_id, "h": since_hour, "lim": GAPS_MAX_PLAYERS})]
+    if len(players) < SESSIONS_MIN_PLAYERS:
+        return None
+
+    per_player = []
+    for pid in players:
+        # (player_id, date_added) composite index; npc filtered server-side.
+        rows = session.execute(text("""
+            SELECT kill_count, MIN(date_added) FROM drops
+            WHERE player_id = :p AND npc_id = :n AND kill_count > 0
+              AND date_added >= NOW() - INTERVAL :d DAY
+            GROUP BY kill_count ORDER BY kill_count
+        """), {"p": pid, "n": npc_id, "d": GAPS_WINDOW_DAYS}).fetchall()
+        measured = kc_session_rate(rows)
+        if measured is not None:
+            kills, seconds = measured
+            per_player.append(kills * 3600.0 / seconds)
+    if len(per_player) < SESSIONS_MIN_PLAYERS:
+        return None
+    return _pct(sorted(per_player), GAPS_PERCENTILE), len(per_player)
 
 
 def _drop_gaps_rate(session, npc_id):
@@ -388,7 +512,7 @@ def main():
     try:
         candidates = _candidates(session, args.npc)
         print(f"{len(candidates)} candidate NPC(s)\n")
-        print(f"{'npc':>7}  {'name':32} {'metric':28} {'method':10} "
+        print(f"{'npc':>7}  {'name':32} {'metric':28} {'method':11} "
               f"{'kph':>7} {'n':>5}  note")
         marker_ids = _marker_npc_ids(session)
         for npc_id in sorted(candidates):
@@ -404,7 +528,7 @@ def main():
                 # silently changing what the number means and putting bails
                 # back on the completion clock.
                 print(f"{npc_id:>7}  {(name or ''):32.32} {(metric or '—'):28} "
-                      f"{'—':10} {'—':>7} {'—':>5}  completion-marker NPC, "
+                      f"{'—':11} {'—':>7} {'—':>5}  completion-marker NPC, "
                       f"only --partials may write it")
                 continue
             wom = wom_rates.get(metric) if metric else None
@@ -412,16 +536,18 @@ def main():
                 continue
 
             result, method = _pb_median_rate(session, npc_id), "pb_median"
+            if result is None and not is_banked_reward(name):
+                result, method = _kc_sessions_rate(session, npc_id), "kc_sessions"
             if result is None:
                 result, method = _drop_gaps_rate(session, npc_id), "drop_gaps"
             if result is None or not result[0]:
                 print(f"{npc_id:>7}  {(name or ''):32.32} {(metric or '—'):28} "
-                      f"{'—':10} {'—':>7} {'—':>5}  too few samples, keeping 0 EHB")
+                      f"{'—':11} {'—':>7} {'—':>5}  too few samples, keeping 0 EHB")
                 continue
             rate, n = result
             if not (RATE_MIN_KPH <= rate <= RATE_MAX_KPH):
                 print(f"{npc_id:>7}  {(name or ''):32.32} {(metric or '—'):28} "
-                      f"{method:10} {rate:>7.1f} {n:>5}  outside sanity bounds, skipped")
+                      f"{method:11} {rate:>7.1f} {n:>5}  outside sanity bounds, skipped")
                 continue
 
             note = ""
@@ -429,7 +555,7 @@ def main():
                 note = (f"WOM publishes {wom} (calibration only, NOT written; "
                         f"factor {wom / rate:.2f})")
             print(f"{npc_id:>7}  {(name or ''):32.32} {(metric or '—'):28} "
-                  f"{method:10} {rate:>7.1f} {n:>5}  {note}")
+                  f"{method:11} {rate:>7.1f} {n:>5}  {note}")
             if wom or not args.apply:
                 written += 0 if wom else 1
                 continue
