@@ -19,6 +19,7 @@ from datetime import datetime
 import pytest
 
 from services.event_effort import (
+    BOSS_BODYGUARDS,
     CLUE_TIERS,
     EFFORT_SCOPE_PREFIX,
     build_effort_map,
@@ -28,6 +29,7 @@ from services.event_effort import (
     completion_scope,
     effort_scope,
     ehb_hours,
+    is_bodyguard,
     is_completion_drop,
     roll_scope,
     rows_to_summary,
@@ -193,6 +195,48 @@ class TestSummary:
         assert out["kills"] == 300
         assert out["ehb_hours"] == 0.0
         assert out["bosses"][0]["kills"] == 300
+
+
+class TestBodyguards:
+    """Bodyguard kills come with the boss kill; WOM's boss rate already prices
+    the room. Pricing them too booked one Bandos trip ~4x (event 35)."""
+
+    def _rows(self):
+        return [
+            {"npc_id": 2215, "npc_name": "General Graardor",
+             "boss_metric": "general_graardor", "kills": 58, "last_at": 100,
+             "frozen_at": None},
+        ] + [
+            {"npc_id": i, "npc_name": name, "boss_metric": None, "kills": 58,
+             "last_at": 300, "frozen_at": None}
+            for i, name in ((2216, "Sergeant Strongstack"),
+                            (2217, "Sergeant Steelwill"),
+                            (2218, "Sergeant Grimspike"))
+        ]
+
+    def test_only_the_boss_counts(self):
+        derived = {2216: 28.6, 2217: 28.7, 2218: 29.5}
+        out = rows_to_summary(self._rows(), {"general_graardor": 58.0}, derived)
+        assert out["ehb_hours"] == pytest.approx(1.0)
+        assert out["ehb_estimated_hours"] == 0.0
+        assert out["kills"] == 58
+        assert [b["name"] for b in out["bosses"]] == ["General Graardor"]
+        # Bodyguard rows do not move activity either.
+        assert out["last_at"] == 100
+
+    def test_every_god_wars_general_has_three_guards(self):
+        from collections import Counter
+
+        assert Counter(BOSS_BODYGUARDS.values()) == {
+            "general graardor": 3, "kree'arra": 3,
+            "k'ril tsutsaroth": 3, "commander zilyana": 3,
+        }
+
+    def test_matching_is_by_normalized_name(self):
+        assert is_bodyguard("  Zakl'n  Gritch ")
+        assert is_bodyguard("STARLIGHT")
+        assert not is_bodyguard("General Graardor")
+        assert not is_bodyguard(None)
 
 
 class TestDerivedRates:

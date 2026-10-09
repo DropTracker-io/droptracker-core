@@ -485,6 +485,7 @@ def main():
     from db import Session
     from db.models import NpcEhbRate
     from utils.wiseoldman import get_ehb_rates_sync
+    from services.event_effort import is_bodyguard
 
     wom_rates = get_ehb_rates_sync() or {}
     if not wom_rates:
@@ -530,6 +531,10 @@ def main():
                 print(f"{npc_id:>7}  {(name or ''):32.32} {(metric or '—'):28} "
                       f"{'—':11} {'—':>7} {'—':>5}  completion-marker NPC, "
                       f"only --partials may write it")
+                continue
+            if is_bodyguard(name):
+                # Never priced on read (the boss's rate covers the room), so
+                # a rate here would only mislead whoever reads the table.
                 continue
             wom = wom_rates.get(metric) if metric else None
             if wom and not args.include_priced:

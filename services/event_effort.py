@@ -91,6 +91,40 @@ COMPLETION_MARKERS = {
 }
 
 
+#: Boss bodyguards, keyed by normalized name -> the boss they guard.
+#:
+#: Their kills come with the boss kill. WOM's rate for the boss already prices
+#: the whole room, bodyguards included, so pricing them too bills one trip
+#: several times over: a Bandos kill booked Graardor's hours PLUS three
+#: sergeants at ~28/h each, roughly 4x the trip (event 35, 2026-10-08). Only
+#: the boss counts; these rows are left out of the summary entirely (no hours,
+#: no kills, no boss entry), so a stored row never reaches any EHE surface.
+#: The rows stay in ``web_event_effort``, so this is reversible on read.
+BOSS_BODYGUARDS = {
+    # General Graardor
+    "sergeant strongstack": "general graardor",
+    "sergeant steelwill": "general graardor",
+    "sergeant grimspike": "general graardor",
+    # Kree'arra
+    "wingman skree": "kree'arra",
+    "flockleader geerin": "kree'arra",
+    "flight kilisa": "kree'arra",
+    # K'ril Tsutsaroth
+    "tstanon karlak": "k'ril tsutsaroth",
+    "zakl'n gritch": "k'ril tsutsaroth",
+    "balfrug kreeyath": "k'ril tsutsaroth",
+    # Commander Zilyana
+    "growler": "commander zilyana",
+    "bree": "commander zilyana",
+    "starlight": "commander zilyana",
+}
+
+
+def is_bodyguard(npc_norm) -> bool:
+    """Whether an NPC is a :data:`BOSS_BODYGUARDS` entry (never priced)."""
+    return _norm(npc_norm) in BOSS_BODYGUARDS
+
+
 #: Item-name prefixes that all mean "a clue scroll of this tier was rolled".
 #:
 #: The tier's own scroll is the *rare* case: monsters overwhelmingly drop a
@@ -421,6 +455,8 @@ def rows_to_summary(rows: Iterable[dict], rates: dict,
     because for those the WOM rate answers a question the plugin's counter is
     not asking. :data:`CLUE_TIERS` NPCs take a third (:func:`_price_clue_row`),
     pricing only the openings a matching in-window roll paid for.
+    :data:`BOSS_BODYGUARDS` rows are skipped outright: the boss's rate already
+    covers them.
     """
     bosses, total_kills = [], 0
     total_hours = 0.0
@@ -428,6 +464,9 @@ def rows_to_summary(rows: Iterable[dict], rates: dict,
     last_at = None
     frozen = 0
     for row in rows or []:
+        if is_bodyguard(row.get("npc_name")):
+            # Priced with the boss they guard, never on their own.
+            continue
         try:
             kills = int(row.get("kills") or 0)
         except (TypeError, ValueError):
