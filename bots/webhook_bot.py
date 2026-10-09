@@ -24,6 +24,7 @@ from data.submissions.dispatch import (
 from api.services.metrics import MetricsTracker
 from services.points import award_points_to_player
 from services import discord_roles
+from services import reaction_roles
 from services import nitro_attribution
 from services import nitro_notifications
 from services import webhook_catchup
@@ -905,6 +906,10 @@ async def on_startup(event: Startup):
     if not _role_sync_started:
         _role_sync_started = True
         asyncio.create_task(_role_sync_scheduler())
+    global _reaction_roles_started
+    if not _reaction_roles_started:
+        _reaction_roles_started = True
+        asyncio.create_task(_reaction_roles_loop())
     global _status_heartbeat_started
     if not _status_heartbeat_started:
         _status_heartbeat_started = True
@@ -934,18 +939,38 @@ async def on_startup(event: Startup):
     
     
 
+# --- Reaction roles (services/reaction_roles.py) --------------------------------
+# A reaction grants its role at once; the backfill re-reads every reactor at
+# startup and then every RECONCILE_SECONDS, which covers reactions made before
+# the feature existed and any made while this bot was down.
+_reaction_roles_started = False
+
+
 @interactions.listen(MessageReactionAdd)
 async def on_message_reaction_add(event: MessageReactionAdd):
-    if os.getenv("SHOULD_PROCESS_REACTIONS") == "false":
-        return
-    if event.message.id == os.getenv("DISCORD_MESSAGE_REACTION_ROLE_MESSAGE_ID"):
-        if event.emoji.id == os.getenv("DISCORD_MESSAGE_REACTION_ROLE_EMOJI_ID"):
-            emoji_user = event.author
-            dt_guild = bot.get_guild(os.getenv("DISCORD_GUILD_ID"))
-            member = dt_guild.get_member(member_id=emoji_user.id)
-            if member:
-                await member.add_role(role=os.getenv("DISCORD_MESSAGE_REACTION_ROLE_ROLE_ID"))
+    try:
+        spec = reaction_roles.match(getattr(event.message, "id", None), getattr(event.emoji, "id", None))
+        if spec is None or event.author is None or getattr(event.author, "bot", False):
             return
+        if spec.role_id in {str(r) for r in (getattr(event.author, "_role_ids", None) or ())}:
+            return
+        result = await reaction_roles.grant(bot.http, spec, event.author.id)
+        print(f"[reaction-roles] {spec.key}: {event.author.id} reacted -> {result}")
+    except Exception as e:
+        print(f"[reaction-roles] reaction handling failed: {e}")
+
+
+async def _reaction_roles_loop():
+    await asyncio.sleep(60)  # let the gateway settle first
+    while not shutdown_event.is_set():
+        results = await reaction_roles.reconcile_all(bot.http)
+        for key, stats in results.items():
+            if stats.get("to_grant") or stats.get("failed"):
+                print(f"[reaction-roles] {key} backfill: {stats}")
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=reaction_roles.RECONCILE_SECONDS)
+        except asyncio.TimeoutError:
+            pass
 
 async def main():
     """Main function with systemd watchdog integration"""
