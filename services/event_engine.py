@@ -364,6 +364,13 @@ def _kc_npcs(task: dict) -> tuple:
     return tuple(out)
 
 
+def _competition_party_gated(task: dict) -> bool:
+    """Whether a competition task only counts kills with mates in them (the
+    ``party`` gate, services/competition.py). Reads the matcher snapshot."""
+    party = (task.get("competition") or {}).get("party")
+    return isinstance(party, dict) and party.get("require") in ("any", "all")
+
+
 def _kc_wom_metrics(task: dict) -> dict:
     """``{wom metric slug -> normalized NPC name}`` for a ``kc_target``.
     Precomputed as ``wom_metrics`` at state-load; falls back to the legacy
@@ -1420,10 +1427,17 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
             # matched_target names the boss the kill was at, so a multi-boss
             # race can show kills per boss (services/competition.fold_rows).
             # Gained rows are untagged, so no item/echo logic reads it.
-            return {"mode": "kc", "quantity": 1,
+            # A group-content race counts each reported kill once
+            # (``kc_kill``) instead of folding absolute KC: the watermark
+            # would hand a refused kill back on the next kill-count gap.
+            return {"mode": "kc_kill" if _competition_party_gated(task) else "kc",
+                    "quantity": 1,
                     "matched_target": str(data.get("npc_name") or "").strip()[:120] or None}
         if kind == "wom_kc":
             if metric_kind != "boss":
+                return None
+            if _competition_party_gated(task):
+                # WOM can't say who a player killed it with.
                 return None
             metric = str(data.get("boss_metric") or "").strip().lower()
             npc_norm = _kc_wom_metrics(task).get(metric) if metric else None
@@ -1857,7 +1871,10 @@ def _task_to_dict(task) -> dict:
         except Exception:
             d["competition"] = {}
         d["kc_npcs"] = list((d["competition"] or {}).get("npcs") or [])
-        d["wom_metrics"] = _task_wom_metrics(task.type, d["kc_npcs"])
+        # A group-content race is plugin-only, so the reconciler plans no
+        # hiscores KC for it (and the matcher refuses wom_kc anyway).
+        d["wom_metrics"] = ({} if _competition_party_gated(d)
+                            else _task_wom_metrics(task.type, d["kc_npcs"]))
         # Turn each embedded bonus-rule config into a real matcher task dict.
         # It borrows the competition task's own id so anything that reads
         # ``task["id"]`` off a match (state scoping, the ledger insert) still
@@ -4585,6 +4602,187 @@ def _competition_roster_ids(session, team_id) -> list:
             .all()]
 
 
+# --------------------------------------------------------------------------- #
+# Group content (competition ``party`` gate + kill rules)
+# --------------------------------------------------------------------------- #
+#: Kinds whose envelope carries the kill's party list and is judged on it.
+#: Every other kind (pet, clog, CA) has no list of its own and rides the
+#: verdict of the player's latest judged kill in the race, if it is recent.
+PARTY_EVIDENCE_KINDS = ("drop", "pb")
+PARTY_VERDICT_TTL_SECONDS = 15 * 60
+
+
+def _party_verdict_key(event_id: int, task_id, player_id: int) -> str:
+    return f"events:{event_id}:partyok:{task_id}:{player_id}"
+
+
+def _party_player_ids(session, group_id, keys) -> dict:
+    """``{name key: player_id}`` for the party names we can place: clan
+    members first (one cached map), then an exact-name lookup for the rest."""
+    from utils.clan_roster import group_member_keys
+
+    keys = [k for k in keys if k]
+    members = group_member_keys(session, group_id) if group_id is not None else {}
+    found = {k: members[k] for k in keys if k in members}
+    missing = [k for k in keys if k not in found]
+    if missing and session is not None:
+        from db.models import Player
+        from services.competition import party_name_key
+
+        variants = set()
+        for key in missing:
+            variants.update({key, key.replace(" ", "_"), key.replace(" ", "-")})
+        try:
+            rows = (session.query(Player.player_id, Player.player_name)
+                    .filter(Player.player_name.in_(sorted(variants)))
+                    .all())
+        except Exception:
+            rows = []
+        for pid, name in rows:
+            key = party_name_key(name)
+            if key in missing and key not in found and pid is not None:
+                found[key] = int(pid)
+    return found
+
+
+def _party_mate_keys(session, state, event: dict, team_id, party, others) -> set:
+    """Which of the kill's other players count as mates: clan members (the
+    hosting clan's DropTracker or WiseOldMan group), or players on the same
+    event team when the race says ``mates: team``."""
+    if not others:
+        return set()
+    scope = (party or {}).get("mates") or "clan"
+    if scope == "team":
+        ids = _party_player_ids(session, event.get("group_id"), others)
+        mates = set()
+        for key, pid in ids.items():
+            for ev_id, tid, _joined in (state.participants.get(pid) or ()):
+                if ev_id == event["id"] and tid == team_id:
+                    mates.add(key)
+                    break
+        return mates
+    from utils.clan_roster import clanmate_keys
+
+    return clanmate_keys(session, event.get("group_id"), others)
+
+
+def _competition_party_check(session, redis_conn, state, event: dict,
+                             task: dict, team_id, player_id: int,
+                             envelope: dict, staged=None) -> tuple:
+    """``(counts, info)`` for one envelope that matched a competition task.
+
+    ``counts`` False means the race refuses the envelope outright (a
+    group-content race, a kill without the mates it needs). ``info`` is
+    ``{"mates": n, "others": [...]}`` for a judged drop or pb (what kill rules
+    pay on), else None. Races with no party setting and no kill rules return
+    ``(True, None)`` without touching anything."""
+    comp = task.get("competition") or {}
+    party = comp.get("party")
+    gated = _competition_party_gated(task)
+    kind = envelope.get("kind")
+    wants_info = bool(comp.get("kill_rules")) and kind == "drop"
+    if not gated and not wants_info:
+        return True, None
+    verdict_key = _party_verdict_key(event["id"], task["id"], player_id)
+    if kind not in PARTY_EVIDENCE_KINDS:
+        if not gated:
+            return True, None
+        try:
+            raw = redis_conn.get(verdict_key)
+        except Exception:
+            raw = None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        return str(raw or "") == "1", None
+
+    from services.competition import party_others, party_verdict
+
+    data = envelope.get("data") or {}
+    others = party_others(data.get("party"), envelope.get("player_name"))
+    try:
+        mate_keys = _party_mate_keys(session, state, event, team_id, party, others)
+    except Exception as e:
+        print(f"[EventParty] mate lookup failed for event {event['id']}: {e}")
+        mate_keys = set()
+    counts, mates = party_verdict(party if gated else None, others, mate_keys,
+                                  data.get("party_size"))
+    if gated:
+        try:
+            if staged is not None:
+                staged.stage("set", verdict_key, "1" if counts else "0",
+                             ex=PARTY_VERDICT_TTL_SECONDS)
+            else:
+                redis_conn.set(verdict_key, "1" if counts else "0",
+                               ex=PARTY_VERDICT_TTL_SECONDS)
+        except Exception:
+            pass
+    return counts, {"mates": mates, "others": others}
+
+
+def _kill_learner_kcs(session, event: dict, envelope: dict, others) -> list:
+    """Known kill counts at the killed boss BEFORE this kill, for everyone in
+    it we can place: the receiver from the drop's own kill count, the rest
+    from their ``player_npc_kc`` watermark. Unknown players are left out."""
+    data = envelope.get("data") or {}
+    kcs = []
+    try:
+        own = int(data.get("kill_count") or 0)
+    except (TypeError, ValueError):
+        own = 0
+    if own > 0:
+        kcs.append(own - 1)
+    try:
+        npc_id = int(data.get("npc_id") or 0)
+    except (TypeError, ValueError):
+        npc_id = 0
+    if not others or not npc_id or session is None:
+        return kcs
+    ids = _party_player_ids(session, event.get("group_id"), others)
+    if not ids:
+        return kcs
+    from db.models import PlayerNpcKc
+
+    rows = (session.query(PlayerNpcKc.kill_count)
+            .filter(PlayerNpcKc.player_id.in_(sorted(set(ids.values()))),
+                    PlayerNpcKc.npc_id == npc_id)
+            .all())
+    kcs.extend(int(kc) for (kc,) in rows if kc is not None)
+    return kcs
+
+
+def _record_kill_bonuses(session, redis_conn, event: dict, task: dict,
+                         team_id, player_id: int, envelope: dict,
+                         party_info: dict, matched_target, cells=None) -> list:
+    """One row per kill rule that this credited kill earns (``party``: the
+    mates in it; ``learner``: someone under the rule's KC). Same envelope,
+    so the ``#b<rule>`` guid suffix keeps each rule's row unique."""
+    from services.competition import has_learner, kill_rule_units
+
+    results = []
+    learner_kcs = None
+    for rule in ((task.get("competition") or {}).get("kill_rules") or ()):
+        learner = False
+        if rule.get("type") == "learner":
+            if learner_kcs is None:
+                try:
+                    learner_kcs = _kill_learner_kcs(
+                        session, event, envelope, party_info.get("others") or [])
+                except Exception as e:
+                    print(f"[EventParty] learner lookup failed for event {event['id']}: {e}")
+                    learner_kcs = []
+            learner = has_learner(learner_kcs, rule.get("max_kc"))
+        units = kill_rule_units(rule.get("type"), party_info.get("mates", 0), learner)
+        if units <= 0:
+            continue
+        outcome = record_match(
+            session, redis_conn, event, task, team_id, player_id, units,
+            envelope, cells=cells, matched_target=matched_target,
+            bonus={"rule_id": rule.get("id"), "type": rule.get("type")})
+        if outcome is not None:
+            results.append(outcome)
+    return results
+
+
 def _set_competition_team_score(session, team_id, value):
     """Write a competition team's ranked score (absolute — it is a pure
     function of the ledger and the roster) under the row lock. Returns the
@@ -4826,8 +5024,8 @@ def _competition_side_effects(session, event: dict, task: dict, completion,
     """Result dict, SSE frame and announcements for one applied competition
     row (split out of :func:`_apply_competition` so the lead-change compare
     runs on every exit path)."""
-    from services.competition import (MANUAL_RULE_TYPE, bonus_detail,
-                                      player_points)
+    from services.competition import (KILL_RULE_TYPES, MANUAL_RULE_TYPE,
+                                      bonus_detail, player_points)
 
     team_id = completion.team_id
     player_id = completion.player_id
@@ -4883,6 +5081,12 @@ def _competition_side_effects(session, event: dict, task: dict, completion,
         if rule_type == MANUAL_RULE_TYPE:
             # An organiser's correction from the Review tab — the standings
             # and the SSE frame above carry it; it is not a race moment.
+            return result
+        rule = config.rules_by_id.get(rule_id)
+        if (rule.type if rule is not None else rule_type) in KILL_RULE_TYPES:
+            # Clanmate / learner bonuses pay on nearly every kill of a group
+            # race: a message each would bury the channel. The standings and
+            # the SSE frame carry them, like the kills they ride on.
             return result
         awarded_n = (entry.get("bonus") or {}).get(rule_id, {}).get("awarded", 0)
         prev_awarded = (prev_entry.get("bonus") or {}).get(rule_id, {}).get("awarded", 0)
@@ -5876,7 +6080,20 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
             # One envelope may yield several matches on ONE task (any_path v2:
             # the drop that advances an item path is also a kill for a KC path
             # and GP for a loot-value path) — each records its own ledger row.
-            for match in match_task_all(task, envelope):
+            matches = match_task_all(task, envelope)
+            if not matches:
+                continue
+            party_info = None
+            if task.get("type") == "competition":
+                # Group content: a race that needs mates in the kill refuses
+                # the WHOLE envelope without them (the kill and any loot or
+                # time bonus riding on it); kill rules read who was there.
+                counts, party_info = _competition_party_check(
+                    session, redis_conn, state, event, task, team_id,
+                    player_id, envelope, staged=staged)
+                if not counts:
+                    continue
+            for match in matches:
                 quantity = match["quantity"]
                 data = envelope.get("data") or {}
                 # WOM envelopes carry the window-start value; seeding from it
@@ -5891,7 +6108,18 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                                and _seed_allowed(
                                    joined_at,
                                    _window_start_for(event, window_seq)))
-                if match["mode"] == "kc":
+                if match["mode"] == "kc_kill":
+                    # Group-content race: one credit per reported kill, deduped
+                    # on (boss, kill_count) so a raid's many loot items count
+                    # once. No absolute-KC fold: nothing may refill a kill the
+                    # gate refused.
+                    kc_scope = _match_kc_scope(
+                        task, match, _norm(data.get("npc_name"))) + wscope
+                    if not _kc_dedupe(redis_conn, event_id, kc_scope,
+                                      player_id, envelope, staged=staged):
+                        continue
+                    quantity = 1
+                elif match["mode"] == "kc":
                     # Multi-NPC kc tasks keep absolute-KC state PER NPC — each
                     # NPC's kill_count is its own counter, so one shared
                     # watermark would swallow the lower counts. Metric-path
@@ -5956,6 +6184,13 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                     bonus=match.get("bonus"))
                 if outcome is not None:
                     results.append(outcome)
+                    if (party_info is not None and match.get("bonus") is None
+                            and match["mode"] in ("kc", "kc_kill")):
+                        results.extend(_record_kill_bonuses(
+                            session, redis_conn, event, task, team_id,
+                            player_id, envelope, party_info,
+                            match.get("matched_target"),
+                            cells=state.cells_by_task.get(task["id"])))
     return results
 
 
@@ -6053,6 +6288,33 @@ def _derive_applied_progress(session, task: dict, team_id) -> float:
         max(int(r.quantity or 1), 1) for r in survivors
         if (r.source_type or "") != "bonus"
     )
+
+
+def kill_bonus_siblings(session, completion) -> list:
+    """Applied ``party`` / ``learner`` rows written for the same kill as a
+    competition gained row (same envelope guid + ``#b<rule>``). Revoking the
+    kill revokes these too, or its clanmate bonus would outlive it."""
+    from db.models import EventCompletion
+    from services.competition import KILL_RULE_TYPES, parse_bonus_note
+
+    guid = getattr(completion, "submission_guid", None)
+    if not guid or parse_bonus_note(getattr(completion, "note", None)) is not None:
+        return []
+    prefix = f"{str(guid)[:60]}#b"
+    rows = (session.query(EventCompletion)
+            .filter(EventCompletion.task_id == completion.task_id,
+                    EventCompletion.team_id == completion.team_id,
+                    EventCompletion.player_id == completion.player_id,
+                    EventCompletion.submission_guid.like(f"{prefix}%"),
+                    EventCompletion.status.in_(APPLIED_BONUS_STATUSES))
+            .all())
+    out = []
+    for row in rows:
+        parsed = parse_bonus_note(row.note)
+        if (str(row.submission_guid or "").startswith(prefix)
+                and parsed is not None and parsed[0] in KILL_RULE_TYPES):
+            out.append(row)
+    return out
 
 
 def revoke_ledger_row(session, completion) -> Optional[dict]:

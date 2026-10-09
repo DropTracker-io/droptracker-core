@@ -905,8 +905,18 @@ async def revoke_completion(event_id: int):
             # surviving rows, adjusts the score, unwinds bingo cells and
             # publishes the SSE correction.
             summary = _engine().revoke_ledger_row(s, comp)
+            # A revoked BotW kill takes its clanmate / learner bonus rows
+            # with it (they were written for that kill alone).
+            cascaded = []
+            for sibling in _engine().kill_bonus_siblings(s, comp):
+                sibling.status = "revoked"
+                sibling.acted_by_user_id = user_id
+                _engine().revoke_ledger_row(s, sibling)
+                cascaded.append(sibling.id)
             after = json.loads(_snapshot(comp))
             after["recomputed"] = summary
+            if cascaded:
+                after["revoked_with_kill"] = cascaded
             s.add(AuditLog(
                 actor_user_id=user_id,
                 group_id=ev.group_id,

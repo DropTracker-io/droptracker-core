@@ -33,10 +33,33 @@ except the duration is whatever the admins choose and DropTracker can layer
                    ("every 100 kills = 10 pts"), up to ``max_awards`` times.
                    Folds straight off the gained number and writes NO ledger
                    rows at all, so it cannot double-count and needs no matcher.
+- ``party``      — (boss races) a credited kill with clanmates in it pays per
+                   mate: ``points`` per mate (``scaling: add``), or
+                   ``bonus_pct`` percent of the kill's own points per mate
+                   (``scaling: multiply``). Who counts as a mate is the race's
+                   ``party`` setting (Group content, below).
+- ``learner``    — (boss races) a credited kill where somebody in it had fewer
+                   than ``max_kc`` kills at that boss: ``points`` per kill, or
+                   ``bonus_pct`` percent of the kill's points (``multiply``:
+                   400 makes the kill worth 5x).
 
 Any rule may carry ``unlimited: true`` instead of a finite ``max_awards``; it
 then pays every time it is earned (see :data:`UNLIMITED_AWARDS`). Task rules
 that can only pay once ignore it.
+
+**Group content (``party``).** A boss race may require clanmates in the kill
+(``party.require``: ``any`` = at least ``min_mates`` of them, ``all`` = every
+other player in the kill is one; ``off`` = no gate, the block then only says
+who counts for ``party`` rules). A mate is anyone in the hosting clan's
+WiseOldMan or DropTracker group (``mates: clan``), or on the player's own team
+(``mates: team``, team races only). The evidence is the party list the plugin
+sends with each kill, so a gated race is **plugin-only**: WOM has no idea who
+a player raided with, so its KC never counts, and kills are credited one per
+reported kill (deduped on the boss's kill count) instead of through the shared
+absolute-KC watermark, which would refill a refused kill from the next WOM
+sync or kill-count gap. A refused kill earns nothing in the race: no kill, no
+loot or time bonus from it. :func:`party_verdict` is the decision; the engine
+gathers the names.
 
 Everything lands on ONE hidden ``competition`` task per event, so per-player
 standings fold from a single ledger. Rows tagged ``bonus:{type}:{rule_id}``
@@ -48,6 +71,10 @@ without loading the config:
 - ``pet`` / ``time_under`` — one row IS one award; ``quantity`` is the points.
 - ``task`` — one row is one unit of PROGRESS (a drop, a kill, GP, a clog slot);
   ``quantity`` is credit units and the points come from the rule at fold time.
+- ``party`` / ``learner`` — one row per credited kill (the per-player cap
+  counts kills); ``quantity`` is the mates in the kill (``party``) or 1
+  (``learner``), and the points come from the rule at fold time
+  (:func:`kill_rule_points`).
 - ``manual`` (rule id :data:`MANUAL_RULE_ID`, never a configured rule) — an
   organiser's manual bonus from the Review tab; ``quantity`` is the points,
   uncapped. A manual GAINED correction is an ordinary untagged row.
@@ -90,7 +117,33 @@ COMPETITION_TASK_TYPE = "competition"
 
 METRIC_KINDS = ("skill", "boss")
 RANKING_MODES = ("gained", "points")
-BONUS_RULE_TYPES = ("pet", "time_under", "task", "milestone")
+BONUS_RULE_TYPES = ("pet", "time_under", "task", "milestone", "party", "learner")
+
+# Rules that pay on a CREDITED KILL from the plugin's own drop (boss races):
+# the engine records one row per kill beside the gained row, carrying the
+# number of mates (``party``) or 1 (``learner``). Too frequent to announce:
+# the kill itself isn't announced either.
+KILL_RULE_TYPES = ("party", "learner")
+# How a kill rule pays: flat ``points`` per unit, or ``bonus_pct`` percent of
+# the kill's own points per unit.
+KILL_RULE_SCALINGS = ("add", "multiply")
+DEFAULT_KILL_RULE_SCALING = "add"
+MIN_BONUS_PCT = 1
+MAX_BONUS_PCT = 10_000              # +100x the kill per unit
+DEFAULT_BONUS_PCT = 100
+# learner: "fewer than N kills at this boss". 100 is the classic raid cut-off.
+MIN_LEARNER_KC = 1
+MAX_LEARNER_KC = 100_000
+DEFAULT_LEARNER_KC = 100
+
+# Group-content gate (config ``party``, boss races only). ``off`` keeps the
+# block purely as the "who counts as a mate" setting for ``party`` rules.
+PARTY_REQUIRE_MODES = ("off", "any", "all")
+PARTY_MATE_SCOPES = ("clan", "team")
+DEFAULT_PARTY_MATES = "clan"
+MIN_PARTY_MATES = 1
+# Chambers of Xeric takes 100 players, the largest group content in the game.
+MAX_PARTY_MATES = 99
 
 # Race formats (config ``format``). ``individual`` is the one-roster scaffold:
 # every entrant sits on a single "Participants" team and the leaderboard is
@@ -239,6 +292,113 @@ def parse_bonus_note(note) -> Optional[tuple]:
 
 
 # --------------------------------------------------------------------------- #
+# Group content (party gate + kill rules)
+# --------------------------------------------------------------------------- #
+def normalize_party(raw, metric_kind=None, race_format=None) -> Optional[dict]:
+    """The race's ``party`` block, normalized, or None when it has none.
+
+    Boss races only (a skill race has no kills to be in). ``mates: team``
+    needs teams to belong to, so an individual race reads it as ``clan``."""
+    if not isinstance(raw, dict) or metric_kind != "boss":
+        return None
+    require = (raw.get("require") if raw.get("require") in PARTY_REQUIRE_MODES
+               else "any")
+    mates = (raw.get("mates") if raw.get("mates") in PARTY_MATE_SCOPES
+             else DEFAULT_PARTY_MATES)
+    if mates == "team" and race_format != "teams":
+        mates = "clan"
+    return {
+        "require": require,
+        "mates": mates,
+        "min_mates": _clamp(raw.get("min_mates"), MIN_PARTY_MATES,
+                            MIN_PARTY_MATES, MAX_PARTY_MATES),
+    }
+
+
+def party_name_key(name) -> str:
+    """Comparison key for a player name from any source (the plugin's party
+    list, WOM, the players table): case, ``_``/``-`` and the game's
+    non-breaking spaces all fold to one plain space."""
+    if name is None:
+        return ""
+    text = (str(name).replace(" ", " ").replace("_", " ")
+            .replace("-", " "))
+    return " ".join(text.split()).lower()
+
+
+def party_others(names, receiver_name=None) -> list:
+    """The OTHER players in a kill: name keys, deduped, receiver dropped."""
+    me = party_name_key(receiver_name)
+    out: list = []
+    for name in names or ():
+        key = party_name_key(name)
+        if key and key != me and key not in out:
+            out.append(key)
+    return out
+
+
+def party_verdict(party: Optional[dict], others: list, mate_keys,
+                  party_size=None) -> tuple:
+    """``(counts, mates)`` for one kill under the race's group-content gate.
+
+    ``others`` are the other players in the kill (:func:`party_others`);
+    ``mate_keys`` the subset that count as mates; ``party_size`` the game's
+    own head count when the plugin sent one (raids), receiver included.
+
+    - no gate (``party`` None or ``require: off``): always counts;
+    - ``any``: at least ``min_mates`` mates;
+    - ``all``: that, and every other player is a mate. A raid whose head
+      count is larger than the names we were given had someone we can't
+      see, so it can't be shown to be all-clan and does not count.
+    """
+    mates = sum(1 for key in others if key in mate_keys)
+    if not party or party.get("require") not in ("any", "all"):
+        return True, mates
+    if mates < max(_int(party.get("min_mates"), 1), 1):
+        return False, mates
+    if party["require"] == "all":
+        if mates < len(others):
+            return False, mates
+        size = _int(party_size, 0)
+        if size and size > len(others) + 1:
+            return False, mates
+    return True, mates
+
+
+def has_learner(kcs: Iterable, max_kc: int) -> bool:
+    """Whether any known kill count (before this kill) is under ``max_kc``.
+    Unknown counts are left out by the caller: a player we can't see is not
+    assumed to be a learner."""
+    limit = max(_int(max_kc, DEFAULT_LEARNER_KC), 1)
+    for kc in kcs or ():
+        if kc is not None and 0 <= _int(kc, -1) < limit:
+            return True
+    return False
+
+
+def kill_rule_units(rule_type: str, mates: int, learner: bool) -> int:
+    """Ledger quantity for one credited kill under a kill rule (0 = no row)."""
+    if rule_type == "party":
+        return max(_int(mates), 0)
+    if rule_type == "learner":
+        return 1 if learner else 0
+    return 0
+
+
+def kill_rule_points(rule, units: int, config) -> int:
+    """Points a kill rule pays for ``units`` (summed over the player's capped
+    rows). ``multiply`` pays ``bonus_pct`` percent of a kill's points per
+    unit, where a kill is worth ``1 / gained_per_point`` in points mode and 1
+    otherwise; it floors on the TOTAL so fractional shares add up."""
+    units = max(_int(units), 0)
+    if rule.scaling == "multiply":
+        per_point = (max(config.gained_per_point, 1)
+                     if config.ranking_mode == "points" else 1)
+        return (units * rule.bonus_pct) // (100 * per_point)
+    return units * rule.points
+
+
+# --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
 class CompetitionBonusRule:
@@ -248,7 +408,7 @@ class CompetitionBonusRule:
                  "unlimited", "pets", "duplicate_pets", "npc", "threshold_ms",
                  "label", "task",
                  "progress_kind", "need", "kinds", "scope", "step", "unscoped",
-                 "metric_kind")
+                 "metric_kind", "scaling", "bonus_pct", "max_kc", "mates")
 
     def __init__(self, raw: dict, idx: int, metric_kind=None):
         raw = raw if isinstance(raw, dict) else {}
@@ -311,6 +471,20 @@ class CompetitionBonusRule:
                            MIN_MILESTONE_STEP, MAX_MILESTONE_STEP)
         self.metric_kind = metric_kind
 
+        # party / learner: flat points per unit, or a percentage of the kill's
+        # own points per unit. ``max_kc`` is the learner cut-off ("fewer than
+        # N kills at this boss").
+        self.scaling = (raw.get("scaling")
+                        if raw.get("scaling") in KILL_RULE_SCALINGS
+                        else DEFAULT_KILL_RULE_SCALING)
+        self.bonus_pct = _clamp(raw.get("bonus_pct"), DEFAULT_BONUS_PCT,
+                                MIN_BONUS_PCT, MAX_BONUS_PCT)
+        self.max_kc = _clamp(raw.get("max_kc"), DEFAULT_LEARNER_KC,
+                             MIN_LEARNER_KC, MAX_LEARNER_KC)
+        # Who a ``party`` rule counts: copied from the race's party setting by
+        # CompetitionConfig so the rule's own label can say it.
+        self.mates = DEFAULT_PARTY_MATES
+
         if self.type == "task" and (
                 self.progress_kind not in REPEATABLE_PROGRESS_KINDS
                 or (self.task or {}).get("type") in SINGLE_AWARD_TASK_TYPES):
@@ -329,6 +503,9 @@ class CompetitionBonusRule:
             return bool(self.task) and bool(self.task.get("type")) and self.need >= 1
         if self.type == "milestone":
             return self.step >= MIN_MILESTONE_STEP
+        if self.type in KILL_RULE_TYPES:
+            # Kills only exist on a boss race.
+            return self.metric_kind == "boss"
         return False
 
     @property
@@ -344,7 +521,7 @@ class CompetitionConfig:
 
     __slots__ = ("metric_kind", "skill", "npcs", "ranking_mode",
                  "gained_per_point", "bonus_rules", "rules_by_id",
-                 "format", "team_scoring")
+                 "format", "team_scoring", "party")
 
     def __init__(self, raw):
         if isinstance(raw, str):
@@ -388,6 +565,20 @@ class CompetitionConfig:
                 rules.append(rule)
         self.bonus_rules = tuple(rules)
         self.rules_by_id = {r.id: r for r in self.bonus_rules}
+        self.party = normalize_party(raw.get("party"), self.metric_kind,
+                                     self.format)
+        if self.party:
+            for rule in self.bonus_rules:
+                rule.mates = self.party["mates"]
+
+    @property
+    def party_gated(self) -> bool:
+        """Whether a kill only counts with mates in it (plugin-only race)."""
+        return bool(self.party) and self.party["require"] != "off"
+
+    @property
+    def kill_rules(self) -> tuple:
+        return tuple(r for r in self.bonus_rules if r.type in KILL_RULE_TYPES)
 
     @property
     def valid(self) -> bool:
@@ -436,6 +627,13 @@ class CompetitionConfig:
                 {"id": r.id, "kinds": list(r.kinds), "task": dict(r.task or {})}
                 for r in self.bonus_rules if r.type == "task"
             ],
+            # Group content: the gate (None = no party setting at all) and the
+            # rules that pay per credited kill.
+            "party": dict(self.party) if self.party else None,
+            "kill_rules": [
+                {"id": r.id, "type": r.type, "max_kc": r.max_kc}
+                for r in self.kill_rules
+            ],
         }
 
     @property
@@ -477,7 +675,10 @@ def fold_rows(rows: Iterable, config: CompetitionConfig) -> dict:
        ``points`` per ``need`` units, capped at ``max_awards``. The points
        come from the RULE, not the row, so a partly-collected set pays
        nothing and a 3× stack of one listed item is worth one item.
-    3. **Milestone** rules read the gained total computed in pass 1 and write
+    3. **Kill** rules (``party`` / ``learner``) count one award per row up to
+       the cap, sum the rows' units into ``progress`` and price it once
+       (:func:`kill_rule_points`), so a percentage never rounds per kill.
+    4. **Milestone** rules read the gained total computed in pass 1 and write
        no ledger rows at all.
 
     The cap is enforced HERE, not only at record time, so a revoked award
@@ -485,6 +686,7 @@ def fold_rows(rows: Iterable, config: CompetitionConfig) -> dict:
     """
     per: dict = {}
     task_rows: dict = {}
+    kill_slots: set = set()
     split_npcs = config.metric_kind == "boss"
     raced = set(config.npcs)
     for row in sorted(rows, key=_row_sort_key):
@@ -522,6 +724,15 @@ def fold_rows(rows: Iterable, config: CompetitionConfig) -> dict:
         if effective_type == "task":
             task_rows.setdefault((player_id, rule_id), []).append(row)
             continue
+        if effective_type in KILL_RULE_TYPES:
+            # One row per kill: the cap counts kills, the units (mates in the
+            # kill, or 1) sum toward points priced after this pass.
+            if rule is None or slot["awarded"] >= rule.max_awards:
+                continue
+            slot["awarded"] += 1
+            slot["progress"] = slot.get("progress", 0) + quantity
+            kill_slots.add((player_id, rule_id))
+            continue
         if effective_type not in DISCRETE_RULE_TYPES:
             # ``milestone`` (writes no rows), or a dialect this deploy has
             # never heard of. Recognised as a bonus row — which is what keeps
@@ -550,6 +761,12 @@ def fold_rows(rows: Iterable, config: CompetitionConfig) -> dict:
         slot["need"] = rule.need
         slot["awarded"] = awarded
         slot["points"] = awarded * rule.points
+        per[player_id]["bonus_points"] += slot["points"]
+
+    for player_id, rule_id in kill_slots:
+        slot = per[player_id]["bonus"][rule_id]
+        slot["points"] = kill_rule_points(config.rules_by_id[rule_id],
+                                          slot.get("progress", 0), config)
         per[player_id]["bonus_points"] += slot["points"]
 
     for rule in config.bonus_rules:
@@ -913,6 +1130,11 @@ def rule_label(rule: CompetitionBonusRule) -> str:
         return f"Every {rule.step:,} {unit}"
     if rule.type == "task":
         return task_rule_label(rule)
+    if rule.type == "party":
+        who = "teammate" if rule.mates == "team" else "clanmate"
+        return f"Each {who} in the kill"
+    if rule.type == "learner":
+        return f"Kill with a learner (under {rule.max_kc:,} KC)"
     return "Bonus"
 
 

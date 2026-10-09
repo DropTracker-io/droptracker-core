@@ -249,6 +249,64 @@ rest:
   create/PATCH and blocks activation (`competition_clan_vs_clan`); a draft
   made before the lock may still switch back to Standard.
 
+## Group content (`party`, 2026-10, suggestions #186 / #187)
+
+Boss races can reward playing together. Config key `party` (boss races only):
+
+```json
+"party": {"require": "off" | "any" | "all", "mates": "clan" | "team", "min_mates": 1}
+```
+
+- **`require`** — `any` (the default when the block is sent): a kill only
+  counts with at least `min_mates` mates in it. `all`: every other player in
+  the kill must be a mate; **raids only** (ToB / ToA / CoX), because only a
+  raid gives the full party list, and a raid whose game head count
+  (`party_size`) is bigger than the names we got is refused (someone we
+  can't see). `off`: no gate; the block only says who counts for the
+  `party` bonus rule.
+- **`mates`** — `clan`: anyone in the hosting clan's DropTracker group OR its
+  WiseOldMan group (`utils/clan_roster.py`; the WOM side is the name list the
+  hourly membership sync stores in Redis `clanroster:{wom_id}`, so clanmates
+  DropTracker has never seen still count). `team`: on the player's own event
+  team (team races only).
+- **Evidence** — the party list the plugin sends with each drop
+  (`players_included`, after the solo-raid evidence gate in
+  `data/submissions/drop.py`) and pb (`nearby_players`), forwarded on the
+  events envelope as `data.party` / `data.party_size`. Pet, clog and CA
+  envelopes carry no list: they ride the verdict of the player's latest
+  judged kill in the race (Redis `events:{eid}:partyok:{task}:{pid}`, 15 min),
+  and are refused when there is none.
+- **A gated race is plugin-only.** WOM can't say who a player killed it with,
+  so `wom_kc` envelopes never match, the reconciler plans no hiscores KC for
+  the task (`wom_metrics` = `{}`), and linking or creating a WOM competition
+  is refused (409 `wom_party_locked`, both ways round). Kills are credited
+  one per reported kill (`kc_kill` mode: `_kc_dedupe` on boss + kill count)
+  instead of the absolute-KC watermark, which would refill a refused kill
+  from the next WOM sync or kill-count gap.
+- **A refused kill earns nothing** in the race: the matcher's whole envelope
+  is dropped for that task (kill, loot `task` bonuses, kill-time bonuses).
+
+Two bonus rule types pay on a credited kill from a plugin drop (any boss
+race, gated or not; one ledger row per kill, the cap counts kills):
+
+| type | row quantity | pays |
+|---|---|---|
+| `party` | mates in the kill | `scaling: add`: `points` per mate. `multiply`: `bonus_pct`% of the kill's points per mate |
+| `learner` | 1 | when anyone in the kill had fewer than `max_kc` (default 100) kills at that boss before it: `points`, or `bonus_pct`% of the kill (400 = the kill is worth 5x) |
+
+A kill is worth `1 / gained_per_point` points in points mode (1 in gained
+mode); `multiply` floors on each player's total, so 50% shares add up.
+Learner KCs: the receiver's from the drop's own kill count, everyone else's
+from `player_npc_kc`; players we can't place are never assumed learners.
+These rows are quiet (no Discord or in-game award message: they land on
+nearly every kill), and revoking a kill from the Review tab revokes its
+party / learner rows too (`kill_bonus_siblings`).
+
+Deploy: webhook-consumer (envelope fields), core (the hourly WOM membership
+sync writes the roster cache), events, webapi, web.
+Until the roster cache is written, clanmates are matched on the DropTracker
+group alone.
+
 ## Source modes (`web_event_competitions.source_mode`)
 
 - **hosted** — plugin envelopes + the group WOM reconciler

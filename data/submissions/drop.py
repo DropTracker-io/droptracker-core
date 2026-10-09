@@ -732,6 +732,12 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     "image_url": drop.image_url,
                     "source_id": getattr(drop, "drop_id", None),
                     "plugin_version": plugin_version,
+                    # Who else was in the kill, after the raid-party evidence
+                    # gate above (a proven-solo raid arrives as []), plus the
+                    # game's own head count for raids. Group-content BotW
+                    # races judge the kill on these; nothing else reads them.
+                    "party": list(players_included or []),
+                    "party_size": raid_party_size,
                 },
                 world_type=world_type, player_name=player_name,
                 # The envelope's used_api means "came from the plugin" to the

@@ -107,7 +107,21 @@ COMP_MAX_TIME_THRESHOLD_MS = 6 * 60 * 60 * 1000
 COMP_RANKING_MODES = ("gained", "points")
 COMP_FORMATS = ("individual", "teams")
 COMP_TEAM_SCORING_MODES = ("total", "average")
-COMP_BONUS_RULE_TYPES = ("pet", "time_under", "task", "milestone")
+COMP_BONUS_RULE_TYPES = ("pet", "time_under", "task", "milestone", "party",
+                         "learner")
+# Group content (services/competition.py ``party``): the gate, who counts as
+# a mate, and the kill rules that pay per mate / for a learner in the kill.
+COMP_PARTY_REQUIRE_MODES = ("off", "any", "all")
+COMP_PARTY_MATE_SCOPES = ("clan", "team")
+COMP_MAX_PARTY_MATES = 99
+COMP_KILL_RULE_SCALINGS = ("add", "multiply")
+COMP_MAX_BONUS_PCT = 10_000
+COMP_MAX_LEARNER_KC = 100_000
+# "Every other player is a clanmate" needs the full party list, and only the
+# raids give one (the plugin reads the raid's own roster; elsewhere it is a
+# scan of whoever happens to stand nearby). Mirrors services/split_observer.
+COMP_FULL_ROSTER_SOURCES = ("theatre of blood", "tombs of amascut",
+                            "chambers of xeric")
 # Task types a ``task`` bonus rule may embed. kc_target/xp_target are absent on
 # purpose: the race already scores those kills and that XP, and their matcher
 # modes feed the shared KC-watermark / XP-baseline folds, so embedding one
@@ -1314,6 +1328,78 @@ def _validated_bonus_task(s, raw_task, *, metric_kind: str,
     }
 
 
+def _strict_int(value, *, lo: int, hi: int, title: str, detail: str) -> int:
+    """A whole number in [lo, hi] or a 422 (no silent clamping: these are
+    numbers an organiser typed and must see refused, not changed)."""
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or int(value) != value or not (lo <= int(value) <= hi)):
+        abort_problem(422, title, detail)
+    return int(value)
+
+
+def _validated_party(raw, *, metric_kind: str, race_format: str,
+                     canonical_npcs: list[str]):
+    """The race's group-content block (``party``), or None for none.
+
+    ``require``: ``off`` (no gate; the block only says who counts for
+    clanmate bonuses), ``any`` (at least ``min_mates`` mates in the kill) or
+    ``all`` (every other player in it is a mate, raids only)."""
+    if raw is None or raw is False:
+        return None
+    if not isinstance(raw, dict):
+        abort_problem(422, "Invalid config", "'party' must be an object.")
+    if metric_kind != "boss":
+        abort_problem(422, "Invalid group content",
+                      "Clan-only tracking applies to a boss race.")
+    require = raw.get("require") or "any"
+    if require not in COMP_PARTY_REQUIRE_MODES:
+        abort_problem(422, "Invalid group content",
+                      f"require must be one of {list(COMP_PARTY_REQUIRE_MODES)}.")
+    mates = raw.get("mates") or "clan"
+    if mates not in COMP_PARTY_MATE_SCOPES:
+        abort_problem(422, "Invalid group content",
+                      f"mates must be one of {list(COMP_PARTY_MATE_SCOPES)}.")
+    if mates == "team" and race_format != "teams":
+        abort_problem(422, "Invalid group content",
+                      "Only a team race has teammates to count. Use clanmates.")
+    min_mates = raw.get("min_mates", 1)
+    min_mates = _strict_int(
+        min_mates, lo=1, hi=COMP_MAX_PARTY_MATES, title="Invalid group content",
+        detail=f"Clanmates needed must be between 1 and {COMP_MAX_PARTY_MATES}.")
+    if require == "all":
+        not_raids = [n for n in canonical_npcs
+                     if not any(src in n.lower() for src in COMP_FULL_ROSTER_SOURCES)]
+        if not_raids:
+            abort_problem(
+                422, "Raids only",
+                "\"Every player must be a clanmate\" needs the raid's own party "
+                "list, which only raids have. Not a raid: "
+                + ", ".join(not_raids[:3]) + ". Use \"at least\" instead.")
+    return {"require": require, "mates": mates, "min_mates": min_mates}
+
+
+def _validated_kill_rule(rtype: str, rr: dict) -> dict:
+    """The fields a ``party`` / ``learner`` rule adds to the common ones."""
+    scaling = rr.get("scaling") or "add"
+    if scaling not in COMP_KILL_RULE_SCALINGS:
+        abort_problem(422, "Invalid bonus rule",
+                      f"scaling must be one of {list(COMP_KILL_RULE_SCALINGS)}.")
+    out: dict = {"scaling": scaling}
+    if scaling == "multiply":
+        out["bonus_pct"] = _strict_int(
+            rr.get("bonus_pct"), lo=1, hi=COMP_MAX_BONUS_PCT,
+            title="Invalid bonus rule",
+            detail=f"The extra share of a kill must be between 1% and "
+                   f"{COMP_MAX_BONUS_PCT:,}%.")
+    if rtype == "learner":
+        out["max_kc"] = _strict_int(
+            rr.get("max_kc", 100), lo=1, hi=COMP_MAX_LEARNER_KC,
+            title="Invalid bonus rule",
+            detail=f"The learner kill count must be between 1 and "
+                   f"{COMP_MAX_LEARNER_KC:,}.")
+    return out
+
+
 def validated_competition_config(s, event_kind: str, raw) -> dict:
     """Validate + normalize a sotw/botw event's ``competition`` block into the
     canonical hidden-task config (``services/competition.py`` schema).
@@ -1400,6 +1486,12 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
         abort_problem(422, "Invalid team scoring",
                       f"team_scoring must be one of {list(COMP_TEAM_SCORING_MODES)}.")
     out["team_scoring"] = team_scoring if race_format == "teams" else "total"
+
+    party = _validated_party(raw.get("party"), metric_kind=metric_kind,
+                             race_format=race_format,
+                             canonical_npcs=canonical_npcs)
+    if party is not None:
+        out["party"] = party
 
     ranking = raw.get("ranking") if isinstance(raw.get("ranking"), dict) else {}
     mode = ranking.get("mode") or "gained"
@@ -1543,6 +1635,12 @@ def validated_competition_config(s, event_kind: str, raw) -> dict:
                               "A kill-time bonus must name one of the "
                               "race's bosses.")
             rule["npc"] = canonical
+        elif rtype in ("party", "learner"):
+            if metric_kind != "boss":
+                abort_problem(422, "Invalid bonus rule",
+                              "Clanmate and learner bonuses only apply to a "
+                              "boss race.")
+            rule.update(_validated_kill_rule(rtype, rr))
         else:
             abort_problem(
                 422, "Invalid bonus rule",

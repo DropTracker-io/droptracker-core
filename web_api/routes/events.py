@@ -3692,6 +3692,12 @@ def _serialize_bonus_rule(rule) -> dict:
         entry["threshold_ms"] = rule.threshold_ms
     elif rule.type == "milestone":
         entry["step"] = rule.step
+    elif rule.type in ("party", "learner"):
+        entry["scaling"] = rule.scaling
+        if rule.scaling == "multiply":
+            entry["bonus_pct"] = rule.bonus_pct
+        if rule.type == "learner":
+            entry["max_kc"] = rule.max_kc
     elif rule.type == "task":
         task = rule.task or {}
         task_config = task.get("config") or {}
@@ -3763,6 +3769,9 @@ def _serialize_competition_config(s, config, comp_row) -> dict:
         # their summed or per-member score).
         "format": config.format,
         "team_scoring": config.team_scoring,
+        # Group content: whether a kill needs clanmates in it (and who
+        # counts). None when the race has no such setting.
+        "party": dict(config.party) if config.party else None,
     }
     if comp_row is not None and comp_row.wom_competition_id:
         out["wom"] = {
@@ -3869,7 +3878,8 @@ async def get_competition_player(event_id: int, player_id: int):
             if (ev.kind or "standard") not in COMPETITION_EVENT_KINDS:
                 abort_problem(422, "Not a competition event",
                               "This event is not a Skill/Boss of the Week.")
-            from services.competition import (CompetitionConfig, bonus_detail,
+            from services.competition import (KILL_RULE_TYPES,
+                                              CompetitionConfig, bonus_detail,
                                               parse_bonus_note)
             from services.competition_setup import competition_task
             from services.event_lifecycle import _competition_ranked_rows
@@ -3934,6 +3944,17 @@ async def get_competition_player(event_id: int, player_id: int):
                     # Recorded at all ⇒ it moved the meter (the record-time
                     # gate drops rows that don't).
                     entry["counted"] = True
+                elif rule is not None and rule.type in KILL_RULE_TYPES:
+                    # A kill rule's row holds the mates in the kill (or 1 for
+                    # a learner), not points. A flat rule prices one row
+                    # exactly; a percentage only adds up over all of them
+                    # (it floors on the total), so its rows show the units.
+                    units = max(int(r.quantity or 0), 0)
+                    if rule.scaling == "multiply":
+                        entry["points"] = 0
+                        entry["contribution"] = units
+                    else:
+                        entry["points"] = units * rule.points
                 awards.append(entry)
             return {
                 "event_id": event_id,
@@ -4178,6 +4199,9 @@ async def link_wom_competition(event_id: int):
 
             task = competition_task(s, event_id)
             config = CompetitionConfig(task.config if task is not None else None)
+            if config.party_gated:
+                abort_problem(409, "Clan-only race", _PARTY_WOM_DETAIL,
+                              extra={"code": "wom_party_locked"})
             problems = competition_link_problems(comp, ev.kind,
                                                  race_format=config.format)
             if problems:
@@ -4306,6 +4330,9 @@ async def create_wom_competition_route(event_id: int):
                 abort_problem(422, "Pick the metric first",
                               "Set the event's skill/boss on the Competition "
                               "step before creating the WOM competition.")
+            if config.party_gated:
+                abort_problem(409, "Clan-only race", _PARTY_WOM_DETAIL,
+                              extra={"code": "wom_party_locked"})
             from utils.wiseoldman import wom_boss_metric, wom_skill_metric
 
             if config.metric_kind == "skill":
@@ -4749,6 +4776,26 @@ def _competition_format_guard(s, ev, cfg: dict) -> None:
             "(or keep the race as Teams).", extra={"code": "competition_extra_teams"})
 
 
+_PARTY_WOM_DETAIL = (
+    "Clan-only tracking counts kills from the plugin, which knows who was in "
+    "each kill. WiseOldMan doesn't, so a clan-only race can't mirror a "
+    "WiseOldMan competition.")
+
+
+def _competition_party_guard(s, ev, cfg: dict) -> None:
+    """Refuse clan-only tracking on a race that mirrors a WiseOldMan
+    competition (WOM's numbers can't say who a kill was with)."""
+    from services.competition_setup import competition_row
+
+    party = cfg.get("party") or {}
+    if party.get("require") not in ("any", "all"):
+        return
+    row = competition_row(s, ev.id)
+    if row is not None and row.wom_competition_id:
+        abort_problem(409, "Unlink WiseOldMan first", _PARTY_WOM_DETAIL,
+                      extra={"code": "wom_party_locked"})
+
+
 def _competition_participation_input(comp_body) -> str | None:
     """The wizard's participation choice ("whole_clan" / "signup"), validated;
     None = keep/derive the current mode (competition kinds only)."""
@@ -5027,6 +5074,7 @@ async def update_event(event_id: int):
                 comp_body = body.get("competition") or {}
                 cfg = validated_competition_config(s, ev.kind, comp_body)
                 _competition_format_guard(s, ev, cfg)
+                _competition_party_guard(s, ev, cfg)
                 participation = _competition_participation_input(comp_body)
                 ensure_competition_scaffold(s, ev, cfg, participation)
             if "requires_confirmation" in body:

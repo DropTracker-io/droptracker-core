@@ -41,6 +41,17 @@ from .common import (
 )
 
 
+def _pb_party(pb_data) -> list:
+    """The kill's other players from the plugin's ``nearby_players``, in the
+    same normalized shape drops send to the events queue ([] when absent)."""
+    try:
+        from .drop import _normalize_incoming_players
+
+        return list(_normalize_incoming_players(pb_data.get("nearby_players")) or [])
+    except Exception:
+        return []
+
+
 def _time_to_ms(value) -> int:
     """Milliseconds from a plugin time value: formatted ("1:23.40"), raw ms
     int (form API path), or garbage ("N/A" on untimed kills, None) → 0.
@@ -527,6 +538,10 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     "kill_time_formatted": _kill_formatted,
                     "image_url": pb_entry.image_url,
                     "source_id": getattr(pb_entry, "id", None),
+                    # Who else was in the kill (the plugin omits the field
+                    # when nobody was). Group-content BotW races judge
+                    # kill-time bonuses on it, the way drops are judged.
+                    "party": _pb_party(pb_data),
                 },
                 world_type=world_type, player_name=player_name,
                 # used_api means "came from the plugin" to the events engine

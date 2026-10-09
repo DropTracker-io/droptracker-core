@@ -660,9 +660,12 @@ async def fetch_group_members(
             # every membership too (the bridge's fallback for clanmates whose
             # mode no plugin has reported).
             type_map = {}
+            roster_names = []
             for member in members:
                 player_obj = getattr(member, "player", None)
                 player_name = getattr(player_obj, "display_name", None)
+                if player_name:
+                    roster_names.append(player_name)
                 member_wom_id = member.player_id
                 member_role = getattr(member, "role", None)
                 if player_name and member_role is not None:
@@ -762,6 +765,12 @@ async def fetch_group_members(
                 from utils.clan_ranks import store_group_account_types
 
                 store_group_account_types(wom_group_id, type_map)
+            # Every member's name, ranked or not: the clanmate check for
+            # group-content BotW races (utils.clan_roster). Swallows its own
+            # failures, like the two maps above.
+            from utils.clan_roster import store_group_roster
+
+            store_group_roster(wom_group_id, roster_names)
             await _store_group_cache(wom_group_id, user_list)
             return user_list
         else:
