@@ -336,6 +336,28 @@ def test_combat_achievement_tiers(line, tier):
     assert parsed.extra["tier"] == tier
 
 
+def test_quest_name_survives_tag_variables():
+    """The live shape since rev241 (2026-10-07): the quest name is defined in a
+    leading tag and referenced by name. Plain tag stripping left
+    "X has completed a quest:" — no name, no kind — for every quest line."""
+    raw = (
+        "<img=2><str_quest_name_0=Big Chompy Bird Hunting>no pk pleae has "
+        "completed a quest: <col=0c8f04><str_quest_name_0></col>"
+    )
+    assert clean_broadcast_text(raw) == (
+        "no pk pleae has completed a quest: Big Chompy Bird Hunting"
+    )
+    parsed = parse_broadcast(clean_broadcast_text(raw))
+    assert parsed.kind == "quest"
+    assert parsed.player == "no pk pleae"
+
+
+def test_tag_variables_leave_ordinary_markup_alone():
+    # An undefined reference is still just a tag; <col=..>/<img=..>/<str> are not variables.
+    assert clean_broadcast_text("X said <str_unknown_0> hi") == "X said hi"
+    assert clean_broadcast_text("<str>struck</str> <col=ff0000>red</col>") == "struck red"
+
+
 def test_combat_achievement_does_not_shadow_quests_or_diaries():
     assert parse_broadcast("Quester has completed a quest: Dragon Slayer II.").kind == "quest"
     assert parse_broadcast(

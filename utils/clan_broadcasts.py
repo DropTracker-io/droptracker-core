@@ -48,6 +48,31 @@ TRACKED_KINDS = frozenset(
 )
 
 _TAG_RE = re.compile(r"<[^>]*>")
+
+#: Jagex's in-line string variables (rev241, 2026-10-07): the line opens by
+#: defining a value in a tag and later references it by name —
+#: ``<str_quest_name_0=Big Chompy Bird Hunting>X has completed a quest: <str_quest_name_0>``.
+#: Both halves are tags, so _TAG_RE alone deletes the quest name outright.
+#: The name always carries an underscore, which keeps <col=..>, <img=..> and
+#: <str> (strikethrough) out of it.
+_VAR_DEF_RE = re.compile(r"<([a-z]+_[a-z0-9_]+)=([^>]*)>", re.IGNORECASE)
+_VAR_REF_RE = re.compile(r"<([a-z]+_[a-z0-9_]+)>", re.IGNORECASE)
+
+
+def expand_tag_variables(text: str) -> str:
+    """Drop ``<name=value>`` variable definitions and substitute each
+    ``<name>`` reference with its value. Undefined references are left for
+    the tag stripper."""
+    values = {}
+
+    def _define(m):
+        values[m[1].lower()] = m[2]
+        return ""
+
+    text = _VAR_DEF_RE.sub(_define, text)
+    if not values:
+        return text
+    return _VAR_REF_RE.sub(lambda m: values.get(m[1].lower(), m[0]), text)
 _WS_RE = re.compile(r"\s+")
 
 #: Machine-readable metadata Jagex prefixes to some broadcasts, pipe-terminated:
@@ -97,7 +122,7 @@ def clean_broadcast_text(raw) -> str:
     """
     if raw is None:
         return ""
-    text = _TAG_RE.sub("", str(raw))
+    text = _TAG_RE.sub("", expand_tag_variables(str(raw)))
     text = _CHAT_TOKEN_RE.sub("", text)
     text = text.replace(" ", " ")
     text = _WS_RE.sub(" ", text).strip()
