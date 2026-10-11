@@ -1768,6 +1768,8 @@ def notification_context(notification_type: str, data: dict) -> dict:
             "auto_assign": "Pick your account — you'll be placed on a team automatically.",
             "signup_pool": "Pick your account to join the sign-up pool; "
                            "admins will sort teams later.",
+            "solo": "Pick your account — it's a free-for-all, everyone "
+                    "competes on their own.",
         }.get(data.get("formation_mode"), "Pick your account to enter.")
         context.setdefault("description", "This event is open for sign-ups!")
         # When the window shuts (web70a). Falls back to the event's end so a

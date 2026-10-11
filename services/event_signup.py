@@ -237,7 +237,8 @@ def perform_signup(session, ev, player, user_id: int, team_id: Optional[int] = N
       • signup_pool → records a sign-up with no team (admins sort later);
       • self_join   → requires/uses ``team_id`` (auto when the player's clan has
         exactly one team);
-      • auto_assign → balances onto the player's smallest eligible team.
+      • auto_assign → balances onto the player's smallest eligible team;
+      • solo        → a new team of their own (free-for-all).
     Returns ``{"team_id": int|None, "pooled": bool}``. Raises :class:`SignupError`.
     The caller owns the commit.
     """
@@ -287,6 +288,12 @@ def perform_signup(session, ev, player, user_id: int, team_id: Optional[int] = N
         # No team yet — admins sort the pool later.
         return {"team_id": None, "pooled": True}
 
+    if formation == "solo":
+        # Free-for-all: the entrant's own team, made on the spot (idempotent).
+        team_id = ensure_solo_team(session, ev, player.player_id)
+        sync_buyin_team(session, ev.id, player.player_id, team_id)
+        return {"team_id": team_id, "pooled": False}
+
     teams = eligible_teams(session, ev, player.player_id)
     if not teams:
         if _is_clan_vs_clan(ev):
@@ -331,6 +338,247 @@ def _team_counts(session, team_ids: list) -> dict:
         .group_by(EventTeamMember.team_id)
         .all()
     )
+
+
+# ---------------------------------------------------------------------------- #
+# Free-for-all (formation_mode == "solo"): every entrant is a team of one
+# ---------------------------------------------------------------------------- #
+def is_solo(ev) -> bool:
+    return (getattr(ev, "formation_mode", None) or "admin_assign") == "solo"
+
+
+def solo_blocked_reason(kind: Optional[str], mode: Optional[str]) -> Optional[str]:
+    """Why an event of this ``kind``/ownership ``mode`` can't run
+    free-for-all, or None when it can. Pure."""
+    from db.models import EVENT_SOLO_BLOCKED_KINDS, EVENT_SOLO_BLOCKED_MODES
+
+    if (mode or "standard") in EVENT_SOLO_BLOCKED_MODES:
+        return ("Clan-vs-clan teams stand for clans, so the event can't be "
+                "free-for-all.")
+    if (kind or "standard") in EVENT_SOLO_BLOCKED_KINDS:
+        return {
+            "conquest": "Conquest needs rival teams fighting over the map.",
+        }.get(kind, "Skill/Boss of the Week already ranks every player on "
+                    "their own.")
+    return None
+
+
+def solo_team_name(player_name: Optional[str], player_id: int, taken: set) -> str:
+    """The team name for one free-for-all entrant: their RSN, suffixed
+    " (2)", " (3)"… if another team already uses it (case-insensitively).
+    Pure; adds the chosen name to ``taken`` (lower-cased)."""
+    base = (str(player_name).strip() if player_name else "") or f"Player {player_id}"
+    base = base[:72]  # EventTeam.name is 80 wide; leave room for a suffix
+    name, n = base, 1
+    while name.lower() in taken:
+        n += 1
+        name = f"{base} ({n})"
+    taken.add(name.lower())
+    return name
+
+
+def _taken_team_names(session, event_id: int) -> set:
+    from db.models import EventTeam
+
+    return {
+        (name or "").lower() for (name,) in
+        session.query(EventTeam.name).filter(EventTeam.event_id == event_id).all()
+    }
+
+
+def create_solo_teams(session, ev, player_ids, joined_at: Optional[dict] = None) -> list:
+    """Give each player in ``player_ids`` a fresh team of their own on ``ev``
+    and place them on it. ``joined_at`` optionally maps player_id → the
+    membership's credit cutoff to keep (a split must not move it). Returns
+    ``[(player_id, team_id)]``. Caller has already checked nobody is placed;
+    flushes, caller owns the commit."""
+    from db.models import EventTeam, EventTeamMember, Player
+
+    player_ids = list(dict.fromkeys(player_ids))
+    if not player_ids:
+        return []
+    names = dict(
+        session.query(Player.player_id, Player.player_name)
+        .filter(Player.player_id.in_(player_ids)).all()
+    )
+    taken = _taken_team_names(session, ev.id)
+    teams = []
+    for pid in player_ids:
+        team = EventTeam(event_id=ev.id,
+                         name=solo_team_name(names.get(pid), pid, taken),
+                         score=0)
+        session.add(team)
+        teams.append((pid, team))
+    session.flush()  # assign team ids
+    placements = []
+    for pid, team in teams:
+        member = EventTeamMember(team_id=team.id, player_id=pid, event_id=ev.id)
+        cutoff = (joined_at or {}).get(pid)
+        if cutoff is not None:
+            member.joined_at = cutoff
+        session.add(member)
+        placements.append((pid, team.id))
+    session.flush()
+    return placements
+
+
+def ensure_solo_team(session, ev, player_id: int) -> int:
+    """The free-for-all sign-up: the player's existing team on ``ev`` if they
+    are already placed (idempotent), else a new team of their own. Returns the
+    team id. Caller owns the commit (and the IntegrityError backstop for a
+    concurrent double-join — uq_web_evt_member_event_player)."""
+    from db.models import EventTeamMember
+
+    placed = (
+        session.query(EventTeamMember.team_id)
+        .filter(EventTeamMember.event_id == ev.id,
+                EventTeamMember.player_id == player_id)
+        .first()
+    )
+    if placed:
+        return placed[0]
+    [(_, team_id)] = create_solo_teams(session, ev, [player_id])
+    return team_id
+
+
+def drop_empty_solo_team(session, ev, team_id: int) -> bool:
+    """After a free-for-all entrant leaves: delete their now-empty team unless
+    it already scored (credited ledger rows / a non-zero score), in which case
+    it stays on the standings like any departed member's history. Returns
+    whether the team was deleted. Caller owns the commit."""
+    from db.models import EventCompletion, EventTeam, EventTeamMember
+
+    team = (session.query(EventTeam)
+            .filter(EventTeam.id == team_id, EventTeam.event_id == ev.id)
+            .first())
+    if team is None:
+        return False
+    if session.query(EventTeamMember.player_id).filter(
+            EventTeamMember.team_id == team_id).first():
+        return False
+    if float(team.score or 0) or session.query(EventCompletion.id).filter(
+            EventCompletion.team_id == team_id).first():
+        return False
+    from services.event_team_purge import purge_team
+
+    purge_team(session, ev.id, team)
+    return True
+
+
+def plan_solo_split(teams: list) -> dict:
+    """Pure: which teams a switch to free-for-all breaks up. ``teams`` is
+    ``[(team_id, [player_id, ...])]``. A team with one member already IS that
+    player's team and stays; an empty team is left for the admins. Returns
+    ``{"split": {team_id: [player_ids]}, "kept": [team_id], "empty": [team_id]}``."""
+    split, kept, empty = {}, [], []
+    for team_id, members in teams:
+        if len(members) > 1:
+            split[team_id] = sorted(members)
+        elif members:
+            kept.append(team_id)
+        else:
+            empty.append(team_id)
+    return {"split": split, "kept": kept, "empty": empty}
+
+
+def split_into_solo_teams(session, ev) -> dict:
+    """Turn every multi-member team on ``ev`` into one team per member — the
+    conversion behind switching a live event to free-for-all.
+
+    Each member keeps their credit cutoff (``joined_at``) and takes their own
+    ledger rows, effort rows and buy-ins to their new team (bingo-cell
+    credits are re-derived instead); every task's rollups are then re-folded
+    from the ledger (``recompute_task_rollups``, silently — no lead-change
+    announcement), so
+    each player's progress, laps, score and contribution points are what they
+    would have been had they entered alone. The emptied teams are deleted.
+    Ledger rows with no player (line/blackout bonuses, team-only manual
+    awards) can't be attributed to anyone and go with their team —
+    ``unattributed_rows`` counts them.
+
+    Refused for board games once begun (positions, coins and rolls are team
+    state that can't be divided). Returns a summary; flushes, caller owns the
+    commit (and the matcher bump)."""
+    from db.models import (EventCompletion, EventEffort, EventLeaderVote,
+                           EventTask, EventTeam, EventTeamMember)
+    from services.event_team_purge import purge_team
+
+    rows = (
+        session.query(EventTeam.id, EventTeamMember.player_id,
+                      EventTeamMember.joined_at)
+        .outerjoin(EventTeamMember, EventTeamMember.team_id == EventTeam.id)
+        .filter(EventTeam.event_id == ev.id)
+        .order_by(EventTeam.id.asc())
+        .all()
+    )
+    members_by_team: dict = {}
+    joined: dict = {}
+    for team_id, pid, joined_at in rows:
+        members_by_team.setdefault(team_id, [])
+        if pid is not None:
+            members_by_team[team_id].append(pid)
+            joined[pid] = joined_at
+    plan = plan_solo_split(list(members_by_team.items()))
+    summary = {"split_teams": len(plan["split"]), "new_teams": 0,
+               "moved_rows": 0, "unattributed_rows": 0, "kept_teams": len(plan["kept"]),
+               "empty_teams": len(plan["empty"]), "recomputed_tasks": 0}
+    if not plan["split"]:
+        return summary
+    if (getattr(ev, "kind", None) or "standard") == "board_game" and \
+            getattr(ev, "status", None) in ("active", "past"):
+        raise SignupError(409, "Board already in play",
+                          "A board game's teams can't be split up once it has "
+                          "begun — positions and coins belong to the team.")
+
+    old_ids = list(plan["split"])
+    moving = [pid for pids in plan["split"].values() for pid in pids]
+    # Off the old rosters first (uq_web_evt_member_event_player), then onto
+    # teams of their own.
+    session.query(EventTeamMember).filter(
+        EventTeamMember.team_id.in_(old_ids)
+    ).delete(synchronize_session=False)
+    session.query(EventLeaderVote).filter(
+        EventLeaderVote.team_id.in_(old_ids)
+    ).delete(synchronize_session=False)
+    session.flush()
+    placements = dict(create_solo_teams(
+        session, ev, moving, joined_at={pid: joined.get(pid) for pid in moving}))
+    summary["new_teams"] = len(placements)
+
+    for pid, new_tid in placements.items():
+        # Bingo-cell credits are NOT moved: the re-fold below re-derives them
+        # per new team from its own completed flag (a moved row would outlive
+        # a task the player alone never finished).
+        for model in (EventCompletion, EventEffort):
+            moved = (session.query(model)
+                     .filter(model.team_id.in_(old_ids), model.player_id == pid)
+                     .update({model.team_id: new_tid}, synchronize_session=False))
+            if model is EventCompletion:
+                summary["moved_rows"] += moved
+    sync_buyin_teams(session, ev.id, placements)
+    summary["unattributed_rows"] = (
+        session.query(EventCompletion.id)
+        .filter(EventCompletion.team_id.in_(old_ids)).count())
+    session.flush()
+
+    # Re-fold every task: the old teams drop to nothing, each new team earns
+    # its own laps. Board games/conquest never reach here with rows to move.
+    from services.event_engine import recompute_task_rollups
+
+    for task in (session.query(EventTask)
+                 .filter(EventTask.event_id == ev.id)
+                 .order_by(EventTask.id.asc()).all()):
+        try:
+            recompute_task_rollups(session, ev, task, announce_lead=False,
+                                   regroup=True)
+            summary["recomputed_tasks"] += 1
+        except ValueError:
+            continue  # forward_only kinds (board game / conquest / race task)
+
+    for team in session.query(EventTeam).filter(EventTeam.id.in_(old_ids)).all():
+        purge_team(session, ev.id, team)
+    session.flush()
+    return summary
 
 
 # ---------------------------------------------------------------------------- #
@@ -734,8 +982,9 @@ def signup_all_members(session, ev, group_id: Optional[int] = None) -> dict:
       • clans whose team already follows the clan automatically (``auto_clan``)
         are skipped — their roster is the clan.
     Then by formation mode: ``signup_pool`` leaves everyone in the pool for
-    the admins to sort; every other mode also places them, balanced onto the
-    least-full eligible team (what an auto-assign sign-up does). Returns
+    the admins to sort; ``solo`` gives each of them a team of their own; every
+    other mode also places them, balanced onto the least-full eligible team
+    (what an auto-assign sign-up does). Returns
     counts; ``capped`` is true when :data:`SIGNUP_ALL_MAX_ADDED` cut it short.
     Raises :class:`SignupError`. The caller owns the commit (and, on a
     staff-hosted event, the roster-capacity check against ``per_team``)."""
@@ -771,7 +1020,8 @@ def signup_all_members(session, ev, group_id: Optional[int] = None) -> dict:
         raise SignupError(409, "Already the whole clan",
                           "This event already enters every clan member automatically.")
     place = formation != "signup_pool"
-    if place and not teams:
+    solo = formation == "solo"
+    if place and not teams and not solo:
         raise SignupError(409, "No teams", "Add at least one team first.")
 
     # Every membership row across ALL participating clans (not just the
@@ -837,7 +1087,12 @@ def signup_all_members(session, ev, group_id: Optional[int] = None) -> dict:
     ])
 
     placements: list = []
-    if place:
+    if solo:
+        # Free-for-all: everyone gets a team of their own.
+        session.flush()
+        placements = create_solo_teams(session, ev, kept)
+        sync_buyin_teams(session, ev.id, dict(placements))
+    elif place:
         placements = _plan_bulk_placement(ev, teams, kept, _clan, session)
         session.add_all([
             EventTeamMember(team_id=tid, player_id=pid, event_id=ev.id)
@@ -892,8 +1147,13 @@ def remove_signup(session, ev, player_id: int) -> None:
         .filter(EventTeam.event_id == ev.id, EventTeamMember.player_id == player_id)
         .all()
     )
+    left = [m.team_id for m in memberships]
     for m in memberships:
         session.delete(m)
     # web71a: a withdrawn player's buy-in (if any) stops crediting a team. The
     # row itself stands — voiding paid GP is a separate, deliberate pot action.
     sync_buyin_team(session, ev.id, player_id, None)
+    if is_solo(ev):
+        session.flush()
+        for team_id in left:
+            drop_empty_solo_team(session, ev, team_id)

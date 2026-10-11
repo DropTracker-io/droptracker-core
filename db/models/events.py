@@ -75,12 +75,25 @@ EVENT_TASK_TYPES = (
 # - "signup_pool"  — sign-ups collect in a pool with NO team; admins sort them
 #                    into teams later (manually or by repeated randomize).
 # - "admin_assign" — no self sign-up at all; admins place every player.
-EVENT_FORMATION_MODES = ("self_join", "auto_assign", "signup_pool", "admin_assign")
+# - "solo"         — free-for-all: every entrant gets a team of their own
+#                    (named after their RSN), created when they sign up. All
+#                    the per-team machinery — progress, score, leaderboard,
+#                    placement points, pot payouts, in-game fan-out — then
+#                    scores each player alone (services/event_signup
+#                    .ensure_solo_team / split_into_solo_teams).
+EVENT_FORMATION_MODES = ("self_join", "auto_assign", "signup_pool", "admin_assign",
+                         "solo")
 
 # Formation modes that let a player sign themselves up (everything but
 # admin_assign). Used by the join route, the recruiting banner and the Discord
 # signup button.
-EVENT_SELF_SIGNUP_MODES = ("self_join", "auto_assign", "signup_pool")
+EVENT_SELF_SIGNUP_MODES = ("self_join", "auto_assign", "signup_pool", "solo")
+
+# Event kinds / ownership modes that can't run free-for-all: conquest needs
+# rival teams fighting over a map, SOTW/BOTW manage their own roster, and
+# clan_vs_clan teams represent clans (EVENT_SOLO_BLOCKED_MODES).
+EVENT_SOLO_BLOCKED_KINDS = ("conquest", "sotw", "botw")
+EVENT_SOLO_BLOCKED_MODES = ("clan_vs_clan",)
 
 # Task-library sharing (web_event_tasks.visibility / web_event_task_library.visibility):
 # every task an admin creates is saved to the reusable task library — "public"

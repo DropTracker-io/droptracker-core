@@ -985,6 +985,8 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             "auto_assign": "Pick your account — you'll be placed on a team automatically.",
             "signup_pool": "Pick your account to join the sign-up pool; "
                            "admins will sort teams later.",
+            "solo": "Pick your account — it's a free-for-all, everyone "
+                    "competes on their own.",
         }.get(data.get("formation_mode"), "Pick your account to enter.")
         spec["description"] = (
             f"{data.get('description') or 'This event is open for sign-ups!'}\n\n"

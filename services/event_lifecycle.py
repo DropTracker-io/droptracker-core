@@ -111,7 +111,8 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
 
     Rules: ``ends_at`` (if set) must be in the future; a bingo event needs a
     complete ``board_size²`` board whose bound cells reference this event's
-    tasks. Standard/global events need ≥1 team. clan_vs_clan needs ≥2 accepted
+    tasks. Standard/global events need ≥1 team (free-for-all excepted — its
+    teams are made per entrant). clan_vs_clan needs ≥2 accepted
     clans; teams are optional there — with none it runs whole-clan vs
     whole-clan (auto-seeded at activation), but once any team exists every
     accepted clan must have one."""
@@ -123,8 +124,11 @@ def activation_blocker_items(session, event, now: Optional[datetime] = None) -> 
     is_cvc = (getattr(event, "mode", None) or "standard") == "clan_vs_clan"
     team_count = session.query(EventTeam).filter(EventTeam.event_id == event.id).count()
 
+    # Free-for-all events grow a team per entrant as players sign up — an
+    # event nobody has joined yet can still open.
+    is_solo = (getattr(event, "formation_mode", None) or "") == "solo"
     if not is_cvc:
-        if team_count < 1:
+        if team_count < 1 and not is_solo:
             blockers.append({
                 "code": "no_teams", "target": "teams",
                 "message": "The event needs at least one team.",

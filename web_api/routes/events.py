@@ -4606,6 +4606,12 @@ async def create_event():
     ping_config = _parse_ping_config(body.get("pings"))
     if mode == "clan_vs_clan" and kind in COMPETITION_EVENT_KINDS:
         abort_problem(*_COMPETITION_CLAN_LOCK)
+    if formation_mode == "solo":
+        from services.event_signup import solo_blocked_reason
+
+        problem = solo_blocked_reason(kind, mode)
+        if problem:
+            abort_problem(422, "Free-for-all unavailable", problem)
     # web119a: clan-vs-clan with no host group = staff-hosted (superadmins
     # only — _assert_event_admin(None) below enforces it). Every clan fields
     # one team whose roster its leaders pick from the sign-up pool, and each
@@ -5227,6 +5233,31 @@ async def update_event(event_id: int):
                 # live Discord scheduled event (never re-creates: the row
                 # keeps its discord_scheduled_event_id).
                 _sync_event_guilds(s, ev)
+            # Free-for-all: checked against the FINAL kind/mode (either may
+            # have moved in this same PATCH). Switching an event with shared
+            # teams to solo splits them — each member onto a team of their
+            # own, the ledger re-folded per player.
+            solo_split = None
+            if (ev.formation_mode or "") == "solo" and \
+                    any(k in body for k in ("formation_mode", "kind", "mode")):
+                from services.event_signup import (SignupError,
+                                                   solo_blocked_reason,
+                                                   split_into_solo_teams)
+
+                problem = solo_blocked_reason(ev.kind, ev.mode)
+                if problem:
+                    abort_problem(422, "Free-for-all unavailable", problem)
+                if _team_discord_enabled(ev):
+                    abort_problem(422, "Team channels are on",
+                                  "Turn off per-team Discord channels first — "
+                                  "a free-for-all would get a channel per player.")
+                if _settings_before.get("formation_mode") != "solo":
+                    try:
+                        solo_split = split_into_solo_teams(s, ev)
+                    except SignupError as e:
+                        abort_problem(e.status, e.title, e.detail)
+                    if solo_split.get("new_teams"):
+                        _mark_team_discord_dirty(s, event_id)
             # Audit only the scoring/config fields that actually changed — a
             # no-op PATCH (or one touching non-tracked keys) writes no row.
             _settings_after = _event_settings_snapshot(ev)
@@ -5236,6 +5267,8 @@ async def update_event(event_id: int):
                 if _settings_before.get(k) != v
             }
             if _changed:
+                if solo_split and solo_split.get("split_teams"):
+                    _changed["solo_split"] = solo_split
                 s.add(AuditLog(
                     actor_user_id=user_id, group_id=ev.group_id, event_id=event_id,
                     action="event.settings.update",
@@ -5379,6 +5412,18 @@ def _sync_team_discord(s, ev: Event) -> None:
     except ImportError:
         return
     sync_event_team_discord(s, ev)
+
+
+def _team_discord_enabled(ev: Event) -> bool:
+    """Whether the event-level per-team Discord config provisions anything
+    (free-for-all refuses to turn that into a channel per player)."""
+    try:
+        from services.event_team_discord import (config_enabled,
+                                                 effective_team_discord_config)
+    except ImportError:
+        return False
+    return config_enabled(effective_team_discord_config(
+        getattr(ev, "team_discord_config", None)))
 
 
 def _mark_team_discord_dirty(s, event_id: int, team_id: int | None = None) -> None:
@@ -7265,7 +7310,8 @@ def _user_other_entry(s, ev, event_id: int, user_id: int, player_id: int) -> int
 async def join_event(event_id: int):
     """Player-facing join. Behavior depends on the event's formation mode
     (PRD D4): self_join picks a team (join code enforced when set),
-    auto_assign balances onto the smallest team, admin_assign refuses."""
+    auto_assign balances onto the smallest team, solo makes the player a team
+    of their own (free-for-all), admin_assign refuses."""
     user_id = current_user_id()
     body = await json_body()
     player_id = body.get("player_id")
@@ -7300,7 +7346,8 @@ async def join_event(event_id: int):
             # One RSN per person on the new self-service surfaces (clan-vs-clan
             # and the sign-up pool). Legacy standard self_join/auto_assign events
             # keep their prior behavior untouched (no extra query, no new 409).
-            if (getattr(ev, "mode", None) or "standard") == "clan_vs_clan" or mode == "signup_pool":
+            if (getattr(ev, "mode", None) or "standard") == "clan_vs_clan" or \
+                    mode in ("signup_pool", "solo"):
                 other = _user_other_entry(s, ev, event_id, user_id, player_id)
                 if other is not None:
                     abort_problem(
@@ -7320,6 +7367,25 @@ async def join_event(event_id: int):
                     ))
                     s.commit()
                 return {"team_id": None, "pooled": True}
+
+            if mode == "solo":
+                # Free-for-all: a team of the player's own, made on the spot.
+                if req_team_id is not None:
+                    abort_problem(422, "No team choice",
+                                  "Everyone competes on their own in this event.")
+                from services.event_signup import ensure_solo_team
+
+                team_id = ensure_solo_team(s, ev, player_id)
+                _sync_buyin_team(s, event_id, player_id, team_id)
+                try:
+                    s.commit()
+                except IntegrityError:
+                    s.rollback()  # concurrent double-join won the race
+                    abort_problem(
+                        409, "Already on a team",
+                        "You're already in this event — refresh to see your "
+                        "placement.")
+                return team_id
 
             teams = (
                 s.query(EventTeam)
@@ -7415,10 +7481,11 @@ async def leave_event(event_id: int):
                          sa_or(EventLeaderVote.voter_player_id == player_id,
                                EventLeaderVote.candidate_player_id == player_id))
                  .delete(synchronize_session=False))
-            # Also withdraw a sign-up-pool opt-in. Only signup_pool events ever
-            # write signup rows, so other modes stay byte-for-byte (no query).
+            # Also withdraw a sign-up-pool opt-in (and a free-for-all one —
+            # "sign up all members" writes rows there). Other modes stay
+            # byte-for-byte (no query).
             signup = None
-            if (ev.formation_mode or "admin_assign") == "signup_pool":
+            if (ev.formation_mode or "admin_assign") in ("signup_pool", "solo"):
                 signup = _signup_row(s, event_id, player_id)
                 if signup:
                     s.delete(signup)
@@ -7429,6 +7496,13 @@ async def leave_event(event_id: int):
                     # crediting a team they left).
                     _sync_buyin_team(s, event_id, player_id, None)
                     _mark_team_discord_dirty(s, event_id, membership.team_id)
+                    if (ev.formation_mode or "") == "solo":
+                        # Free-for-all: their own team goes too, unless it
+                        # already scored (then it stays on the standings).
+                        from services.event_signup import drop_empty_solo_team
+
+                        s.flush()
+                        drop_empty_solo_team(s, ev, membership.team_id)
                 s.commit()
 
     await asyncio.to_thread(_apply)

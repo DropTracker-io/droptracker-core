@@ -909,6 +909,7 @@ async def put_event_team_discord(event_id: int):
     Saving immediately (re)materializes the desired ``web_event_team_discord``
     rows — the bot provisions within ~30s."""
     from services.event_team_discord import (
+        config_enabled,
         effective_team_discord_config,
         sync_event_team_discord,
     )
@@ -1055,6 +1056,11 @@ async def put_event_team_discord(event_id: int):
             for tid, entry in teams_clean.items():
                 merged_teams.setdefault(tid, {}).update(entry)
             merged["teams"] = merged_teams
+            if (ev.formation_mode or "") == "solo" and config_enabled(merged):
+                abort_problem(422, "Free-for-all event",
+                              "Every player is their own team here — per-team "
+                              "Discord would make a role and channel for each "
+                              "one.")
             owner.team_discord_config = json.dumps(merged)
 
             sync_event_team_discord(s, ev)

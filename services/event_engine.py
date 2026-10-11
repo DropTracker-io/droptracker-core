@@ -861,6 +861,20 @@ def _plugin_progress_step_crossed(previous: int, current: int, threshold: int) -
     return (current * steps) // threshold > (previous * steps) // threshold
 
 
+def _laps_announce_progress(event: dict, task: dict) -> bool:
+    """True for a repeatable continuous-metric task (loot_value / xp_target
+    with ``config.repeatable``): every whole multiple of the target is a
+    completion that scores and announces itself, so the 25/50/75%-of-the-lap
+    progress pings in between are noise — "1M GP = 1 point" told every
+    teammate about each quarter-million (event 129, 2026-10-11)."""
+    if task.get("type") not in PLUGIN_PROGRESS_STEP_TASK_TYPES:
+        return False
+    try:
+        return _tr.is_repeatable(repeat_cap(event, task))
+    except Exception:
+        return False
+
+
 def task_progress_notify_mode(task: dict) -> Optional[str]:
     """Per-task progress-notification override (``config.progress_notify``:
     'off' | 'milestones' | 'all'), or None to inherit the event/team modes.
@@ -3893,7 +3907,9 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     a per-task ``config.progress_notify`` of 'all' opts one tile back into
     every increment — except continuous-metric tasks (xp_target/loot_value),
     which even then step at {PLUGIN_PROGRESS_STEP_PCT}% of the target so a
-    10M-XP task pings its teams ~10 times total instead of per kill.
+    10M-XP task pings its teams ~10 times total instead of per kill. A
+    REPEATABLE continuous-metric task with no override sends nothing at all
+    here (:func:`_laps_announce_progress`): only an earned lap announces.
 
     The override ('off'/'milestones'/'all') replaces the event AND team modes
     for BOTH the plugin fan-out and the Discord enqueue — it's how one tile
@@ -3928,6 +3944,11 @@ def _maybe_enqueue_progress(session, event: dict, task: dict, team_id, player_id
     if crossed_pcts:
         base_payload["milestone_pct"] = max(crossed_pcts)
     task_mode = task_progress_notify_mode(task)
+    if task_mode is None and _laps_announce_progress(event, task):
+        # Repeatable meter task ("every 1M GP = 1 pt"): each lap is its own
+        # completion message, so by default nothing is said between points.
+        # An explicit per-task progress_notify still opts back in.
+        return
     if task_mode:
         base_payload["progress_notify"] = task_mode
     if task_mode == "off":
@@ -6738,7 +6759,9 @@ def recompute_task_rollups(session, event_row, task_row, *,
                            old_task: Optional[dict] = None,
                            preserve_completed: bool = False,
                            rescreen_vestige_rings: bool = False,
-                           rescreen_duplicate_pets: bool = False) -> dict:
+                           rescreen_duplicate_pets: bool = False,
+                           announce_lead: bool = True,
+                           regroup: bool = False) -> dict:
     """Re-fold every (task, team) rollup after a LIVE task edit (web68a).
 
     The caller has already mutated + flushed the task row (new target/config/
@@ -6786,6 +6809,15 @@ def recompute_task_rollups(session, event_row, task_row, *,
     no longer accepts. :func:`_rescreen_duplicate_pet_credits` runs first and
     its summary rides back under ``"duplicate_pets"``.
 
+    ``announce_lead``: False keeps the re-fold silent even when it changes
+    who leads (a free-for-all split re-attributes rows; nobody overtook
+    anyone).
+
+    ``regroup``: the task is unchanged and ledger rows moved between teams
+    (``services.event_signup.split_into_solo_teams``). The manual-only types
+    are then re-foldable too: their rollup is the plain quantity sum, exactly
+    what a revoke re-derives.
+
     Raises ``ValueError("forward_only")`` for kinds with no recomputable
     ledger: manual-only types (custom/ehp_target/ehb_target), board-game
     events (progress is entangled with turn state — coins/rolls must never
@@ -6808,7 +6840,7 @@ def recompute_task_rollups(session, event_row, task_row, *,
     event = _event_to_dict(event_row)
     task = _task_to_dict(task_row)
 
-    if task.get("type") in ("custom", "ehp_target", "ehb_target") or \
+    if (task.get("type") in ("custom", "ehp_target", "ehb_target") and not regroup) or \
             (event.get("kind") or "standard") in ("board_game", "conquest"):
         raise ValueError("forward_only")
     if task.get("type") == "competition":
@@ -6862,7 +6894,7 @@ def recompute_task_rollups(session, event_row, task_row, *,
     # before the FIRST score write: a re-fold that moves no score (the common
     # case) issues no standings queries at all.
     lead_before = _NO_LEAD_SNAPSHOT
-    announce_lead = _lead_changes_announceable(event_row)
+    announce_lead = announce_lead and _lead_changes_announceable(event_row)
 
     for team_id in sorted(t for t in team_ids if t is not None):
         # P0-7: locked read — same progress→team lock order as apply/revoke.

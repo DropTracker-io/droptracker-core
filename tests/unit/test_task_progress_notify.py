@@ -191,6 +191,64 @@ def test_event_toggle_still_mutes_discord_not_plugin(gates):
     assert not discord.calls
 
 
+# ── repeatable meter tasks: only an earned lap announces ─────────────────────
+
+def _lap_task(progress_notify=None, ttype="loot_value", repeatable=True):
+    config = {}
+    if repeatable:
+        config["repeatable"] = True
+    if progress_notify is not None:
+        config["progress_notify"] = progress_notify
+    return {"id": 9, "label": "Turn on the Money Printer", "type": ttype,
+            "config": config, "target_value": 1_000_000}
+
+
+def test_repeatable_loot_task_is_silent_between_points(gates):
+    plugin, discord, set_team = gates
+    set_team("all")
+    # 200k → 300k of a 1M lap crosses 25% — still nothing: the lap's own
+    # completion is the announcement (event 129, "1M GP = 1 point").
+    _run(gates, _lap_task(), _event(mode="all"),
+         previous=200_000, current=300_000, threshold=1_000_000)
+    assert not plugin.calls
+    assert not discord.calls
+
+
+def test_repeatable_xp_task_is_silent_between_points(gates):
+    plugin, discord, _ = gates
+    _run(gates, _lap_task(ttype="xp_target"), _event(mode="milestones"),
+         previous=700_000, current=800_000, threshold=1_000_000)
+    assert not plugin.calls
+    assert not discord.calls
+
+
+def test_non_repeatable_loot_task_keeps_milestones(gates):
+    plugin, discord, _ = gates
+    # A one-shot "loot 1M" still tells the team at 25/50/75%.
+    _run(gates, _lap_task(repeatable=False), _event(mode="off"),
+         previous=200_000, current=300_000, threshold=1_000_000)
+    assert len(plugin.calls) == 1
+    assert plugin.calls[0][0][3]["milestone_pct"] == 25
+
+
+def test_repeatable_meter_explicit_override_still_opts_in(gates):
+    plugin, discord, _ = gates
+    _run(gates, _lap_task("milestones"), _event(mode="off"),
+         previous=200_000, current=300_000, threshold=1_000_000)
+    assert len(plugin.calls) == 1
+    assert len(discord.calls) == 1
+
+
+def test_repeatable_item_task_keeps_default(gates):
+    plugin, _, _ = gates
+    # Only continuous meters go quiet; a repeatable item tile still
+    # announces its milestones.
+    task = _task()
+    task["config"]["repeatable"] = True
+    _run(gates, task, _event(mode="off"), previous=3700, current=3800)
+    assert len(plugin.calls) == 1
+
+
 # ── _enqueue_notification override gate ──────────────────────────────────────
 
 class _Nested:

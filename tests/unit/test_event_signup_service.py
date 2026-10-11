@@ -368,3 +368,64 @@ class TestSignupAllMembers:
         with pytest.raises(sus.SignupError) as exc:
             sus.signup_all_members(mini_db.s, _ev(formation_mode="self_join"))
         assert exc.value.title == "No teams"
+
+
+class TestSolo:
+    """Free-for-all (formation_mode="solo"): the pure halves."""
+
+    def _models(self, monkeypatch):
+        import types
+        fake = types.ModuleType("db.models")
+        fake.EVENT_SELF_SIGNUP_MODES = ("self_join", "auto_assign", "signup_pool", "solo")
+        fake.EVENT_SOLO_BLOCKED_KINDS = ("conquest", "sotw", "botw")
+        fake.EVENT_SOLO_BLOCKED_MODES = ("clan_vs_clan",)
+        monkeypatch.setitem(sys.modules, "db.models", fake)
+
+    def test_solo_is_a_self_signup_mode(self, monkeypatch):
+        self._models(monkeypatch)
+        assert sus.is_self_signup_mode(_ev(formation_mode="solo"))
+        assert sus.is_solo(_ev(formation_mode="solo"))
+        assert not sus.is_solo(_ev(formation_mode="self_join"))
+        assert not sus.is_solo(_ev(formation_mode=None))
+
+    def test_blocked_kinds_and_modes(self, monkeypatch):
+        self._models(monkeypatch)
+        for kind in ("standard", "bingo", "board_game", "loot_sweep"):
+            assert sus.solo_blocked_reason(kind, "standard") is None
+        assert sus.solo_blocked_reason(None, None) is None
+        for kind in ("conquest", "sotw", "botw"):
+            assert sus.solo_blocked_reason(kind, "standard")
+        assert sus.solo_blocked_reason("standard", "clan_vs_clan")
+
+    def test_team_name_is_the_rsn(self):
+        taken = set()
+        assert sus.solo_team_name("Zezima", 1, taken) == "Zezima"
+        assert "zezima" in taken
+
+    def test_team_name_dedupes_case_insensitively(self):
+        taken = {"zezima", "zezima (2)"}
+        assert sus.solo_team_name("ZEZIMA", 2, taken) == "ZEZIMA (3)"
+
+    def test_team_name_falls_back_to_id(self):
+        assert sus.solo_team_name(None, 42, set()) == "Player 42"
+        assert sus.solo_team_name("   ", 42, set()) == "Player 42"
+
+    def test_team_name_fits_the_column(self):
+        name = sus.solo_team_name("x" * 200, 1, {"x" * 72})
+        assert len(name) <= 80
+
+    def test_split_plan(self):
+        plan = sus.plan_solo_split([(10, [3, 1, 2]), (11, [4]), (12, [])])
+        assert plan == {"split": {10: [1, 2, 3]}, "kept": [11], "empty": [12]}
+
+    def test_split_plan_nothing_to_do(self):
+        plan = sus.plan_solo_split([(11, [4]), (13, [5])])
+        assert plan["split"] == {}
+        assert plan["kept"] == [11, 13]
+
+    def test_perform_signup_admin_assign_still_refused(self, monkeypatch):
+        self._models(monkeypatch)
+        with pytest.raises(sus.SignupError) as exc:
+            sus.perform_signup(None, _ev(formation_mode="admin_assign"),
+                               SimpleNamespace(player_id=3), 7)
+        assert exc.value.status == 403

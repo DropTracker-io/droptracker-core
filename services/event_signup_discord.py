@@ -229,6 +229,9 @@ class EventSignupButtons(Extension):
         if result.get("pooled"):
             msg = (f"✅ **{player.player_name}** is in the sign-up pool for "
                    f"**{ev.name}**. Team assignments come later — watch this channel!")
+        elif sus.is_solo(ev):
+            msg = (f"✅ **{player.player_name}** entered **{ev.name}** — it's a "
+                   f"free-for-all, so you're competing on your own. Good luck!")
         else:
             team = session.query(EventTeam).filter(EventTeam.id == result["team_id"]).first()
             tname = team.name if team else "your team"
