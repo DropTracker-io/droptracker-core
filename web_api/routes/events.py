@@ -8130,6 +8130,73 @@ async def randomize_signups(event_id: int):
     return private_no_store(jsonify(result))
 
 
+@events_bp.post("/events/<int:event_id>/signups/all-members")
+async def signup_all_members_route(event_id: int):
+    """Sign up every current member of the event's clan(s) in one go — the
+    manager counterpart of a SOTW/BOTW "whole clan" roster, for any event
+    kind. Pool events fill the pool; other formation modes also place the new
+    players, balanced across teams. Only adds — never moves or removes anyone.
+    Optional body ``{group_id}`` scopes a clan-vs-clan event to one clan (a
+    staff-hosted event's clan managers are always scoped to their own)."""
+    user_id = current_user_id()
+    body = await json_body(required=False)
+    group_id = (body or {}).get("group_id")
+    if group_id is not None and (not isinstance(group_id, int) or isinstance(group_id, bool)):
+        abort_problem(422, "Invalid group_id", "'group_id' must be an integer or omitted.")
+
+    def _apply():
+        from services.event_signup import signup_all_members, SignupError
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_roster_open(ev)
+            scope_gid = group_id
+            if is_staff_hosted(ev):
+                # Same scoping as randomize: a clan manager only ever adds
+                # their own clan; the whole event is staff's call.
+                if scope_gid is None and not _is_event_admin(s, user_id, ev):
+                    mine = _clan_manager_group_ids(s, user_id, ev)
+                    if len(mine) == 1:
+                        scope_gid = next(iter(mine))
+                if scope_gid is None:
+                    _assert_event_admin(s, user_id, ev)
+                else:
+                    _assert_clan_manager(s, user_id, ev, scope_gid, roster=True)
+            else:
+                _assert_event_admin(s, user_id, ev)
+            try:
+                result = signup_all_members(s, ev, group_id=scope_gid)
+            except SignupError as e:
+                abort_problem(e.status, e.title, e.detail)
+            if is_staff_hosted(ev) and result["per_team"]:
+                s.flush()  # counts below include this call's placements
+                for team_id, adding in result["per_team"].items():
+                    problem = capacity_problem(ev, _team_member_count(s, team_id) - adding,
+                                               adding)
+                    if problem:
+                        # Nothing committed yet — the session rolls back.
+                        abort_problem(409, "Roster full",
+                                      f"{problem} Pick the roster by hand.",
+                                      extra={"code": "roster_full"})
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=ev.group_id or scope_gid,
+                event_id=ev.id,
+                action="event.signup.all_members",
+                target=f"web_events.{event_id}",
+                before=None,
+                after=f"added:{result['added']} placed:{result['placed']}",
+            ))
+            if result["placed"]:
+                _mark_team_discord_dirty(s, event_id)
+            s.commit()
+            result.pop("per_team", None)
+            return result
+
+    result = await asyncio.to_thread(_apply)
+    _bump(event_id)
+    return private_no_store(jsonify(result))
+
+
 @events_bp.post("/events/<int:event_id>/populate-random")
 async def populate_random_members(event_id: int):
     """Admin-only scale/testing tool: bulk-fill this event's teams with random

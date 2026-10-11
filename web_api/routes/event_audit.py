@@ -486,6 +486,7 @@ _ACTION_VERB = {
     "event.participant.decline": "declined an invite",
     "event.signup.assign": "assigned a signup",
     "event.signup.randomize": "randomized signups",
+    "event.signup.all_members": "signed up every clan member",
     "event.signup.remove": "removed a signup",
     "event.signup.message": "messaged signups",
     "event.populate_random": "populated random teams",

@@ -690,6 +690,195 @@ def populate_random(session, ev, *, source: str, count: Optional[int] = None) ->
     return {"added": len(placements), "source": source, "teams": teams_summary}
 
 
+# ---------------------------------------------------------------------------- #
+# Manager action: sign up every member of the participating clan(s)
+# ---------------------------------------------------------------------------- #
+# Ceiling on one call (the populate tool's P1-12 reasoning: bound the rows one
+# transaction writes). Sign-ups are single inserts, so this sits above
+# POPULATE_MAX_ADDED; a clan larger than this re-runs the action for the rest.
+SIGNUP_ALL_MAX_ADDED = 5000
+
+
+def _pick_one_per_user(rows: list) -> tuple:
+    """Pure (no DB): one account per person. ``rows`` are ``(player_id,
+    user_id, date_updated)``; unclaimed accounts (user_id None) each stand
+    alone. A user with several accounts in the clan keeps the most recently
+    updated one (ties: lowest player_id). Returns ``(kept_ids, alt_count)``."""
+    best: dict = {}
+    kept: list = []
+    for pid, uid, updated in rows:
+        if uid is None:
+            kept.append(pid)
+            continue
+        cur = best.get(uid)
+        key = (updated or datetime.min, -pid)
+        if cur is None or key > cur[0]:
+            best[uid] = (key, pid)
+    kept.extend(pid for _, pid in best.values())
+    return sorted(kept), len(rows) - len(kept)
+
+
+def signup_all_members(session, ev, group_id: Optional[int] = None) -> dict:
+    """Manager action: sign up every current member of the event's clan(s) —
+    the one-shot counterpart of a SOTW/BOTW "whole clan" roster, for any event
+    kind. Only ADDS: anyone already signed up or on a team is left alone.
+
+    Members come from ``user_group_association`` (the WOM-synced roster) of
+    the participating groups, optionally scoped to one ``group_id`` (a
+    clan_vs_clan clan). Same rules as a self sign-up, applied in bulk:
+      • one account per person — a user who already entered with any account
+        is skipped, and of several accounts in the clan only the most
+        recently updated is entered (``skipped_alts``);
+      • clan_vs_clan players in more than one participating clan are skipped
+        (G7 — an admin must place them; ``skipped_multi_clan``);
+      • clans whose team already follows the clan automatically (``auto_clan``)
+        are skipped — their roster is the clan.
+    Then by formation mode: ``signup_pool`` leaves everyone in the pool for
+    the admins to sort; every other mode also places them, balanced onto the
+    least-full eligible team (what an auto-assign sign-up does). Returns
+    counts; ``capped`` is true when :data:`SIGNUP_ALL_MAX_ADDED` cut it short.
+    Raises :class:`SignupError`. The caller owns the commit (and, on a
+    staff-hosted event, the roster-capacity check against ``per_team``)."""
+    from db.models import (EventSignup, EventTeam, EventTeamMember, Player,
+                           user_group_association)
+
+    groups = participating_group_ids(session, ev)
+    if group_id is not None:
+        if group_id not in groups:
+            raise SignupError(422, "Not a participating clan",
+                              "That clan isn't taking part in this event.")
+        groups = {group_id}
+    if not groups:
+        raise SignupError(409, "No linked group",
+                          "This event has no clan whose members could be signed up.")
+
+    formation = getattr(ev, "formation_mode", None) or "admin_assign"
+    clan_vs_clan = _is_clan_vs_clan(ev)
+    teams = (
+        session.query(EventTeam)
+        .filter(EventTeam.event_id == ev.id)
+        .order_by(EventTeam.id.asc())
+        .all()
+    )
+    # A team that follows its clan automatically (SOTW/BOTW whole clan, CvC
+    # whole-clan teams) already holds every member; never double-enter them.
+    auto_groups = {
+        (t.group_id if clan_vs_clan else ev.group_id)
+        for t in teams if getattr(t, "auto_clan", False)
+    }
+    groups -= auto_groups
+    if not groups:
+        raise SignupError(409, "Already the whole clan",
+                          "This event already enters every clan member automatically.")
+    place = formation != "signup_pool"
+    if place and not teams:
+        raise SignupError(409, "No teams", "Add at least one team first.")
+
+    # Every membership row across ALL participating clans (not just the
+    # scoped ones): G7 ambiguity is "in more than one competing clan".
+    all_groups = participating_group_ids(session, ev)
+    rows = (
+        session.query(user_group_association.c.player_id,
+                      user_group_association.c.group_id,
+                      Player.user_id, Player.date_updated)
+        .join(Player, Player.player_id == user_group_association.c.player_id)
+        .filter(user_group_association.c.group_id.in_(all_groups if clan_vs_clan else groups),
+                user_group_association.c.player_id.isnot(None))
+        .all()
+    )
+    member_groups: dict = {}
+    info: dict = {}
+    for pid, gid, uid, updated in rows:
+        member_groups.setdefault(pid, set()).add(gid)
+        info[pid] = (uid, updated)
+    members = [pid for pid, gids in member_groups.items() if gids & groups]
+    multi = {pid for pid in members if clan_vs_clan and len(member_groups[pid]) > 1}
+
+    signed = {
+        pid for (pid,) in
+        session.query(EventSignup.player_id).filter(EventSignup.event_id == ev.id).all()
+    }
+    placed = {
+        pid for (pid,) in
+        session.query(EventTeamMember.player_id)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeam.event_id == ev.id)
+        .all()
+    }
+    entered = signed | placed
+    # One RSN per user: a user who already entered with ANY account is done.
+    entered_users = {
+        uid for (uid,) in
+        session.query(Player.user_id)
+        .filter(Player.player_id.in_(list(entered)), Player.user_id.isnot(None))
+        .all()
+    } if entered else set()
+
+    already = sum(1 for pid in members if pid in entered)
+    fresh = [pid for pid in members if pid not in entered and pid not in multi]
+    other_account = [pid for pid in fresh
+                     if info[pid][0] is not None and info[pid][0] in entered_users]
+    kept, alts = _pick_one_per_user([
+        (pid, info[pid][0], info[pid][1]) for pid in fresh
+        if not (info[pid][0] is not None and info[pid][0] in entered_users)
+    ])
+    capped = len(kept) > SIGNUP_ALL_MAX_ADDED
+    kept = kept[:SIGNUP_ALL_MAX_ADDED]
+
+    def _clan(pid):
+        if not clan_vs_clan:
+            return ev.group_id
+        return next(iter(member_groups[pid] & groups))
+
+    session.add_all([
+        EventSignup(event_id=ev.id, player_id=pid, group_id=_clan(pid),
+                    user_id=info[pid][0], source="bulk")
+        for pid in kept
+    ])
+
+    placements: list = []
+    if place:
+        placements = _plan_bulk_placement(ev, teams, kept, _clan, session)
+        session.add_all([
+            EventTeamMember(team_id=tid, player_id=pid, event_id=ev.id)
+            for pid, tid in placements
+        ])
+        # A buy-in recorded before placement now credits the dealt team.
+        sync_buyin_teams(session, ev.id, dict(placements))
+
+    per_team: dict = {}
+    for _, tid in placements:
+        per_team[tid] = per_team.get(tid, 0) + 1
+    return {
+        "added": len(kept),
+        "placed": len(placements),
+        "unplaced": len(kept) - len(placements) if place else 0,
+        "pooled": not place,
+        "already": already,
+        "skipped_alts": alts + len(other_account),
+        "skipped_multi_clan": len(multi - entered),
+        "capped": capped,
+        # {team_id: players added} — the route's roster-capacity check.
+        "per_team": per_team,
+    }
+
+
+def _plan_bulk_placement(ev, teams, player_ids, clan_of, session) -> list:
+    """Balanced placement for :func:`signup_all_members`: clan_vs_clan players
+    go to their clan's teams, everyone else shares the event's teams. Teams
+    that follow their clan automatically are never targets."""
+    clan_vs_clan = _is_clan_vs_clan(ev)
+    targets = [t for t in teams if not getattr(t, "auto_clan", False)]
+    teams_by_bucket: dict = {}
+    for t in targets:
+        teams_by_bucket.setdefault(t.group_id if clan_vs_clan else None, []).append(t.id)
+    selected: dict = {}
+    for pid in player_ids:
+        selected.setdefault(clan_of(pid) if clan_vs_clan else None, []).append(pid)
+    start_counts = _team_counts(session, [t.id for t in targets])
+    return _plan_distribution(selected, teams_by_bucket, start_counts)
+
+
 def remove_signup(session, ev, player_id: int) -> None:
     """Withdraw a sign-up and any resulting team placement. Caller owns commit."""
     from db.models import EventSignup, EventTeam, EventTeamMember

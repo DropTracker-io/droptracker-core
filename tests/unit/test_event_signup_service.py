@@ -197,3 +197,174 @@ class TestSignupError:
         e = sus.SignupError(422, "Nope", "because")
         assert (e.status, e.title, e.detail) == (422, "Nope", "because")
         assert str(e) == "because"
+
+
+# ── signup_all_members: real queries against an in-memory SQLite schema ─────
+
+class TestPickOnePerUser:
+    def test_keeps_newest_account_per_user_and_every_unclaimed(self):
+        old, new = datetime(2026, 1, 1), datetime(2026, 9, 1)
+        rows = [(1, 7, old), (2, 7, new), (3, None, None), (4, None, old), (5, 8, None)]
+        kept, alts = sus._pick_one_per_user(rows)
+        assert kept == [2, 3, 4, 5]
+        assert alts == 1
+
+    def test_tie_prefers_lowest_player_id(self):
+        same = datetime(2026, 5, 5)
+        assert sus._pick_one_per_user([(9, 1, same), (4, 1, same)]) == ([4], 1)
+
+
+@pytest.fixture
+def mini_db(monkeypatch):
+    """Just the tables signup_all_members touches, as a stand-in db.models."""
+    import types
+
+    from sqlalchemy import (Boolean, Column, DateTime, ForeignKey, Integer, String,
+                            Table, create_engine)
+    from sqlalchemy.orm import declarative_base, sessionmaker
+
+    Base = declarative_base()
+
+    class Player(Base):
+        __tablename__ = "players"
+        player_id = Column(Integer, primary_key=True)
+        user_id = Column(Integer)
+        date_updated = Column(DateTime)
+
+    uga = Table("user_group_association", Base.metadata,
+                Column("id", Integer, primary_key=True),
+                Column("player_id", Integer), Column("user_id", Integer),
+                Column("group_id", Integer))
+
+    class EventTeam(Base):
+        __tablename__ = "teams"
+        id = Column(Integer, primary_key=True)
+        event_id = Column(Integer)
+        group_id = Column(Integer)
+        auto_clan = Column(Boolean, default=False)
+
+    class EventTeamMember(Base):
+        __tablename__ = "members"
+        team_id = Column(Integer, ForeignKey("teams.id"), primary_key=True)
+        player_id = Column(Integer, primary_key=True)
+        event_id = Column(Integer)
+
+    class EventSignup(Base):
+        __tablename__ = "signups"
+        id = Column(Integer, primary_key=True)
+        event_id = Column(Integer)
+        player_id = Column(Integer)
+        group_id = Column(Integer)
+        user_id = Column(Integer)
+        source = Column(String(16))
+
+    class EventGroup(Base):
+        __tablename__ = "event_groups"
+        id = Column(Integer, primary_key=True)
+        event_id = Column(Integer)
+        group_id = Column(Integer)
+        status = Column(String(16))
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    fake = types.ModuleType("db.models")
+    for name, obj in dict(Player=Player, user_group_association=uga, EventTeam=EventTeam,
+                          EventTeamMember=EventTeamMember, EventSignup=EventSignup,
+                          EventGroup=EventGroup).items():
+        setattr(fake, name, obj)
+    monkeypatch.setitem(sys.modules, "db.models", fake)
+    monkeypatch.setattr(sus, "sync_buyin_teams", lambda *a, **k: None)
+    s = sessionmaker(bind=engine)()
+
+    def member(pid, gid, uid=None, updated=None):
+        if s.get(Player, pid) is None:
+            s.add(Player(player_id=pid, user_id=uid, date_updated=updated))
+        s.execute(uga.insert().values(player_id=pid, user_id=uid, group_id=gid))
+
+    yield SimpleNamespace(s=s, m=fake, member=member)
+    s.close()
+
+
+class TestSignupAllMembers:
+    def test_pool_mode_signs_everyone_up_without_placing(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        for pid in (1, 2, 3):
+            mini_db.member(pid, 5)
+        mini_db.member(4, 99)                      # another clan: not ours
+        s.add(m.EventTeam(id=1, event_id=1, group_id=5))
+        s.commit()
+        res = sus.signup_all_members(s, _ev(formation_mode="signup_pool"))
+        s.commit()
+        assert (res["added"], res["placed"], res["pooled"]) == (3, 0, True)
+        rows = s.query(m.EventSignup).all()
+        assert sorted(r.player_id for r in rows) == [1, 2, 3]
+        assert {(r.group_id, r.source) for r in rows} == {(5, "bulk")}
+        assert s.query(m.EventTeamMember).count() == 0
+
+    def test_only_adds_and_skips_alts_of_entered_users(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        old, new = datetime(2026, 1, 1), datetime(2026, 9, 1)
+        mini_db.member(1, 5, uid=70)               # already on a team
+        mini_db.member(2, 5, uid=70)               # alt of an entered user
+        mini_db.member(3, 5, uid=80, updated=old)  # two accounts, none entered:
+        mini_db.member(4, 5, uid=80, updated=new)  #   the newest one goes in
+        mini_db.member(5, 5)                       # already signed up
+        mini_db.member(6, 5)
+        s.add_all([m.EventTeam(id=1, event_id=1, group_id=5),
+                   m.EventTeam(id=2, event_id=1, group_id=5)])
+        s.add(m.EventTeamMember(team_id=1, player_id=1, event_id=1))
+        s.add(m.EventSignup(event_id=1, player_id=5, group_id=5, source="web"))
+        s.commit()
+        res = sus.signup_all_members(s, _ev(formation_mode="auto_assign"))
+        s.commit()
+        assert res["already"] == 2
+        assert res["skipped_alts"] == 2            # player 2 + player 3
+        assert res["added"] == 2 and res["placed"] == 2
+        placed = dict(s.query(m.EventTeamMember.player_id, m.EventTeamMember.team_id).all())
+        # Balanced: team 1 already had one member, so 4 → team 2, 6 → team 1.
+        assert placed == {1: 1, 4: 2, 6: 1}
+        # A second run is a no-op.
+        again = sus.signup_all_members(s, _ev(formation_mode="auto_assign"))
+        assert again["added"] == 0
+
+    def test_clan_vs_clan_routes_by_clan_and_skips_multi_clan(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        mini_db.member(1, 10)
+        mini_db.member(2, 20)
+        mini_db.member(3, 10)
+        mini_db.member(3, 20)                      # in both: G7, skipped
+        s.add_all([m.EventGroup(event_id=1, group_id=10, status="accepted"),
+                   m.EventGroup(event_id=1, group_id=20, status="accepted"),
+                   m.EventTeam(id=1, event_id=1, group_id=10),
+                   m.EventTeam(id=2, event_id=1, group_id=20)])
+        s.commit()
+        ev = _ev(mode="clan_vs_clan", formation_mode="admin_assign", group_id=None)
+        res = sus.signup_all_members(s, ev, group_id=10)
+        s.commit()
+        assert (res["added"], res["skipped_multi_clan"]) == (1, 1)
+        assert dict(s.query(m.EventTeamMember.player_id, m.EventTeamMember.team_id).all()) \
+            == {1: 1}
+        res = sus.signup_all_members(s, ev)        # the rest: clan 20
+        assert res["added"] == 1
+        with pytest.raises(sus.SignupError) as exc:
+            sus.signup_all_members(s, ev, group_id=30)
+        assert exc.value.status == 422
+
+    def test_whole_clan_team_and_global_events_are_refused(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        mini_db.member(1, 5)
+        s.add(m.EventTeam(id=1, event_id=1, group_id=5, auto_clan=True))
+        s.commit()
+        with pytest.raises(sus.SignupError) as exc:
+            sus.signup_all_members(s, _ev(formation_mode="admin_assign"))
+        assert exc.value.title == "Already the whole clan"
+        with pytest.raises(sus.SignupError) as exc:
+            sus.signup_all_members(s, _ev(group_id=None))
+        assert exc.value.status == 409
+
+    def test_placing_modes_need_a_team(self, mini_db):
+        mini_db.member(1, 5)
+        mini_db.s.commit()
+        with pytest.raises(sus.SignupError) as exc:
+            sus.signup_all_members(mini_db.s, _ev(formation_mode="self_join"))
+        assert exc.value.title == "No teams"

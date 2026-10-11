@@ -98,6 +98,32 @@ class TestKindMapping:
         assert set(en.POST_END_ALLOWED_TYPES) <= set(en.EVENT_NOTIFICATION_TYPES)
 
 
+def _model_tuple(name):
+    """A string tuple from db/models/events.py, read with ``ast`` (conftest
+    stubs ``db`` as a MagicMock, so importing it would compare against a mock)."""
+    import ast
+
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "db", "models", "events.py")
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and getattr(node.targets[0], "id", None) == name):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} not found in db/models/events.py")
+
+
+class TestToggleKeyParity:
+    def test_default_toggles_match_the_validated_keys(self):
+        # PUT /events/{id}/discord rejects any toggle outside
+        # EVENT_MESSAGE_TOGGLE_KEYS, and GET returns every default toggle —
+        # so a default missing from the tuple makes EVERY event's messages
+        # save 422 (web123a added event_conquest_alert/news to the defaults
+        # only, and no event could save its Discord config).
+        assert set(en.DEFAULT_MESSAGE_TOGGLES) == set(
+            _model_tuple("EVENT_MESSAGE_TOGGLE_KEYS"))
+
+
 # ── channel resolution + fallbacks ───────────────────────────────────────────
 
 class TestResolveEventChannel:

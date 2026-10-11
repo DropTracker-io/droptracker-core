@@ -337,6 +337,11 @@ EVENT_MESSAGE_TOGGLE_KEYS = (
     "event_conquest_battle",
     "event_conquest_region",
     "event_conquest_summary",
+    # Conquest (web123a): "your tile is under attack / breached / taken"
+    # (default OFF here — it lives in the defending team's own channel, see
+    # services/event_team_discord), and phase / hot-zone news (default ON).
+    "event_conquest_alert",
+    "event_conquest_news",
 )
 
 # Message types that have a component-layout row in web_event_message_layouts:
