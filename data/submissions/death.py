@@ -105,6 +105,12 @@ async def death_processor(death_data, external_session=None, world_type="main"):
     if corrected_location:
         location = corrected_location
         region_name = corrected_location
+    elif not region_name:
+        # The plugin only knows RuneLite's names; the server's list also covers
+        # the Wilderness and newer content (utils/region_names.py).
+        region_name = _safe_str(region_names.name_for(region_id), 125)
+        if not _safe_str(location, 255):
+            location = region_name or ""
     region_type = _safe_str(death_data.get("region_type"), 32)
     killer_type = _safe_str(death_data.get("killer_type"), 16)
     is_pvp = parse_flag(death_data.get("is_pvp"))

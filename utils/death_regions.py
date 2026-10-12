@@ -43,6 +43,8 @@ _TOMBS_OF_AMASCUT = frozenset({
 
 _BARBARIAN_ASSAULT = frozenset({7508, 7509, 10322})
 _CASTLE_WARS = frozenset({9520, 9620})
+#: Emir's Arena: PvP Arena fights cost nothing (plugin 6.1.6).
+_EMIRS_ARENA = frozenset({13362, 13363})
 _CLAN_WARS = frozenset({
     12621, 12622, 12623, 13130, 13131, 13133, 13134, 13135, 13386, 13387,
     13390, 13641, 13642, 13643, 13644, 13645, 13646, 13647, 13899, 13900,
@@ -81,6 +83,7 @@ SAFE_REGIONS: frozenset[int] = frozenset().union(
     _BARBARIAN_ASSAULT,
     _CASTLE_WARS,
     _CLAN_WARS,
+    _EMIRS_ARENA,
     _LAST_MAN_STANDING,
     _PLAYER_OWNED_HOUSE,
     _SOUL_WARS,

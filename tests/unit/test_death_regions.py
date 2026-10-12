@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +29,8 @@ CLAN_HALL = 6997
 INFERNO = 9043
 FIGHT_CAVES = 9551
 VORKATH = 9023
+
+_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 
 def _plugin_file(*parts):
@@ -102,8 +105,8 @@ class TestRegionNames:
         assert region_names.name_for(CHAMBERS_OF_XERIC) == "Chambers of Xeric"
 
     def test_an_unnamed_region_resolves_to_nothing(self):
-        # Two of the 97 safe regions have no name; callers show the bare id.
-        assert region_names.name_for(CLAN_HALL) is None
+        # Callers show the bare id for a region nobody names.
+        assert region_names.name_for(1) is None
 
     @pytest.mark.parametrize("value", [None, "", "N/A", "abc"])
     def test_unparseable_ids_resolve_to_nothing(self, value):
@@ -133,13 +136,41 @@ class TestRegionNames:
         assert all(a["name"] and a["regions"] for a in areas)
         assert {a["type"] for a in areas} <= set(region_names.AREA_TYPES)
 
-    def test_named_regions_cover_almost_every_safe_region(self):
+    def test_every_safe_region_is_named(self):
         # The picker is only useful if the places a group wants to mute have
-        # names. Four do not (clan hall, one POH chunk, and the PK tutor, which
-        # is newer than RuneLite's names and has a switch of its own) and are
-        # muted by id.
-        unnamed = {r for r in SAFE_REGIONS if region_names.name_for(r) is None}
-        assert unnamed <= {CLAN_HALL, 7257, 10588, 11100}
+        # names. RuneLite leaves three of them unnamed; the supplement covers
+        # those.
+        assert {r for r in SAFE_REGIONS if region_names.name_for(r) is None} == set()
+
+    def test_the_supplement_only_fills_gaps(self):
+        """It never renames a region RuneLite names, and never repeats itself."""
+        base = json.loads((_DATA_DIR / "region_names.json").read_text(encoding="utf-8"))
+        extra = json.loads((_DATA_DIR / "region_names_extra.json").read_text(encoding="utf-8"))
+        runelite = {r for area in base["areas"] for r in area["regions"]}
+        seen: set[int] = set()
+        for area in extra["areas"]:
+            assert area["type"] in region_names.AREA_TYPES, area["name"]
+            overlap = set(area["regions"]) & runelite
+            assert not overlap, f"{area['name']} renames RuneLite regions {sorted(overlap)}"
+            assert not set(area["regions"]) & seen, f"{area['name']} repeats a region"
+            seen |= set(area["regions"])
+
+    def test_a_supplement_area_sharing_a_runelite_name_is_listed_once(self):
+        houses = [a for a in region_names.all_areas() if a["name"] == "Player Owned House"]
+        assert len(houses) == 1 and 7257 in houses[0]["regions"]
+        assert 7257 in region_names.regions_for("Player Owned House")
+
+    @pytest.mark.parametrize(
+        "region_id, name",
+        [(12601, "Wilderness"), (11836, "Wilderness"), (12957, "Revenant Caves"),
+         (13668, "Doom of Mokhaiotl"), (10588, "Pete Kayer's challenges"), (CLAN_HALL, "Clan Hall")],
+    )
+    def test_supplement_names(self, region_id, name):
+        assert region_names.name_for(region_id) == name
+        assert region_id in region_names.regions_for(name)
+
+    def test_runelite_names_win(self):
+        assert region_names.name_for(CASTLE_WARS) == "Castle Wars"
 
     def test_data_file_matches_the_plugin_resource(self):
         """The JSON is a verbatim copy; a regenerated plugin resource must be recopied."""

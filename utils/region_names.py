@@ -20,6 +20,14 @@ plugin sends:
 Regenerate by copying ``plugin/src/main/resources/io/droptracker/region_names.json``.
 Do not hand-edit: divergence between the two copies is exactly the failure this
 module exists to prevent.
+
+RuneLite's list stops short of the Wilderness and of content newer than it (the
+Doom of Mokhaiotl, the PK tutor, ...): 46% of deaths in the busiest regions had
+no name. ``data/region_names_extra.json`` is DropTracker's own supplement,
+server-only and hand-curated. It only ever names regions RuneLite leaves
+unnamed, never renames one, and an area sharing a RuneLite name extends it
+rather than appearing twice. Boss lairs go in only when that boss is most of
+the region's recorded deaths.
 """
 from __future__ import annotations
 
@@ -29,9 +37,9 @@ import threading
 
 from utils.npc_names import npc_slug
 
-_DATA_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "region_names.json"
-)
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+_DATA_PATH = os.path.join(_DATA_DIR, "region_names.json")
+_EXTRA_PATH = os.path.join(_DATA_DIR, "region_names_extra.json")
 
 #: The coarse buckets RuneLite files areas under, for grouping the picker.
 AREA_TYPES = ("BOSSES", "RAIDS", "DUNGEONS", "MINIGAMES", "CITIES", "REGIONS")
@@ -75,24 +83,45 @@ def _load() -> None:
         if _loaded:
             return
         _loaded = True
-        try:
-            with open(_DATA_PATH, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except (OSError, ValueError):
-            return
-
-        for area in payload.get("areas") or []:
-            name = (area.get("name") or "").strip()
-            regions = [int(r) for r in (area.get("regions") or [])]
-            if not name or not regions:
+        for area in _read_areas(_DATA_PATH):
+            _add_area(area)
+        # The supplement fills gaps only: a region RuneLite names keeps its name.
+        for area in _read_areas(_EXTRA_PATH):
+            regions = [r for r in area["regions"] if r not in _by_id]
+            if not regions:
                 continue
-            area_type = area.get("type") or "REGIONS"
-            for region_id in regions:
-                _by_id[region_id] = {"name": name, "type": area_type}
-            _by_name.setdefault(region_key(name), set()).update(regions)
-            _areas.append({"name": name, "type": area_type, "regions": sorted(regions)})
+            existing = next((a for a in _areas if region_key(a["name"]) == region_key(area["name"])), None)
+            if existing is not None:
+                for region_id in regions:
+                    _by_id[region_id] = {"name": existing["name"], "type": existing["type"]}
+                _by_name[region_key(existing["name"])].update(regions)
+                existing["regions"] = sorted(set(existing["regions"]) | set(regions))
+            else:
+                _add_area({**area, "regions": regions})
 
         _areas.sort(key=lambda a: (a["type"], a["name"]))
+
+
+def _read_areas(path) -> list[dict]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    areas = []
+    for area in payload.get("areas") or []:
+        name = (area.get("name") or "").strip()
+        regions = [int(r) for r in (area.get("regions") or [])]
+        if name and regions:
+            areas.append({"name": name, "type": area.get("type") or "REGIONS", "regions": regions})
+    return areas
+
+
+def _add_area(area) -> None:
+    for region_id in area["regions"]:
+        _by_id[region_id] = {"name": area["name"], "type": area["type"]}
+    _by_name.setdefault(region_key(area["name"]), set()).update(area["regions"])
+    _areas.append({**area, "regions": sorted(area["regions"])})
 
 
 def region_key(name) -> str:
@@ -108,8 +137,8 @@ def region_key(name) -> str:
 def name_for(region_id) -> str | None:
     """The area name covering this region id, or ``None`` if unnamed.
 
-    Two of the 97 safe region ids have no name (the clan hall and one
-    player-owned-house chunk); callers show the bare id for those.
+    Covers RuneLite's names plus DropTracker's supplement. Callers show the
+    bare id for a region that is in neither.
     """
     _load()
     try:

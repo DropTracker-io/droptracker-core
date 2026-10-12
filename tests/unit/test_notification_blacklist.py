@@ -156,9 +156,13 @@ class TestRegionSubjects:
         assert subjects["region"] == {"#9520", "castle-wars"}
 
     def test_unnamed_region_still_yields_its_id(self):
-        # The clan hall has no entry in the name data; a leader can still mute
-        # it by id, so the id key must survive the failed name lookup.
-        assert payload_subjects({"region_id": 6997})["region"] == {"#6997"}
+        # A region with no entry in the name data can still be muted by id,
+        # so the id key must survive the failed name lookup.
+        assert payload_subjects({"region_id": 1})["region"] == {"#1"}
+
+    def test_a_supplement_name_is_keyed_too(self):
+        # The clan hall is named by the server's supplement, not by RuneLite.
+        assert payload_subjects({"region_id": 6997})["region"] == {"#6997", "clan-hall"}
 
     def test_payload_region_name_is_also_keyed(self):
         subjects = payload_subjects({"region_name": "Chambers of Xeric"})

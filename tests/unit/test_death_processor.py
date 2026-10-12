@@ -225,3 +225,34 @@ class TestDt2BossLocations:
         row, data = _run(_payload())
         assert row["region_name"] == "Ungael"
         assert data["location"] == "Ungael"
+
+
+class TestServerSideNames:
+    """Regions RuneLite never named get the server's name at ingest."""
+
+    @pytest.mark.parametrize(
+        "region_id, place",
+        [
+            (10588, "Pete Kayer's challenges"),
+            (14180, "Doom of Mokhaiotl"),
+            (11645, "Maggot King"),
+            (12601, "Wilderness"),
+        ],
+    )
+    def test_an_unnamed_region_gets_the_server_name(self, region_id, place):
+        row, data = _run(_payload(region_id=str(region_id), region_name=_ABSENT, location=_ABSENT))
+        assert row["region_name"] == row["location"] == place
+        assert data["region_name"] == data["location"] == place
+
+    def test_a_na_location_is_replaced_too(self):
+        row, _ = _run(_payload(region_id="12601", region_name="N/A", location="N/A"))
+        assert row["location"] == "Wilderness"
+
+    def test_a_name_the_client_sent_is_kept(self):
+        row, _ = _run(_payload(region_id="12601", region_name="Somewhere", location="Somewhere"))
+        assert row["region_name"] == "Somewhere"
+
+    def test_a_region_nobody_names_stays_blank(self):
+        row, _ = _run(_payload(region_id="1", region_name=_ABSENT, location=_ABSENT))
+        assert row["region_name"] is None
+
