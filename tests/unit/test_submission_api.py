@@ -190,6 +190,12 @@ class TestIntakeResponse:
         status, body = r.intake_response(400, {"success": False, "error": "bad"})
         assert status == 422 and body["detail"] == "bad"
 
+    def test_replay_of_an_unfinished_call_is_409(self):
+        from data_api.routes import submissions as r
+        status, body = r.intake_response(200, {"status": "processing", "replayed": True,
+                                               "api_submission_id": 4})
+        assert status == 409 and body["error"] == "in_progress" and body["id"] == 4
+
     @pytest.mark.parametrize("code", [401, 503, 500])
     def test_our_own_failures_are_502(self, code):
         from data_api.routes import submissions as r
@@ -314,6 +320,14 @@ class TestRoute:
         status, body = await _post(client, {**_WHIP, "image_url": "https://evil.example/x.png"})
         assert status == 422 and "Discord" in body["detail"]
         assert state["forwarded"] == []
+
+    @pytest.mark.asyncio
+    async def test_player_id_zero_is_a_real_id(self, route):
+        client, state = route
+        state["members"]["0"] = (0, "Player Zero")
+        body = {k: v for k, v in _WHIP.items() if k != "player"}
+        status, out = await _post(client, {**body, "player_id": 0})
+        assert status == 200 and out["player"] == "Player Zero"
 
     @pytest.mark.asyncio
     async def test_missing_player_is_422(self, route):

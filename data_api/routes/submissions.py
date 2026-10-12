@@ -303,6 +303,13 @@ def intake_response(status_code: int, data) -> tuple[int, dict]:
     if status == "rejected":
         return 422, {**body, "error": "rejected",
                      "detail": data.get("message") or "The submission was rejected."}
+    if status == "processing":
+        # A retry of a call that is still running (or died mid-way). Its
+        # outcome lands on GET /v2/submissions/{id}; a call that never
+        # finished needs a new external_id.
+        return 409, {**body, "error": "in_progress",
+                     "detail": "A submission with this external_id is still being "
+                               "processed. Check GET /v2/submissions/{id}."}
     return 502, {**body, "error": "pipeline_error",
                  "detail": data.get("message") or data.get("error")
                  or "The submission could not be processed."}
@@ -440,8 +447,11 @@ async def create_submission():
         body, upload = await _read_body()
         sub_type, payload = build_intake_payload(body)
         payload.update(parse_api_fields(body))
-        player_ref = body.get("player") or body.get("player_id")
-        if player_ref in (None, "") or isinstance(player_ref, (bool, dict, list)):
+        # Explicit None checks: player id 0 is a real id, not "missing".
+        player_ref = body.get("player")
+        if player_ref is None or player_ref == "":
+            player_ref = body.get("player_id")
+        if player_ref is None or player_ref == "" or isinstance(player_ref, (bool, dict, list)):
             raise _bad("'player' is required (an RSN or a DropTracker player id).")
         image_url = _text(body, "image_url", max_len=2000)
         if upload is not None and image_url:
