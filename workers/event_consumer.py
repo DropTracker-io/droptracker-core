@@ -201,6 +201,15 @@ def _replay_prestart(r, state) -> dict:
     return event_engine.replay_prestart(r, list(state.events.keys()))
 
 
+def _replay_early(r, state) -> dict:
+    """Requeue early arrivals of live events whose start moved earlier
+    (event_engine.replay_early_if_moved). Same ordering rule as
+    :func:`_replay_prestart`: only after ``shared["state"]`` holds ``state``."""
+    from services import event_engine
+
+    return event_engine.replay_early_if_moved(r, state)
+
+
 def _requeue_held(r) -> int:
     """t275: requeue the capped holding list; report (once) if it overflowed,
     because that window's credit is gone."""
@@ -341,6 +350,12 @@ def _process_entry(r, state, entry_bytes) -> list:
             event_engine.park_prestart(r, state, envelope)
         except Exception:
             log.warning("Pre-start parking failed:\n%s", traceback.format_exc())
+        # A live event refused it as predating its start: keep it in case
+        # the start is moved earlier (replay_early_if_moved).
+        try:
+            event_engine.park_early(r, state, envelope)
+        except Exception:
+            log.warning("Early-arrival parking failed:\n%s", traceback.format_exc())
         return results
     except Exception:
         db_session.rollback()
@@ -699,6 +714,14 @@ async def run_consumer() -> None:
                         log.info("Pre-start replay requeued: %s", replayed)
                 except Exception:
                     log.error("Pre-start replay failed:\n%s", traceback.format_exc())
+                # A live event's start moved earlier: submissions it refused
+                # as too early now fall inside the window — score them.
+                try:
+                    early = await asyncio.to_thread(_replay_early, r, state)
+                    if early:
+                        log.info("Early-arrival replay requeued: %s", early)
+                except Exception:
+                    log.error("Early-arrival replay failed:\n%s", traceback.format_exc())
                 # Bingo EHB: catch the `frozen_at` reporting flag up to the
                 # freeze gate (accrual already stopped at completion time).
                 try:

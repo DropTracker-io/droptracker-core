@@ -175,6 +175,18 @@ PRESTART_LOOKAHEAD_SECONDS = 120
 PRESTART_MAX_ENTRIES = 20000
 PRESTART_TTL_SECONDS = 6 * 3600
 ADMIN_BUMP_CHANNEL = "rt:event-admin"      # pubsub bump on event/task/roster mutations
+# Early arrivals on a LIVE event (2026-10-11, event 129). An event activated
+# ahead of its scheduled start is in the matcher, but submissions timestamped
+# before its window opens are refused. If an admin then moves the start
+# EARLIER, those submissions now fall inside the window yet were never scored
+# (45 minutes of drops, ~4.6M GP, lost on event 129). Each refused envelope is
+# parked here, pinned to the event; EARLY_START_KEY remembers the window start
+# it was refused against, and the consumer replays the list once the event's
+# window start moves before that (``replay_early_if_moved``).
+EARLY_KEY = "events:early:{event_id}"
+EARLY_START_KEY = "events:early:{event_id}:start"
+EARLY_MAX_ENTRIES = 20000
+EARLY_TTL_SECONDS = 14 * 24 * 3600
 # Late arrivals (t274). A submission received inside an event's window that is
 # only processed after the event ended (results frozen, points paid) is not
 # scored; it is kept here for staff and the event's admins are told once.
@@ -2026,6 +2038,124 @@ def park_prestart(redis_conn, state: "MatcherState", envelope: dict) -> list:
         except Exception:
             pass
     return parked
+
+
+def park_early(redis_conn, state: "MatcherState", envelope: dict) -> list:
+    """Park a copy of ``envelope`` for every LIVE event of its player that
+    refused it only because it predates the event's window start (see
+    :data:`EARLY_KEY`). Submissions before the member's ``joined_at`` are not
+    kept (they can never count), nor WOM synthetic envelopes (the reconciler
+    measures from the window itself). A replayed copy that is STILL early is
+    parked again, so a start moved twice keeps working. Best-effort; returns
+    the event ids parked for."""
+    if redis_conn is None or not getattr(state, "events", None):
+        return []
+    data = envelope.get("data") or {}
+    if data.get("source") == "wom" or envelope.get("source") == "wom":
+        return []
+    try:
+        memberships = state.participants.get(int(envelope.get("player_id"))) or []
+    except (TypeError, ValueError):
+        return []
+    if not memberships:
+        return []
+    try:
+        submitted_at = datetime.fromtimestamp(int(envelope.get("ts") or time.time()))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return []
+    only_event_id = envelope.get("only_event_id")
+    parked = []
+    for event_id, _team_id, joined_at in memberships:
+        if event_id in parked:
+            continue
+        if only_event_id is not None and event_id != only_event_id:
+            continue
+        event = state.events.get(event_id)
+        if event is None:
+            continue
+        window_start = event.get("window_start")
+        if window_start is None or submitted_at >= window_start:
+            continue
+        if joined_at is not None and submitted_at < joined_at:
+            continue
+        copy = dict(envelope)
+        copy["only_event_id"] = int(event_id)
+        copy.pop("_attempts", None)
+        key = EARLY_KEY.format(event_id=int(event_id))
+        start_key = EARLY_START_KEY.format(event_id=int(event_id))
+        try:
+            pipe = redis_conn.pipeline()
+            pipe.rpush(key, json.dumps(copy, default=str))
+            pipe.ltrim(key, -EARLY_MAX_ENTRIES, -1)
+            pipe.expire(key, EARLY_TTL_SECONDS)
+            pipe.set(start_key, int(window_start.timestamp()), ex=EARLY_TTL_SECONDS)
+            pipe.execute()
+            parked.append(event_id)
+        except Exception:
+            pass
+    return parked
+
+
+def early_replay_due(parked_starts: dict, window_starts: dict) -> list:
+    """Pure: the events whose parked early arrivals should be replayed —
+    their current window start (``window_starts``: {event_id: datetime|None})
+    is earlier than the one the envelopes were refused against
+    (``parked_starts``: {event_id: epoch seconds}). A window start cleared to
+    None (no start at all) counts as earlier."""
+    due = []
+    for event_id, parked_at in parked_starts.items():
+        if parked_at is None or event_id not in window_starts:
+            continue
+        current = window_starts[event_id]
+        if current is None or int(current.timestamp()) < int(parked_at):
+            due.append(event_id)
+    return sorted(due)
+
+
+def replay_early_if_moved(redis_conn, state: "MatcherState") -> dict:
+    """Requeue the parked early arrivals of every live event whose window
+    start moved earlier since they were parked. Call only once the consumer's
+    matcher state holds the new start, or the replay is judged against the
+    old one. Envelopes still before the new start are re-parked by the
+    consumer; the ledger's (task, team, guid) key makes an envelope that
+    somehow scored already a no-op. Returns {event_id: count}."""
+    replayed: dict = {}
+    if redis_conn is None or not getattr(state, "events", None):
+        return replayed
+    ids = [int(i) for i in state.events]
+    try:
+        pipe = redis_conn.pipeline()
+        for eid in ids:
+            pipe.get(EARLY_START_KEY.format(event_id=eid))
+        parked_starts = {}
+        for eid, raw in zip(ids, pipe.execute()):
+            if raw is not None:
+                try:
+                    parked_starts[eid] = int(raw)
+                except (TypeError, ValueError):
+                    continue
+    except Exception:
+        return replayed
+    due = early_replay_due(
+        parked_starts,
+        {eid: state.events[eid].get("window_start") for eid in parked_starts})
+    for eid in due:
+        key = EARLY_KEY.format(event_id=eid)
+        claim = f"{key}:replaying:{int(time.time() * 1000)}"
+        try:
+            redis_conn.delete(EARLY_START_KEY.format(event_id=eid))
+            redis_conn.rename(key, claim)
+        except Exception:
+            continue  # list expired / another replayer took it
+        try:
+            entries = redis_conn.lrange(claim, 0, -1) or []
+            if entries:
+                redis_conn.rpush(QUEUE_KEY, *reversed(entries))
+            redis_conn.delete(claim)
+            replayed[eid] = len(entries)
+        except Exception:
+            pass  # claim expires with the list's TTL; never double-replay
+    return replayed
 
 
 def replay_prestart(redis_conn, event_ids) -> dict:
