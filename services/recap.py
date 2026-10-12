@@ -70,6 +70,11 @@ MIN_DROPS_FOR_RECAP = 25
 # loudly beats melting a connection for a "group" nobody wants a recap for.
 MAX_ROSTER_FOR_RECAP = 1500
 
+# What the ``activity`` histograms count — see `activity_histograms`. Stamped
+# on every payload as ``activity.weight``. Snapshots without it predate the
+# change and are GP-weighted; nothing may mix or display those as activity.
+ACTIVITY_WEIGHT = "active_hours"
+
 
 class RosterTooLarge(RuntimeError):
     """Raised instead of issuing a query that would read-timeout. Callers skip
@@ -340,29 +345,7 @@ def _item_rollup(session, player_ids: list[int], period: str) -> dict:
         params,
     ).fetchall()
 
-    hist = session.execute(
-        text(
-            # DAYOFWEEK is 1=Sunday..7=Saturday; normalised to 0=Monday below so
-            # the payload matches how the card will read left-to-right.
-            "SELECT RIGHT(date_hour, 2) AS hh, "
-            "       DAYOFWEEK(STR_TO_DATE(LEFT(date_hour, 10), '%Y-%m-%d')) AS dw, "
-            "       SUM(total_value) AS loot "
-            "FROM player_item_hourly_totals "
-            "WHERE player_id IN :pids AND date_hour BETWEEN :lo AND :hi "
-            "GROUP BY hh, dw"
-        ).bindparams(bindparam("pids", expanding=True)),
-        params,
-    ).fetchall()
-
-    by_hour = [0] * 24
-    by_weekday = [0] * 7
-    for hh, dw, loot in hist:
-        loot = int(loot or 0)
-        try:
-            by_hour[int(hh)] += loot
-            by_weekday[(int(dw) + 5) % 7] += loot  # 1=Sun -> index 6, 2=Mon -> 0
-        except (TypeError, ValueError, IndexError):
-            continue
+    activity = activity_histograms(session, player_ids, period)
 
     # Fold the per-(item, player) rows into per-item totals, tracking who
     # received the most of each by value.
@@ -409,9 +392,56 @@ def _item_rollup(session, player_ids: list[int], period: str) -> dict:
         "drops": sum(i["drops"] for i in items),
         "unique_items": len(items),
         "top_items": top,
-        "by_hour": by_hour,
-        "by_weekday": by_weekday,
+        "by_hour": activity["by_hour"],
+        "by_weekday": activity["by_weekday"],
     }
+
+
+def activity_histograms(session, player_ids: list[int], period: str) -> dict:
+    """When the subject plays: hour-of-day and day-of-week histograms.
+
+    The unit is the **active hour** — one distinct ``(player_id, date_hour)``
+    cell of the rollup, i.e. one player who received at least one drop in that
+    clock hour. So ``by_hour[h]`` is how many days (member-days, for a group)
+    someone was looting at ``h``:00 UTC, and ``by_weekday[d]`` is how many hours
+    were spent looting on that weekday.
+
+    These used to be weighted by GP, which made "Prime time" the hour the
+    biggest drop landed rather than when anyone plays — a single 4.5M clue at
+    04:25 decided a month that was otherwise played in the evenings (bug report
+    #191). Counting cells means every hour of play counts the same whatever it
+    paid out. ``ACTIVITY_WEIGHT`` is stamped on the payload so a reader can tell
+    these apart from the GP-weighted ones in older snapshots.
+    """
+    if not player_ids:
+        return {"by_hour": [0] * 24, "by_weekday": [0] * 7}
+    lo, hi = month_hour_bounds(period)
+    hist = session.execute(
+        text(
+            # DAYOFWEEK is 1=Sunday..7=Saturday; normalised to 0=Monday below so
+            # the payload matches how the card will read left-to-right. Every
+            # date_hour falls in exactly one (hh, dw) group, so the per-group
+            # distinct counts sum without double-counting.
+            "SELECT RIGHT(date_hour, 2) AS hh, "
+            "       DAYOFWEEK(STR_TO_DATE(LEFT(date_hour, 10), '%Y-%m-%d')) AS dw, "
+            "       COUNT(DISTINCT player_id, date_hour) AS active "
+            "FROM player_item_hourly_totals "
+            "WHERE player_id IN :pids AND date_hour BETWEEN :lo AND :hi "
+            "GROUP BY hh, dw"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": player_ids, "lo": lo, "hi": hi},
+    ).fetchall()
+
+    by_hour = [0] * 24
+    by_weekday = [0] * 7
+    for hh, dw, active in hist:
+        active = int(active or 0)
+        try:
+            by_hour[int(hh)] += active
+            by_weekday[(int(dw) + 5) % 7] += active  # 1=Sun -> index 6, 2=Mon -> 0
+        except (TypeError, ValueError, IndexError):
+            continue
+    return {"by_hour": by_hour, "by_weekday": by_weekday}
 
 
 def _npc_coverage(session, period: str) -> bool:
@@ -760,7 +790,11 @@ def _base_month_payload(session, player_ids: list[int], period: str) -> dict:
         "top_items": items["top_items"],
         "top_npcs": npcs["top_npcs"],
         "npc_data_available": npcs["available"],
-        "activity": {"by_hour": items["by_hour"], "by_weekday": items["by_weekday"]},
+        "activity": {
+            "by_hour": items["by_hour"],
+            "by_weekday": items["by_weekday"],
+            "weight": ACTIVITY_WEIGHT,
+        },
         "biggest_drop": _biggest_drop(session, player_ids, period),
         "achievements": _achievements(session, player_ids, period),
     }
@@ -1057,7 +1091,11 @@ def compute_year(session, scope: str, subject_id: int, year: int) -> Optional[di
         for key, value in (snap.get("achievements") or {}).items():
             achievements[key] = achievements.get(key, 0) + int(value or 0)
 
+        # A month still carrying GP-weighted histograms can't be added to
+        # active-hour counts, so it sits out of the fold rather than skewing it.
         activity = snap.get("activity") or {}
+        if activity.get("weight") != ACTIVITY_WEIGHT:
+            activity = {}
         for i, v in enumerate((activity.get("by_hour") or [])[:24]):
             by_hour[i] += int(v or 0)
         for i, v in enumerate((activity.get("by_weekday") or [])[:7]):
@@ -1088,7 +1126,7 @@ def compute_year(session, scope: str, subject_id: int, year: int) -> Optional[di
         "totals": totals,
         "top_items": top_items,
         "top_npcs": top_npcs,
-        "activity": {"by_hour": by_hour, "by_weekday": by_weekday},
+        "activity": {"by_hour": by_hour, "by_weekday": by_weekday, "weight": ACTIVITY_WEIGHT},
         "by_month": by_month,
         "biggest_drop": biggest,
         "achievements": achievements,

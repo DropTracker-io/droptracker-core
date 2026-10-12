@@ -133,7 +133,8 @@ def _month(period, loot, drops, *, npc_available=True, top_npcs=None,
         "top_items": top_items or [],
         "top_npcs": top_npcs or [],
         "npc_data_available": npc_available,
-        "activity": {"by_hour": by_hour or [0] * 24, "by_weekday": [0] * 7},
+        "activity": {"by_hour": by_hour or [0] * 24, "by_weekday": [0] * 7,
+                     "weight": recap.ACTIVITY_WEIGHT},
         "achievements": achievements or {},
         "biggest_drop": biggest,
     }
@@ -248,6 +249,21 @@ class TestAnnualFold:
         })
         assert out["activity"]["by_hour"][22] == 15
         assert out["activity"]["by_hour"][3] == 2
+        assert out["activity"]["weight"] == recap.ACTIVITY_WEIGHT
+
+    def test_gp_weighted_months_sit_out_of_the_activity_fold(self, monkeypatch):
+        # Snapshots from before the active-hours change summed GP per hour;
+        # adding those to hour counts would let one month's loot swamp the year.
+        legacy, current = [0] * 24, [0] * 24
+        legacy[4], current[20] = 4_891_446, 9
+        old = _month("2025-01", 1, 1, by_hour=legacy)
+        del old["activity"]["weight"]
+        out = self._fold(monkeypatch, {
+            "2025-01": old,
+            "2025-02": _month("2025-02", 1, 1, by_hour=current),
+        })
+        assert out["activity"]["by_hour"][4] == 0
+        assert out["activity"]["by_hour"][20] == 9
 
     def test_npc_coverage_requires_every_folded_month(self, monkeypatch):
         # player_npc_hourly_totals is missing 202509-202606 entirely, so a year
@@ -550,3 +566,31 @@ class TestPublicImageUrl:
         )
         assert "//img" not in out.replace("https://", "")
         assert out.count("//") == 1  # only the scheme's
+
+
+class TestActivityHistograms:
+    """`activity_histograms` counts active (player, hour) cells, not GP."""
+
+    class _Session:
+        def __init__(self, rows):
+            self.rows, self.sql = rows, None
+
+        def execute(self, stmt, params):
+            self.sql = str(stmt)
+            return type("R", (), {"fetchall": lambda _self: self.rows})()
+
+    def test_counts_active_cells_and_maps_dayofweek_to_monday_first(self):
+        # (hh, DAYOFWEEK, active cells): 1=Sunday, 3=Tuesday.
+        s = self._Session([("04", 3, 1), ("20", 3, 4), ("20", 1, 2)])
+        out = recap.activity_histograms(s, [5761100], "2026-09")
+        assert "COUNT(DISTINCT player_id, date_hour)" in s.sql
+        assert "total_value" not in s.sql
+        assert out["by_hour"][20] == 6 and out["by_hour"][4] == 1
+        assert out["by_weekday"][1] == 5  # Tuesday
+        assert out["by_weekday"][6] == 2  # Sunday
+
+    def test_no_players_reads_nothing(self):
+        s = self._Session([])
+        out = recap.activity_histograms(s, [], "2026-09")
+        assert s.sql is None
+        assert out == {"by_hour": [0] * 24, "by_weekday": [0] * 7}
