@@ -614,3 +614,47 @@ class TestKeyFlags:
     def test_create_key_refuses_preapproved_without_submit(self):
         with pytest.raises(ValueError):
             keys.create_key(None, group_id=7, submit_preapproved=True)
+
+
+class TestRevealDm:
+    """The ACP's "deliver as a one-time link" DM. ``discord_outbox.enqueue``
+    takes the session first; calling it without one raised TypeError into a
+    bare except, so the DM silently never sent (found minting the #198 key)."""
+
+    def test_group_reveal_dms_the_owner_through_the_outbox(self, monkeypatch):
+        import importlib
+
+        routes = importlib.import_module("web_api.routes.api_keys")
+        calls = []
+
+        def enqueue(session, **kwargs):
+            calls.append((session, kwargs))
+
+        fake_outbox = types.ModuleType("services.discord_outbox")
+        fake_outbox.enqueue = enqueue
+        monkeypatch.setitem(sys.modules, "services.discord_outbox", fake_outbox)
+        import services
+        monkeypatch.setattr(services, "discord_outbox", fake_outbox, raising=False)
+
+        owner = SimpleNamespace(user_id=2)
+        user = SimpleNamespace(discord_id="232236164776460288")
+
+        class _Query:
+            def __init__(self, result):
+                self.result = result
+
+            def filter(self, *_a, **_k):
+                return self
+
+            def first(self):
+                return self.result
+
+        results = iter([owner, user])
+        session = SimpleNamespace(query=lambda *_a: _Query(next(results)))
+
+        assert routes._dm_reveal(session, None, 7, "https://x/claim/abc", "bot") is True
+        assert len(calls) == 1
+        sent_session, kwargs = calls[0]
+        assert sent_session is session
+        assert kwargs["channel_id"] == "232236164776460288" and kwargs["kind"] == "dm"
+        assert "https://x/claim/abc" in kwargs["content"]

@@ -742,7 +742,10 @@ def _dm_reveal(session, audience_user_id, audience_group_id, url: str,
             return False
 
         name = f" for **{label}**" if label else ""
+        # enqueue's first argument is the session; without it every call
+        # raised TypeError into the except below and no link was ever sent.
         enqueue(
+            session,
             channel_id=str(discord_id),
             kind="dm",
             content=(
