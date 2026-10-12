@@ -77,7 +77,7 @@ def channel_supports_launch(channel) -> bool:
     return launch_supported_channel_type(channel_type)
 
 
-def build_launch_card(supports_launch: bool = True):
+def build_launch_card(supports_launch: bool = True, submit: bool = False):
     """Components-V2 "Open DropTracker" card. Its button (custom_id
     LAUNCH_BUTTON_CUSTOM_ID) opens the Activity when clicked. Matches the bot's
     other V2 cards (services/components.py). With ``supports_launch`` False
@@ -136,24 +136,55 @@ def build_launch_card(supports_launch: bool = True):
             SeparatorComponent(divider=True),
             TextDisplayComponent(content=cta),
             SeparatorComponent(divider=True),
-            ActionRow(button),
+            # The group's "Submit button on the launcher card" setting adds the
+            # Submit button beside Open (services/submit_panel_discord.py).
+            ActionRow(*([button, _submit_button()] if submit else [button])),
             SeparatorComponent(divider=True),
             TextDisplayComponent(content="-# Powered by the [DropTracker](https://www.droptracker.io)"),
         )
     ]
 
 
-async def _post_card(bot, channel_id):
+def _submit_button():
+    from interactions import Button, ButtonStyle
+
+    from services.submit_panel_core import SUBMIT_BUTTON_ID, SUBMIT_BUTTON_LABEL
+
+    return Button(style=ButtonStyle.GREEN, label=SUBMIT_BUTTON_LABEL, custom_id=SUBMIT_BUTTON_ID)
+
+
+async def _post_card(bot, channel_id, variant=None):
     try:
         channel = await bot.fetch_channel(channel_id=channel_id)
         if channel is None:
             return None
         return await channel.send(
-            components=build_launch_card(supports_launch=channel_supports_launch(channel))
+            components=build_launch_card(supports_launch=channel_supports_launch(channel),
+                                         submit=variant == core.CARD_WITH_SUBMIT)
         )
     except Exception:
         log.warning("[ActivityLaunch] couldn't post card to channel %s", channel_id, exc_info=True)
         return None
+
+
+async def _edit_card(bot, channel_id, message_id, variant) -> bool:
+    """Rewrite the posted card for a new variant (Submit button on/off).
+    False when the message is gone, so the reconciler posts a fresh card."""
+    try:
+        channel = await bot.fetch_channel(channel_id=channel_id)
+        if channel is None:
+            return False
+        message = await channel.fetch_message(message_id=message_id)
+        if message is None:
+            return False
+        await message.edit(
+            components=build_launch_card(supports_launch=channel_supports_launch(channel),
+                                         submit=variant == core.CARD_WITH_SUBMIT)
+        )
+        return True
+    except Exception:
+        log.warning("[ActivityLaunch] couldn't edit card %s/%s", channel_id, message_id, exc_info=True)
+        return False
 
 
 async def _delete_message(bot, channel_id, message_id) -> None:
@@ -174,6 +205,7 @@ async def reconcile_all(bot, session_factory) -> None:
         session_factory,
         post_card=functools.partial(_post_card, bot),
         delete_message=functools.partial(_delete_message, bot),
+        edit_card=functools.partial(_edit_card, bot),
     )
 
 

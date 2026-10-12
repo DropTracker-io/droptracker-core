@@ -176,6 +176,35 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Post an “Open DropTracker” card in this channel with a button that opens the in-Discord app. The bot keeps one card here and moves or removes it when you change this.",
         "default": None,
     },
+    # Submit button (suggestion #198): members send a drop, PB or other entry
+    # from a button instead of remembering /submit. Either on the launcher
+    # card above, or on its own card in a channel of the group's choosing.
+    # The bot keeps the cards in step (services/submit_panel.py).
+    {
+        "key": "submit_on_launch_card",
+        "label": "Submit button on the launcher card",
+        "category": "channels",
+        "type": "boolean",
+        "help": "Add a Submit button to the Open DropTracker card, so members can send a drop, PB or other entry without a slash command.",
+        "default": False,
+    },
+    {
+        "key": "submit_panel_channel",
+        "label": "Submit card channel",
+        "category": "channels",
+        "type": "channel",
+        "help": "Post a card with a Submit button in this channel. The bot keeps one card here and moves or removes it when you change this.",
+        "default": None,
+    },
+    {
+        "key": "submit_panel_message",
+        "label": "Submit card message",
+        "category": "channels",
+        "type": "string",
+        "help": "Optional. The text on the Submit card. Leave blank for the default.",
+        "default": "",
+        "max_length": 250,
+    },
 
     # --- Drop notifications ---
     # Defaults here must match the runtime fallbacks the processors use when a
@@ -722,6 +751,17 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Optional. Where to ping when a manual submission is held for approval (the \"Hold for admin approval\" policy). Leave unset to review only on the website.",
         "default": None,
     },
+    # Who may press Approve / Reject on review cards in Discord (manual-review
+    # pings and event "awaiting review" cards). Group admins always may; this
+    # adds a staff role. services/review_buttons_discord.py reads it.
+    {
+        "key": "review_role_id",
+        "label": "Review staff role",
+        "category": "drops",
+        "type": "role",
+        "help": "Members with this Discord role can approve or reject submissions with the buttons on review messages. Group admins always can.",
+        "default": None,
+    },
 
     # --- Member activity log + voice-channel stat displays ---
     # channel_id_to_send_logs: member join/leave embeds (db/ops.py notify_group).
@@ -1234,6 +1274,14 @@ def coerce_to_storage(key: str, value: Any) -> str:
 
     if key in _SNOWFLAKE_LIST_KEYS:
         return _coerce_snowflake_list(key, value)
+
+    if ftype == "role":
+        # One Discord role id, or empty to clear. A pasted <@&id> mention is
+        # unwrapped; anything else is refused rather than stored as a name.
+        raw = "" if value is None else str(value).strip().strip("<@&>")
+        if raw and not _SNOWFLAKE_RE.match(raw):
+            raise ConfigValidationError(key, f"'{key}' must be a Discord role id.")
+        return raw
 
     # channel / string / text / csv / bosslist
     if value is None:

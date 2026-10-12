@@ -3168,6 +3168,20 @@ class NotificationService:
                     )))
                 except Exception:
                     extra_rows = []  # never let a component error drop the post
+            # Review buttons on "awaiting review" cards (suggestion #198):
+            # services/review_buttons_discord.py answers them and checks the
+            # clicker. Staff-hosted events (no group) review on the site only.
+            if notification_type == "event_pending" and event.group_id:
+                try:
+                    cid = int(data.get("completion_id"))
+                    extra_rows.append(interactions.ActionRow(
+                        interactions.Button(style=interactions.ButtonStyle.GREEN,
+                                            label="Approve", custom_id=f"dtrv:e:a:{cid}"),
+                        interactions.Button(style=interactions.ButtonStyle.RED,
+                                            label="Reject", custom_id=f"dtrv:e:r:{cid}"),
+                    ))
+                except Exception:
+                    pass  # no completion id / component error: links still work
 
             # Configured role pings (web_events.ping_config). Components V2
             # forbids content= alongside components, so mentions render as

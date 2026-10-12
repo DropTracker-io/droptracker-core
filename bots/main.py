@@ -319,6 +319,9 @@ async def on_startup(event: Startup):
     bot.load_extension("services.user_context")
     bot.load_extension("services.group_poll")
     bot.load_extension("services.activity_launch")
+    # Submit button + Discord review buttons (suggestion #198).
+    bot.load_extension("services.submit_panel_discord")
+    bot.load_extension("services.review_buttons_discord")
     # Staff-DM reply bridge (web102a): DMs to this bot flow into staff_dm
     # chat threads. Must live on the SAME bot that sends the relay DMs
     # (the outbox drain runs here), or replies land in the wrong app's inbox.
@@ -1082,6 +1085,12 @@ async def activity_launch_cards():
         await reconcile_all(bot, Session)
     except Exception as e:
         print(f"Couldn't reconcile activity launch cards: {e}")
+    # The standalone Submit card (submit_panel_channel), same bookkeeping.
+    try:
+        from services.submit_panel_discord import reconcile_all as reconcile_submit_cards
+        await reconcile_submit_cards(bot, Session)
+    except Exception as e:
+        print(f"Couldn't reconcile submit cards: {e}")
 
 
 async def _drain_orphan_scheduled_events(limit: int = 50) -> None:

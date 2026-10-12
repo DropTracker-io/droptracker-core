@@ -169,6 +169,23 @@ def manual_notification_suppressed_groups(session, player, group_ids,
 REVIEW_CHANNEL_KEY = "channel_id_to_post_manual_review"
 
 
+def review_buttons(group_id, drop_id) -> list:
+    """Outbox button specs for a review ping: Approve / Reject (answered by
+    services/review_buttons_discord.py — ``dtrv:m:<action>:<group>:<drop>``)
+    and the website queue. Without a drop id only the link is offered."""
+    queue = {"label": "Open the review queue",
+             "url": f"https://www.droptracker.io/groups/{int(group_id)}/submissions"}
+    if drop_id is None:
+        return [queue]
+    return [
+        {"label": "Approve", "custom_id": f"dtrv:m:a:{int(group_id)}:{int(drop_id)}",
+         "style": "success"},
+        {"label": "Reject", "custom_id": f"dtrv:m:r:{int(group_id)}:{int(drop_id)}",
+         "style": "danger"},
+        queue,
+    ]
+
+
 async def notify_pending_review(session, drop, player, item_name, npc_name, drop_value,
                                 pending_group_ids, use_external_session: bool = False) -> None:
     """Ping each pending group's configured review channel about a manual drop
@@ -189,16 +206,18 @@ async def notify_pending_review(session, drop, player, item_name, npc_name, drop
         channel_id = channels.get((gid, REVIEW_CHANNEL_KEY))
         if not channel_id:
             continue
+        drop_id = getattr(drop, "drop_id", None)
         content = (
             f"\U0001F50D **Manual submission awaiting review** — "
             f"`{player_name}` submitted **{item_name}** from **{npc_name}** "
             f"(~{format_number(int(drop_value))} gp). "
-            f"Approve or reject it: https://www.droptracker.io/groups/{gid}/submissions"
+            f"Approve or reject it below, or on the website."
         )
         enqueue(
             session, channel_id=str(channel_id), content=content,
             kind="message", ref_type="manual_review",
-            ref_id=getattr(drop, "drop_id", None), commit=False,
+            ref_id=drop_id, commit=False,
+            components=review_buttons(gid, drop_id),
         )
         enqueued = True
     if enqueued:

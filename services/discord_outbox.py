@@ -75,8 +75,9 @@ def enqueue(
     ``kind='news_post'`` sends like a plain message and then publishes it, so
     an Announcement channel's followers receive it (``services/leader_updates``).
 
-    ``components`` is a list of ``{"label", "url"}`` link buttons (web96a).
-    Link buttons only — see :func:`_build_components`.
+    ``components`` is a list of ``{"label", "url"}`` link buttons (web96a),
+    plus ``{"label", "custom_id", "style"}`` action buttons whose custom_id
+    carries an allowlisted prefix — see :func:`_build_components`.
     """
     row = DiscordOutbox(
         kind=kind,
@@ -100,14 +101,25 @@ def enqueue(
 _MAX_COMPONENT_BUTTONS = 5
 
 
-def _build_components(raw: Optional[str]):
-    """Turn ``components_json`` into an ActionRow of LINK buttons, or None.
+#: custom_id prefixes an outbox row may put on an ACTION button, each owned by
+#: a bot extension that handles the click. Anything else is dropped, so a
+#: queued row can never mint a button nothing answers.
+#:   dtrv: — review buttons (services/review_buttons_discord.py, suggestion #198)
+ACTION_BUTTON_PREFIXES = ("dtrv:",)
 
-    **Link buttons only, by design.** A URL button produces no interaction
-    event, so the outbox stays a fire-and-forget queue and the bot needs no
-    custom_id routing, no state table and no handler to keep in sync with
-    whatever queued the row. Anything needing a callback belongs in a bot
-    extension, not here.
+_ACTION_STYLES = {"primary": "BLURPLE", "secondary": "GREY",
+                  "success": "GREEN", "danger": "RED"}
+
+
+def _build_components(raw: Optional[str]):
+    """Turn ``components_json`` into an ActionRow of buttons, or None.
+
+    **Link buttons by default.** A URL button produces no interaction event,
+    so the outbox stays a fire-and-forget queue and needs no state table.
+    The one exception is an action button whose ``custom_id`` starts with an
+    :data:`ACTION_BUTTON_PREFIXES` entry: the extension owning that prefix
+    answers the click and re-checks everything itself, so the outbox still
+    only carries a label and an id.
     """
     if not raw:
         return None
@@ -127,8 +139,17 @@ def _build_components(raw: Optional[str]):
     for entry in entries[:_MAX_COMPONENT_BUTTONS]:
         if not isinstance(entry, dict):
             continue
-        url = entry.get("url")
+        custom_id = entry.get("custom_id")
         label = entry.get("label")
+        if custom_id is not None:
+            if (isinstance(custom_id, str) and len(custom_id) <= 100
+                    and custom_id.startswith(ACTION_BUTTON_PREFIXES)):
+                style = getattr(ButtonStyle,
+                                _ACTION_STYLES.get(str(entry.get("style") or ""), "GREY"))
+                buttons.append(Button(style=style, label=str(label or "OK")[:80],
+                                      custom_id=custom_id))
+            continue
+        url = entry.get("url")
         # Discord rejects a link button without an http(s) URL; drop rather
         # than let one malformed entry fail the whole send.
         if not isinstance(url, str) or not url.startswith(("http://", "https://")):

@@ -148,6 +148,106 @@ def _proof_option():
     )
 
 
+# Shared plumbing, module-level so the Submit button (services/submit_panel_discord.py,
+# suggestion #198) goes through exactly the checks /submit does.
+
+def claimed_players(discord_id):
+    """(players, error_message): every RSN this Discord account has claimed."""
+    user = session.query(User).filter(User.discord_id == str(discord_id)).first()
+    if user is None:
+        return [], (
+            "You don't have a DropTracker account yet. Claim your RuneScape "
+            "account with `/claim-rsn` first, then try again."
+        )
+    players = (
+        session.query(Player)
+        .filter(Player.user_id == user.user_id)
+        .order_by(Player.player_name)
+        .all()
+    )
+    if not players:
+        return [], (
+            "You haven't claimed any RuneScape accounts yet. Claim one with "
+            "`/claim-rsn` first — manual submissions only count for accounts you own."
+        )
+    return players, None
+
+
+def rate_limited(user_id: int) -> bool:
+    conn = getattr(redis_client, "client", None)
+    if conn is None:
+        return False
+    try:
+        key = f"web:ratelimit:manual:{user_id}"
+        count = conn.incr(key)
+        if count == 1:
+            conn.expire(key, 60)
+        return count > _RATE_LIMIT_PER_MIN
+    except Exception:
+        return False
+
+
+def policy_notices(player) -> list[str]:
+    """Per-group heads-up lines for groups that hold/exclude this player's
+    manual submissions (same preflight the web submit page shows)."""
+    try:
+        from data.submissions.manual_policy import manual_moderation_for_player
+
+        groups = player.groups or []
+        gid_name = {g.group_id: g.group_name for g in groups}
+        moderation = manual_moderation_for_player(session, player, list(gid_name))
+        lines = [
+            f"**{gid_name.get(gid, f'Group {gid}')}**: this submission "
+            f"{POLICY_NOTICE.get(policy, POLICY_NOTICE_FALLBACK)}."
+            for gid, (_status, policy) in sorted(
+                moderation.items(),
+                key=lambda kv: (gid_name.get(kv[0]) or "").lower(),
+            )
+        ]
+        return lines
+    except Exception:
+        # The heads-up is best-effort; never block a submission on it.
+        return []
+
+
+async def forward_to_intake(payload: dict, image: tuple | None):
+    """POST to the intake /manual-submit endpoint. Returns (ok, data|str)."""
+    key = (os.getenv("MANUAL_SUBMIT_KEY") or "").strip()
+    if not key:
+        return False, "Manual submissions aren't configured on the server right now."
+    headers = {MANUAL_SUBMIT_KEY_HEADER: key}
+    url = f"{INTAKE_API_URL}/manual-submit"
+    try:
+        async with httpx.AsyncClient(timeout=INTAKE_TIMEOUT_SECONDS) as client:
+            if image is not None:
+                filename, content, content_type = image
+                resp = await client.post(
+                    url,
+                    data=payload_to_form(payload),
+                    files={"image_file": (filename, content, content_type)},
+                    headers=headers,
+                )
+            else:
+                resp = await client.post(url, json=payload, headers=headers)
+    except Exception:
+        return False, "The submission pipeline is unavailable right now — try again shortly."
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if resp.status_code >= 400 or data.get("success") is False:
+        # Same wording the website shows for the same rejection
+        # (utils/submission_messages.py) — the pipeline's own messages are
+        # written for logs, not for the person who submitted.
+        return False, friendly_rejection(
+            data,
+            fallback=f"The submission service returned an error ({resp.status_code}).",
+        )
+    return True, data
+
+
 class SubmissionCommands(Extension):
     """Extension providing the /submit manual-submission commands."""
 
@@ -170,24 +270,7 @@ class SubmissionCommands(Extension):
 
     def _claimed_players(self, discord_id):
         """(players, error_message): every RSN this Discord account has claimed."""
-        user = session.query(User).filter(User.discord_id == str(discord_id)).first()
-        if user is None:
-            return [], (
-                "You don't have a DropTracker account yet. Claim your RuneScape "
-                "account with `/claim-rsn` first, then try again."
-            )
-        players = (
-            session.query(Player)
-            .filter(Player.user_id == user.user_id)
-            .order_by(Player.player_name)
-            .all()
-        )
-        if not players:
-            return [], (
-                "You haven't claimed any RuneScape accounts yet. Claim one with "
-                "`/claim-rsn` first — manual submissions only count for accounts you own."
-            )
-        return players, None
+        return claimed_players(discord_id)
 
     def _resolve_player(self, ctx: SlashContext, account: str | None):
         """(player, error_message): the claimed player this submission is for.
@@ -216,39 +299,10 @@ class SubmissionCommands(Extension):
         )
 
     def _rate_limited(self, user_id: int) -> bool:
-        conn = getattr(redis_client, "client", None)
-        if conn is None:
-            return False
-        try:
-            key = f"web:ratelimit:manual:{user_id}"
-            count = conn.incr(key)
-            if count == 1:
-                conn.expire(key, 60)
-            return count > _RATE_LIMIT_PER_MIN
-        except Exception:
-            return False
+        return rate_limited(user_id)
 
     def _policy_notices(self, player) -> list[str]:
-        """Per-group heads-up lines for groups that hold/exclude this player's
-        manual submissions (same preflight the web submit page shows)."""
-        try:
-            from data.submissions.manual_policy import manual_moderation_for_player
-
-            groups = player.groups or []
-            gid_name = {g.group_id: g.group_name for g in groups}
-            moderation = manual_moderation_for_player(session, player, list(gid_name))
-            lines = [
-                f"**{gid_name.get(gid, f'Group {gid}')}**: this submission "
-                f"{POLICY_NOTICE.get(policy, POLICY_NOTICE_FALLBACK)}."
-                for gid, (_status, policy) in sorted(
-                    moderation.items(),
-                    key=lambda kv: (gid_name.get(kv[0]) or "").lower(),
-                )
-            ]
-            return lines
-        except Exception:
-            # The heads-up is best-effort; never block a submission on it.
-            return []
+        return policy_notices(player)
 
     async def _fetch_proof(self, proof: Attachment):
         """(bytes | None, content_type, filename, error | warning).
@@ -274,40 +328,7 @@ class SubmissionCommands(Extension):
 
     async def _forward_to_intake(self, payload: dict, image: tuple | None):
         """POST to the intake /manual-submit endpoint. Returns (ok, data|str)."""
-        key = (os.getenv("MANUAL_SUBMIT_KEY") or "").strip()
-        if not key:
-            return False, "Manual submissions aren't configured on the server right now."
-        headers = {MANUAL_SUBMIT_KEY_HEADER: key}
-        url = f"{INTAKE_API_URL}/manual-submit"
-        try:
-            async with httpx.AsyncClient(timeout=INTAKE_TIMEOUT_SECONDS) as client:
-                if image is not None:
-                    filename, content, content_type = image
-                    resp = await client.post(
-                        url,
-                        data=payload_to_form(payload),
-                        files={"image_file": (filename, content, content_type)},
-                        headers=headers,
-                    )
-                else:
-                    resp = await client.post(url, json=payload, headers=headers)
-        except Exception:
-            return False, "The submission pipeline is unavailable right now — try again shortly."
-        try:
-            data = resp.json()
-        except Exception:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        if resp.status_code >= 400 or data.get("success") is False:
-            # Same wording the website shows for the same rejection
-            # (utils/submission_messages.py) — the pipeline's own messages are
-            # written for logs, not for the person who submitted.
-            return False, friendly_rejection(
-                data,
-                fallback=f"The submission service returned an error ({resp.status_code}).",
-            )
-        return True, data
+        return await forward_to_intake(payload, image)
 
     async def _handle_submission(
         self,

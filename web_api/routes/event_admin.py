@@ -132,7 +132,8 @@ def _completion_payload(c: EventCompletion, task_label=None, team_name=None,
 
 
 def _snapshot(c: EventCompletion) -> str:
-    """Before/after JSON for audit rows."""
+    """Before/after JSON for audit rows. services/event_review.snapshot (the
+    confirm/reject path) writes the same shape; keep the two in step."""
     return json.dumps({
         "status": c.status,
         "task_id": c.task_id,
@@ -346,35 +347,10 @@ async def list_completions(event_id: int):
 # --------------------------------------------------------------------------- #
 def _publish_pending_update(s, ev, comp) -> None:
     """After a confirm/reject, push a fresh ``kind: "pending"`` SSE frame so
-    the board's amber tint updates (or clears) live (web53a). Best-effort —
-    a realtime hiccup must never fail the admin action."""
-    try:
-        from services.event_engine import _publish, pending_projection
+    the board's amber tint updates (or clears) live (web53a). Best-effort."""
+    from services.event_review import publish_pending_update
 
-        task = s.query(EventTask).filter(EventTask.id == comp.task_id).first()
-        if task is None or comp.team_id is None:
-            return
-        config = task.config
-        if isinstance(config, str):
-            try:
-                config = json.loads(config)
-            except (ValueError, TypeError):
-                config = None
-        proj = pending_projection(
-            s, {"id": task.id, "type": task.type,
-                "target_value": task.target_value,
-                "config": config}, comp.team_id)
-        frame = {
-            "kind": "pending", "event_id": ev.id, "task_id": comp.task_id,
-            "team_id": comp.team_id,
-            "pending": proj["pending_count"] if proj else 0,
-            "pending_complete": bool(proj and proj["pending_complete"]),
-        }
-        if proj:
-            frame["progress"] = proj["applied"]
-        _publish(ev.id, frame)
-    except Exception:
-        pass
+    publish_pending_update(s, ev, comp)
 
 
 @event_admin_bp.post("/events/<int:event_id>/completions/<int:completion_id>/confirm")
@@ -382,56 +358,17 @@ async def confirm_completion(event_id: int, completion_id: int):
     user_id = current_user_id()
 
     def _apply():
+        # The state change lives in services/event_review.py, shared with the
+        # Discord review buttons so both surfaces confirm identically.
+        from services import event_review
+
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
-            # An ended event (manual premature ends included) processes no
-            # further completions — confirming would award points and post
-            # notifications after the final standings went out. Reject stays
-            # available for bookkeeping.
-            if ev.status == "past":
-                abort_problem(
-                    409, "Event has ended",
-                    "This event is over — pending completions can no longer "
-                    "be confirmed. Reject them (or leave them) for the record.",
-                )
-            comp = _load_completion_or_404(s, event_id, completion_id, for_update=True)
-            if comp.status != "pending":
-                abort_problem(
-                    409,
-                    "Not pending",
-                    f"Completion {completion_id} is '{comp.status}'; only pending rows can be confirmed.",
-                )
-            before = _snapshot(comp)
-            from services import event_credit_receipt
-
-            receipt_task = s.query(EventTask).filter(EventTask.id == comp.task_id).first()
-            receipt_task = _engine()._task_to_dict(receipt_task) if receipt_task else None
-            credit_before = (event_credit_receipt.capture(
-                s, event_id=event_id, task=receipt_task, team_id=comp.team_id,
-                player_id=comp.player_id) if receipt_task else None)
-            comp.status = "confirmed"
-            comp.acted_by_user_id = user_id
-            # Single shared apply path with the worker: a confirmed row takes
-            # effect exactly like an auto completion (progress fold, points,
-            # bingo cells, SSE, notification).
-            _engine().apply_completion(s, comp)
-            score_change = (event_credit_receipt.finish(
-                s, credit_before, event_id=event_id, task=receipt_task,
-                team_id=comp.team_id, player_id=comp.player_id)
-                if receipt_task else None)
-            s.add(AuditLog(
-                actor_user_id=user_id,
-                group_id=ev.group_id,
-                event_id=ev.id,
-                action="event.completion.confirm",
-                target=f"web_event_completions.{completion_id}",
-                before=before,
-                after=_snapshot(comp),
-            ))
-            s.commit()
-            _publish_pending_update(s, ev, comp)
-            return score_change
+            try:
+                return event_review.confirm(s, ev, completion_id, user_id)
+            except event_review.ReviewError as e:
+                abort_problem(e.status, e.title, e.detail)
 
     score_change = await asyncio.to_thread(_apply)
     _bump(event_id)
@@ -537,33 +474,15 @@ async def reject_completion(event_id: int, completion_id: int):
     note = _clean_note(body or {})
 
     def _apply():
+        from services import event_review
+
         with db_session() as s:
             ev = _load_event_or_404(s, event_id)
             _assert_event_admin(s, user_id, ev)
-            comp = _load_completion_or_404(s, event_id, completion_id, for_update=True)
-            if comp.status != "pending":
-                abort_problem(
-                    409,
-                    "Not pending",
-                    f"Completion {completion_id} is '{comp.status}'; only pending rows can be rejected.",
-                )
-            before = _snapshot(comp)
-            # pending -> rejected: no side effects, note stored.
-            comp.status = "rejected"
-            comp.acted_by_user_id = user_id
-            if note:
-                comp.note = note
-            s.add(AuditLog(
-                actor_user_id=user_id,
-                group_id=ev.group_id,
-                event_id=ev.id,
-                action="event.completion.reject",
-                target=f"web_event_completions.{completion_id}",
-                before=before,
-                after=_snapshot(comp),
-            ))
-            s.commit()
-            _publish_pending_update(s, ev, comp)
+            try:
+                event_review.reject(s, ev, completion_id, user_id, note=note)
+            except event_review.ReviewError as e:
+                abort_problem(e.status, e.title, e.detail)
 
     await asyncio.to_thread(_apply)
     return private_no_store(jsonify({"ok": True}))

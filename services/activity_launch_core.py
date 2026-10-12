@@ -83,6 +83,13 @@ LAUNCH_INTENT_TTL = 600
 # tracks the posted card as "channel_id:message_id" (NOT in the config registry).
 CHANNEL_KEY = "activity_launch_channel"
 MSG_REF_KEY = "activity_launch_message_id"
+#: Which version of the card is posted (suggestion #198: with or without the
+#: Submit button), so flipping the setting edits the card in place.
+VARIANT_KEY = "activity_launch_card_variant"
+SUBMIT_ON_CARD_KEY = "submit_on_launch_card"
+#: Variants. A card posted before variants existed has no Submit button.
+CARD_PLAIN = "s0"
+CARD_WITH_SUBMIT = "s1"
 
 # Whether opening the app from the launcher posts any message. Off by default —
 # opening should be silent; discoverability comes from the standing channel card.
@@ -331,17 +338,41 @@ def clean_channel(value: str | None) -> str | None:
     return value if value.isdigit() and value != "0" else None
 
 
-async def reconcile_group(session, group_id, channel_id, ref_row, *, post_card, delete_message) -> None:
+async def reconcile_group(session, group_id, channel_id, ref_row, *, post_card, delete_message,
+                          variant=None, variant_row=None, edit_card=None,
+                          ref_key=MSG_REF_KEY, variant_key=VARIANT_KEY,
+                          assume_variant=None) -> None:
     """Bring one group's standing card in line with its configured channel.
 
     ``post_card(channel_id) -> message|None`` and
     ``delete_message(channel_id, message_id)`` are injected by the shell so this
     stays Discord-free and testable. Cheap in steady state — when the card is
     already in the configured channel this returns without any side effect.
+
+    ``variant`` (optional) names the card's current content. When the posted
+    card's stored variant (``variant_row``, or ``assume_variant`` for a card
+    posted before variants were recorded) differs, ``edit_card(channel_id,
+    message_id, variant) -> bool`` rewrites it in place; a failed edit (the
+    message was deleted) posts a fresh one. With a variant, ``post_card`` is
+    called as ``post_card(channel_id, variant)``. ``ref_key``/``variant_key``
+    let other standing cards (the Submit card) reuse this.
     """
     from db.models import GroupConfiguration
 
     stored_channel, stored_msg = parse_ref(ref_row.config_value if ref_row else None)
+
+    def _forget_variant():
+        if variant_row is not None:
+            session.delete(variant_row)
+
+    def _save_variant():
+        if variant is None:
+            return
+        if variant_row is not None:
+            variant_row.config_value = variant
+        else:
+            session.add(GroupConfiguration(group_id=group_id, config_key=variant_key,
+                                           config_value=variant))
 
     # Channel cleared → remove the card and forget it.
     if not channel_id:
@@ -349,18 +380,30 @@ async def reconcile_group(session, group_id, channel_id, ref_row, *, post_card, 
             await delete_message(stored_channel, stored_msg)
         if ref_row is not None:
             session.delete(ref_row)
+            _forget_variant()
             session.commit()
         return
 
-    # Already posted in the right channel → nothing to do (no API call).
+    # Already posted in the right channel → nothing to do (no API call),
+    # unless its content changed and it needs an edit.
     if stored_channel == str(channel_id) and stored_msg:
-        return
+        if variant is None:
+            return
+        posted = variant_row.config_value if variant_row is not None else assume_variant
+        if posted == variant:
+            return
+        if edit_card is not None and await edit_card(stored_channel, stored_msg, variant):
+            _save_variant()
+            session.commit()
+            return
+        # The edit failed: the message is gone (or never ours). Post afresh.
+        stored_msg = None
 
     # New, or the channel changed → drop the stale card, post fresh.
     if stored_channel and stored_msg and stored_channel != str(channel_id):
         await delete_message(stored_channel, stored_msg)
 
-    message = await post_card(channel_id)
+    message = await (post_card(channel_id) if variant is None else post_card(channel_id, variant))
     if message is None:
         return
     new_ref = f"{channel_id}:{message.id}"
@@ -368,32 +411,53 @@ async def reconcile_group(session, group_id, channel_id, ref_row, *, post_card, 
         ref_row.config_value = new_ref
     else:
         session.add(
-            GroupConfiguration(group_id=group_id, config_key=MSG_REF_KEY, config_value=new_ref)
+            GroupConfiguration(group_id=group_id, config_key=ref_key, config_value=new_ref)
         )
+    _save_variant()
     session.commit()
 
 
-async def reconcile_all(session_factory, *, post_card, delete_message) -> None:
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def reconcile_all(session_factory, *, post_card, delete_message, edit_card=None) -> None:
     """Sweep every group with a launcher card configured or posted, reconciling
-    each. DB reads only in steady state; API calls only when a card must move."""
+    each. DB reads only in steady state; API calls only when a card must move
+    or (with ``edit_card``) when its Submit button setting changed.
+
+    With ``edit_card`` given, ``post_card`` is called as ``(channel_id,
+    variant)``; without it, as before."""
     from db.models import GroupConfiguration
 
     session = session_factory()
     try:
-        channel_rows = (
+        rows = (
             session.query(GroupConfiguration)
-            .filter(GroupConfiguration.config_key == CHANNEL_KEY)
+            .filter(GroupConfiguration.config_key.in_(
+                (CHANNEL_KEY, MSG_REF_KEY, VARIANT_KEY, SUBMIT_ON_CARD_KEY)))
             .all()
         )
-        ref_rows = (
-            session.query(GroupConfiguration)
-            .filter(GroupConfiguration.config_key == MSG_REF_KEY)
-            .all()
-        )
-        channels = {r.group_id: clean_channel(r.config_value) for r in channel_rows}
-        refs = {r.group_id: r for r in ref_rows}
+        channels, refs, variants, submit_on = {}, {}, {}, set()
+        for r in rows:
+            if r.config_key == CHANNEL_KEY:
+                channels[r.group_id] = clean_channel(r.config_value)
+            elif r.config_key == MSG_REF_KEY:
+                refs[r.group_id] = r
+            elif r.config_key == VARIANT_KEY:
+                variants[r.group_id] = r
+            elif _truthy(r.config_value):
+                submit_on.add(r.group_id)
         for group_id in set(channels) | set(refs):
             try:
+                extra = {}
+                if edit_card is not None:
+                    extra = dict(
+                        variant=CARD_WITH_SUBMIT if group_id in submit_on else CARD_PLAIN,
+                        variant_row=variants.get(group_id),
+                        edit_card=edit_card,
+                        assume_variant=CARD_PLAIN,
+                    )
                 await reconcile_group(
                     session,
                     group_id,
@@ -401,6 +465,7 @@ async def reconcile_all(session_factory, *, post_card, delete_message) -> None:
                     refs.get(group_id),
                     post_card=post_card,
                     delete_message=delete_message,
+                    **extra,
                 )
             except Exception:
                 log.exception("[ActivityLaunch] reconcile failed for group %s", group_id)
