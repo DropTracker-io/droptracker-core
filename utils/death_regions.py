@@ -13,8 +13,9 @@ in step.
 **This is strictly weaker than the plugin's answer, and is only ever a
 fallback.** Two inputs exist only on the client:
 
-* *account type* — every death is dangerous for a hardcore ironman, because the
-  status is what is lost. The server does not know an account's type at
+* *account type* — a raid or Gauntlet death is dangerous for a hardcore
+  ironman, because the status is what is lost (minigames are safe for every
+  account since plugin 6.1.5). The server does not know an account's type at
   submission time, so an HCIM's Gauntlet death from an old client classifies as
   safe here and would be muted by a group that mutes safe deaths.
 * *Pest Control* — the islands are ordinary regions; only the live status
@@ -55,9 +56,10 @@ _PLAYER_OWNED_HOUSE = frozenset({
     7257, 7534, 7535, 7790, 7791, 8046, 8047, 8302, 8303,
 })
 _SOUL_WARS = frozenset({8493, 8748, 8749, 9005})
-#: The PK tutor (Pete Kayer's training arena, October 2026). Measured from the
-#: first week of production deaths: every tutor kill landed in one of these two
-#: regions. Filtered by its own group switch (ACTIVITY_REGIONS below).
+#: The PK tutor (Pete Kayer's training arena, October 2026). The tutor hands out
+#: the gear, so a death costs only the loadout. Measured from the first week of
+#: production deaths: every tutor kill landed in one of these two regions. Also
+#: filtered by its own group switch (ACTIVITY_REGIONS below).
 _PK_TUTOR = frozenset({10588, 11100})
 
 _CLAN_HALL = 6997
@@ -82,6 +84,7 @@ SAFE_REGIONS: frozenset[int] = frozenset().union(
     _LAST_MAN_STANDING,
     _PLAYER_OWNED_HOUSE,
     _SOUL_WARS,
+    _PK_TUTOR,
     {
         _CLAN_HALL,
         _CREATURE_GRAVEYARD,

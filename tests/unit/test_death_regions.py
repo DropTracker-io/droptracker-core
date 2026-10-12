@@ -135,9 +135,11 @@ class TestRegionNames:
 
     def test_named_regions_cover_almost_every_safe_region(self):
         # The picker is only useful if the places a group wants to mute have
-        # names. Two do not (clan hall, one POH chunk) and are muted by id.
-        unnamed = [r for r in SAFE_REGIONS if region_names.name_for(r) is None]
-        assert len(unnamed) <= 2
+        # names. Four do not (clan hall, one POH chunk, and the PK tutor, which
+        # is newer than RuneLite's names and has a switch of its own) and are
+        # muted by id.
+        unnamed = {r for r in SAFE_REGIONS if region_names.name_for(r) is None}
+        assert unnamed <= {CLAN_HALL, 7257, 10588, 11100}
 
     def test_data_file_matches_the_plugin_resource(self):
         """The JSON is a verbatim copy; a regenerated plugin resource must be recopied."""
