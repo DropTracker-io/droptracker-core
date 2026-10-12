@@ -20,7 +20,7 @@ import pytest
 
 from tests.local_artifacts import plugin_repo_root, skip_without
 from utils import region_names
-from utils.death_regions import SAFE_REGIONS, is_safe_region
+from utils.death_regions import SAFE_REGIONS, activity_for_region, is_safe_region
 
 CASTLE_WARS = 9520
 CHAMBERS_OF_XERIC = 12889
@@ -62,6 +62,15 @@ class TestSafeRegions:
     def test_string_region_ids_are_accepted(self):
         # Embed fields arrive as strings.
         assert is_safe_region("9520")
+
+    @pytest.mark.parametrize(
+        "region_id, activity",
+        [(13658, "lms"), (14432, "lms"), ("13919", "lms"), (10588, "pk_tutor"),
+         (11100, "pk_tutor"), (CHAMBERS_OF_XERIC, None), (CASTLE_WARS, None),
+         (None, None), ("N/A", None)],
+    )
+    def test_activity_for_region(self, region_id, activity):
+        assert activity_for_region(region_id) == activity
 
     def test_parity_with_the_plugin_classifier(self):
         """The server's fallback must classify exactly what the plugin does."""

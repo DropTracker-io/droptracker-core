@@ -16,6 +16,10 @@ cannot drift apart.
 ``notify_deaths_safe``. This matches Dink's default and is a deliberate change
 from the old behaviour of announcing every death.
 
+Some activities have a switch of their own (``ACTIVITY_CONFIG_KEYS``: Last Man
+Standing, the PK tutor), matched by region and checked first. One switch for
+every safe death made a group choose between raid wipes and an LMS flood.
+
 Only group notifications are filtered. ``dm_death`` — the supporter's personal
 submission DM — is out of scope for the same reason it escapes the blacklist:
 it is the player's own record of their own death, not a clan's feed, and no
@@ -27,6 +31,21 @@ from utils import death_regions
 
 #: Group config key. Truthy means "yes, still announce safe deaths".
 SAFE_DEATH_CONFIG_KEY = "notify_deaths_safe"
+
+#: Per-activity switches, checked before the safe-death rule and instead of it:
+#: a group that keeps safe deaths on for raid wipes can still mute LMS. Absent
+#: means off, like the safe-death key. The PK tutor alone sent 74% of all death
+#: posts in its first week, which is why it is off unless a group asks.
+ACTIVITY_CONFIG_KEYS = {
+    "lms": "notify_deaths_lms",
+    "pk_tutor": "notify_deaths_pk_tutor",
+}
+
+#: How each activity reads in a skip reason.
+ACTIVITY_LABELS = {
+    "lms": "Last Man Standing",
+    "pk_tutor": "PK tutor",
+}
 
 #: Notification types this filter applies to. Deliberately not ``dm_death``.
 FILTERABLE_TYPES = frozenset({"death"})
@@ -91,11 +110,27 @@ def announces_safe_deaths(db_session, group_id, world_type=None) -> bool:
     transient database fault floods every group's feed with exactly the deaths
     they configured away.
     """
+    return _config_flag(db_session, group_id, SAFE_DEATH_CONFIG_KEY, world_type)
+
+
+def announces_activity(db_session, group_id, activity, world_type=None) -> bool:
+    """Whether this group asked to see deaths in this activity (``"lms"``).
+
+    Same reading as :func:`announces_safe_deaths`: no row, or a failed read,
+    is *no*.
+    """
+    key = ACTIVITY_CONFIG_KEYS.get(activity)
+    if key is None:
+        return True
+    return _config_flag(db_session, group_id, key, world_type)
+
+
+def _config_flag(db_session, group_id, key, world_type) -> bool:
     from utils import group_config as gc
 
     prefix = "seasonal_" if world_type == SEASONAL_WORLD_TYPE else ""
     try:
-        return gc.is_truthy(gc.get(db_session, group_id, f"{prefix}{SAFE_DEATH_CONFIG_KEY}"))
+        return gc.is_truthy(gc.get(db_session, group_id, f"{prefix}{key}"))
     except Exception:
         return False
 
@@ -111,6 +146,13 @@ def death_skip_reason(db_session, group_id, notification_type, data) -> str | No
         return None
     if not isinstance(data, dict):
         return None
+    # An activity with its own switch is decided by that switch alone, safe
+    # or not, so turning safe deaths on for raids does not bring LMS back.
+    activity = death_regions.activity_for_region(data.get("region_id"))
+    if activity is not None:
+        if announces_activity(db_session, group_id, activity, data.get("world_type")):
+            return None
+        return f"{ACTIVITY_LABELS[activity]} death"
     if not is_safe_death(data):
         return None
     if announces_safe_deaths(db_session, group_id, data.get("world_type")):

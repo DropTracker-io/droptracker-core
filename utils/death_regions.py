@@ -55,6 +55,10 @@ _PLAYER_OWNED_HOUSE = frozenset({
     7257, 7534, 7535, 7790, 7791, 8046, 8047, 8302, 8303,
 })
 _SOUL_WARS = frozenset({8493, 8748, 8749, 9005})
+#: The PK tutor (Pete Kayer's training arena, October 2026). Measured from the
+#: first week of production deaths: every tutor kill landed in one of these two
+#: regions. Filtered by its own group switch (ACTIVITY_REGIONS below).
+_PK_TUTOR = frozenset({10588, 11100})
 
 _CLAN_HALL = 6997
 _CREATURE_GRAVEYARD = 13462
@@ -98,3 +102,25 @@ def is_safe_region(region_id) -> bool:
         return int(region_id) in SAFE_REGIONS
     except (TypeError, ValueError):
         return False
+
+
+#: Activities a group switches on or off by themselves, whatever the safe-death
+#: setting says. Keyed on the region alone, never on the client's verdict: a
+#: hardcore account's LMS death arrives flagged dangerous from clients before
+#: 6.1.5, and a group that turned LMS off still means it.
+ACTIVITY_REGIONS: dict[str, frozenset[int]] = {
+    "lms": _LAST_MAN_STANDING,
+    "pk_tutor": _PK_TUTOR,
+}
+
+
+def activity_for_region(region_id) -> str | None:
+    """The switchable activity this region belongs to (``"lms"``), or ``None``."""
+    try:
+        region = int(region_id)
+    except (TypeError, ValueError):
+        return None
+    for activity, regions in ACTIVITY_REGIONS.items():
+        if region in regions:
+            return activity
+    return None

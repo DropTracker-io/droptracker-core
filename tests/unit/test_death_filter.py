@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from db.death_filter import (
+    ACTIVITY_CONFIG_KEYS,
+    ACTIVITY_LABELS,
     SAFE_DEATH_CONFIG_KEY,
     death_skip_reason,
     is_safe_death,
@@ -31,6 +33,8 @@ CHAMBERS_OF_XERIC = 12889
 INFERNO = 9043
 FIGHT_CAVES = 9551
 VORKATH = 9023
+LMS_DESERTED_ISLAND = 13659
+PK_TUTOR_ARENA = 10588
 
 
 @pytest.fixture
@@ -148,6 +152,62 @@ class TestDeathSkipReason:
         # No is_safe_death field at all: the region fallback is what stops a
         # pre-6.0 member's Castle Wars deaths escaping the group's setting.
         assert death_skip_reason(None, 303, "death", {"region_id": CASTLE_WARS}) is not None
+
+
+class TestActivitySwitches:
+    """LMS and the PK tutor have switches of their own, decided by region."""
+
+    LMS = {"is_safe_death": "true", "region_id": LMS_DESERTED_ISLAND, "region_name": "LMS - Deserted Island"}
+    # Clients before 6.1.5 flag a hardcore account's LMS death as dangerous.
+    LMS_HARDCORE = {"is_safe_death": "false", "region_id": LMS_DESERTED_ISLAND}
+    PK_TUTOR = {"is_safe_death": "false", "region_id": PK_TUTOR_ARENA, "source": "Pete Kayer"}
+
+    def test_both_are_withheld_by_default(self, group_config):
+        assert death_skip_reason(None, 303, "death", self.LMS) == "Last Man Standing death"
+        assert death_skip_reason(None, 303, "death", self.PK_TUTOR) == "PK tutor death"
+
+    def test_the_client_verdict_does_not_matter(self, group_config):
+        # The hardcore LMS death and every PK tutor death arrive flagged
+        # dangerous, which used to carry them past "safe deaths off".
+        assert death_skip_reason(None, 303, "death", self.LMS_HARDCORE) is not None
+        assert death_skip_reason(None, 303, "death", {"region_id": str(PK_TUTOR_ARENA)}) is not None
+
+    def test_safe_deaths_on_does_not_bring_lms_back(self, group_config):
+        # The case that prompted this: raid wipes wanted, LMS not.
+        group_config[(303, SAFE_DEATH_CONFIG_KEY)] = "1"
+        assert death_skip_reason(None, 303, "death", self.LMS) is not None
+        assert death_skip_reason(None, 303, "death", self.PK_TUTOR) is not None
+        raid_wipe = {"is_safe_death": "true", "region_id": CHAMBERS_OF_XERIC}
+        assert death_skip_reason(None, 303, "death", raid_wipe) is None
+
+    def test_each_switch_turns_its_own_activity_on(self, group_config):
+        group_config[(303, ACTIVITY_CONFIG_KEYS["lms"])] = "1"
+        assert death_skip_reason(None, 303, "death", self.LMS) is None
+        assert death_skip_reason(None, 303, "death", self.LMS_HARDCORE) is None
+        assert death_skip_reason(None, 303, "death", self.PK_TUTOR) is not None
+
+        group_config[(303, ACTIVITY_CONFIG_KEYS["pk_tutor"])] = "true"
+        assert death_skip_reason(None, 303, "death", self.PK_TUTOR) is None
+
+    def test_seasonal_deaths_read_the_seasonal_key(self, group_config):
+        group_config[(303, f"seasonal_{ACTIVITY_CONFIG_KEYS['lms']}")] = "1"
+        assert death_skip_reason(None, 303, "death", {**self.LMS, "world_type": "seasonal"}) is None
+        assert death_skip_reason(None, 303, "death", self.LMS) is not None
+
+    def test_dms_are_still_out_of_scope(self, group_config):
+        assert death_skip_reason(None, 303, "dm_death", self.PK_TUTOR) is None
+
+    def test_a_config_fault_applies_the_default(self, monkeypatch, group_config):
+        from utils import group_config as gc
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("database went away")
+
+        monkeypatch.setattr(gc, "get", _boom)
+        assert death_skip_reason(None, 303, "death", self.PK_TUTOR) is not None
+
+    def test_every_activity_has_a_label(self):
+        assert set(ACTIVITY_LABELS) == set(ACTIVITY_CONFIG_KEYS)
 
 
 # ── The chokepoint ──────────────────────────────────────────────────────────

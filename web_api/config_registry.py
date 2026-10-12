@@ -309,11 +309,36 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "category": "deaths",
         "type": "boolean",
         "help": (
-            "Also announce deaths that cost nothing — raid and Gauntlet wipes, "
+            "Also announce deaths that cost nothing: raid and Gauntlet wipes, "
             "Castle Wars, Soul Wars, Barbarian Assault, Nightmare Zone, your own "
-            "house. Off by default so the deaths channel shows the ones that hurt. "
-            "Inferno and Fight Caves always count as real deaths regardless of this "
-            "setting; mute those by blacklisting the region instead."
+            "house. Off by default so the deaths channel shows the ones that hurt, "
+            "which also hides raid and Gauntlet wipes. Last Man Standing and the PK "
+            "tutor have their own switches below. Inferno and Fight Caves always "
+            "count as real deaths; mute those by blacklisting the region instead."
+        ),
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "notify_deaths_lms",
+        "label": "Notify Last Man Standing deaths",
+        "category": "deaths",
+        "type": "boolean",
+        "help": (
+            "Announce deaths in Last Man Standing. Decided by this switch alone, "
+            "so you can keep safe deaths on for raids and still leave LMS out."
+        ),
+        "default": False,
+        "seasonal": True,
+    },
+    {
+        "key": "notify_deaths_pk_tutor",
+        "label": "Notify PK tutor deaths",
+        "category": "deaths",
+        "type": "boolean",
+        "help": (
+            "Announce deaths at Pete Kayer's PK tutor. Members practising there "
+            "can die dozens of times an hour, so this is off by default."
         ),
         "default": False,
         "seasonal": True,
