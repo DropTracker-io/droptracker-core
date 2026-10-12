@@ -130,6 +130,48 @@ def envelope_from_plugin(submission_data: dict) -> bool:
     return submission_data.get("intake_source") != "manual"
 
 
+#: Payload keys the intake sets for a pre-approved submission-API key
+#: (suggestion #198). Client payloads can never carry them:
+#: utils.replay_stamp.strip_client_stamp_fields drops every ``_api_trusted*``
+#: key on both plugin intake paths.
+API_TRUSTED_GROUPS_KEY = "_api_trusted_group_ids"
+API_TRUSTED_EVENTS_KEY = "_api_trusted_event_ids"
+
+
+def _int_list(raw) -> list:
+    if not isinstance(raw, (list, tuple, set)):
+        return []
+    out = []
+    for value in raw:
+        if isinstance(value, bool):
+            continue
+        try:
+            out.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def trusted_group_ids(submission_data: dict) -> set:
+    """Groups that already reviewed this MANUAL submission themselves — a
+    pre-approved submission-API key's group. Their manual-submission policy
+    treats it as coming from an authorized member. Empty for everything
+    else, including all plugin traffic (which no policy holds anyway)."""
+    if submission_data.get("intake_source") != "manual":
+        return set()
+    return set(_int_list(submission_data.get(API_TRUSTED_GROUPS_KEY)))
+
+
+def trusted_event_ids(submission_data: dict) -> list:
+    """Events on which this MANUAL submission counts as plugin traffic: the
+    live or upcoming events hosted by, or including, the pre-approving
+    group. Resolved once at intake; the events engine only checks membership
+    (services.event_engine.envelope_from_plugin_for)."""
+    if submission_data.get("intake_source") != "manual":
+        return []
+    return _int_list(submission_data.get(API_TRUSTED_EVENTS_KEY))
+
+
 # How far behind "now" an accepted-at stamp may be and still be believed.
 # A submission that sat in the queue longer than this is more likely to be a
 # replayed or hand-requeued entry than a live one, and dating a row hours into

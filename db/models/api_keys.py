@@ -112,3 +112,57 @@ class ApiKey(Base):
     revoked_at = Column(DateTime, nullable=True)
     #: Admin-facing free text ("promoted 2026-09: verified batch client").
     notes = Column(Text, nullable=True)
+
+    #: May this key call ``POST /v2/submissions`` (suggestion #198)? Group
+    #: keys only, staff-granted. Off for every key by default — read access
+    #: never implies write access.
+    can_submit = Column(Boolean, nullable=False, default=False, server_default="0")
+    #: The group already reviewed what this key sends: its submissions count
+    #: as authorized for the key's group (no manual-submission review) and as
+    #: plugin traffic on events that group hosts or takes part in. Explicit
+    #: per-task / per-event "requires confirmation" still holds them.
+    submit_preapproved = Column(Boolean, nullable=False, default=False, server_default="0")
+
+
+class ApiSubmission(Base):
+    """One ``POST /v2/submissions`` call (suggestion #198).
+
+    Three jobs in one row: the audit trail (which key credited what, and with
+    which screenshot), the idempotency record (``external_id`` is unique per
+    key, so a caller's retry returns the first answer instead of crediting
+    twice), and the count-aware "already tracked by the plugin" check, which
+    reads earlier ``already_tracked`` rows for the same player and item.
+
+    Written by the intake (``api/routes/webhook.py``) — the data API's own DB
+    user is SELECT-only, so it only ever reads this table.
+    """
+
+    __tablename__ = "api_submissions"
+    __table_args__ = (
+        Index("uq_api_submission_external", "api_key_id", "external_id", unique=True),
+        Index("idx_api_submission_player_item", "player_id", "item_name", "created_at"),
+        Index("idx_api_submission_group", "group_id", "id"),
+        # One plugin drop stands in for one API submission at most.
+        Index("uq_api_submission_matched_drop", "matched_drop_id", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    api_key_id = Column(BigInteger, ForeignKey("api_keys.id"), nullable=False)
+    group_id = Column(Integer, nullable=False)
+    external_id = Column(String(64), nullable=True)
+    player_id = Column(Integer, nullable=False)
+    submission_type = Column(String(24), nullable=False)
+    item_name = Column(String(120), nullable=True)
+    #: processing | accepted | rejected | already_tracked | error
+    status = Column(String(16), nullable=False, default="processing", server_default="processing")
+    message = Column(String(255), nullable=True)
+    submission_guid = Column(String(64), nullable=True)
+    #: The plugin drop an ``already_tracked`` submission was matched to.
+    matched_drop_id = Column(Integer, nullable=True)
+    preapproved = Column(Boolean, nullable=False, default=False, server_default="0")
+    image_url = Column(String(255), nullable=True)
+    note = Column(String(500), nullable=True)
+    obtained_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

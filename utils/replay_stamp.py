@@ -94,13 +94,21 @@ def verify(stamp, signature) -> Optional[str]:
     return normalize(stamp)
 
 
+#: Server-set payload keys a client must never supply: receive-time stamps,
+#: and the submission API's pre-approval markers (``_api_trusted_*``, set only
+#: by the intake's ``/manual-submit`` path for a pre-approved key).
+_SERVER_ONLY_PREFIXES = ("_received_at", "_api_trusted")
+
+
 def strip_client_stamp_fields(data: dict) -> dict:
-    """Drop any ``_received_at*`` key from client-built submission data.
+    """Drop any server-only key (``_received_at*``, ``_api_trusted*``) from
+    client-built submission data.
 
     Embed fields become payload keys verbatim on both intake paths, so without
     this a client could date its own submission by adding a field named
-    ``_received_at`` (and, with the trusted flag, up to a week back).
+    ``_received_at`` (and, with the trusted flag, up to a week back), or claim
+    a submission-API key's pre-approval.
     """
-    for key in [k for k in data if isinstance(k, str) and k.startswith("_received_at")]:
+    for key in [k for k in data if isinstance(k, str) and k.startswith(_SERVER_ONLY_PREFIXES)]:
         data.pop(key, None)
     return data

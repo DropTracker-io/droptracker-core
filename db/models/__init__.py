@@ -113,7 +113,7 @@ from .chat import (
 from .known_issues import KnownIssueCategory, KnownIssue, ISSUE_SEVERITIES, ISSUE_STATUSES
 from .knowledgebase import KBDocument, KBChunk, KBIngestState, KB_SOURCE_TYPES
 from .api_key_reveals import ApiKeyReveal
-from .api_keys import ApiKey, ApiKeyTier
+from .api_keys import ApiKey, ApiKeyTier, ApiSubmission
 from .badge import Badge, PlayerBadge
 from .recap import (
     RecapSnapshot,

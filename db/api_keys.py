@@ -141,6 +141,13 @@ def key_descriptor(row, tier_row) -> dict:
         "owner_user_id": owner_user_id,
         "group_id": group_id,
         "limits": effective_limits(row, tier_row),
+        # Write capability (suggestion #198). Only ever true on a group key:
+        # a submission is credited "for" a group, so a user or global key has
+        # no group whose review it could stand in for.
+        "can_submit": scope == "group" and bool(getattr(row, "can_submit", False)),
+        "submit_preapproved": (scope == "group"
+                               and bool(getattr(row, "can_submit", False))
+                               and bool(getattr(row, "submit_preapproved", False))),
     }
 
 
@@ -171,6 +178,8 @@ def create_key(
     tier_key: str = DEFAULT_TIER,
     created_by_user_id: Optional[int] = None,
     expires_at: Optional[datetime] = None,
+    can_submit: bool = False,
+    submit_preapproved: bool = False,
 ) -> Tuple[object, str]:
     """Insert a key and return ``(row, plaintext_token)``. Caller commits.
 
@@ -194,6 +203,10 @@ def create_key(
     else:
         if group_id is None or owner_user_id is not None:
             raise ValueError("a group key needs group_id and no owner_user_id")
+    if (can_submit or submit_preapproved) and scope != "group":
+        raise ValueError("only a group key can submit")
+    if submit_preapproved and not can_submit:
+        raise ValueError("submit_preapproved needs can_submit")
 
     from db.models import ApiKey
 
@@ -207,6 +220,8 @@ def create_key(
         tier_key=tier_key,
         created_by_user_id=created_by_user_id,
         expires_at=expires_at,
+        can_submit=bool(can_submit),
+        submit_preapproved=bool(submit_preapproved),
     )
     session.add(row)
     session.flush()  # assigns row.id

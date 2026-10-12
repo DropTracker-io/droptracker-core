@@ -34,6 +34,8 @@ from .common import (
     is_truthy_config,
     get_config_prefix,
     envelope_from_plugin,
+    trusted_event_ids,
+    trusted_group_ids,
     event_ts,
     SEASONAL_WORLD_TYPE,
     SeasonalPersonalBestEntry,
@@ -548,6 +550,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 # (API and Discord-webhook intake both count; mirrors drop.py).
                 ts=event_ts(pb_data),
                 used_api=envelope_from_plugin(pb_data),
+                trusted_event_ids=trusted_event_ids(pb_data),
             )
     except Exception:
         pass
@@ -595,7 +598,8 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
             try:
                 from .manual_policy import manual_notification_suppressed_groups
                 manual_suppressed = manual_notification_suppressed_groups(
-                    session, player, group_ids
+                    session, player, group_ids,
+                    trusted_group_ids=trusted_group_ids(pb_data),
                 )
             except Exception as e:
                 print(f"[ManualPolicy] pb suppression check failed: {e}")

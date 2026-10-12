@@ -9,6 +9,8 @@ admin/dev path and the only mint path until then.
     ./venv/bin/python -m scripts.mint_api_key --user 1 --label "joel dev" --tier elevated
     ./venv/bin/python -m scripts.mint_api_key --global --label "partner site"
     ./venv/bin/python -m scripts.mint_api_key --revoke 3
+    # a group key that may POST /v2/submissions (suggestion #198)
+    ./venv/bin/python -m scripts.mint_api_key --group 7 --label "clan bot" --can-submit --preapproved
 """
 from __future__ import annotations
 
@@ -31,6 +33,10 @@ def main() -> int:
     parser.add_argument("--revoke", type=int, metavar="KEY_ID",
                         help="revoke this key id instead of minting")
     parser.add_argument("--list", action="store_true", help="list keys and exit")
+    parser.add_argument("--can-submit", action="store_true",
+                        help="group keys only: may POST /v2/submissions")
+    parser.add_argument("--preapproved", action="store_true",
+                        help="with --can-submit: the group already reviews what it sends")
     args = parser.parse_args()
 
     from db.models import ApiKey, ApiKeyTier, Session
@@ -48,8 +54,10 @@ def main() -> int:
                 owner_desc = ("GLOBAL" if scope == "global"
                               else f"user {row.owner_user_id}" if row.owner_user_id is not None
                               else f"group {row.group_id}")
+                submit = ("submit+pre" if getattr(row, "submit_preapproved", False)
+                          else "submit" if getattr(row, "can_submit", False) else "read")
                 print(f"#{row.id:<4} {state:<8} {row.tier_key:<10} {owner_desc:<12} "
-                      f"dtk_{row.id}_{row.token_prefix}…  {row.label}")
+                      f"{submit:<10} dtk_{row.id}_{row.token_prefix}…  {row.label}")
             return 0
 
         if args.revoke is not None:
@@ -67,6 +75,10 @@ def main() -> int:
 
         if not args.is_global and (args.user is None) == (args.group is None):
             parser.error("exactly one of --user / --group / --global is required")
+        if (args.can_submit or args.preapproved) and args.group is None:
+            parser.error("--can-submit / --preapproved need a --group key")
+        if args.preapproved and not args.can_submit:
+            parser.error("--preapproved needs --can-submit")
 
         tier = session.query(ApiKeyTier).filter(
             ApiKeyTier.tier_key == args.tier, ApiKeyTier.enabled == True  # noqa: E712
@@ -83,9 +95,14 @@ def main() -> int:
             scope="global" if args.is_global else None,
             label=args.label,
             tier_key=args.tier,
+            can_submit=args.can_submit,
+            submit_preapproved=args.preapproved,
         )
         session.commit()
         print(f"Key #{row.id} minted (tier {row.tier_key}, {args.label!r}).")
+        if args.can_submit:
+            print("  may submit" + (" (pre-approved)" if args.preapproved else
+                                    " (submissions go through the group's normal review)"))
         print("Token — shown once, store it now:")
         print(f"  {token}")
         return 0

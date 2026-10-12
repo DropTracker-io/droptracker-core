@@ -122,6 +122,9 @@ def _serialize(row, include_token: str | None = None) -> dict:
             field: getattr(row, field) for field in keys.LIMIT_FIELDS
             if getattr(row, field) is not None
         },
+        # Submission API (suggestion #198).
+        "can_submit": bool(getattr(row, "can_submit", False)),
+        "submit_preapproved": bool(getattr(row, "submit_preapproved", False)),
     }
     if include_token:
         payload["token"] = include_token
@@ -348,6 +351,15 @@ async def admin_mint_key():
             if session.query(ApiKeyTier).filter(
                     ApiKeyTier.tier_key == tier_key).first() is None:
                 return None, "unknown_tier"
+            # Write access (suggestion #198) is granted here, at mint, and
+            # only to group keys — like scope, it is never added later by a
+            # PATCH, so the escalation always comes with a fresh token.
+            can_submit = body.get("can_submit") is True
+            submit_preapproved = body.get("submit_preapproved") is True
+            if (can_submit or submit_preapproved) and key_scope != "group":
+                return None, "submit_needs_group"
+            if submit_preapproved and not can_submit:
+                return None, "preapproved_needs_submit"
 
             row, token = keys.create_key(
                 session,
@@ -357,6 +369,8 @@ async def admin_mint_key():
                 label=str(body.get("label") or "")[:64],
                 tier_key=tier_key,
                 created_by_user_id=user_id,
+                can_submit=can_submit,
+                submit_preapproved=submit_preapproved,
             )
             for field in keys.LIMIT_FIELDS:
                 if body.get(field) is not None:
@@ -366,6 +380,10 @@ async def admin_mint_key():
             session.commit()
 
             payload = _serialize(row, include_token=token)
+            if can_submit:
+                _audit(user_id, "api_key.submit_grant", f"api_keys.{row.id}",
+                       after=json.dumps({"group_id": row.group_id,
+                                         "submit_preapproved": submit_preapproved}))
 
             # Optional one-time delivery: instead of the minter copying the
             # secret out of this response and pasting it somewhere, hand the
@@ -413,6 +431,13 @@ async def admin_mint_key():
                       "nor group_id.")
     if error == "unknown_tier":
         abort_problem(400, "Bad Request", "No such tier.")
+    if error == "submit_needs_group":
+        abort_problem(400, "Bad Request",
+                      "Only a group key can submit: submissions are credited "
+                      "for one group's members.")
+    if error == "preapproved_needs_submit":
+        abort_problem(400, "Bad Request",
+                      "submit_preapproved only applies to a key with can_submit.")
     if error == "deliver_needs_recipient":
         abort_problem(400, "Bad Request",
                       "A global key has no owner, so deliver_to_user_id is required "
@@ -451,7 +476,29 @@ async def admin_update_key(key_id: int):
                 row.notes = str(body["notes"])
             if "revoked" in body:
                 row.revoked_at = datetime.utcnow() if body["revoked"] else None
+            # Submission flags: a PATCH may take write access away, or switch
+            # pre-approval on a key that already submits — never grant
+            # can_submit (re-mint for that, like scope).
+            before_submit = (bool(row.can_submit), bool(row.submit_preapproved))
+            if "can_submit" in body:
+                if body["can_submit"] is True and not row.can_submit:
+                    return "submit_grant_needs_mint"
+                if body["can_submit"] is False:
+                    row.can_submit = False
+                    row.submit_preapproved = False
+            if "submit_preapproved" in body:
+                wanted = body["submit_preapproved"] is True
+                if wanted and not row.can_submit:
+                    return "preapproved_needs_submit"
+                row.submit_preapproved = wanted
+            after_submit = (bool(row.can_submit), bool(row.submit_preapproved))
             session.commit()
+            if after_submit != before_submit:
+                _audit(user_id, "api_key.submit_update", f"api_keys.{row.id}",
+                       before=json.dumps({"can_submit": before_submit[0],
+                                          "submit_preapproved": before_submit[1]}),
+                       after=json.dumps({"can_submit": after_submit[0],
+                                         "submit_preapproved": after_submit[1]}))
             return _serialize(row)
 
     result = await asyncio.to_thread(work)
@@ -459,6 +506,13 @@ async def admin_update_key(key_id: int):
         abort_problem(404, "Not Found", "No such key.")
     if result == "unknown_tier":
         abort_problem(400, "Bad Request", "No such tier.")
+    if result == "submit_grant_needs_mint":
+        abort_problem(400, "Bad Request",
+                      "Submission access is granted when a key is minted. "
+                      "Mint a new group key with can_submit instead.")
+    if result == "preapproved_needs_submit":
+        abort_problem(400, "Bad Request",
+                      "submit_preapproved only applies to a key with can_submit.")
     return jsonify(result)
 
 

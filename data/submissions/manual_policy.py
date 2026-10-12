@@ -102,7 +102,8 @@ def _authorized_group_ids(session, user_id, group_ids) -> set:
     return out
 
 
-def manual_moderation_for_player(session, player, group_ids) -> dict:
+def manual_moderation_for_player(session, player, group_ids,
+                                 trusted_group_ids=()) -> dict:
     """Which of ``group_ids`` this player's MANUAL submission must be withheld
     from, as ``{group_id: (status, policy)}`` (status ∈ excluded|pending;
     policy feeds the moderation row's ``reason``). Empty dict = nothing held.
@@ -110,6 +111,11 @@ def manual_moderation_for_player(session, player, group_ids) -> dict:
     The submitter is the player's owning user — the web API only lets a user
     manual-submit for players they own (web_api/routes/submissions.py), so no
     separate submitter identity travels with the payload.
+
+    ``trusted_group_ids`` are groups whose own staff already reviewed the
+    submission (a pre-approved submission-API key, suggestion #198): they
+    count it as an authorized member's. Every other group still applies its
+    own policy.
     """
     real_gids = [g for g in group_ids if g > _SYSTEM_GROUP_MAX]
     if not real_gids:
@@ -123,6 +129,7 @@ def manual_moderation_for_player(session, player, group_ids) -> dict:
     authorized = _authorized_group_ids(
         session, getattr(player, "user_id", None), real_gids
     )
+    authorized |= {int(g) for g in (trusted_group_ids or ())}
     statuses = resolve_manual_moderation(policies, authorized)
     return {gid: (status, policies.get(gid)) for gid, status in statuses.items()}
 
@@ -143,7 +150,8 @@ def record_moderation(session, drop_id, moderation: dict) -> None:
         ))
 
 
-def manual_notification_suppressed_groups(session, player, group_ids) -> set:
+def manual_notification_suppressed_groups(session, player, group_ids,
+                                          trusted_group_ids=()) -> set:
     """Groups whose Discord notification must be suppressed for a MANUAL
     non-drop submission (clog / pb / ca / pet) under a restrictive policy.
 
@@ -154,7 +162,8 @@ def manual_notification_suppressed_groups(session, player, group_ids) -> set:
     the pending/approve flow). Reuses the exact drop resolution, so the
     authorized-member bypass and system-group carve-outs apply identically.
     """
-    return set(manual_moderation_for_player(session, player, group_ids))
+    return set(manual_moderation_for_player(session, player, group_ids,
+                                            trusted_group_ids=trusted_group_ids))
 
 
 REVIEW_CHANNEL_KEY = "channel_id_to_post_manual_review"

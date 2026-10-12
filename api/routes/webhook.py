@@ -1074,6 +1074,9 @@ async def _process_manual_submission(req_start):
             return jsonify({"success": False, "error": "Missing required field: submission_type"}), 400
         if not player_name:
             return jsonify({"success": False, "error": "Missing required field: player_name"}), 400
+        # The multipart parser turns digit-only values into ints; an all-digit
+        # RSN is still a name.
+        player_name = str(player_name)
         
         # Normalize submission type
         submission_type = str(submission_type).lower().strip()
@@ -1139,6 +1142,38 @@ async def _process_manual_submission(req_start):
         
         # Use the player's existing account hash so authentication passes
         processed_data["acc_hash"] = player.account_hash or placeholder_hash
+
+        # Submission API (suggestion #198): only calls forwarded by the data
+        # API carry api_* fields. Claim the call (idempotent on external_id),
+        # skip a drop the plugin already recorded, and stamp a pre-approved
+        # key's trust. Website and /submit traffic never enters this block.
+        from data.submissions import api_submissions as api_sub
+
+        api_ctx = api_sub.parse_api_context(data)
+        api_row = None
+        if api_ctx is not None:
+            item_hint = (data.get("item_name") or data.get("pet_name")
+                         or data.get("task") or data.get("boss_name") or data.get("npc_name"))
+            api_row, existing = api_sub.claim(
+                db_session, api_ctx, player.player_id, submission_type, item_hint)
+            log_phase("api_claimed")
+            if existing is not None:
+                success = True
+                return jsonify(api_sub.outcome_body(existing, replayed=True)), 200
+            if (submission_type == "drop" and api_ctx["skip_if_tracked"]
+                    and data.get("item_name")):
+                matched = api_sub.find_tracked_drop(
+                    db_session, api_row, str(data["item_name"]), api_ctx["obtained_at"])
+                log_phase("api_tracked_check")
+                if matched is not None:
+                    api_sub.finish(db_session, api_row, "already_tracked",
+                                   "The plugin already recorded this drop, so nothing was added.")
+                    success = True
+                    return jsonify(api_sub.outcome_body(api_row)), 200
+            if api_ctx["preapproved"]:
+                api_sub.apply_trust(
+                    processed_data, api_ctx,
+                    api_sub.trusted_event_ids_for_group(db_session, api_ctx["group_id"]))
         
         # Handle image file upload if present
         if image_file:
@@ -1329,6 +1364,17 @@ async def _process_manual_submission(req_start):
             log_phase("committed")
             success = True
 
+            if api_row is not None:
+                accepted = bool(response.success) if response else True
+                api_sub.finish(
+                    db_session, api_row,
+                    "accepted" if accepted else "rejected",
+                    (response.message if response else None),
+                    guid=unique_id, image_url=processed_data.get("image_url"))
+                body = api_sub.outcome_body(api_row)
+                body["notice"] = response.notice if response else None
+                return jsonify(body), 200
+
             if response:
                 # Reflect the processor's actual verdict: a rejection (duplicate,
                 # failed auth, unknown item/NPC) is not a success even though the
@@ -1350,6 +1396,9 @@ async def _process_manual_submission(req_start):
             logger.log_sync("error", f"Manual submission processor error: {processor_error}")
             if db_session:
                 db_session.rollback()
+            if api_row is not None:
+                api_sub.finish(db_session, api_row, "error", str(processor_error),
+                               guid=unique_id)
             return jsonify({
                 "success": False,
                 "error": f"Error processing submission: {str(processor_error)}"

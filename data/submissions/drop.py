@@ -30,6 +30,8 @@ from .common import (
     redis_updates,
     get_config_prefix,
     envelope_from_plugin,
+    trusted_event_ids,
+    trusted_group_ids,
     event_ts,
     SEASONAL_WORLD_TYPE,
     SeasonalDrop,
@@ -662,7 +664,8 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             try:
                 from .manual_policy import manual_moderation_for_player, record_moderation
                 manual_moderation = manual_moderation_for_player(
-                    session, player, [g.group_id for g in (player.groups or [])]
+                    session, player, [g.group_id for g in (player.groups or [])],
+                    trusted_group_ids=trusted_group_ids(drop_data),
                 )
                 if manual_moderation:
                     record_moderation(session, drop.drop_id, manual_moderation)
@@ -746,6 +749,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                 # the intake transport (API vs Discord webhook).
                 ts=event_ts(drop_data),
                 used_api=envelope_from_plugin(drop_data),
+                trusted_event_ids=trusted_event_ids(drop_data),
             )
         except Exception:
             pass

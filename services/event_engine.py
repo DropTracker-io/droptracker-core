@@ -215,12 +215,18 @@ AUTO_TASK_TYPES = ("item_collection", "kc_target", "pb_target", "xp_target", "sk
 
 def queue_submission(kind: str, player_id, guid, data: dict,
                      world_type: str = "main", player_name: str = None,
-                     ts: int = None, used_api: bool = False) -> None:
+                     ts: int = None, used_api: bool = False,
+                     trusted_event_ids=None) -> None:
     """Fire-and-forget push of a processed submission onto the events queue.
 
     Gated on the ``events:active`` Redis set (maintained by the worker) so it
     is a single O(1) EXISTS when no events run. Main world only (v1). Any
     Redis hiccup is swallowed — this must never fail a submission.
+
+    ``trusted_event_ids`` (suggestion #198): events on which this non-plugin
+    submission still counts as plugin traffic, because a pre-approved
+    submission-API key's group already reviewed it. See
+    :func:`envelope_from_plugin_for`.
     """
     if world_type != "main":
         return
@@ -255,6 +261,8 @@ def queue_submission(kind: str, player_id, guid, data: dict,
         }
         if player_name:
             envelope["player_name"] = str(player_name)
+        if trusted_event_ids:
+            envelope["trusted_event_ids"] = [int(e) for e in trusted_event_ids]
         if target == QUEUE_KEY:
             conn.lpush(QUEUE_KEY, json.dumps(envelope, default=str))
             return
@@ -1599,6 +1607,23 @@ def match_task_all(task: dict, envelope: dict) -> list:
     return matches
 
 
+def envelope_from_plugin_for(event: dict, envelope: dict) -> bool:
+    """Whether ``envelope`` counts as plugin traffic for THIS event (pure).
+
+    Plugin submissions always do (``used_api``). A manual submission does too
+    when the event is in its ``trusted_event_ids`` — it came through a
+    pre-approved submission-API key whose group hosts or takes part in the
+    event, so that group's staff already reviewed it (suggestion #198). The
+    trust is per event: the same envelope stays non-plugin everywhere else."""
+    if envelope.get("used_api"):
+        return True
+    trusted = envelope.get("trusted_event_ids") or ()
+    try:
+        return int(event.get("id")) in {int(e) for e in trusted}
+    except (TypeError, ValueError):
+        return False
+
+
 def accepts_submission_source(event: dict, envelope: dict) -> bool:
     """Whether the event's submission_policy admits this envelope's intake
     path (pure; no I/O). Only ``api_only`` rejects; ``used_api`` means "came
@@ -1609,7 +1634,7 @@ def accepts_submission_source(event: dict, envelope: dict) -> bool:
     if envelope.get("source") == "wom":
         return True
     if event.get("submission_policy") == "api_only":
-        return bool(envelope.get("used_api"))
+        return envelope_from_plugin_for(event, envelope)
     return True
 
 
@@ -1636,7 +1661,7 @@ def completion_status(event: dict, task: dict, envelope: dict,
     if task.get("requires_confirmation") or event.get("requires_confirmation"):
         return "pending"
     if (event.get("submission_policy") == "confirm_non_api"
-            and not envelope.get("used_api")
+            and not envelope_from_plugin_for(event, envelope)
             and envelope.get("source") != "wom"):
         return "pending"
     return "auto"

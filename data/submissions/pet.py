@@ -20,6 +20,8 @@ from .common import (
     award_points_to_player,
     get_config_prefix,
     envelope_from_plugin,
+    trusted_event_ids,
+    trusted_group_ids,
     event_ts,
     SEASONAL_WORLD_TYPE,
     SeasonalPlayerPet,
@@ -238,6 +240,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                 # (API and Discord-webhook intake both count; mirrors drop.py).
                 ts=event_ts(pet_data),
                 used_api=envelope_from_plugin(pet_data),
+                trusted_event_ids=trusted_event_ids(pet_data),
             )
         except Exception:
             pass
@@ -254,7 +257,8 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
             try:
                 from .manual_policy import manual_notification_suppressed_groups
                 manual_suppressed = manual_notification_suppressed_groups(
-                    session, player, [g.group_id for g in player_groups]
+                    session, player, [g.group_id for g in player_groups],
+                    trusted_group_ids=trusted_group_ids(pet_data),
                 )
             except Exception as e:
                 print(f"[ManualPolicy] pet suppression check failed: {e}")
