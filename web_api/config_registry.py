@@ -220,15 +220,6 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "min": 0,
     },
     {
-        "key": "only_include_items_over_minimum",
-        "label": "Only items over minimum",
-        "category": "drops",
-        "type": "boolean",
-        "help": "On stacked/multi-item drops, only include items above the minimum value.",
-        "default": False,
-        "seasonal": True,
-    },
-    {
         "key": "only_send_messages_with_images",
         "label": "Only send with images",
         "category": "drops",
@@ -680,6 +671,15 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "type": "boardstyle",
         "help": "Visual style of the generated lootboard. Browse the catalog with live previews.",
         "default": "1",
+    },
+    {
+        "key": "only_include_items_over_minimum",
+        "label": "Hide items below minimum value",
+        "category": "board",
+        "type": "boolean",
+        "help": "When on, the lootboard only shows items worth at least your Minimum value to notify. When off, every tracked item for your members appears, and player totals on the board follow the same rule. Discord drop announcements are unchanged.",
+        "default": False,
+        "seasonal": True,
     },
     {
         "key": "use_dynamic_colors",
