@@ -244,13 +244,15 @@ class TestAdvertisedTokensAreActuallySubstituted:
 
     def test_every_drop_token_appears_in_the_sender(self):
         from services.component_layout import NOTIFICATION_TYPES, tokens_for
+        from utils.game_emojis import DERIVED_TOKENS
 
         source = (Path(__file__).resolve().parents[2]
                   / "services" / "notification_service.py").read_text(encoding="utf-8")
         missing = {}
         for notification_type in NOTIFICATION_TYPES:
             absent = [d["token"] for d in tokens_for(notification_type)
-                      if "{%s}" % d["token"] not in source]
+                      if "{%s}" % d["token"] not in source
+                      and d["token"] not in DERIVED_TOKENS]
             if absent:
                 missing[notification_type] = absent
         assert not missing, (
@@ -292,7 +294,7 @@ class TestDefaultsDegradeGracefully:
         text = "\n".join(
             c.get("content", "") for c in blocks_of(payload) if c["type"] == 10)
         assert "group_points_awarded" not in text
-        assert "<item_name>" in "\n".join(
+        assert "<item_link>" in "\n".join(
             str(c) for c in blocks_of(payload))
 
 

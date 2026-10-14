@@ -482,7 +482,14 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
         "optional": True,
     },
     # Drop
-    "item_name": {"help": "Item name (linked to the wiki)", "sample": "Twisted bow"},
+    "item_name": {
+        "help": "Item name as plain text. Only an embed title links it to the wiki; use {item_link} for a link anywhere else",
+        "sample": "Twisted bow",
+    },
+    "item_link": {
+        "help": "Item name linked to its wiki page",
+        "sample": "[Twisted bow](https://oldschool.runescape.wiki/w/Twisted_bow)",
+    },
     "item_emoji": {
         # Optional in the real sense: ~1450 of 29k items have a glyph, so this
         # resolves to nothing for rarely-notified items. Marked so the unresolved-token
@@ -504,7 +511,15 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     "item_value": {"help": "Value of the drop, stacks spelled out", "sample": "`1.2B`"},
     "quantity": {"help": "How many were received", "sample": "`1`"},
     "total_value": {"help": "Stack value (value x quantity)", "sample": "`1204000000`"},
-    "npc_name": {"help": "The source — NPC, raid or chest", "sample": "Chambers of Xeric"},
+    "npc_name": {
+        "help": "The source (NPC, raid or chest) as plain text. Use {npc_link} for a wiki link",
+        "sample": "Chambers of Xeric",
+    },
+    "npc_link": {
+        "help": "The source linked to its wiki page. Empty when the source is unknown",
+        "sample": "[Chambers of Xeric](https://oldschool.runescape.wiki/w/Chambers_of_Xeric)",
+        "optional": True,
+    },
     "npc_id": {
         "help": "NPC id — an icon is https://www.droptracker.io/img/npcdb/{npc_id}.png",
         "sample": "7530",
@@ -544,6 +559,18 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     # Collection log
     "collection_name": {"help": "The collection the item belongs to", "sample": "Chambers of Xeric"},
     "kc_received": {"help": "Kill count when the slot was filled", "sample": "412"},
+    # Optional: the client sends these only when it could read the game's
+    # counters, so a "813/1,612" line has to be able to disappear.
+    "slots_unlocked": {
+        "help": "Collection log slots the player has filled, counting this one",
+        "sample": "813",
+        "optional": True,
+    },
+    "slots_total": {
+        "help": "Collection log slots in the game",
+        "sample": "1,612",
+        "optional": True,
+    },
     "player_loot_month": {"help": "The player's loot this month", "sample": "48.2M"},
     "total_tracked": {"help": "Tracked members in the group", "sample": "86"},
     # Personal best
@@ -660,8 +687,8 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Drop",
         "group": "Loot",
         "description": "Posted when a member receives a drop worth announcing.",
-        "tokens": ("item_name", "item_emoji", "item_id", "item_value", "quantity", "total_value",
-                   "npc_name", "npc_id", "kill_count", "month_name", "player_total_month",
+        "tokens": ("item_name", "item_link", "item_emoji", "item_id", "item_value", "quantity",
+                   "total_value", "npc_name", "npc_link", "npc_id", "kill_count", "month_name", "player_total_month",
                    "group_total_month", "group_total", "global_rank", "group_rank",
                    "group_to_group_rank", "user_count") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
@@ -669,14 +696,15 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Collection log",
         "group": "Loot",
         "description": "Posted when a member fills a collection log slot.",
-        "tokens": ("item_name", "item_emoji", "item_id", "collection_name", "npc_name", "kc_received",
+        "tokens": ("item_name", "item_link", "item_emoji", "item_id", "collection_name", "npc_name",
+                   "npc_link", "kc_received", "slots_unlocked", "slots_total",
                    "player_loot_month", "total_tracked") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
     "pb": {
         "label": "Personal best",
         "group": "Achievements",
         "description": "Posted when a member sets a new personal best time.",
-        "tokens": ("npc_name", "npc_id", "personal_best", "team_size", "kill_count",
+        "tokens": ("npc_name", "npc_link", "npc_id", "personal_best", "team_size", "kill_count",
                    "global_rank", "total_ranked_global", "group_rank",
                    "total_ranked_group", "gear_image_url") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
@@ -746,7 +774,7 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
             "Posted when a member's boss kill count crosses a configured "
             "milestone (first kill, or every Nth)."
         ),
-        "tokens": ("kc_achievement", "npc_name", "npc_id", "kill_count",
+        "tokens": ("kc_achievement", "npc_name", "npc_link", "npc_id", "kill_count",
                    "kc_milestone") + _MEDIA_TOKENS,
     },
     "rank_milestone": {
@@ -822,7 +850,7 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
             {"type": "separator", "divider": True},
             {
                 "type": "section",
-                "content": "## {item_name}\nG/E Value: `{item_value}`\nfrom **{npc_name}**",
+                "content": "## {item_link}\nG/E Value: `{item_value}`\nfrom **{npc_name}**",
                 "thumbnail": _ITEM_ICON,
             },
             {"type": "text", "content": "**Kill count** {kill_count}"},
@@ -860,10 +888,14 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
             {
                 "type": "section",
                 "content": (
-                    "## {item_name}\n"
+                    "## {item_link}\n"
                     "They currently have `{kc_received}` kc at `{npc_name}`"
                 ),
                 "thumbnail": _ITEM_ICON,
+            },
+            {
+                "type": "text",
+                "content": "**Collection log** `{slots_unlocked}`/`{slots_total}` slots",
             },
             {"type": "text", "content": "**Player Stats**\nLoot this month: `{player_loot_month}`"},
             {"type": "text", "content": "**Group Stats**\nTracked Members: `{total_tracked}`"},

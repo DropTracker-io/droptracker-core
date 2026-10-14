@@ -77,6 +77,7 @@ from datetime import datetime, timedelta
 # functions that need it — at module scope it pulls in db/ops and closes an
 # import cycle when this package loads before ``db`` does.
 from utils.clan_broadcasts import (
+    SENTINEL_NPC_NAME,
     TRACKED_KINDS,
     clan_slug,
     clean_broadcast_text,
@@ -128,11 +129,19 @@ NOTIFY_WITHOUT_IMAGES_KEY = "clan_broadcast_notify_without_images"
 #: sync.
 MIRROR_SUPPRESSED_KINDS = frozenset({"presence", "channel_notice"})
 
-#: Fallback npc_list row for chat drops whose line names no resolvable source
-#: (untradeables, wordings without a "from X" clause, novel/garbled names).
-#: Chat text must never mint an npc_list row, and inventing one per item would
-#: pollute real drop-source leaderboards.
-SENTINEL_NPC_NAME = "Clan Broadcast"
+#: Fallback npc_list row for chat drops whose source can't be pinned down:
+#: a "from X" naming an unknown NPC, or a sourceless line (raid/clue lines,
+#: slayer-monster drops, Doom/Colosseum rewards) whose item has several real
+#: sources. Chat text must never mint an npc_list row, and inventing one per
+#: item would pollute real drop-source leaderboards. The name itself lives in
+#: utils.clan_broadcasts so read paths can exclude it.
+#:
+#: Sourceless lines are inferred first (db.item_sources.infer_sole_source):
+#: Jagex only prints "from X" for some sources, yet most broadcast-worthy
+#: items have one real source ("Burning claw" -> Tormented Demon).
+#: Cached per item: the answer only moves with the weekly wiki sync and slow
+#: drift in observed shares, and a miss costs one indexed scan per item id.
+INFERRED_SOURCE_TTL_SECONDS = 6 * 3600
 
 #: Seconds two relays of the same line are collapsed for. Longer than
 #: TrackScape's 10s equivalent because our queue-mode consumer can run behind;
@@ -410,6 +419,50 @@ def _resolve_npc(session, name_text):
     if norm:
         return int(norm[0]), norm[1]
     return None, None
+
+
+def _inferred_drop_source(item_name):
+    """NPC name a sourceless drop of ``item_name`` belongs to, or ``None``.
+
+    See :func:`db.item_sources.infer_sole_source`. Both answers are cached, a
+    miss as ``""``. Reads run on a short-lived session of their own: a timed-out
+    statement rolls back, and that must not take the caller's transaction with
+    it. Fail-open to ``None``, which leaves the drop on the sentinel.
+    """
+    name = clean_broadcast_text(item_name)
+    if not name:
+        return None
+    key = f"clanchat:infersrc:{hashlib.sha1(name.lower().encode('utf-8')).hexdigest()}"
+    try:
+        cached = redis_client.client.get(key)
+        if cached is not None:
+            return (cached.decode() if isinstance(cached, bytes) else cached) or None
+    except Exception:
+        pass
+    from db.item_sources import infer_sole_source, item_ids_for_name
+    from db.models.base import Session
+
+    s = Session()
+    try:
+        source = infer_sole_source(
+            s,
+            item_ids_for_name(s, name),
+            exclude_npc_ids=[_sentinel_npc_id] if _sentinel_npc_id is not None else (),
+        )
+    except Exception as e:
+        print(f"[ClanBroadcast] Source inference failed for {name}: {e}")
+        return None
+    finally:
+        try:
+            s.rollback()
+            s.close()
+        except Exception:
+            pass
+    try:
+        redis_client.client.set(key, source or "", ex=INFERRED_SOURCE_TTL_SECONDS)
+    except Exception:
+        pass
+    return source
 
 
 def _pb_bracket(parsed) -> str:
@@ -874,18 +927,24 @@ async def _process_chat_drop(
         return SubmissionResponse(True, "Drop below every bound group's clan broadcast minimum")
 
     # Attribute to the source the line named ("... from Alchemical Hydra") when
-    # it resolves to a real npc_list row; the sentinel covers the rest —
-    # untradeables and wordings that print no source, and novel/garbled names,
-    # which must never mint a boss row from chat text.
-    npc_id, npc_name = _resolve_npc(session, parsed.extra.get("source"))
+    # it resolves to a real npc_list row. A line that names nothing gets the
+    # item's sole source if it has one. The sentinel covers the rest:
+    # multi-source items, and novel/garbled names (never inferred over, since
+    # the line did name something), which must never mint a boss row.
+    named = parsed.extra.get("source")
+    npc_id, npc_name = _resolve_npc(session, named)
+    if npc_id is None and not named:
+        npc_id, npc_name = _resolve_npc(session, _inferred_drop_source(parsed.item_name))
+        if npc_id is not None:
+            _stat("drop_npc_inferred")
+    elif npc_id is not None:
+        _stat("drop_npc_resolved")
     if npc_id is None:
         npc_id = await _ensure_sentinel_npc_id(session)
         npc_name = SENTINEL_NPC_NAME
         _stat("drop_npc_sentinel")
         if npc_id is None:
             return SubmissionResponse(False, "Sentinel NPC row unavailable")
-    else:
-        _stat("drop_npc_resolved")
 
     drop = await db.create_drop_object(
         item_id=item.item_id,
@@ -1284,6 +1343,7 @@ async def _process_chat_clog(
             "kc_received": None,
             "item_id": item.item_id if item else None,
             "log_slots": parsed.extra.get("log_slots"),
+            "log_total": parsed.extra.get("log_total"),
             "group_points_awarded": 0,
             "group_points_receiver_total": 0,
             "group_points_member_count": 0,

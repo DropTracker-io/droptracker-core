@@ -4960,7 +4960,12 @@ class NotificationService:
                 "{collection_name}": collection_name,
                 "{item_id}": item_id,
                 "{npc_name}": npc_name,
-                "{total_tracked}": user_count
+                "{total_tracked}": user_count,
+                # The game's own counters, sent with the unlock (or read off
+                # the clan broadcast). Blank when the client could not read
+                # them, which drops a line holding only these.
+                "{slots_unlocked}": self._format_slot_count(data.get('log_slots')),
+                "{slots_total}": self._format_slot_count(data.get('log_total')),
             }
             replacements.update(self._group_points_placeholder_map(data))
             replacements.update(self._plugin_version_placeholder_map(data))
@@ -5023,6 +5028,14 @@ class NotificationService:
             notification.error_message = str(e)
             db_session.commit()
             raise
+
+    @staticmethod
+    def _format_slot_count(value) -> str:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return ""
+        return f"{value:,}" if value > 0 else ""
 
     async def remove_group_field(self, embed: interactions.Embed):
         """Removes the Group field from the embed"""

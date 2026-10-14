@@ -309,6 +309,10 @@ def emoji_for_npc_id(npc_id, profile=None) -> Optional[str]:
     return _lookup("npc", entry["key"], profile) if entry else None
 
 
+# Tokens with_derived_tokens fills, so no sender has to.
+DERIVED_TOKENS = ("item_emoji", "item_link", "npc_link")
+
+
 def with_derived_tokens(values: dict, profile=None) -> dict:
     """``values`` plus the glyph tokens its sender did not fill in.
 
@@ -318,18 +322,53 @@ def with_derived_tokens(values: dict, profile=None) -> dict:
     sender and the Modify Entry rebuild never did, so a group that used it in
     those templates saw the raw ``{item_emoji}`` text. A value the sender did
     supply is left alone. Returns a new dict; the caller's is not mutated.
+
+    ``{item_link}``/``{npc_link}`` (the name as a markdown wiki link) are
+    derived here for the same reason, though they are not glyphs.
     """
-    if not isinstance(values, dict) or "{item_emoji}" in values:
+    if not isinstance(values, dict):
         return values
+    derived = {}
     name = values.get("{item_name}")
     item_id = values.get("{item_id}")
-    if not name and item_id in (None, ""):
-        return values
-    try:
-        glyph = emoji_for_item(name, profile) or emoji_for_item_id(item_id, profile) or ""
-    except Exception:
-        glyph = ""
-    return {**values, "{item_emoji}": glyph}
+    if "{item_emoji}" not in values and (name or item_id not in (None, "")):
+        try:
+            glyph = emoji_for_item(name, profile) or emoji_for_item_id(item_id, profile) or ""
+        except Exception:
+            glyph = ""
+        derived["{item_emoji}"] = glyph
+    # {item_name}/{npc_name} are plain text. An embed links them through the
+    # title url, which a component layout has no equivalent of, so the linked
+    # form is its own token rather than a change to what the name means.
+    if "{item_link}" not in values and "{item_name}" in values:
+        derived["{item_link}"] = wiki_link(name)
+    if "{npc_link}" not in values and "{npc_name}" in values:
+        derived["{npc_link}"] = wiki_link(values.get("{npc_name}"))
+    return {**values, **derived} if derived else values
+
+
+WIKI_BASE = "https://oldschool.runescape.wiki/w/"
+
+# Senders fill a missing source with these rather than leaving it empty, and
+# the wiki has no page for either.
+_NO_WIKI_PAGE = {"", "unknown", "none", "n/a"}
+
+
+def wiki_link(name) -> str:
+    """``"[Twisted bow](https://oldschool.runescape.wiki/w/Twisted_bow)"``.
+
+    Empty when there is no name, so a line holding only the link drops like
+    any other blank token. Parentheses are percent-encoded: a raw ``)`` in the
+    url ends a markdown link early ("Graceful hood (Hosidius)").
+    """
+    from urllib.parse import quote
+
+    text = str(name or "").strip()
+    if text.lower() in _NO_WIKI_PAGE:
+        return ""
+    label = text.replace("[", "(").replace("]", ")")
+    path = quote(text.replace(" ", "_"), safe="_'-.:,")
+    return f"[{label}]({WIKI_BASE}{path})"
 
 
 def prefix_item(name, profile=None) -> str:

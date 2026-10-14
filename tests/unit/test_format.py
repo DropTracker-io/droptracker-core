@@ -657,6 +657,46 @@ class TestDerivedItemEmoji:
         assert text == "## <:item_elidinis_ward:1> Elidinis' ward"
 
 
+class TestDerivedWikiLinks:
+    """{item_name} is plain text; only an embed title links it (through the
+    title url). Component layouts have no title url, so the linked form is
+    its own token."""
+
+    def test_item_link_in_a_component_layout(self):
+        from services.component_layout import render_layout
+
+        layout = {"blocks": [{"type": "text", "content": "## {item_link}"}]}
+        payload = render_layout(layout, {"{item_name}": "Graceful hood (Hosidius)"})
+        text = payload["components"][0]["components"][0]["content"]
+        # The bracket is encoded, or Discord ends the link at "(Hosidius".
+        assert text == ("## [Graceful hood (Hosidius)]"
+                        "(https://oldschool.runescape.wiki/w/Graceful_hood_%28Hosidius%29)")
+
+    def test_item_name_stays_plain_in_a_component_layout(self):
+        from services.component_layout import render_layout
+
+        layout = {"blocks": [{"type": "text", "content": "## {item_name}"}]}
+        payload = render_layout(layout, {"{item_name}": "Twisted bow"})
+        assert payload["components"][0]["components"][0]["content"] == "## Twisted bow"
+
+    def test_links_work_in_embed_fields(self):
+        embed = _embed_with_fields(("Source", "{npc_link}"))
+        out = replace_placeholders(embed, {"{npc_name}": "Chambers of Xeric", "{item_name}": "Olmlet"})
+        assert out.fields[0].value == "[Chambers of Xeric](https://oldschool.runescape.wiki/w/Chambers_of_Xeric)"
+
+    def test_unknown_source_links_to_nothing(self):
+        from utils.game_emojis import with_derived_tokens
+
+        assert with_derived_tokens({"{npc_name}": "unknown"})["{npc_link}"] == ""
+        assert with_derived_tokens({"{npc_name}": None})["{npc_link}"] == ""
+
+    def test_not_derived_when_the_sender_has_no_name(self):
+        from utils.game_emojis import with_derived_tokens
+
+        out = with_derived_tokens({"{task_name}": "Perfect Zulrah"})
+        assert "{item_link}" not in out and "{npc_link}" not in out
+
+
 class TestUnresolvedKnownTokens:
     def test_known_token_is_blanked_not_printed(self):
         out = replace_placeholders(_embed("{npc_name} {item_name}"), {"{item_name}": "Twisted bow"})

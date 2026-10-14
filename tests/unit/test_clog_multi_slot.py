@@ -136,3 +136,28 @@ class TestMultiSlotClog:
             "already-owned ordinary slot must not re-notify"
         )
         session.add.assert_not_called()
+
+
+# ── slot progress ({slots_unlocked}/{slots_total}) ───────────────────────────
+
+from data.submissions.clog import parse_slot_progress  # noqa: E402
+
+
+class TestSlotProgress:
+    def test_plugin_count_gains_the_slot_being_announced(self):
+        # The varp is read before the game bumps it for this unlock.
+        assert parse_slot_progress({"slots": "813/1612"}) == (814, 1612)
+
+    def test_never_exceeds_the_total(self):
+        assert parse_slot_progress({"slots": "1612/1612"}) == (1612, 1612)
+
+    def test_unreadable_varps(self):
+        assert parse_slot_progress({"slots": "unknown"}) == (None, None)
+        assert parse_slot_progress({"slots": "0/1612"}) == (None, None)
+        assert parse_slot_progress({"slots": "x/y"}) == (None, None)
+        assert parse_slot_progress({}) == (None, None)
+
+    def test_submission_api_figure_is_taken_as_given(self):
+        assert parse_slot_progress({"reported_slots": 900}) == (900, None)
+        assert parse_slot_progress({"reported_slots": "900"}) == (900, None)
+        assert parse_slot_progress({"reported_slots": 0}) == (None, None)

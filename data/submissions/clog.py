@@ -79,6 +79,34 @@ def is_multi_slot_clog_item(item_name) -> bool:
     return bool(item_name) and item_name.strip().lower() in _MULTI_SLOT_CLOG_LOOKUP
 
 
+def parse_slot_progress(clog_data):
+    """``(slots_unlocked, slots_total)`` for this unlock, either may be None.
+
+    The plugin sends the game's own counters as a ``slots`` field, "813/1612",
+    or "unknown" when the varps were unreadable. They are read on the unlock's
+    chat message or pop-up, which the game sends a few ticks *before* it bumps
+    COLLECTION_COUNT, so the count does not include the slot being announced;
+    Dink corrects the same lag by adding one. ``reported_slots`` (the
+    submission API's integer field) is the caller's own figure and is taken
+    as given.
+    """
+    raw = clog_data.get("slots")
+    if isinstance(raw, str) and "/" in raw:
+        done, _, total = raw.partition("/")
+        try:
+            done, total = int(done.strip()), int(total.strip())
+        except ValueError:
+            done = total = 0
+        if total > 0 and 0 < done:
+            return min(done + 1, total), total
+    reported = clog_data.get("reported_slots")
+    try:
+        reported = int(reported) if reported not in (None, "") else None
+    except (TypeError, ValueError):
+        reported = None
+    return (reported if reported and reported > 0 else None), None
+
+
 async def clog_processor(clog_data, external_session=None, world_type="main"):
     debug_print(f"=== CLOG PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw clog data: {clog_data}")
@@ -105,7 +133,8 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     auth_key = clog_data.get("auth_key", "")
     attachment_url = clog_data.get("attachment_url", None)
     attachment_type = clog_data.get("attachment_type", None)
-    reported_slots = clog_data.get("reported_slots", None)
+    slots_unlocked, slots_total = parse_slot_progress(clog_data)
+    reported_slots = slots_unlocked
     downloaded = clog_data.get("downloaded", False)
     image_url = clog_data.get("image_url", None)
     used_api = clog_data.get("used_api", False)
@@ -140,6 +169,19 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
         print(f"Player does not exist, and creating failed")
         return
     player_id = player.player_id
+    if slots_unlocked and not slots_total:
+        # The game's total is the same for everyone; the player's last state
+        # sync is the nearest copy of it.
+        try:
+            from db.models.player_state import PlayerState
+
+            slots_total = (
+                session.query(PlayerState.clog_slots_total)
+                .filter(PlayerState.player_id == player_id)
+                .scalar()
+            )
+        except Exception:
+            slots_total = None
     npc_id, npc_name = await ensure_npc_id_for_player(
         session, npc_name, player_id, player_name, use_external_session
     )
@@ -350,6 +392,8 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                     "video_key": video_key,
                     "kc_received": killcount,
                     "item_id": item_id,
+                    "log_slots": slots_unlocked,
+                    "log_total": slots_total,
                     "group_points_awarded": int(group_points_result.get("receiver_points_awarded", 0)),
                     "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                     "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
