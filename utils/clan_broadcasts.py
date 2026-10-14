@@ -47,6 +47,12 @@ TRACKED_KINDS = frozenset(
     {"item_drop", "raid_drop", "clue_item", "pet", "collection_log", "personal_best"}
 )
 
+#: npc_list row holding chat drops whose source could be neither read from the
+#: line nor inferred from the item. Not a real NPC: the NPC rollup, search and
+#: item-source lists skip it. Lives here (not in the processor) so the web API
+#: and services can name it without importing the submission package.
+SENTINEL_NPC_NAME = "Clan Broadcast"
+
 _TAG_RE = re.compile(r"<[^>]*>")
 
 #: Jagex's in-line string variables (rev241, 2026-10-07): the line opens by

@@ -12,6 +12,7 @@ from quart import Blueprint, jsonify, request
 from sqlalchemy import text
 
 from db import Player, Group, User
+from utils.clan_broadcasts import SENTINEL_NPC_NAME
 from utils.format import normalize_player_display_equivalence, player_name_search_expr
 from utils.npc_names import npc_match_key, npc_match_variants, npc_slug_sql_expr
 from web_api.common import (
@@ -116,10 +117,11 @@ def _search_npcs(s, q):
             "SELECT n.npc_id, n.npc_name, "
             "       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
             "              WHERE t.npc_id = n.npc_id) AS tracked "
-            "FROM npc_list n WHERE n.npc_name LIKE :pat "
+            "FROM npc_list n WHERE n.npc_name LIKE :pat AND n.npc_name <> :sentinel "
             "ORDER BY tracked DESC, n.npc_name ASC, n.npc_id ASC LIMIT :lim"
         ),
-        {"pat": f"%{q}%", "lim": LIMIT_EACH * 4},
+        # The clan-chat catch-all is a storage bucket, not an NPC.
+        {"pat": f"%{q}%", "lim": LIMIT_EACH * 4, "sentinel": SENTINEL_NPC_NAME},
     ).fetchall()
     out = []
     seen_keys = set()

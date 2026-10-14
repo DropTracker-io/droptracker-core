@@ -127,7 +127,15 @@ def observed_source_rows(s, item_ids) -> list[tuple[int, str, int]]:
             {"ids": qualifying},
         ).fetchall()
     )
-    out = [(nid, names[nid], drops_by_npc[nid]) for nid in qualifying if nid in names]
+    from utils.clan_broadcasts import SENTINEL_NPC_NAME
+
+    # The sentinel holds chat drops of every item it couldn't place, so it
+    # clears both thresholds for popular items without being a source.
+    out = [
+        (nid, names[nid], drops_by_npc[nid])
+        for nid in qualifying
+        if nid in names and names[nid] != SENTINEL_NPC_NAME
+    ]
     out.sort(key=lambda r: -r[2])
     return out
 
@@ -296,3 +304,112 @@ def items_dropped_by_npcs(s, npc_names, candidate_item_names) -> dict[str, list[
         if npc_name not in bucket:
             bucket.append(str(npc_name))
     return out
+
+
+# --- Sourceless drop inference ---------------------------------------------
+# Clan broadcast lines only sometimes name the source ("... from Zulrah");
+# slayer monsters, Doom, the Colosseum, raids and clues print none. For those
+# the item alone usually settles it: "Burning claw" only drops from Tormented
+# Demons. Asked per sourceless chat drop (cached by the caller), so it reads a
+# bounded slice of recent drops instead of the ~10s observed_source_rows scan.
+
+#: Newest drops read per item id. A recent sample, so new content and drop
+#: table changes show up without a wiki resync.
+INFER_SAMPLE_PER_ID = 400
+#: Fewer observations than this can't outvote the wiki table.
+INFER_MIN_OBSERVED = 20
+#: Share of observations the top source needs to win outright. Below it the
+#: item is genuinely multi-source (Dragon platelegs, revenant loot, raid
+#: modes) and a guess would put real drops on the wrong NPC.
+INFER_DOMINANT_SHARE = 0.9
+
+
+def _source_key(npc_name: str) -> str:
+    from utils.npc_names import canonical_encounter_name, npc_match_key
+
+    return npc_match_key(canonical_encounter_name(npc_name))
+
+
+def pick_sole_source(wiki_names, observed: dict) -> str | None:
+    """The one NPC name a sourceless drop of this item belongs to, or ``None``.
+
+    ``wiki_names`` are the item's wiki drop-table sources; ``observed`` maps
+    NPC names to how many recent tracked drops of the item landed on each.
+    Names are compared by match key, so "The Hueycoatl"/"Hueycoatl" and the
+    Moons/Lunar Chest spellings count as one source.
+
+    Observed data wins when there is enough of it and one source carries
+    ``INFER_DOMINANT_SHARE``: it reflects where drops really come from,
+    including content the wiki table lacks. Otherwise a single wiki source is
+    used, unless the observations point somewhere else.
+    """
+    wiki = {}
+    for name in wiki_names or ():
+        key = _source_key(name)
+        if key:
+            wiki.setdefault(key, name)
+    counts: dict[str, int] = {}
+    best_name: dict[str, tuple[int, str]] = {}
+    for name, n in (observed or {}).items():
+        key = _source_key(name)
+        if not key or n <= 0:
+            continue
+        counts[key] = counts.get(key, 0) + int(n)
+        if n > best_name.get(key, (0, ""))[0]:
+            best_name[key] = (int(n), name)
+    total = sum(counts.values())
+    top_key = max(counts, key=counts.get) if counts else None
+    if total >= INFER_MIN_OBSERVED and counts[top_key] / total >= INFER_DOMINANT_SHARE:
+        return best_name[top_key][1]
+    if len(wiki) == 1:
+        (key, name), = wiki.items()
+        if total < INFER_MIN_OBSERVED or top_key == key:
+            return best_name[key][1] if key in best_name else name
+    return None
+
+
+def infer_sole_source(s, item_ids, *, exclude_npc_ids=()) -> str | None:
+    """:func:`pick_sole_source` fed from the database; ``None`` when unsure.
+
+    Observations skip ``source='clan_chat'`` rows so the inference never feeds
+    on its own output, and ``exclude_npc_ids`` (the sentinel) for the same
+    reason. Each item id reads its newest ``INFER_SAMPLE_PER_ID`` rows through
+    ``ix_drops_item_id``. One ``IN`` over all ids would filesort every row of a
+    common item instead. Every statement is time-capped. A slow or failed read
+    counts as no evidence, never as an error.
+    """
+    ids = sorted({int(i) for i in item_ids or ()})
+    if not ids:
+        return None
+    wiki_names = [
+        name for (name,) in s.execute(
+            text(
+                "SELECT DISTINCT n.npc_name FROM xenforo.dt_npc_loot l "
+                "JOIN npc_list n ON n.npc_id = l.npc_id WHERE l.item_id IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": ids},
+        ).fetchall()
+    ]
+    excluded = {int(i) for i in exclude_npc_ids or ()}
+    observed: dict[str, int] = {}
+    for item_id in ids:
+        try:
+            rows = s.execute(
+                text(
+                    "SET STATEMENT max_statement_time=3 FOR "
+                    "SELECT n.npc_id, n.npc_name, COUNT(*) FROM ("
+                    "  SELECT npc_id, source FROM drops WHERE item_id = :item "
+                    "  ORDER BY drop_id DESC LIMIT :lim"
+                    ") d JOIN npc_list n ON n.npc_id = d.npc_id "
+                    "WHERE d.source IS NULL OR d.source <> 'clan_chat' "
+                    "GROUP BY n.npc_id, n.npc_name"
+                ),
+                {"item": item_id, "lim": INFER_SAMPLE_PER_ID},
+            ).fetchall()
+        except Exception:
+            s.rollback()
+            continue
+        for npc_id, name, n in rows:
+            if int(npc_id) not in excluded:
+                observed[name] = observed.get(name, 0) + int(n)
+    return pick_sole_source(wiki_names, observed)

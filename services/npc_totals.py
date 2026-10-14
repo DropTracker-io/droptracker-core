@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import text
 
 from db.models.base import session as _default_session
+from utils.clan_broadcasts import SENTINEL_NPC_NAME
 from utils.redis import RedisClient
 
 LAST_ID_KEY = "npc_totals:last_drop_id"
@@ -35,6 +36,15 @@ PREV_MONTH_GRACE_DAYS = int(os.getenv("ROLLUP_REFOLD_PREV_MONTH_DAYS", "3"))
 # to fail later. Must divide 24 and stay >= 1 (chunks align to `date_hour`).
 REFOLD_CHUNK_HOURS = max(1, min(24, int(os.getenv("ROLLUP_REFOLD_CHUNK_HOURS", "1"))))
 
+# The clan-chat catch-all row (utils.clan_broadcasts.SENTINEL_NPC_NAME) is
+# not a real NPC. Leaving it out here keeps it off every "top bosses" surface
+# that reads this rollup. Its drops still count in the item rollup and loot
+# totals. The name is a constant, so it is inlined, not bound.
+_NOT_SENTINEL = (
+    "  AND d.npc_id <> COALESCE((SELECT s.npc_id FROM npc_list s "
+    f"WHERE s.npc_name = '{SENTINEL_NPC_NAME}' LIMIT 1), -1) "
+)
+
 _UPSERT_WINDOW_SQL = text(
     "INSERT INTO player_npc_hourly_totals "
     "  (player_id, npc_id, date_hour, `partition`, total_value, drop_count, last_drop_time) "
@@ -45,6 +55,7 @@ _UPSERT_WINDOW_SQL = text(
     "FROM drops d "
     "WHERE d.drop_id > :from_id AND d.drop_id <= :to_id "
     "  AND d.npc_id IS NOT NULL AND d.date_added IS NOT NULL "
+    + _NOT_SENTINEL +
     "GROUP BY d.player_id, d.npc_id, "
     "         DATE_FORMAT(d.date_added, '%Y-%m-%d-%H'), "
     "         COALESCE(d.`partition`, CAST(DATE_FORMAT(d.date_added, '%Y%m') AS UNSIGNED)) "
@@ -64,6 +75,7 @@ _REBUILD_PARTITION_SQL = text(
     "FROM drops d "
     "WHERE d.`partition` = :partition AND d.drop_id <= :max_id "
     "  AND d.npc_id IS NOT NULL AND d.date_added IS NOT NULL "
+    + _NOT_SENTINEL +
     "GROUP BY d.player_id, d.npc_id, DATE_FORMAT(d.date_added, '%Y-%m-%d-%H')"
 )
 
@@ -83,6 +95,7 @@ _REFOLD_DAY_SQL = text(
     "FROM drops d "
     "WHERE d.date_added >= :day_start AND d.date_added < :day_end AND d.drop_id <= :max_id "
     "  AND d.npc_id IS NOT NULL AND d.date_added IS NOT NULL "
+    + _NOT_SENTINEL +
     "GROUP BY d.player_id, d.npc_id, DATE_FORMAT(d.date_added, '%Y-%m-%d-%H') "
     "ON DUPLICATE KEY UPDATE "
     "  total_value = VALUES(total_value), "
