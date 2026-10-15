@@ -184,7 +184,48 @@ def _read_behavior(s, group_id: int) -> dict:
     row = _config_row(s, group_id, "point_sharing_method")
     if row is not None and str(row.config_value or "").strip().lower() in SHARING_METHODS:
         out["point_sharing_method"] = str(row.config_value).strip().lower()
+    from data.submissions import pet_points
+
+    pet_keys = (pet_points.DUPLICATES_MODE_KEY, pet_points.DUPLICATE_PETS_KEY,
+                pet_points.DUPLICATE_AWARD_KEY, pet_points.PRIOR_OWNED_KEY)
+    rows = {k: r for k in pet_keys if (r := _config_row(s, group_id, k)) is not None}
+    out.update(pet_points.parse_settings(rows).as_payload())
     return out
+
+
+def _apply_pet_behavior(s, group_id: int, behavior_in: dict, changed: dict) -> None:
+    """Duplicate-pet settings from a settings PUT. ``pet_prior_owned`` is not
+    accepted here: turning it on pays out, so it has its own preview + confirm
+    route below."""
+    from data.submissions.pet_points import (
+        DUPLICATE_MODES, MAX_DUPLICATE_AWARD, normalize_duplicate_pets, write_settings,
+    )
+
+    kwargs = {}
+    if "pet_duplicates" in behavior_in:
+        mode = str(behavior_in["pet_duplicates"] or "").strip().lower()
+        if mode not in DUPLICATE_MODES:
+            abort_problem(400, "Invalid value", "pet_duplicates must be none, all or selected.")
+        kwargs["duplicates"] = mode
+    if "pet_duplicate_pets" in behavior_in:
+        names = behavior_in["pet_duplicate_pets"]
+        if not isinstance(names, list):
+            abort_problem(400, "Invalid value", "pet_duplicate_pets must be a list of pet names.")
+        known, unknown = normalize_duplicate_pets(names)
+        if unknown:
+            abort_problem(400, "Unknown pet", f"Not a known pet: {', '.join(unknown[:5])}.")
+        kwargs["duplicate_pets"] = known
+    if "pet_duplicate_award" in behavior_in:
+        raw = behavior_in["pet_duplicate_award"]
+        if raw in (None, ""):
+            kwargs["duplicate_award"] = None
+        else:
+            kwargs["duplicate_award"] = _int_in_range(
+                behavior_in, "pet_duplicate_award", 0, MAX_DUPLICATE_AWARD,
+            )
+    if kwargs:
+        write_settings(s, group_id, **kwargs)
+        changed.setdefault("behavior", {}).update({f"pet_{k}": v for k, v in kwargs.items()})
 
 
 def _write_config(s, group_id: int, key: str, value: str) -> None:
@@ -431,6 +472,7 @@ async def update_points_settings(group_id: int):
                         abort_problem(400, "Invalid value", "point_sharing_method must be equal_split or award_all.")
                     _write_config(s, group_id, "point_sharing_method", method)
                     changed.setdefault("behavior", {})["point_sharing_method"] = method
+                _apply_pet_behavior(s, group_id, behavior_in, changed)
 
             if changed:
                 _audit(
@@ -443,6 +485,72 @@ async def update_points_settings(group_id: int):
                 "rules": _rules_payload(s, group_id),
                 "behavior": _read_behavior(s, group_id),
             }
+
+    return private_no_store(jsonify(await asyncio.to_thread(_apply)))
+
+
+# --------------------------------------------------------------------------- #
+# Pets members owned before DropTracker saw them (data/submissions/pet_points)
+# --------------------------------------------------------------------------- #
+def _run_prior_owned_sweep(s, group_id: int, *, apply: bool) -> dict:
+    """The sweep is async (it reuses the award engine); the route runs it in a
+    worker thread, which has no running loop, so it gets one of its own."""
+    from data.submissions.pet_points import sweep_prior_owned_pets
+
+    return asyncio.run(sweep_prior_owned_pets(s, group_id, apply=apply)).as_payload()
+
+
+@points_bp.get("/groups/<int:group_id>/points/pets/prior-owned")
+async def preview_prior_owned_pets(group_id: int):
+    """What turning on "pets owned before DropTracker" would pay right now."""
+    user_id = current_user_id()
+
+    def _load():
+        with db_session() as s:
+            _admin_ctx(s, user_id, group_id, entitlement=True)
+            from data.submissions.pet_points import load_settings
+
+            out = _run_prior_owned_sweep(s, group_id, apply=False)
+            s.rollback()
+            out["enabled"] = load_settings(s, group_id).prior_owned
+            return out
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@points_bp.post("/groups/<int:group_id>/points/pets/prior-owned")
+async def set_prior_owned_pets(group_id: int):
+    """``{enabled: true}`` stores the option and pays every unpaid pet members
+    already own; ``{enabled: false}`` stops future payouts (nothing paid is
+    taken back)."""
+    user_id = current_user_id()
+    body = await json_body()
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        abort_problem(422, "Invalid body", "'enabled' (bool) required.")
+
+    def _apply():
+        with db_session() as s:
+            user = _admin_ctx(s, user_id, group_id, entitlement=True)
+            group = _assert_group_exists(s, group_id)
+            from data.submissions.pet_points import write_settings
+
+            write_settings(s, group_id, prior_owned=enabled)
+            out = {"members": 0, "awards": 0, "points": 0, "by_pet": []}
+            if enabled:
+                out = _run_prior_owned_sweep(s, group_id, apply=True)
+            _audit(
+                s, action="pets_prior_owned", actor=user, group=group,
+                message=(f"Previously owned pets turned {'on' if enabled else 'off'} "
+                         f"for {group.group_name}"
+                         + (f": {out['awards']} awards, {out['points']} points" if enabled else "")),
+                details={"enabled": enabled, "awards": out["awards"], "points": out["points"],
+                         "members": out["members"]},
+            )
+            s.commit()
+            out["enabled"] = enabled
+            out["behavior"] = _read_behavior(s, group_id)
+            return out
 
     return private_no_store(jsonify(await asyncio.to_thread(_apply)))
 

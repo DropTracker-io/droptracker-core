@@ -291,6 +291,23 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                         elif existing_pet is not None:
                             pet_entry_id = getattr(existing_pet, "id", None)
 
+                        # A member earns a pet's new-pet points once per
+                        # group; later copies pay only if the group's
+                        # duplicate setting covers this pet (pet_points.py).
+                        from .pet_points import (
+                            DUPLICATE_ENTRY_TYPE, DUPLICATE_REASON, plan_live_pet,
+                        )
+                        plan = plan_live_pet(session, group_id, player_id, pet_name, pet_item_id)
+                        if not plan.award:
+                            debug_print(f"Group {group_id}: duplicate {pet_name} pays no points")
+                            return
+                        dupe_kwargs = {}
+                        if plan.duplicate:
+                            dupe_kwargs = {
+                                "ledger_reason": DUPLICATE_REASON,
+                                "entry_type": DUPLICATE_ENTRY_TYPE,
+                                "fixed_award": plan.duplicate_award,
+                            }
                         group_points_result = await check_and_award_points(
                             "pet",
                             group_id,
@@ -301,6 +318,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                             entry_id=pet_entry_id,
                             submission_timestamp=pet_data.get("timestamp"),
                             external_session=session,
+                            **dupe_kwargs,
                         )
                     else:
                         pass

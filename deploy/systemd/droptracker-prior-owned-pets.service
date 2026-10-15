@@ -1,0 +1,24 @@
+# Hourly clan-points catch-up for pets members owned before DropTracker saw them.
+# Triggered by droptracker-prior-owned-pets.timer; do not enable the service itself.
+#
+# Only touches groups with points_pet_prior_owned on (Points page, "Pets owned
+# before DropTracker"). Pays each member the new-pet award once per pet found in
+# their stored collection log or DropTracker's pet records that this group never
+# paid for. Turning the option on runs the same sweep at once; this picks up
+# members who join or sync later. See data/submissions/pet_points.py.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.award_prior_owned_pets
+# Watch it:        journalctl -u droptracker-prior-owned-pets.service -f
+
+[Unit]
+Description=DropTracker clan points for previously owned pets
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service redis-server.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.award_prior_owned_pets --apply
+TimeoutStartSec=20min
+Nice=10

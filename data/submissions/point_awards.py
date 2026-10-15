@@ -351,6 +351,11 @@ async def check_and_award_points(
     submission_timestamp=None,
     *,
     external_session=None,
+    ledger_reason=None,
+    entry_type=None,
+    fixed_award=None,
+    skip_boosts=False,
+    dry_run=False,
 ):
     """Run the point-award pass isolated from the caller's transaction.
 
@@ -359,6 +364,12 @@ async def check_and_award_points(
     therefore runs inside a SAVEPOINT: on any failure we roll back to the
     savepoint and return an empty result, so a bad point insert can never
     poison the session and take the submission down with it.
+
+    Pet options (data/submissions/pet_points.py): ``ledger_reason`` and
+    ``entry_type`` label the written row (``reason`` still picks the rule);
+    ``fixed_award`` replaces the computed amount before boosts and limits (a
+    duplicate's own rate); ``skip_boosts`` ignores timed boosts; ``dry_run``
+    computes the receiver's award without writing anything.
     """
     try:
         receiver_player_id = int(player_id)
@@ -382,6 +393,18 @@ async def check_and_award_points(
     if skip_mirrored_extras():
         return empty_result
 
+    extra = {}
+    if ledger_reason is not None:
+        extra["ledger_reason"] = ledger_reason
+    if entry_type is not None:
+        extra["entry_type"] = entry_type
+    if fixed_award is not None:
+        extra["fixed_award"] = fixed_award
+    if skip_boosts:
+        extra["skip_boosts"] = True
+    if dry_run:
+        extra["dry_run"] = True
+
     try:
         if external_session is None:
             return await _check_and_award_points(
@@ -389,6 +412,7 @@ async def check_and_award_points(
                 players_included=players_included, item_id=item_id, npc_id=npc_id,
                 quantity=quantity, entry_id=entry_id, submission_guid=submission_guid,
                 submission_timestamp=submission_timestamp, external_session=None,
+                **extra,
             )
 
         savepoint = external_session.begin_nested()
@@ -398,6 +422,7 @@ async def check_and_award_points(
                 players_included=players_included, item_id=item_id, npc_id=npc_id,
                 quantity=quantity, entry_id=entry_id, submission_guid=submission_guid,
                 submission_timestamp=submission_timestamp, external_session=external_session,
+                **extra,
             )
             savepoint.commit()
             return result
@@ -429,6 +454,11 @@ async def _check_and_award_points(
     submission_timestamp=None,
     *,
     external_session=None,
+    ledger_reason=None,
+    entry_type=None,
+    fixed_award=None,
+    skip_boosts=False,
+    dry_run=False,
 ):
     from data.submissions.common import check_group_point_system_active, select_session_and_flag
 
@@ -675,6 +705,9 @@ async def _check_and_award_points(
     else:
         # Other event types: flat award
         point_award = int(award)
+    if fixed_award is not None:
+        point_award = max(0, int(fixed_award))
+        point_log(f"fixed_award replaces computed award: {point_award}")
     point_log(
         f"pre_split_point_award={point_award} "
         f"has_mod_override={has_mod_override} award={award} divisor={divisor} qty={qty}"
@@ -753,7 +786,7 @@ async def _check_and_award_points(
         point_log("no_split rule matched; only receiver can be awarded")
     if not included_player_names:
         point_log("no additional normalized participants detected for split")
-    if included_player_names and not force_no_split:
+    if included_player_names and not force_no_split and not dry_run:
         should_share_points, split_method = await check_group_points_sharing(group_id, external_session)
         point_log(
             f"split_settings should_share_points={should_share_points} "
@@ -826,17 +859,18 @@ async def _check_and_award_points(
                 point_award = receiver_share
         else:
             point_log("point_sharing disabled; split awards skipped")
-    point_award = await modify_for_event(
-        reason,
-        group_id,
-        receiver_player_id,
-        point_award,
-        item_id=item_id,
-        npc_id=npc_id,
-        submission_timestamp=submission_timestamp,
-        present_member_count=1 if split_applied else present_member_count,
-        external_session=external_session,
-    )
+    if not skip_boosts:
+        point_award = await modify_for_event(
+            reason,
+            group_id,
+            receiver_player_id,
+            point_award,
+            item_id=item_id,
+            npc_id=npc_id,
+            submission_timestamp=submission_timestamp,
+            present_member_count=1 if split_applied else present_member_count,
+            external_session=external_session,
+        )
     point_award = _apply_submission_point_bounds(
         point_award,
         min_submission_pts=min_submission_pts,
@@ -844,17 +878,23 @@ async def _check_and_award_points(
     )
     point_log(f"receiver_award_after_bounds={point_award}")
 
+    if point_award > 0 and dry_run:
+        point_log(f"dry_run: receiver would get {point_award}")
+        result["receiver_points_awarded"] = int(point_award)
+        result["total_points_awarded"] = int(point_award)
+        return result
     if point_award > 0:
         point_log(
             f"awarding receiver points={point_award} receiver_player_id={receiver_player_id}"
         )
         receiver_awarded = await award_player_points(
-            reason,
+            ledger_reason or reason,
             group_id,
             receiver_player_id,
             point_award,
             entry_id=entry_id,
             external_session=external_session,
+            **({"entry_type": entry_type} if entry_type is not None else {}),
         )
         _record_award(receiver_player_id, receiver_player_name, receiver_awarded)
     point_log(f"final_award_result={result}")
@@ -1225,7 +1265,8 @@ async def evaluate_point_list_rules(group_id, item_id=None, npc_id=None, externa
     return True, force_no_split
 
 async def award_player_points(
-    reason, group_id, player_id, points_to_award, entry_id=None, *, external_session=None
+    reason, group_id, player_id, points_to_award, entry_id=None, *, external_session=None,
+    entry_type=None,
 ) -> int:
         print(
             f"Awarding {points_to_award} points to {player_id} for {reason} (entry_id={entry_id}) "
@@ -1241,6 +1282,7 @@ async def award_player_points(
                 # (raid drops build reasons listing every participant).
                 reason=str(reason)[:_PLAYER_POINTS_REASON_MAX_LEN],
                 entry_id=int(entry_id) if entry_id not in (None, "", 0, "0") else None,
+                entry_type=entry_type,
             )
             if use_ext:
                 # SAVEPOINT: a failed insert must roll back only this point

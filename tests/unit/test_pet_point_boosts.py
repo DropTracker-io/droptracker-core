@@ -108,8 +108,14 @@ class _FakePlayer:
     user = MagicMock()
 
 
-def _drive_pet_processor(payload, item_id=LIL_ZIK, npc=(TOB_NPC, "Theatre of Blood")):
+def _drive_pet_processor(payload, item_id=LIL_ZIK, npc=(TOB_NPC, "Theatre of Blood"),
+                         plan=None):
     import data.submissions.pet as pet
+    import data.submissions.pet_points as pet_points
+
+    # The once-per-pet decision reads the ledger; that has its own tests
+    # (test_pet_points.py). Here it says "first copy" unless a test asks.
+    plan = plan or pet_points.PetAwardPlan(award=True, duplicate=False)
 
     player = _FakePlayer()
     session = _session(player)
@@ -141,6 +147,9 @@ def _drive_pet_processor(payload, item_id=LIL_ZIK, npc=(TOB_NPC, "Theatre of Blo
         stack.enter_context(
             patch("data.submissions.point_awards.check_and_award_points", new=award)
         )
+        stack.enter_context(
+            patch.object(pet_points, "plan_live_pet", return_value=plan)
+        )
         stack.enter_context(patch("utils.group_config.get", return_value="false"))
         stack.enter_context(patch("utils.group_config.is_truthy", return_value=False))
         asyncio.run(pet.pet_processor(payload, external_session=session))
@@ -162,6 +171,23 @@ class TestPetProcessorPassesIds:
         assert args[0] == "pet"
         assert kwargs["item_id"] == LIL_ZIK
         assert kwargs["npc_id"] == TOB_NPC
+
+    def test_unpaid_duplicate_skips_the_point_pass(self):
+        import data.submissions.pet_points as pet_points
+
+        plan = pet_points.PetAwardPlan(award=False, duplicate=True)
+        award = _drive_pet_processor(dict(PAYLOAD, duplicate=True, guid="dupe-guid"), plan=plan)
+        assert award.await_count == 0
+
+    def test_paid_duplicate_is_labelled(self):
+        import data.submissions.pet_points as pet_points
+
+        plan = pet_points.PetAwardPlan(award=True, duplicate=True, duplicate_award=4)
+        award = _drive_pet_processor(dict(PAYLOAD, duplicate=True, guid="dupe-guid-2"), plan=plan)
+        _, kwargs = award.await_args
+        assert kwargs["ledger_reason"] == pet_points.DUPLICATE_REASON
+        assert kwargs["entry_type"] == pet_points.DUPLICATE_ENTRY_TYPE
+        assert kwargs["fixed_award"] == 4
 
     def test_skilling_pet_passes_no_npc(self):
         payload = dict(PAYLOAD, pet_name="Heron", source=None, guid="heron-guid")
