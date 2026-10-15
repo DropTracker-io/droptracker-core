@@ -421,10 +421,12 @@ def _resolve_npc(session, name_text):
     return None, None
 
 
-def _inferred_drop_source(item_name):
+def _inferred_drop_source(item_name, from_raid=False):
     """NPC name a sourceless drop of ``item_name`` belongs to, or ``None``.
 
-    See :func:`db.item_sources.infer_sole_source`. Both answers are cached, a
+    See :func:`db.item_sources.infer_sole_source`. ``from_raid`` (a "special
+    loot from a raid" line) folds raid modes into the base raid, since the
+    line cannot say which mode it was. Both answers are cached, a
     miss as ``""``. Reads run on a short-lived session of their own: a timed-out
     statement rolls back, and that must not take the caller's transaction with
     it. Fail-open to ``None``, which leaves the drop on the sentinel.
@@ -432,7 +434,10 @@ def _inferred_drop_source(item_name):
     name = clean_broadcast_text(item_name)
     if not name:
         return None
-    key = f"clanchat:infersrc:{hashlib.sha1(name.lower().encode('utf-8')).hexdigest()}"
+    key = (
+        f"clanchat:infersrc:{'raid:' if from_raid else ''}"
+        f"{hashlib.sha1(name.lower().encode('utf-8')).hexdigest()}"
+    )
     try:
         cached = redis_client.client.get(key)
         if cached is not None:
@@ -448,6 +453,7 @@ def _inferred_drop_source(item_name):
             s,
             item_ids_for_name(s, name),
             exclude_npc_ids=[_sentinel_npc_id] if _sentinel_npc_id is not None else (),
+            fold_raid_modes=from_raid,
         )
     except Exception as e:
         print(f"[ClanBroadcast] Source inference failed for {name}: {e}")
@@ -934,7 +940,10 @@ async def _process_chat_drop(
     named = parsed.extra.get("source")
     npc_id, npc_name = _resolve_npc(session, named)
     if npc_id is None and not named:
-        npc_id, npc_name = _resolve_npc(session, _inferred_drop_source(parsed.item_name))
+        npc_id, npc_name = _resolve_npc(
+            session,
+            _inferred_drop_source(parsed.item_name, from_raid=parsed.kind == "raid_drop"),
+        )
         if npc_id is not None:
             _stat("drop_npc_inferred")
     elif npc_id is not None:

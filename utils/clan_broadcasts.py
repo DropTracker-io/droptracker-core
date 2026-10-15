@@ -199,16 +199,28 @@ def _int(raw, default=1) -> int:
 # item group swallows "(48,810,952 coins) from Alchemical Hydra" whole, the
 # item fails to resolve and the whole broadcast is dropped on the floor. The
 # source is captured so the drop can attach to the real npc_list row.
+#: The coin figure, or "(very valuable)" where Jagex prints no number (seen on
+#: untradeable raid uniques: "Twisted ancestral colour kit (very valuable).").
+#: Both shapes must be peeled off the item, which is otherwise left holding
+#: "Twisted bow (1,354,024,290 coins)" and fails to resolve. Items whose real
+#: name ends in parentheses ("Scythe of vitur (uncharged)") are safe: the
+#: clause only ever matches a coin figure or the literal phrase.
+_VALUE_CLAUSE = r"(?: \((?:(?P<value>[\d,]+) coins|very valuable)\))?"
+
 _ITEM_DROP_RE = re.compile(
     r"^(?P<player>.+?) received a drop: "
     r"(?:(?P<quantity>[\d,]+) x )?"
     r"(?P<item>.+?)"
-    r"(?: \((?P<value>[\d,]+) coins\))?"
+    + _VALUE_CLAUSE +
     r"(?: from (?P<source>.+?))?\.?$"
 )
 
+# Raid uniques carry the same value clause as drops ("... from a raid: Twisted
+# bow (1,354,024,290 coins)."), and name no source. Until 2026-10-15 this
+# pattern had no value clause, so every raid line failed item resolution.
 _RAID_DROP_RE = re.compile(
-    r"^(?P<player>.+?) received special loot from a raid: (?P<item>.+?)\.?$"
+    r"^(?P<player>.+?) received special loot from a raid: "
+    r"(?P<item>.+?)" + _VALUE_CLAUSE + r"\.?$"
 )
 
 # Same optional source clause as drops: unverified for clue items (no such
@@ -217,7 +229,7 @@ _RAID_DROP_RE = re.compile(
 _CLUE_ITEM_RE = re.compile(
     r"^(?P<player>.+?) received a clue item: "
     r"(?P<item>.+?)"
-    r"(?: \((?P<value>[\d,]+) coins\))?"
+    + _VALUE_CLAUSE +
     r"(?: from (?P<source>.+?))?\.?$"
 )
 
@@ -262,7 +274,9 @@ def _item_drop(m) -> ParsedBroadcast:
 
 
 def _raid_drop(m) -> ParsedBroadcast:
-    return ParsedBroadcast(kind="raid_drop", player=m["player"], item_name=m["item"])
+    return ParsedBroadcast(
+        kind="raid_drop", player=m["player"], item_name=m["item"], value_gp=_gp(m["value"])
+    )
 
 
 def _clue_item(m) -> ParsedBroadcast:

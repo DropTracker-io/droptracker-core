@@ -46,6 +46,24 @@ def test_multi_source_item_stays_unattributed():
     ) is None
 
 
+def test_raid_lines_fold_modes_into_the_base_raid():
+    # "special loot from a raid: Masori mask": a raid for sure, mode unknown.
+    wiki = ["Tombs of Amascut", "Tombs of Amascut: Expert Mode"]
+    observed = {"Tombs of Amascut: Expert Mode": 242, "Tombs of Amascut": 158}
+    assert pick_sole_source(wiki, observed, fold_raid_modes=True) == "Tombs of Amascut"
+
+
+def test_folding_answers_with_the_base_raid_even_if_unseen_in_observations():
+    wiki = ["Chambers of Xeric", "Chambers of Xeric Challenge Mode"]
+    observed = {"Chambers of Xeric Challenge Mode": 94}
+    assert pick_sole_source(wiki, observed, fold_raid_modes=True) == "Chambers of Xeric"
+
+
+def test_folding_still_rejects_two_different_raids():
+    observed = {"Chambers of Xeric": 50, "Theatre of Blood": 50}
+    assert pick_sole_source([], observed, fold_raid_modes=True) is None
+
+
 def test_single_wiki_source_contradicted_by_observations_is_rejected():
     observed = {"Somewhere Else": 60, "Wiki Boss": 40}
     assert pick_sole_source(["Wiki Boss"], observed) is None
@@ -111,7 +129,7 @@ def _wire(monkeypatch, answer):
     monkeypatch.setattr(cb.redis_client, "client", fake, raising=False)
     calls = []
 
-    def infer(_s, ids, exclude_npc_ids=()):
+    def infer(_s, ids, exclude_npc_ids=(), fold_raid_modes=False):
         calls.append(list(ids))
         if isinstance(answer, Exception):
             raise answer

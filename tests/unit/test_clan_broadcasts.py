@@ -155,6 +155,38 @@ def test_raid_drop_has_no_value_in_text():
     )
 
 
+def test_raid_drop_value_is_peeled_off_the_item():
+    # Live wording (2026-10): the coin figure follows the item, and used to be
+    # swallowed into it, so no raid unique ever resolved.
+    parsed = parse_broadcast(
+        "ll Sebas ll received special loot from a raid: Twisted bow (1,354,024,290 coins)."
+    )
+    assert parsed == ParsedBroadcast(
+        kind="raid_drop", player="ll Sebas ll", item_name="Twisted bow",
+        value_gp=1354024290,
+    )
+
+
+def test_raid_drop_keeps_parentheses_that_belong_to_the_item():
+    parsed = parse_broadcast(
+        "Yo Gleesh received special loot from a raid: "
+        "Scythe of Vitur (uncharged) (1,220,059,296 coins)."
+    )
+    assert parsed.item_name == "Scythe of Vitur (uncharged)"
+    assert parsed.value_gp == 1220059296
+
+
+def test_very_valuable_untradeables_carry_no_figure():
+    parsed = parse_broadcast(
+        "Yo Gleesh received special loot from a raid: Twisted ancestral colour kit (very valuable)."
+    )
+    assert parsed.item_name == "Twisted ancestral colour kit"
+    assert parsed.value_gp is None
+    drop = parse_broadcast("X received a drop: Some untradeable (very valuable) from Zulrah.")
+    assert drop.item_name == "Some untradeable"
+    assert drop.extra == {"source": "Zulrah"}
+
+
 def test_clue_item():
     parsed = parse_broadcast("Clue Solver received a clue item: Ranger boots (36,460,467 coins).")
     assert parsed.kind == "clue_item"

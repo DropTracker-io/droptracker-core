@@ -324,13 +324,16 @@ INFER_MIN_OBSERVED = 20
 INFER_DOMINANT_SHARE = 0.9
 
 
-def _source_key(npc_name: str) -> str:
-    from utils.npc_names import canonical_encounter_name, npc_match_key
+def _source_key(npc_name: str, fold_raid_modes: bool = False) -> str:
+    from utils.npc_names import canonical_encounter_name, npc_base_slug, npc_match_key
 
-    return npc_match_key(canonical_encounter_name(npc_name))
+    key = npc_match_key(canonical_encounter_name(npc_name))
+    if fold_raid_modes and key:
+        return npc_base_slug(key) or key
+    return key
 
 
-def pick_sole_source(wiki_names, observed: dict) -> str | None:
+def pick_sole_source(wiki_names, observed: dict, *, fold_raid_modes: bool = False) -> str | None:
     """The one NPC name a sourceless drop of this item belongs to, or ``None``.
 
     ``wiki_names`` are the item's wiki drop-table sources; ``observed`` maps
@@ -338,37 +341,59 @@ def pick_sole_source(wiki_names, observed: dict) -> str | None:
     Names are compared by match key, so "The Hueycoatl"/"Hueycoatl" and the
     Moons/Lunar Chest spellings count as one source.
 
+    ``fold_raid_modes`` also counts a raid's modes as one source ("Chambers of
+    Xeric Challenge Mode" with "Chambers of Xeric") and answers with the base
+    raid. Only for lines that prove the item came from a raid but not which
+    mode: every raid unique drops from more than one mode, so without folding
+    none of them could ever be inferred.
+
     Observed data wins when there is enough of it and one source carries
     ``INFER_DOMINANT_SHARE``: it reflects where drops really come from,
     including content the wiki table lacks. Otherwise a single wiki source is
     used, unless the observations point somewhere else.
     """
+    fold = fold_raid_modes
+    # Folded, the answer is the base raid's own row when one is in sight
+    # (keyed by its unfolded key equalling the folded one), not whichever mode
+    # happened to log the most drops.
+    base_name: dict[str, str] = {}
+
+    def _note_base(key, name):
+        if fold and _source_key(name) == key:
+            base_name.setdefault(key, name)
+
     wiki = {}
     for name in wiki_names or ():
-        key = _source_key(name)
+        key = _source_key(name, fold)
         if key:
             wiki.setdefault(key, name)
+            _note_base(key, name)
     counts: dict[str, int] = {}
     best_name: dict[str, tuple[int, str]] = {}
     for name, n in (observed or {}).items():
-        key = _source_key(name)
+        key = _source_key(name, fold)
         if not key or n <= 0:
             continue
         counts[key] = counts.get(key, 0) + int(n)
         if n > best_name.get(key, (0, ""))[0]:
             best_name[key] = (int(n), name)
+        _note_base(key, name)
     total = sum(counts.values())
     top_key = max(counts, key=counts.get) if counts else None
     if total >= INFER_MIN_OBSERVED and counts[top_key] / total >= INFER_DOMINANT_SHARE:
-        return best_name[top_key][1]
+        return base_name.get(top_key) or best_name[top_key][1]
     if len(wiki) == 1:
         (key, name), = wiki.items()
         if total < INFER_MIN_OBSERVED or top_key == key:
+            if key in base_name:
+                return base_name[key]
             return best_name[key][1] if key in best_name else name
     return None
 
 
-def infer_sole_source(s, item_ids, *, exclude_npc_ids=()) -> str | None:
+def infer_sole_source(
+    s, item_ids, *, exclude_npc_ids=(), fold_raid_modes: bool = False
+) -> str | None:
     """:func:`pick_sole_source` fed from the database; ``None`` when unsure.
 
     Observations skip ``source='clan_chat'`` rows so the inference never feeds
@@ -412,4 +437,9 @@ def infer_sole_source(s, item_ids, *, exclude_npc_ids=()) -> str | None:
         for npc_id, name, n in rows:
             if int(npc_id) not in excluded:
                 observed[name] = observed.get(name, 0) + int(n)
-    return pick_sole_source(wiki_names, observed)
+    # Folding is a fallback: a mode-exclusive item (Twisted ancestral colour
+    # kit is CM-only) keeps its exact mode when the evidence names one.
+    return pick_sole_source(wiki_names, observed) or (
+        pick_sole_source(wiki_names, observed, fold_raid_modes=True)
+        if fold_raid_modes else None
+    )
