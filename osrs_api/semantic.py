@@ -38,6 +38,15 @@ class SemanticAPI:
     # "no rows" stays inconclusive.
     NEW_ITEM_GRACE_DAYS = 30
 
+    # Activity loot with no monster drop table behind it, so the dropsline
+    # bucket can never confirm the pairing. Exact (item, source) pairs only,
+    # lowercased: the exemption must not let either name vouch for anything
+    # else.
+    ACTIVITY_ITEM_SOURCES = frozenset({
+        ("pharaoh's sceptre", "pyramid plunder"),
+        ("amulet of eternal glory", "fountain of rune"),
+    })
+
     # Drop tables only change with the weekly game update (Tue/Wed), so a
     # per-item source list is safe to reuse for days. Serving allows from
     # cache is what keeps our api.php volume down — the wiki blocklisted our
@@ -485,6 +494,8 @@ class SemanticAPI:
         if item_name == "Enhanced crystal teleport seed" and npc_name == "Elf":
             return True, False
         if item_name.strip() == "Black tourmaline core" and npc_name.strip() == "Dusk":
+            return True, False
+        if (item_name.strip().lower(), npc_name.strip().lower()) in self.ACTIVITY_ITEM_SOURCES:
             return True, False
         if npc_name.strip() == "Kingdom of Miscellania":
             # Kingdom resource collection is an activity, not a monster;

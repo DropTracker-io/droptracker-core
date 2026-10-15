@@ -279,6 +279,15 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     session.commit()
 
     if is_new_clog:
+        # Items that never arrive as a drop (eternal glory) are recorded as
+        # one from their new slot. Never fails the submission.
+        from .clog_drop_mirror import mirror_clog_as_drop
+        await mirror_clog_as_drop(
+            clog_data, item_id, item_name, clog_entry.image_url,
+            external_session=session if use_external_session else None,
+            world_type=world_type,
+        )
+
         # Event engine hook (Task 17): gated, fire-and-forget LPUSH; new
         # collection log slots only. Never fails the submission.
         try:

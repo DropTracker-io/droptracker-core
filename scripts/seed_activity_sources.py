@@ -3,7 +3,7 @@
 
 The plugin (>= 5.5.0) submits synthetic type=drop events for activities that
 never fire a RuneLite loot event — MTA reward-shop purchases, Agility Pyramid
-tops, deep sea trawling catches. `ensure_npc_id_for_player` rejects any drop
+tops, deep sea trawling catches, Pharaoh's sceptres. `ensure_npc_id_for_player` rejects any drop
 whose source has no npc_list row (these aren't monsters, so the semantic wiki
 lookup can't mint one), and event task-builder validation 422s on the names —
 so the rows must exist before the plugin ships.
@@ -35,6 +35,11 @@ ACTIVITY_SOURCES = [
     ("Mage Training Arena", 900001),
     ("Agility Pyramid", 900002),
     ("Deep Sea Trawling", 900003),
+    # Plugin >= 6.1.7 submits Pharaoh's sceptres under this source.
+    ("Pyramid Plunder", 900004),
+    # Server-side only: data/submissions/clog_drop_mirror.py records a new
+    # eternal glory collection log slot as a drop from here.
+    ("Fountain of Rune", 900005),
 ]
 
 

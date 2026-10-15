@@ -88,6 +88,19 @@ def test_activity_source_is_exempt():
     assert _run(api.check_drop("Coal", "Kingdom of Miscellania")) is True
 
 
+def test_activity_item_pairs_are_exempt():
+    # Sceptres and eternal glories have no monster drop table to confirm them.
+    api = _api({"bucket": [{"page_name": "Grand Gold Chest"}]})
+    assert _run(api.check_drop("Pharaoh's sceptre", "Pyramid Plunder")) is True
+    assert _run(api.check_drop("Amulet of eternal glory", "Fountain of Rune")) is True
+
+
+def test_activity_item_exemption_is_pair_exact():
+    api = _api({"bucket": [{"page_name": "Grand Gold Chest"}]})
+    assert _run(api.check_drop("Twisted bow", "Pyramid Plunder")) is False
+    assert _run(api.check_drop("Pharaoh's sceptre", "Zulrah")) is False
+
+
 def test_empty_dropsline_fails_open():
     # Successful query, but the item has no drop-source rows (new item / name
     # variant / wiki gap). Absence of data is not proof of a spoof.
