@@ -396,19 +396,25 @@ def test_hints_carry_the_kind_and_the_glyph_source():
 
 
 def test_display_only_shapes_get_icons_without_touching_the_parser():
-    """ToA/delve PBs, CA tier unlocks and PvP lines are unparsed for tracking
-    (a parser match would change what gets recorded) but still get icons."""
+    """PvP lines stay unparsed for tracking (a parser match would change what
+    gets recorded) but still get icons; the display patterns also back up
+    shapes the parser learned since (ToA PBs, CA tiers) against rewordings."""
     from utils.clan_broadcasts import parse_broadcast
 
     toa = ("Taka-ta achieved a new Tombs of Amascut (team size: 3) Expert mode "
            "Overall personal best: 25:40.20")
-    assert parse_broadcast(toa) is None
+    hints = bridge.broadcast_hints(parse_broadcast(toa), toa)
+    assert hints["bkind"] == "personal_best_overall"
+    assert hints["npc"] == "Tombs of Amascut: Expert Mode"
     assert bridge.broadcast_hints(None, toa)["bkind"] == "personal_best"
     pvp = ("Godest has been defeated by AlwaysDaGoat in The Wilderness and lost "
            "(844,540 coins) worth of loot.")
     assert bridge.broadcast_hints(parse_broadcast(pvp), pvp)["bkind"] == "pk"
     unlock = "Ann has unlocked the Hard tier of rewards from Combat Achievements!"
+    assert bridge.broadcast_hints(parse_broadcast(unlock), unlock)["bkind"] == "combat_achievement_tier"
     assert bridge.broadcast_hints(None, unlock)["bkind"] == "combat_achievement"
+    delve = "Ann achieved a new personal best deep delve at the Doom of Mokhaiotl: Level 30"
+    assert bridge.broadcast_hints(parse_broadcast(delve), delve)["npc"] == "Doom of Mokhaiotl"
     assert bridge.broadcast_hints(None, "Brand new Jagex wording")["bkind"] is None
 
 
@@ -432,6 +438,10 @@ def test_each_kind_gets_its_own_icon(monkeypatch):
     assert icon({"bkind": "diary"}) == "<diary>"
     assert icon({"bkind": "level_up"}) == "<stats>"
     assert icon({"bkind": "pk"}) == "<skull>"
+    assert icon({"bkind": "hardcore_death"}) == "<skull>"
+    assert icon({"bkind": "combat_achievement_tier"}) == "<combat_achievement>"
+    assert icon({"bkind": "delve"}) == "⏱️"
+    assert icon({"bkind": "personal_best_overall"}) == "⏱️"
     assert icon({"bkind": None}) == bridge.BROADCAST_PREFIX
 
 

@@ -462,4 +462,89 @@ def test_tracked_kinds_is_exactly_v2():
         "pet",
         "collection_log",
         "personal_best",
+        "delve",
     }
+
+
+# ── shapes added 2026-10-15 (live samples) ──────────────────────────────────
+
+def test_received_an_item_is_a_sourceless_drop():
+    parsed = parse_broadcast("Bluntish received an item: Infernal cape")
+    assert parsed == ParsedBroadcast(kind="item_drop", player="Bluntish", item_name="Infernal cape")
+
+
+def test_acquired_something_special_pet_wording():
+    parsed = parse_broadcast(
+        "Bwana Narc feels like she's acquired something special: Abyssal orphan"
+    )
+    assert parsed.kind == "pet"
+    assert parsed.item_name == "Abyssal orphan"
+
+
+def test_toa_challenge_pb_is_tracked_on_the_mode_row():
+    parsed = parse_broadcast(
+        "7N40 achieved a new Tombs of Amascut (team size: 3) Expert mode "
+        "Challenge personal best: 30:10.80"
+    )
+    assert parsed.kind == "personal_best"
+    assert parsed.tracked
+    assert parsed.extra == {
+        "activity": "Tombs of Amascut: Expert Mode", "team_size": "3", "time_text": "30:10.80",
+    }
+    normal = parse_broadcast(
+        "Aaveencity achieved a new Tombs of Amascut (team size: 1) Normal mode "
+        "Challenge personal best: 30:42"
+    )
+    assert normal.extra["activity"] == "Tombs of Amascut"
+
+
+def test_toa_overall_pb_is_recognized_but_not_tracked():
+    parsed = parse_broadcast(
+        "30 th and mish mish achieved a new Tombs of Amascut (team size: 4) Expert mode "
+        "Overall personal best: 28:12"
+    )
+    assert parsed.kind == "personal_best_overall"
+    assert not parsed.tracked
+
+
+def test_delve_pb():
+    parsed = parse_broadcast(
+        "Ettuflu achieved a new personal best deep delve at the Doom of Mokhaiotl: Level 27"
+    )
+    assert parsed == ParsedBroadcast(kind="delve", player="Ettuflu", extra={"level": 27})
+    assert parsed.tracked
+
+
+@pytest.mark.parametrize("line, kind", [
+    ("1stHonor has unlocked the Easy tier of rewards from Combat Achievements!",
+     "combat_achievement_tier"),
+    ("IArtemas has reached the highest possible combat level of 126!", "level_up"),
+    ("Lunchboxzz has reached the highest possible total level of 2376!", "level_up"),
+    ("HC King Snow has died and lost their Hardcore Ironman status.", "hardcore_death"),
+])
+def test_classify_only_shapes(line, kind):
+    parsed = parse_broadcast(line)
+    assert parsed.kind == kind
+    assert not parsed.tracked
+
+
+def test_one_coin_coffer_lines():
+    assert parse_broadcast("Hashtag has deposited one coin into the coffer.").value_gp == 1
+    withdrawal = parse_broadcast("Hashtag has withdrawn one coin from the coffer.")
+    assert withdrawal.kind == "coffer_withdrawal"
+    assert parse_broadcast("X has deposited 1,000 coins into the coffer.").value_gp == 1000
+
+
+def test_team_names_split():
+    from utils.clan_broadcasts import team_names
+
+    assert team_names("2k T0A, bahstun, Spoon Feed, GIM Awabaz and The Gr8M8") == [
+        "2k T0A", "bahstun", "Spoon Feed", "GIM Awabaz", "The Gr8M8",
+    ]
+    assert team_names("30 th and mish mish") == ["30 th", "mish mish"]
+    assert team_names("Solo Hann") == ["Solo Hann"]
+
+
+def test_rare_drop_wording():
+    parsed = parse_broadcast("Someone received a rare drop: Magma mutagen")
+    assert parsed == ParsedBroadcast(kind="item_drop", player="Someone", item_name="Magma mutagen")

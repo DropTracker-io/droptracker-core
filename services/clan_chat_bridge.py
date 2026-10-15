@@ -594,7 +594,8 @@ def push_mirror_broadcast(group_id, channel_id, message, extra: dict = None) -> 
 #: Shapes the tracking parser (``utils.clan_broadcasts``) does not classify,
 #: recognized here for the icon only. Kept out of the parser on purpose: a
 #: parser match changes what TRACKING does with a line, and a display tweak
-#: must never start recording e.g. ToA personal bests.
+#: must never start recording anything. Some of these are parsed now (ToA and
+#: delve PBs, CA tiers since 2026-10-15); they stay as a fallback for rewordings.
 _DISPLAY_KIND_PATTERNS = (
     (re.compile(r" achieved a new .*personal best", re.IGNORECASE), "personal_best"),
     (re.compile(r" tier of rewards from Combat Achievements", re.IGNORECASE),
@@ -608,11 +609,13 @@ _DISPLAY_KIND_PATTERNS = (
 _KIND_APP_EMOJI = {
     "collection_log": "collection_log",
     "combat_achievement": "combat_achievement",
+    "combat_achievement_tier": "combat_achievement",
     "quest": "quest",
     "diary": "diary",
     "level_up": "stats",
     "xp_milestone": "stats",
     "pk": "skull",
+    "hardcore_death": "skull",
 }
 
 #: Broadcast kind → plain Unicode icon, for kinds with no game art of their own.
@@ -622,6 +625,8 @@ _KIND_UNICODE = {
     "clue_item": "💰",
     "pet": "🐾",
     "personal_best": "⏱️",
+    "personal_best_overall": "⏱️",
+    "delve": "⏱️",
     "coffer_donation": "💰",
     "coffer_withdrawal": "💰",
     "invite": "🤝",
@@ -643,8 +648,10 @@ def broadcast_hints(parsed, message: str) -> dict:
     hints = {"bkind": kind, "subject": getattr(parsed, "player", None)}
     if kind in ("item_drop", "raid_drop", "clue_item", "pet"):
         hints["item"] = getattr(parsed, "item_name", None)
-    elif kind == "personal_best" and parsed is not None:
+    elif kind in ("personal_best", "personal_best_overall") and parsed is not None:
         hints["npc"] = (getattr(parsed, "extra", None) or {}).get("activity")
+    elif kind == "delve":
+        hints["npc"] = "Doom of Mokhaiotl"
     elif kind in ("coffer_donation", "coffer_withdrawal"):
         hints["item"] = "Coins"
     return hints

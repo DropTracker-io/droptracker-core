@@ -690,3 +690,94 @@ def test_flag_absent_or_false_keeps_the_tracking_path():
     assert cb._is_bridge_only({"bridge_only": "false"}) is False
     assert cb._is_bridge_only({"bridge_only": "true"}) is True
     assert cb._is_bridge_only({"bridge_only": True}) is True
+
+
+# ── team lines + delve (2026-10-15) ─────────────────────────────────────────
+
+class _Subject:
+    def __init__(self, pid, name, plugin=False):
+        self.player_id = pid
+        self.player_name = name
+        self.account_hash = "998877" if plugin else None
+
+
+@pytest.fixture
+def team_flow(mirror_spy, monkeypatch):
+    """Processor stubbed past binding/dedupe; records which subjects reached
+    the PB / delve writers and which lines were deferred."""
+    roster = {
+        "30 th": _Subject(1, "30 th"),
+        "mish mish": _Subject(2, "mish mish", plugin=True),
+        "Spoon Feed": _Subject(3, "Spoon Feed"),
+    }
+    calls = {"pb": [], "delve": [], "defer": 0, "guids": []}
+
+    monkeypatch.setattr(cb, "_bound_group_ids", lambda *_a: {10: 0})
+    monkeypatch.setattr(cb, "_bundle_is_new", lambda *_a: True)
+    monkeypatch.setattr(cb, "received_at", lambda _d: datetime(2026, 10, 15, 12, 0))
+    monkeypatch.setattr(
+        cb, "_find_subject_in_groups",
+        lambda _s, name, gids: (roster.get(name), [10]) if name in roster else (None, []),
+    )
+
+    async def no_copy(*_a):
+        return False
+
+    def defer(*_a):
+        calls["defer"] += 1
+        return True
+
+    async def pb(_s, _ext, _parsed, subject, _gids, guid, _stamp):
+        calls["pb"].append(subject.player_name)
+        calls["guids"].append(guid)
+        return cb.SubmissionResponse(True, "ok")
+
+    def delve(_s, _ext, parsed, subject, _stamp):
+        calls["delve"].append((subject.player_name, parsed.extra["level"]))
+        return cb.SubmissionResponse(True, "ok")
+
+    monkeypatch.setattr(cb, "_plugin_copy_exists", no_copy)
+    monkeypatch.setattr(cb, "_defer_broadcast", defer)
+    monkeypatch.setattr(cb, "_process_chat_pb", pb)
+    monkeypatch.setattr(cb, "_process_chat_delve", delve)
+    return calls
+
+
+TOA_TEAM_LINE = (
+    "30 th, Nobody Here and Spoon Feed achieved a new Tombs of Amascut (team size: 3) "
+    "Expert mode Challenge personal best: 23:20"
+)
+
+
+def test_team_pb_credits_every_rostered_teammate(team_flow):
+    response = asyncio.run(cb.clan_broadcast_processor(_payload(TOA_TEAM_LINE)))
+    assert response.success
+    assert team_flow["pb"] == ["30 th", "Spoon Feed"]
+    assert len(set(team_flow["guids"])) == 2
+
+
+def test_team_pb_defers_plugin_users_once_and_records_the_rest(team_flow):
+    line = TOA_TEAM_LINE.replace("Nobody Here", "mish mish")
+    asyncio.run(cb.clan_broadcast_processor(_payload(line)))
+    assert team_flow["pb"] == ["30 th", "Spoon Feed"]
+    assert team_flow["defer"] == 1
+    # The replay decides the plugin user; the others hit their guids again.
+    asyncio.run(cb.clan_broadcast_processor(_payload(line), _deferred_replay=True))
+    assert team_flow["pb"][2:] == ["30 th", "mish mish", "Spoon Feed"]
+    assert team_flow["defer"] == 1
+
+
+def test_single_player_guid_is_unchanged_by_the_team_support(team_flow):
+    line = TOA_TEAM_LINE.replace("30 th, Nobody Here and Spoon Feed", "Spoon Feed")
+    asyncio.run(cb.clan_broadcast_processor(_payload(line)))
+    stamp = datetime(2026, 10, 15, 12, 0)
+    assert team_flow["guids"] == [
+        cb._deterministic_guid(cb._clan_slug("The Best Clan"), line, stamp)
+    ]
+
+
+def test_delve_skips_plugin_reconciliation(team_flow):
+    line = "mish mish achieved a new personal best deep delve at the Doom of Mokhaiotl: Level 31"
+    asyncio.run(cb.clan_broadcast_processor(_payload(line)))
+    assert team_flow["delve"] == [("mish mish", 31)]
+    assert team_flow["defer"] == 0

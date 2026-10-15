@@ -43,8 +43,11 @@ __all__ = [
 #: line carries activity, time and — for raids — an explicit team size,
 #: which is enough for the PB boards when the write gate never overwrites a
 #: faster stored time.
+#: delve joined 2026-10-15: the deepest Doom of Mokhaiotl level, recorded
+#: through the same never-regress upsert the plugin path uses.
 TRACKED_KINDS = frozenset(
-    {"item_drop", "raid_drop", "clue_item", "pet", "collection_log", "personal_best"}
+    {"item_drop", "raid_drop", "clue_item", "pet", "collection_log", "personal_best",
+     "delve"}
 )
 
 #: npc_list row holding chat drops whose source could be neither read from the
@@ -208,7 +211,7 @@ def _int(raw, default=1) -> int:
 _VALUE_CLAUSE = r"(?: \((?:(?P<value>[\d,]+) coins|very valuable)\))?"
 
 _ITEM_DROP_RE = re.compile(
-    r"^(?P<player>.+?) received a drop: "
+    r"^(?P<player>.+?) received a (?:rare )?drop: "
     r"(?:(?P<quantity>[\d,]+) x )?"
     r"(?P<item>.+?)"
     + _VALUE_CLAUSE +
@@ -233,6 +236,17 @@ _CLUE_ITEM_RE = re.compile(
     r"(?: from (?P<source>.+?))?\.?$"
 )
 
+#: Rewards handed over rather than dropped: "Bluntish received an item:
+#: Infernal cape". No source is printed; the processor infers it from the item
+#: like any sourceless drop. Tracked as an item drop.
+_ITEM_RECEIVED_RE = re.compile(
+    r"^(?P<player>.+?) received an item: "
+    r"(?:(?P<quantity>[\d,]+) x )?"
+    r"(?P<item>.+?)"
+    + _VALUE_CLAUSE +
+    r"(?: from (?P<source>.+?))?\.?$"
+)
+
 _CLOG_RE = re.compile(
     r"^(?P<player>.+?) received a new collection log item: "
     r"(?P<item>.+?) \((?P<slots>\d+)/(?P<total>\d+)\)\.?$"
@@ -247,7 +261,8 @@ _CLOG_RE = re.compile(
 _PET_RE = re.compile(
     r"^(?P<player>.+?) "
     r"(?:has a funny feeling like .+? followed|"
-    r"feels something weird sneaking into .+? backpack): "
+    r"feels something weird sneaking into .+? backpack|"
+    r"feels like .+? acquired something special): "
     r"(?P<pet>.+?)"
     r"(?: at (?P<count>[\d,]+) (?P<unit>.+?))?\.?$"
 )
@@ -326,7 +341,7 @@ _DIARY_RE = re.compile(
 )
 _LEVEL_RE = re.compile(
     r"^(?P<player>.+?) has reached (?:a )?(?:the highest possible )?"
-    r"(?P<skill>.+?) level(?: of)? (?P<level>[\d,]+)\.?$"
+    r"(?P<skill>.+?) level(?: of)? (?P<level>[\d,]+)[.!]?$"
 )
 _XP_RE = re.compile(
     r"^(?P<player>.+?) has reached (?P<xp>[\d,]+) XP in (?P<skill>.+?)\.?$"
@@ -334,6 +349,30 @@ _XP_RE = re.compile(
 _PB_RE = re.compile(
     r"^(?P<player>.+?) has achieved a new (?P<activity>.+?) personal best: "
     r"(?P<time>[\d:.]+)\.?$"
+)
+#: ToA prints its own shape, two lines per raid, and names the whole team:
+#: "30 th and mish mish achieved a new Tombs of Amascut (team size: 4) Expert
+#: mode Challenge personal best: 28:12". The plugin's ToA PB is the Challenge
+#: time (verified against stored rows 2026-10-15), so only that phase is
+#: tracked; Overall is recognized and left alone.
+_TOA_PB_RE = re.compile(
+    r"^(?P<player>.+?) achieved a new Tombs of Amascut "
+    r"\(team size: (?P<size>\d+)\) (?P<mode>Entry|Normal|Expert) mode "
+    r"(?P<phase>Challenge|Overall) personal best: (?P<time>[\d:.]+)\.?$",
+    re.IGNORECASE,
+)
+_TOA_MODE_ACTIVITY = {
+    "entry": "Tombs of Amascut: Entry Mode",
+    "normal": "Tombs of Amascut",
+    "expert": "Tombs of Amascut: Expert Mode",
+}
+#: "Ettuflu achieved a new personal best deep delve at the Doom of Mokhaiotl:
+#: Level 27". The level matches what the plugin path stores as the deepest
+#: level completed.
+_DELVE_RE = re.compile(
+    r"^(?P<player>.+?) achieved a new personal best deep delve at the "
+    r"Doom of Mokhaiotl: Level (?P<level>\d+)\.?$",
+    re.IGNORECASE,
 )
 #: Raid PB activities embed the bracket: "Chambers of Xeric (Team Size: 5)".
 #: Solo-boss broadcasts carry no size (the processor brackets those "Solo").
@@ -364,7 +403,16 @@ _EXPELLED_RE = re.compile(
 )
 _COFFER_RE = re.compile(
     r"^(?P<player>.+?) has (?P<direction>deposited|withdrawn) "
-    r"(?P<value>[\d,]+) coins (?:into|from) the (?:clan )?coffer\.?$"
+    r"(?P<value>[\d,]+ coins|one coin) (?:into|from) the (?:clan )?coffer\.?$"
+)
+#: "1stHonor has unlocked the Easy tier of rewards from Combat Achievements!"
+_CA_TIER_RE = re.compile(
+    r"^(?P<player>.+?) has unlocked the (?P<tier>\w+) tier of rewards "
+    r"from Combat Achievements[.!]?$"
+)
+_HARDCORE_DEATH_RE = re.compile(
+    r"^(?P<player>.+?) has died and lost (?:their|his|her) Hardcore "
+    r"(?:Group )?Ironman status[.!]?$"
 )
 #: Client-local channel notices: the game talking TO the relayer, not a
 #: broadcast ABOUT a clanmate. The login hint ("To talk in your clan's channel,
@@ -382,6 +430,23 @@ _CHANNEL_NOTICE_RE = re.compile(
     r"|You (?:have left|are not in) .*\bchannel\b)",
     re.IGNORECASE,
 )
+
+
+def team_names(raw) -> list[str]:
+    """The players a team broadcast names: "A, B and C" → ["A", "B", "C"].
+
+    A single name comes back as a one-item list. Names may themselves contain
+    " and ", so callers try the whole string as one player first and fall back
+    to this split only when that fails.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    head, sep, last = text.rpartition(" and ")
+    if not sep:
+        return [text]
+    names = [n.strip() for n in head.split(", ")] + [last.strip()]
+    return [n for n in names if n]
 
 
 def _classified(kind: str, player_group: str = "player"):
@@ -414,6 +479,31 @@ def _pb(m) -> ParsedBroadcast:
     )
 
 
+def _toa_pb(m) -> ParsedBroadcast:
+    """Challenge lines are tracked as ``personal_best`` on the mode's own NPC
+    row; Overall lines classify as ``personal_best_overall`` (untracked)."""
+    activity = _TOA_MODE_ACTIVITY[m["mode"].lower()]
+    extra = {
+        "activity": activity,
+        "team_size": m["size"],
+        "time_text": m["time"].rstrip("."),
+    }
+    kind = "personal_best" if m["phase"].lower() == "challenge" else "personal_best_overall"
+    return ParsedBroadcast(kind=kind, player=m["player"], extra=extra)
+
+
+def _delve(m) -> ParsedBroadcast:
+    return ParsedBroadcast(
+        kind="delve", player=m["player"], extra={"level": int(m["level"])}
+    )
+
+
+def _ca_tier(m) -> ParsedBroadcast:
+    return ParsedBroadcast(
+        kind="combat_achievement_tier", player=m["player"], extra={"tier": m["tier"]}
+    )
+
+
 def _pk_win(m) -> ParsedBroadcast:
     return ParsedBroadcast(
         kind="pk",
@@ -431,7 +521,9 @@ def _pk_loss(m) -> ParsedBroadcast:
 
 def _coffer(m) -> ParsedBroadcast:
     kind = "coffer_donation" if m["direction"] == "deposited" else "coffer_withdrawal"
-    return ParsedBroadcast(kind=kind, player=m["player"], value_gp=_gp(m["value"]))
+    raw = m["value"]
+    value = 1 if raw == "one coin" else _gp(raw.split(" ")[0])
+    return ParsedBroadcast(kind=kind, player=m["player"], value_gp=value)
 
 
 def _combat_achievement(m) -> ParsedBroadcast:
@@ -468,6 +560,7 @@ def _channel_notice(_m) -> ParsedBroadcast:
 _MATCHERS = (
     (_CHANNEL_NOTICE_RE, _channel_notice),
     (_ITEM_DROP_RE, _item_drop),
+    (_ITEM_RECEIVED_RE, _item_drop),
     (_RAID_DROP_RE, _raid_drop),
     (_CLUE_ITEM_RE, _clue_item),
     (_CLOG_RE, _clog),
@@ -478,6 +571,10 @@ _MATCHERS = (
     (_XP_RE, _classified("xp_milestone")),
     (_LEVEL_RE, _classified("level_up")),
     (_PB_RE, _pb),
+    (_TOA_PB_RE, _toa_pb),
+    (_DELVE_RE, _delve),
+    (_CA_TIER_RE, _ca_tier),
+    (_HARDCORE_DEATH_RE, _classified("hardcore_death")),
     (_PK_WIN_RE, _pk_win),
     (_INVITE_RE, _classified("invite")),
     (_EXPELLED_RE, _classified("expelled", player_group="player")),

@@ -3,7 +3,8 @@
 The plugin's clan-relay feature (``relayClanBroadcasts``) forwards in-game
 ``CLAN_MESSAGE`` system broadcasts verbatim as ``type=clan_broadcast``
 payloads. This processor turns the ones we track (item/raid/clue drops, pets,
-collection log slots, personal bests — ``utils.clan_broadcasts.TRACKED_KINDS``)
+collection log slots, personal bests, deepest Doom delve —
+``utils.clan_broadcasts.TRACKED_KINDS``)
 into records for clanmates who do NOT run the plugin themselves. Everything about a chat
 row is deliberately second-class next to a plugin submission:
 
@@ -827,10 +828,8 @@ async def clan_broadcast_processor(
             _stat("duplicate_relay")
             return SubmissionResponse(True, "Broadcast already relayed by another clanmate")
 
-    subject, subject_group_ids = _find_subject_in_groups(
-        session, str(parsed.player).strip(), list(bound_groups)
-    )
-    if subject is None:
+    subjects = _find_subjects(session, parsed, list(bound_groups))
+    if not subjects:
         _stat("subject_not_in_roster")
         return SubmissionResponse(
             False,
@@ -838,6 +837,92 @@ async def clan_broadcast_processor(
             "chat tracking never creates players; run a WOM member sync",
         )
     stamp = received_at(broadcast_data)
+    team_line = len(subjects) > 1
+
+    if team_line:
+        # One line credits several clanmates (ToA team PBs). Each is decided
+        # on its own; a deferral parks the whole line once, and the replay
+        # re-decides everyone, already-recorded teammates hitting their guid.
+        deferred = False
+        results = []
+        for subject, subject_group_ids in subjects:
+            result = await _record_for_subject(
+                session, use_external_session, broadcast_data, world_type, parsed,
+                subject, subject_group_ids, bound_groups, clan_slug, clan_name,
+                message, stamp, _deferred_replay, allow_defer=not deferred,
+                guid_salt=str(subject.player_id),
+            )
+            if result is _DEFERRED:
+                deferred = True
+                continue
+            results.append(result)
+        recorded = sum(1 for r in results if r is not None and r.success)
+        note = " (plugin users deferred)" if deferred else ""
+        return SubmissionResponse(
+            True, f"Team broadcast handled for {len(subjects)} players, {recorded} ok{note}"
+        )
+
+    subject, subject_group_ids = subjects[0]
+    result = await _record_for_subject(
+        session, use_external_session, broadcast_data, world_type, parsed,
+        subject, subject_group_ids, bound_groups, clan_slug, clan_name,
+        message, stamp, _deferred_replay, allow_defer=True,
+    )
+    if result is _DEFERRED:
+        return SubmissionResponse(
+            True,
+            f"{subject.player_name} uses the plugin; chat copy deferred "
+            f"{PLUGIN_GRACE_SECONDS}s pending their own submission",
+        )
+    return result
+
+
+#: Sentinel :func:`_record_for_subject` returns when it parked the line.
+_DEFERRED = object()
+
+
+def _find_subjects(session, parsed, group_ids):
+    """``[(subject, subject_group_ids), ...]`` the line is about.
+
+    Usually one player. Team PB lines name several ("A, B and C achieved
+    ..."); the whole string is tried as one name first, because RSNs can
+    themselves contain " and ", and only then split. Teammates not on a bound
+    roster are simply left out.
+    """
+    from utils.clan_broadcasts import team_names
+
+    whole = str(parsed.player).strip()
+    subject, subject_group_ids = _find_subject_in_groups(session, whole, group_ids)
+    if subject is not None:
+        return [(subject, subject_group_ids)]
+    if parsed.kind != "personal_best":
+        return []
+    names = team_names(whole)
+    if len(names) < 2:
+        return []
+    found, seen = [], set()
+    for name in names:
+        subject, subject_group_ids = _find_subject_in_groups(session, name, group_ids)
+        if subject is not None and subject.player_id not in seen:
+            seen.add(subject.player_id)
+            found.append((subject, subject_group_ids))
+    return found
+
+
+async def _record_for_subject(
+    session, use_external_session, broadcast_data, world_type, parsed, subject,
+    subject_group_ids, bound_groups, clan_slug, clan_name, message, stamp,
+    _deferred_replay, *, allow_defer, guid_salt="",
+):
+    """Plugin-user reconciliation + the per-kind record for ONE subject.
+
+    Returns a SubmissionResponse, or :data:`_DEFERRED` when the line was
+    parked for the plugin grace window.
+    """
+    if parsed.kind == "delve":
+        # An idempotent never-regress upsert, so a chat copy can never
+        # double-count a plugin one: no reconciliation needed.
+        return _process_chat_delve(session, use_external_session, parsed, subject, stamp)
 
     if subject.account_hash and not _is_temp_account_hash(subject.account_hash):
         # Plugin-user reconciliation. Their own structured submission is
@@ -850,13 +935,12 @@ async def clan_broadcast_processor(
                 True, f"{subject.player_name}'s own submission covers this; chat copy ignored"
             )
         if not _deferred_replay:
+            if not allow_defer:
+                # A teammate already parked this line; the replay decides us.
+                return _DEFERRED
             if _defer_broadcast(broadcast_data, world_type):
                 _stat("deferred_plugin_user")
-                return SubmissionResponse(
-                    True,
-                    f"{subject.player_name} uses the plugin; chat copy deferred "
-                    f"{PLUGIN_GRACE_SECONDS}s pending their own submission",
-                )
+                return _DEFERRED
             # Redis defer unavailable: keep the conservative pre-reconciliation
             # behaviour — suppressing risks a missed record, recording risks a
             # double-count, and only one of those is self-healing.
@@ -868,7 +952,10 @@ async def clan_broadcast_processor(
         # record the chat fallback below.
         _stat("recovered_plugin_gap")
 
-    cc_guid = _deterministic_guid(clan_slug, message, stamp)
+    # Team lines salt the guid per player: one line, several records.
+    cc_guid = _deterministic_guid(
+        clan_slug, f"{message}|{guid_salt}" if guid_salt else message, stamp
+    )
     await asyncio.sleep(0)
 
     if parsed.kind in ("item_drop", "raid_drop", "clue_item"):
@@ -892,6 +979,35 @@ async def clan_broadcast_processor(
             cc_guid, stamp,
         )
     return SubmissionResponse(True, f"Broadcast kind '{parsed.kind}' is not tracked")
+
+
+def _process_chat_delve(session, use_external_session, parsed, subject, stamp):
+    """Raise the subject's deepest Doom delve (the Hall of Fame board) through
+    the plugin path's own atomic GREATEST upsert. No notification: deepest
+    delve has none on the plugin path either."""
+    from utils.doom_delve import MAX_LEVEL, record_completed
+
+    level = int(parsed.extra.get("level") or 0)
+    if not 1 <= level <= MAX_LEVEL:
+        _stat("delve_out_of_range")
+        return SubmissionResponse(True, f"Delve level {level} out of range; skipped")
+    try:
+        with session.begin_nested():
+            record_completed(session, subject.player_id, level, True, at=stamp)
+        if use_external_session:
+            session.flush()
+        else:
+            session.commit()
+    except Exception as e:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return SubmissionResponse(False, f"Deepest delve update failed: {e}")
+    _stat("delves_recorded")
+    return SubmissionResponse(
+        True, f"Deepest delve for {subject.player_name} raised to at least {level}"
+    )
 
 
 async def _process_chat_drop(
