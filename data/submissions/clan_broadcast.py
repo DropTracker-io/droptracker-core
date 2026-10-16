@@ -1449,6 +1449,10 @@ async def _process_chat_clog(
         pass
 
     item = await ensure_item_by_name(session, parsed.item_name)
+    # The line never names a source, so {npc_name} used to render as "None"
+    # (ticket #476). Use the item's only real source when it has one, like
+    # the drop path does, else say where it came from.
+    source = _inferred_drop_source(parsed.item_name) or SENTINEL_NPC_NAME
     _stat("clogs_notified")
     enabled = _notify_enabled_groups(session, subject_group_ids, "notify_clogs")
     notified = 0
@@ -1462,7 +1466,7 @@ async def _process_chat_clog(
             "player_id": subject.player_id,
             "guid": cc_guid,
             "item_name": parsed.item_name,
-            "npc_name": None,
+            "npc_name": source,
             "image_url": "",
             "video_key": None,
             "kc_received": None,

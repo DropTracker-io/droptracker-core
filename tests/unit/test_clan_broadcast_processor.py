@@ -781,3 +781,43 @@ def test_delve_skips_plugin_reconciliation(team_flow):
     asyncio.run(cb.clan_broadcast_processor(_payload(line)))
     assert team_flow["delve"] == [("mish mish", 31)]
     assert team_flow["defer"] == 0
+
+
+# ── chat clog notifications name a source (ticket #476) ─────────────────────
+
+def _run_chat_clog(monkeypatch, inferred):
+    import asyncio
+    from types import SimpleNamespace
+
+    sent = []
+
+    async def _item(_s, _name):
+        return SimpleNamespace(item_id=11920)
+
+    async def _notify(kind, player_id, data, gid, existing_session=None):
+        sent.append(data)
+
+    async def _no_gate(_s, _gid):
+        return False
+
+    monkeypatch.setattr(cb.redis_client.client, "set", lambda *a, **k: True, raising=False)
+    monkeypatch.setattr(cb, "ensure_item_by_name", _item)
+    monkeypatch.setattr(cb, "_notify_enabled_groups", lambda _s, gids, _k: set(gids))
+    monkeypatch.setattr(cb, "_images_gate_blocks", _no_gate)
+    monkeypatch.setattr(cb, "create_notification", _notify)
+    monkeypatch.setattr(cb, "_inferred_drop_source", lambda _name, from_raid=False: inferred)
+    parsed = SimpleNamespace(item_name="Dragon pickaxe", extra={"log_slots": 518, "log_total": 1717})
+    subject = SimpleNamespace(player_name="Sebby", player_id=7)
+    asyncio.run(cb._process_chat_clog(None, False, parsed, subject, [381], [381], "cc:x"))
+    return sent
+
+
+def test_chat_clog_uses_the_items_only_source(monkeypatch):
+    sent = _run_chat_clog(monkeypatch, "Tormented Demon")
+    assert [d["npc_name"] for d in sent] == ["Tormented Demon"]
+    assert sent[0]["log_slots"] == 518
+
+
+def test_chat_clog_without_a_sole_source_says_clan_broadcast(monkeypatch):
+    sent = _run_chat_clog(monkeypatch, None)
+    assert [d["npc_name"] for d in sent] == [cb.SENTINEL_NPC_NAME] == ["Clan Broadcast"]

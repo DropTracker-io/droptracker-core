@@ -4930,11 +4930,15 @@ class NotificationService:
             # Get data
             player_name = data.get('player_name')
             item_name = data.get('item_name')
-            collection_name = data.get('collection_name')
             image_url = data.get('image_url')
             item_id = data.get('item_id')
             kc = data.get('kc_received')
             npc_name = data.get('npc_name')
+            collection_name = data.get('collection_name')
+            if not collection_name:
+                # No sender supplies it; derive it from the game's log layout.
+                from utils.clog_collections import collection_for_item
+                collection_name = collection_for_item(item_id, item_name, npc_name) or ""
             partition = get_current_partition()
             month_total_int = self._get_player_month_total(player_id, partition)
             player_month_total = format_number(month_total_int)
