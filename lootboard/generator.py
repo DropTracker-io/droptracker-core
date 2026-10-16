@@ -495,6 +495,7 @@ async def generate_server_board(group_id: int = 0, wom_group_id: int = 0, partit
     group_items, player_totals, recent_drops, total_loot = await get_drops_for_group_optimized(player_ids, partition, int(group.group_id))
     print("Got recent drops:", len(recent_drops))
     redis_client.client.zadd(f'gleaderboard:{partition}', {group.group_id: total_loot})
+    _ensure_public_dir(f"/store/droptracker/disc/static/assets/img/clans/{group_id}")
     with open(f"/store/droptracker/disc/static/assets/img/clans/{group_id}/recent_drops.json", "w") as f:
         json.dump(recent_drops, f, indent=4)
     # Draw elements on the background image (added dynamic_coloring - added BY Smoke [https://github.com/Varietyz/])
@@ -635,6 +636,7 @@ async def generate_server_board_temporary(group_id: int = 0, wom_group_id: int =
     )
     #print("Got recent drops:", len(recent_drops))
     redis_client.client.zadd(f'gleaderboard:{partition}', {group.group_id: total_loot})
+    _ensure_public_dir(f"/store/droptracker/disc/static/assets/img/clans/{group_id}")
     with open(f"/store/droptracker/disc/static/assets/img/clans/{group_id}/recent_drops.json", "w") as f:
         json.dump(recent_drops, f, indent=4)
     # Draw elements on the background image (added dynamic_coloring - added BY Smoke [https://github.com/Varietyz/])
@@ -1537,6 +1539,7 @@ async def generate_timeframe_board(group_id: int = 0, wom_group_id: int = 0,
     
     # Save recent drops JSON
     try:
+        _ensure_public_dir(f"/store/droptracker/disc/static/assets/img/clans/{group_id}")
         with open(f"/store/droptracker/disc/static/assets/img/clans/{group_id}/recent_drops.json", "w") as f:
             json.dump(recent_drops, f)
     except Exception as e:
