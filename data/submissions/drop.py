@@ -16,6 +16,7 @@ from .common import (
     get_player_groups_with_global,
     is_user_dm_enabled,
     wants_drop_confirmation,
+    screenshot_gate_notice,
     screenshot_required,
     select_session_and_flag,
     create_notification,
@@ -996,7 +997,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                 if await screenshot_required(session, group_id):
                     # Treat video submissions as satisfying screenshot requirement
                     if not drop.image_url and not video_key:
-                        notice = f"Your {item_name} submission did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
+                        notice = screenshot_gate_notice(session, player_id, group.group_name, f"{item_name} drop", value=int(raw_drop_value))
                         continue ## Skipping this group in the loop; as there is no image despite the group's requirement of one
 
                 debug_print(f"Notification criteria met for group {group_id} (reason: {notify_reason})")

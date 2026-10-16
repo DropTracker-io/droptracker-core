@@ -12,6 +12,7 @@ from .common import (
     get_player_groups_with_global,
     is_user_dm_enabled,
     create_notification,
+    screenshot_gate_notice,
     screenshot_required,
     select_session_and_flag,
     ensure_can_create,
@@ -150,11 +151,7 @@ async def diary_processor(diary_data, external_session=None, world_type="main"):
         # Screenshot requirement (treat video submissions as satisfying it too)
         if await screenshot_required(session, group_id):
             if not image_url and not video_key and not video_url:
-                notice = (
-                    f"Your diary submission did not include a screenshot "
-                    f"(required for {group.group_name}). Please enable screenshots "
-                    f"in the DropTracker plugin configuration."
-                )
+                notice = screenshot_gate_notice(session, player_id, group.group_name, "diary")
                 print(f"Diary submission did not include a screenshot (required for {group.group_name}).")
                 continue
 

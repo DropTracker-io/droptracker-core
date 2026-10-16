@@ -13,6 +13,7 @@ from .common import (
     get_player_groups_with_global,
     is_user_dm_enabled,
     create_notification,
+    screenshot_gate_notice,
     screenshot_required,
     select_session_and_flag,
     ensure_can_create,
@@ -331,7 +332,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
             if await screenshot_required(session, group_id):
                 # Treat video submissions as satisfying screenshot requirement
                 if not dl_path and not video_key:
-                    notice = f"Your pet submission did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
+                    notice = screenshot_gate_notice(session, player_id, group.group_name, "pet")
                     continue
             notify_reason = "config" if gc.is_truthy(pet_notify_val) else None
             if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:

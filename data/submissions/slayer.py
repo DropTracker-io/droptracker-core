@@ -26,6 +26,7 @@ from .common import (
     ensure_player_by_name_then_auth,
     get_config_prefix,
     get_player_groups_with_global,
+    screenshot_gate_notice,
     screenshot_required,
     select_session_and_flag,
     ensure_can_create,
@@ -282,11 +283,7 @@ async def _queue_group_notifications(session, player, entry, *, player_name,
 
         if await screenshot_required(session, group_id):
             if not image_url and not video_key and not video_url:
-                notice = (
-                    f"Your slayer task submission did not include a screenshot "
-                    f"(required for {group.group_name}). Please enable screenshots "
-                    f"in the DropTracker plugin configuration."
-                )
+                notice = screenshot_gate_notice(session, entry.player_id, group.group_name, "slayer task")
                 continue
 
         await create_notification(

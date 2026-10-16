@@ -17,6 +17,7 @@ from .common import (
     create_notification,
     download_webhook_screenshot,
     is_truthy_config,
+    screenshot_gate_notice,
     screenshot_required,
     select_session_and_flag,
     debug_print,
@@ -756,10 +757,7 @@ async def experience_processor(experience_data, external_session=None):
 
                 if await screenshot_required(session, group_id):
                     if not image_url:
-                        notice = (
-                            f"Your XP milestone submission did not include a screenshot "
-                            f"(required for {group.group_name})."
-                        )
+                        notice = screenshot_gate_notice(session, player_id, group.group_name, "XP milestone")
                         continue
 
                 qualifying_text = ", ".join(
@@ -1021,10 +1019,12 @@ async def experience_processor(experience_data, external_session=None):
             # Check screenshot requirement
             if await screenshot_required(session, group_id):
                 if not image_url:
-                    notice = (
-                        f"Your level-up submission did not include a screenshot "
-                        f"(required for {group.group_name}). Please enable screenshots "
-                        f"in the DropTracker plugin configuration."
+                    notice = screenshot_gate_notice(
+                        session, player_id, group.group_name, "level-up",
+                        # The plugin compares its minimum to the highest level
+                        # in the submission (SubmissionManager.maxNewLevelIn).
+                        level=max((_safe_int(sk.get("new_level"), default=0) for sk in skills), default=0),
+                        group_min_level=minimum_level_to_notify,
                     )
                     continue
 

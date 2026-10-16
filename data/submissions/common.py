@@ -670,6 +670,80 @@ async def screenshot_required(session, group_id) -> bool:
     value = gc.get(session, group_id, gc.ONLY_SEND_MESSAGES_WITH_IMAGES)
     return gc.is_truthy(value)
 
+
+def _snapshot_screenshot_settings(session, player_id):
+    """The player's ``Screenshots`` settings from their latest plugin snapshot.
+
+    ``{}`` when there is no snapshot (plugins before 6.0.16, or none sent yet)
+    or it cannot be read. Never raises: this only shapes a chat notice.
+    """
+    if player_id is None:
+        return {}
+    try:
+        import json
+        from db.models import PlayerPluginConfig
+
+        raw = (
+            session.query(PlayerPluginConfig.config_json)
+            .filter(PlayerPluginConfig.player_id == player_id)
+            .scalar()
+        )
+        settings = (json.loads(raw) or {}).get("settings") or {} if raw else {}
+        shots = settings.get("Screenshots")
+        return shots if isinstance(shots, dict) else {}
+    except Exception:
+        return {}
+
+
+def _setting_int(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _setting_off(value):
+    return value is False or str(value).strip().lower() in ("false", "0", "off")
+
+
+def screenshot_gate_notice(session, player_id, group_name, what, *,
+                           level=None, group_min_level=None, value=None):
+    """Chat notice for a submission a group dropped for having no screenshot.
+
+    ``what`` names the submission ("level-up", "Abyssal whip drop", ...). The
+    player's stored plugin settings say *why* there was no screenshot, so the
+    notice can name the setting to change instead of always saying "enable
+    screenshots", which is wrong advice when screenshots are on and the
+    player's own threshold skipped this one (suggestion #168).
+
+    ``level`` / ``group_min_level`` apply to level-ups (the plugin's "Minimum
+    level to screenshot"); ``value`` to loot (its "Loot screenshot value").
+    """
+    head = f"{group_name} only posts submissions with a screenshot, so your {what} was not posted."
+    shots = _snapshot_screenshot_settings(session, player_id)
+
+    if _setting_off(shots.get("screenshots")):
+        return f"{head} Turn on 'Enable Screenshots' in the DropTracker plugin settings."
+
+    if level is not None:
+        player_min = _setting_int(shots.get("minLevelToScreenshot"))
+        if player_min is not None and level < player_min:
+            target = f" to {group_min_level} or lower" if group_min_level and group_min_level < player_min else ""
+            return (
+                f"{head} Your plugin only takes level-up screenshots from level {player_min} "
+                f"('Minimum level to screenshot'). Lower it{target} to have these posted."
+            )
+
+    if value is not None:
+        player_min_value = _setting_int(shots.get("screenshotValue"))
+        if player_min_value is not None and value <= player_min_value:
+            return (
+                f"{head} Your plugin only takes loot screenshots above {player_min_value:,} gp "
+                f"('Loot screenshot value'). Lower it to have these posted."
+            )
+
+    return f"{head} Check that screenshots are turned on in the DropTracker plugin settings."
+
 def check_group_point_system_active(group_id, external_session=None):
     """Whether the group's custom point system is enabled (subscription entitlement).
 

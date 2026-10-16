@@ -27,6 +27,7 @@ from .common import (
     get_player_boss_kills,
     is_user_dm_enabled,
     award_points_to_player,
+    screenshot_gate_notice,
     screenshot_required,
     select_session_and_flag,
     ensure_can_create,
@@ -655,7 +656,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 if (await screenshot_required(session, group_id)):
                     # Treat video submissions as satisfying screenshot requirement
                     if not pb_entry.image_url and not video_key:
-                        notice = f"Your personal best submission did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
+                        notice = screenshot_gate_notice(session, player_id, group.group_name, "personal best")
                         ## Continue past this group in the loop
                         continue
                 notification_data = {

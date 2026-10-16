@@ -1,7 +1,7 @@
 """A drop withheld from every group must still say why.
 
-The processors build a "your submission did not include a screenshot (required
-for X)" notice when a group runs ``only_send_messages_with_images`` and the
+The processors build a "X only posts submissions with a screenshot" notice
+(``common.screenshot_gate_notice``) when a group runs ``only_send_messages_with_images`` and the
 submission has neither image nor video, then ``continue`` past that group.
 ``SubmissionResponse.notice`` is the only channel that reaches the player: the
 plugin renders it as in-game chat, either straight off the /webhook response
@@ -40,7 +40,8 @@ PROCESSOR_DIR = Path(__file__).resolve().parents[2] / "data" / "submissions"
 
 PROCESSORS = ["drop.py", "clog.py", "ca.py", "pb.py", "pet.py"]
 
-NOTICE_MARKER = "did not include a screenshot"
+#: Every processor builds the notice through common.screenshot_gate_notice.
+NOTICE_MARKER = "screenshot_gate_notice("
 
 
 def _module(name):

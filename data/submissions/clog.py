@@ -13,6 +13,7 @@ from .common import (
     get_player_groups_with_global,
     create_notification,
     is_user_dm_enabled,
+    screenshot_gate_notice,
     screenshot_required,
     select_session_and_flag,
     ensure_can_create,
@@ -389,7 +390,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                 if await screenshot_required(session, group_id):
                     # Treat video submissions as satisfying screenshot requirement
                     if not clog_entry.image_url and not video_key:
-                        notice = f"Your Collection Log submission ({item_name}) did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
+                        notice = screenshot_gate_notice(session, player_id, group.group_name, f"collection log slot ({item_name})")
                         continue ## Skip this group in the loop
                 notification_data = {
                     "player_name": player_name,

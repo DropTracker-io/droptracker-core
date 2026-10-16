@@ -10,6 +10,7 @@ from .common import (
     ensure_player_by_name_then_auth,
     ensure_can_create,
     is_user_dm_enabled,
+    screenshot_gate_notice,
     screenshot_required,
     select_session_and_flag,
     create_notification,
@@ -376,7 +377,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                 if await screenshot_required(session, group_id):
                     # Treat video submissions as satisfying screenshot requirement
                     if not ca_entry.image_url and not video_key:
-                        notice = f"Your combat achievement submission did not include a screenshot (required for {group.group_name}). Please enable screenshots in the DropTracker plugin configuration to accurately share your achievements!"
+                        notice = screenshot_gate_notice(session, player_id, group.group_name, "combat achievement")
                         continue ## Skip this group inside the loop
                 notification_data = {
                     "player_name": player_name,
