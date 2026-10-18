@@ -362,3 +362,34 @@ class TestProcessOneNotificationScopesTheRow:
         outside = _RecordingChannel(5)
         await service._send(outside, embed="E")
         assert outside.calls == [{"embed": "E"}]
+
+
+class TestAHungSendCannotStallTheQueue:
+    """2026-10-17: one send never returned, its lane never finished, and the
+    gather() over all lanes held the loop for ~3.5h — no group got anything."""
+
+    @pytest.fixture()
+    def service(self, monkeypatch):
+        svc = ns.NotificationService.__new__(ns.NotificationService)
+        svc.NOTIF_SEND_TIMEOUT_SECONDS = 0.05
+        monkeypatch.setattr(ns, "redis_client", SimpleNamespace(client=_FakeRedis()))
+        self.row = SimpleNamespace(id=2681978, status="pending", error_message=None)
+        session = _FakeRowSession(self.row)
+        monkeypatch.setattr(sys.modules["api.core"], "get_db_session", lambda: session, raising=False)
+
+        async def hangs(notification, db_session):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(svc, "process_notification_with_session", hangs)
+        return svc
+
+    async def test_the_row_times_out_and_requeues(self, service):
+        assert await asyncio.wait_for(service._process_one_notification(self.row.id), 2) == 0
+        assert self.row.status == "pending"
+        assert "retrying" in self.row.error_message
+
+    async def test_it_goes_terminal_after_the_retry_cap(self, service):
+        for _ in range(ns.NotificationService.SEND_ATTEMPTS_MAX):
+            self.row.status = "pending"
+            await service._process_one_notification(self.row.id)
+        assert self.row.status == "failed"

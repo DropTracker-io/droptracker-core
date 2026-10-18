@@ -1392,6 +1392,13 @@ class NotificationService:
     NOTIF_BATCH_SIZE = 50
     NOTIF_LANE_CONCURRENCY = 6
 
+    # Upper bound on one queue row's send. Lanes run under one gather(), so a
+    # single await that never returns (seen 2026-10-17: one group-381 drop hung
+    # at 21:21 and nothing sent for ~3.5h fleet-wide, 3,950 rows backed up)
+    # stalls every group. The resulting TimeoutError is transient, so the row
+    # requeues; the per-row nonce keeps a retry from double-posting.
+    NOTIF_SEND_TIMEOUT_SECONDS = 120
+
     # Audit P1: total tries a queue row gets when the failure is transient
     # (429, Discord 5xx, network) before it lands in `failed` for good. A
     # permanent failure (Forbidden/NotFound/BadRequest — a fact about the
@@ -1520,7 +1527,10 @@ class NotificationService:
                 try:
                     scope_token = _send_scope.set(_SendScope(notification_id))
                     try:
-                        await self.process_notification_with_session(locked_notification, db_session)
+                        await asyncio.wait_for(
+                            self.process_notification_with_session(locked_notification, db_session),
+                            timeout=self.NOTIF_SEND_TIMEOUT_SECONDS,
+                        )
                     finally:
                         _send_scope.reset(scope_token)
                     return 1
