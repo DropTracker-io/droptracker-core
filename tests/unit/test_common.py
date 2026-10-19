@@ -302,6 +302,65 @@ class TestEnsureCanCreate:
 
 # ── check_auth ────────────────────────────────────────────────────────────────
 
+class _GroupsSession:
+    """Session stub for get_player_groups_with_global: serves the player's
+    association rows and records each Group lookup."""
+
+    def __init__(self, member_of, global_group):
+        self.member_of = member_of
+        self.global_group = global_group
+        self.first_calls = 0
+        self.commits = 0
+
+    def execute(self, *args, **kwargs):
+        rows = [(gid,) for gid in self.member_of]
+        return MagicMock(all=MagicMock(return_value=rows))
+
+    def query(self, model):
+        return self
+
+    def filter(self, *criteria):
+        return self
+
+    def first(self):
+        self.first_calls += 1
+        return self.global_group
+
+    def all(self):
+        return ["groups"]
+
+    def commit(self):
+        self.commits += 1
+
+
+class TestGetPlayerGroupsWithGlobal:
+    def test_member_of_global_skips_the_global_lookup(self):
+        from data.submissions.common import get_player_groups_with_global
+        player = MagicMock(player_id=7)
+        session = _GroupsSession(member_of=[2, 190], global_group=MagicMock(group_id=2))
+        assert get_player_groups_with_global(session, player) == ["groups"]
+        assert session.first_calls == 0
+        player.add_group.assert_not_called()
+        assert session.commits == 0
+
+    def test_non_member_is_added_to_global(self):
+        from data.submissions.common import get_player_groups_with_global
+        player = MagicMock(player_id=7)
+        global_group = MagicMock(group_id=2)
+        session = _GroupsSession(member_of=[190], global_group=global_group)
+        assert get_player_groups_with_global(session, player) == ["groups"]
+        assert session.first_calls == 1
+        player.add_group.assert_called_once_with(global_group)
+        assert session.commits == 1
+
+    def test_missing_global_group_adds_nothing(self):
+        from data.submissions.common import get_player_groups_with_global
+        player = MagicMock(player_id=7)
+        session = _GroupsSession(member_of=[], global_group=None)
+        assert get_player_groups_with_global(session, player) == []
+        player.add_group.assert_not_called()
+
+
 class TestCheckAuth:
     @pytest.fixture(autouse=True)
     def _import(self):

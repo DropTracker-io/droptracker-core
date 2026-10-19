@@ -139,18 +139,19 @@ class DatabaseOperations:
             date_received_value = date_received
         else:
             date_received_value = date_received
-        item = db_session.query(ItemList).filter(ItemList.item_id==item_id).first()
-        item_name = item.item_name if item else "Unknown"
-        npc = db_session.query(NpcList).filter(NpcList.npc_id==npc_id).first()
-        npc_name = npc.npc_name if npc else "Unknown"
         if attachment_url and attachment_type:
             # Don't re-download if the image was already downloaded and processed
             if attachment_type == "downloaded":
                 # Image was already downloaded, use the provided image_url directly
-                #print(f"Using already downloaded image for drop {item_name} from {npc_name}")
                 # The image_url should already be set from the original download
                 pass
             else:
+                # Names only feed the download's file path, so they are read
+                # here rather than on every drop.
+                item = db_session.query(ItemList).filter(ItemList.item_id==item_id).first()
+                item_name = item.item_name if item else "Unknown"
+                npc = db_session.query(NpcList).filter(NpcList.npc_id==npc_id).first()
+                npc_name = npc.npc_name if npc else "Unknown"
                 # Download the image from the attachment URL
                 player = db_session.query(Player).filter(Player.player_id == player_id).first()
                 if not player:

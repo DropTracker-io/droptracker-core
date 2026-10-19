@@ -1438,12 +1438,15 @@ def get_player_groups_with_global(session, player: Player):
     ).all()
 
     group_ids = {gid[0] for gid in player_gids} if player_gids else set()
-    global_group = session.query(Group).filter(Group.group_id == 2).first()
 
-    if global_group and global_group.group_id not in group_ids:
-        player.add_group(global_group)
-        session.commit()
-        group_ids.add(global_group.group_id)
+    # Nearly every player is already in the global group, so it is only loaded
+    # when they are not -- a read per submission otherwise.
+    if 2 not in group_ids:
+        global_group = session.query(Group).filter(Group.group_id == 2).first()
+        if global_group:
+            player.add_group(global_group)
+            session.commit()
+            group_ids.add(global_group.group_id)
 
     if not group_ids:
         return []
