@@ -284,6 +284,17 @@ def _resolve_victim(session, victim_name: str):
         return None
 
 
+def _region_name(region_id) -> Optional[str]:
+    if region_id is None:
+        return None
+    try:
+        from utils import region_names
+
+        return _text(region_names.location_for(region_id) or region_names.name_for(region_id), 125)
+    except Exception:
+        return None
+
+
 def _items_text(items: List[dict], limit: int = NOTIFY_ITEM_LINES) -> str:
     """``2 x Abyssal whip (2.4M)`` lines, most valuable first."""
     from utils.format import format_number
@@ -383,7 +394,9 @@ async def pvp_kill_processor(kill_data, external_session=None):
             world=_int_or_none(kill_data.get("world")),
             wilderness_level=_int_or_none(kill_data.get("wilderness_level")),
             region_id=region_id,
-            location=_text(kill_data.get("location"), 125),
+            # The plugin sends the region, not a name; the server's names also
+            # cover the Wilderness (utils/region_names.py), like deaths.
+            location=_text(kill_data.get("location"), 125) or _region_name(region_id),
             total_value=total_value,
             item_count=sum(i["quantity"] for i in items),
             world_type=world_type,
