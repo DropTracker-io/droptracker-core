@@ -178,7 +178,7 @@ CATEGORY_LABELS = {
 BOSS_PAGES = [
     "Zulrah", "Vorkath", "Corporeal Beast", "Yama", "Doom of Mokhaiotl",
     "Maggot King", "The Nightmare", "Phantom Muspah", "Kalphite Queen",
-    "The Hueycoatl", "Amoxliatl", "Royal Titans", "Shellbane Gryphon",
+    "The Hueycoatl", "Amoxliatl", "Royal Titans",
     "The Mad Angel", "Sarachnis", "Fortis Colosseum", "The Gauntlet",
     "The Fight Caves", "The Inferno", "Tormented Demons", "Scurrius",
     "Giant Mole", "Hespori", "Brutus", "Obor", "Bryophyta",
@@ -186,7 +186,8 @@ BOSS_PAGES = [
 ]
 SLAYER_BOSS_PAGES = [
     "Abyssal Sire", "Kraken", "Cerberus", "Thermonuclear Smoke Devil",
-    "Alchemical Hydra", "Grotesque Guardians", "Araxxor", "Skotizo",
+    "Alchemical Hydra", "Grotesque Guardians", "Araxxor", "Shellbane Gryphon",
+    "Skotizo",
 ]
 WILDERNESS_PAGES = [
     "Chaos Elemental", "Chaos Fanatic", "Crazy Archaeologist", "Scorpia",

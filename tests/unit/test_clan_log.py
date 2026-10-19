@@ -331,7 +331,7 @@ def test_spec_fixes_the_suggestion_207_gaps(spec_sections):
         assert _section(spec_sections, boss)["category"] == "bosses"
     assert _section(spec_sections, "Skotizo")["category"] == "slayer"
     assert _section(spec_sections, "Sarachnis")["category"] == "bosses"
-    assert _section(spec_sections, "Shellbane Gryphon")["category"] == "bosses"
+    assert _section(spec_sections, "Shellbane Gryphon")["category"] == "slayer"
     assert {"Ring of nature", "Lava dragon mask"} <= _names(_section(spec_sections, "Elite (rare)"))
     assert {"Ring of coins", "Bucket helm (g)"} <= _names(_section(spec_sections, "Master (rare)"))
     assert "Mystic hat (dusk)" in _names(_section(spec_sections, "Slayer (non-boss)"))
