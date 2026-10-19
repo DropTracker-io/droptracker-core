@@ -72,6 +72,10 @@ MIRROR_KIND_BROADCAST = "broadcast"
 #: :func:`broadcast_icon`).
 BROADCAST_PREFIX = "📢"
 
+#: Leads the name of a clanmate the game has muted (services/clan_chat_muted):
+#: their line reached Discord, but most of the clan never saw it in game.
+MUTED_ICON = "🔇"
+
 #: Per-relayer, per-minute ceiling on lines staged for the bridge. ONE budget
 #: for both kinds: it is one relayer feeding one channel, and the thing being
 #: capped is Discord spam. Chattier than the broadcast-tracking limit, still far
@@ -575,11 +579,12 @@ def bot_within_rate_limit(channel_id, author_id) -> bool:
 
 
 def push_mirror_line(group_id, channel_id, sender, message, rank=None,
-                     account_type=None) -> bool:
-    """Stage one game chat line (player speech) for the batched channel send."""
+                     account_type=None, muted=False) -> bool:
+    """Stage one game chat line (player speech) for the batched channel send.
+    ``muted`` marks a sender the game is not delivering (services/clan_chat_muted)."""
     return _stage_entry(
         group_id, channel_id, MIRROR_KIND_CHAT, message, sender=sender, rank=rank,
-        extra={"account_type": account_type},
+        extra={"account_type": account_type, "muted": "1" if muted else None},
     )
 
 
@@ -809,6 +814,9 @@ def batch_lines_by_channel(entries: list, rank_emojis: dict = None) -> dict:
         if not sender:
             continue
         icons = [i for i in (emoji_for_rank(entry.get("rank"), rank_emojis), badge) if i]
+        if entry.get("muted"):
+            # Only Discord and plugin users see this sender; the game drops it.
+            icons.append(MUTED_ICON)
         line = f"**{sender}**: {message}"
         batches.setdefault(channel_id, []).append(" ".join(icons + [line]))
     return batches

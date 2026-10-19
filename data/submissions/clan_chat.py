@@ -107,9 +107,24 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
         )
 
     digest = hashlib.sha256(f"{sender}|{message}".encode("utf-8")).hexdigest()[:24]
-    if not claim_relayed_line(
+    claimed = claim_relayed_line(
         f"chatbridge:seen:{slug}:{digest}", relayer.player_id, CHAT_SEEN_TTL_SECONDS
-    ):
+    )
+
+    # The relayer's own line (plugin 6.1.10+ marks it). A muted player's line only
+    # ever exists on their own client, so these feed the muted-member relay
+    # (services/clan_chat_muted). Only the relayer can speak for themselves.
+    self_line = is_own_line(chat_data.get("self"), sender, relayer.player_name)
+    muted = False
+    if self_line:
+        from services import clan_chat_muted
+
+        muted = clan_chat_muted.is_flagged(slug, relayer.player_id)
+
+    if not claimed:
+        if muted:
+            # Another clanmate's copy got here first, so the game delivered it.
+            clan_chat_muted.clear_flag(slug, relayer.player_id)
         return SubmissionResponse(True, "Line already relayed by another clanmate")
 
     # Rank drives the mirror line's rank emoji. The plugin's relay doesn't send
@@ -126,6 +141,7 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
     if plugin_type not in VALID_ACCOUNT_TYPES:
         plugin_type = None
     staged = 0
+    relay_type = plugin_type
     for group_id, channel_id in bound.items():
         rank = plugin_rank or rank_for_group_member(session, group_id, sender)
         account_type = plugin_type
@@ -135,7 +151,26 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
             except Exception:
                 account_type = None
         if push_mirror_line(
-            group_id, channel_id, sender, message, rank=rank, account_type=account_type
+            group_id, channel_id, sender, message, rank=rank, account_type=account_type,
+            muted=muted,
         ):
             staged += 1
+        relay_type = relay_type or account_type
+
+    if self_line and clan_chat_muted.relay_enabled(session, bound.keys()):
+        clan_chat_muted.on_self_line(
+            slug, digest, relayer.player_id, sender, message, account_type=relay_type
+        )
     return SubmissionResponse(True, f"Clan chat line staged for {staged} group(s)")
+
+
+def is_own_line(flag, sender, relayer_name) -> bool:
+    """Whether a line marked ``self`` really is the authenticated relayer's.
+    The flag alone is the client's word; the name match is what stops one
+    member from injecting lines under another's name."""
+    if str(flag or "").strip().lower() not in ("true", "1"):
+        return False
+    from utils.rsn import normalize_player_display_equivalence as norm
+
+    own = norm(relayer_name or "")
+    return bool(own) and norm(sender) == own

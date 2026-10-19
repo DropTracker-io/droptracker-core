@@ -70,3 +70,12 @@ def test_missing_fields_still_rejected_before_the_echo_check(stub_session):
     response = _run("Bob (Discord)", message="   ")
     assert response.success is False
     assert "Missing" in response.message
+
+
+def test_only_the_relayer_can_speak_for_themselves():
+    """A ``self`` line reaches other players' games looking like real clan
+    chat, so the flag counts only when the sender IS the authed relayer."""
+    assert cc.is_own_line("true", "Muted_Mike", "muted mike") is True
+    assert cc.is_own_line("true", "Someone Else", "Muted Mike") is False
+    assert cc.is_own_line(None, "Muted Mike", "Muted Mike") is False
+    assert cc.is_own_line("true", "Muted Mike", "") is False

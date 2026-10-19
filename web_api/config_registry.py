@@ -892,6 +892,16 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "The Discord channel your in-game clan chat is mirrored to, and whose messages are relayed into the game. Anyone who can type in this channel can speak to the clan — restrict it accordingly.",
         "default": None,
     },
+    # services/clan_chat_muted: lines only the sender's own client printed
+    # (a Jagex mute) are shown to the clan's plugin users, marked muted.
+    {
+        "key": "clan_chat_relay_muted",
+        "label": "Show muted clanmates' chat",
+        "category": "clan_chat",
+        "type": "boolean",
+        "help": "Shows chat from clanmates the game has muted to members who use the plugin with the bridge on. A muted player's messages only appear on their own screen, so nobody else in the clan sees them. When their plugin relays a message that nobody else saw, it is shown in game to members with the plugin, with a muted icon by the name. It also appears in the bridge channel with the same icon. Only a player's own messages are relayed this way.",
+        "default": True,
+    },
     # services/clan_chat_bridge.allowed_bot_source: bot/webhook IDs admitted
     # to the Discord→game direction, bridge channel only. Validated by
     # _coerce_snowflake_list (10 IDs fit config_value's 255 chars).

@@ -441,6 +441,14 @@ async def clan_chat_mirror_drain():
         await drain_and_send(bot)
     except Exception as e:
         print(f"[ClanChatBridge] mirror drain failed: {e}")
+    try:
+        # Muted clanmates: settle lines whose "did anyone else see it?"
+        # window has closed (services/clan_chat_muted). Redis only.
+        from services.clan_chat_muted import process_due_checks
+
+        await asyncio.to_thread(process_due_checks)
+    except Exception as e:
+        print(f"[ClanChatBridge] muted-line checks failed: {e}")
 
 
 
