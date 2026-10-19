@@ -19,7 +19,10 @@ What it does
    are ``cc:<sha256>``, so this is an index prefix range, not a table scan).
 2. For each, looks for a non-``clan_chat`` row of the same player, the same
    item NAME (any id in the family) and the same quantity, within
-   ``--window`` seconds (default 600, the server's own look-back). Pairing is
+   ``--window`` seconds (default 400). Every real copy found on 2026-10-19
+   sat within 360 s of its twin: about 2 s by date, or 300-360 s when the
+   copy was stamped with the 5-min replay time. A wider window starts pairing
+   genuine later kills (Leviathan repeats a drop every few minutes). Pairing is
    one-to-one: a plugin row absorbs at most one chat copy, so two real drops
    and one broadcast never cost a real drop.
 3. Keeps the plugin row (it carries the kill count and the screenshot) and
@@ -49,7 +52,11 @@ Safety
   * Every doomed row (drop, notified, group_recent_drops) is snapshotted to
     ``logs/dedupe_clan_broadcast_copies_<ts>.json`` before anything is deleted.
   * Deletes in small per-chunk transactions; intake keeps writing.
-  * Idempotent: a second run finds nothing.
+  * Re-runnable: plugin rows that absorbed a copy in an earlier APPLIED run
+    (read back from the snapshots in ``logs/``) stay claimed. Without that,
+    deleting the copy frees its plugin row, and the rerun would pair it with
+    a real chat-recovered drop minutes away (seen on the first rerun: drop
+    206493948, kept).
   * Main-world ``drops`` only (the chat path never writes seasonal drops).
 
 Run (dry-run):
@@ -124,6 +131,23 @@ def pair_copies(chat_rows, plugin_rows, window_seconds):
             claimed.add(best["drop_id"])
             pairs.append((c, best))
     return pairs
+
+
+def previously_absorbed(log_dir):
+    """Plugin drop ids that already absorbed a deleted copy, from every applied
+    snapshot this script wrote."""
+    import glob
+
+    used = set()
+    for path in glob.glob(os.path.join(log_dir, "dedupe_clan_broadcast_copies_*.json")):
+        try:
+            with open(path) as fh:
+                snap = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if snap.get("applied"):
+            used.update(int(p["plugin_twin"]["drop_id"]) for p in snap.get("pairs", []))
+    return used
 
 
 def hour_bucket(dt):
@@ -253,8 +277,8 @@ def main(argv=None) -> int:
     ap.add_argument("--apply", action="store_true", help="write (default: dry run)")
     ap.add_argument("--since", type=datetime.fromisoformat, default=None,
                     help="only chat copies on/after this date (default: all)")
-    ap.add_argument("--window", type=int, default=600,
-                    help="max seconds between a chat copy and its plugin twin (default 600)")
+    ap.add_argument("--window", type=int, default=400,
+                    help="max seconds between a chat copy and its plugin twin (default 400)")
     ap.add_argument("--delete-discord-messages", action="store_true",
                     help="also delete the duplicate Discord posts (default: keep them)")
     ap.add_argument("--skip-redis", action="store_true", help="skip the Redis rebuild")
@@ -276,6 +300,9 @@ def main(argv=None) -> int:
             return 0
         families = _families(s, [c["item_name"] for c in chat])
         plugin = _plugin_candidates(s, chat, families, args.window)
+        absorbed = previously_absorbed(LOG_DIR)
+        plugin = [r for r in plugin if r["drop_id"] not in absorbed]
+        print(f"plugin rows already used by an earlier applied run: {len(absorbed)}")
         for r in chat + plugin:
             r["name"] = (r.get("item_name") or "").lower() or f"id:{r['item_id']}"
         pairs = pair_copies(chat, plugin, args.window)

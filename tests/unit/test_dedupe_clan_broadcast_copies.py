@@ -50,3 +50,15 @@ def test_plugin_twin_arriving_after_the_copy_still_pairs():
 
 def test_hour_bucket_matches_rollup_date_format():
     assert mod.hour_bucket(datetime(2026, 10, 19, 7, 5, 59)) == "2026-10-19-07"
+
+
+def test_applied_snapshots_keep_their_plugin_rows_claimed(tmp_path):
+    import json
+
+    (tmp_path / "dedupe_clan_broadcast_copies_1.json").write_text(json.dumps(
+        {"applied": True, "pairs": [{"chat": {"drop_id": 206487567},
+                                     "plugin_twin": {"drop_id": 206483828}}]}))
+    (tmp_path / "dedupe_clan_broadcast_copies_2.json").write_text(json.dumps(
+        {"applied": False, "pairs": [{"chat": {"drop_id": 1}, "plugin_twin": {"drop_id": 2}}]}))
+    (tmp_path / "dedupe_clan_broadcast_copies_3.json").write_text("not json")
+    assert mod.previously_absorbed(str(tmp_path)) == {206483828}
