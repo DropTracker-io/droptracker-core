@@ -51,10 +51,13 @@ class _Column:
 
 
 class _LedgerSession(FakeSession):
-    """FakeSession whose amount query returns a ledger, so totals are non-zero."""
+    """FakeSession whose amount query returns a ledger total, so totals are non-zero."""
 
     def all(self):
         return [(40,), (2,)]
+
+    def scalar(self):
+        return 42
 
     def first(self):
         return None
