@@ -211,3 +211,22 @@ async def test_forbidden_still_propagates(monkeypatch):
     with pytest.raises(Denied):
         await _service()._try_send_component_layout(
             FakeSession(), _notification(), channel, 2, "pb", VALUES)
+
+
+class TestClogKcAndSource:
+    """A clog unlock's KC/source are skipped, not printed, when the client had none."""
+
+    norm = staticmethod(ns.NotificationService._clog_kc_and_source)
+
+    def test_plugin_zero_kc_and_unknown_source_are_missing(self):
+        assert self.norm("0", "unknown") == (None, None)
+
+    def test_clan_broadcast_none_kc_is_missing(self):
+        assert self.norm(None, "Zulrah") == (None, "Zulrah")
+
+    def test_a_real_kc_and_source_pass_through(self):
+        assert self.norm("412", "Zulrah") == ("412", "Zulrah")
+        assert self.norm(1234, "Vorkath") == (1234, "Vorkath")
+
+    def test_none_text_is_missing(self):
+        assert self.norm("None", "None") == (None, None)

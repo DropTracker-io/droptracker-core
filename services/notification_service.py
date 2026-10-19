@@ -191,6 +191,21 @@ class NotificationService:
         except (TypeError, ValueError):
             return None
 
+    @classmethod
+    def _clog_kc_and_source(cls, kc, npc_name):
+        """A clog unlock's KC and source, or None for each one it lacks.
+
+        The plugin sends kc "0" and source "unknown" for an unlock with no kill
+        source (clue items, minigames, skilling), and a clan broadcast sends no
+        KC at all. None makes replace_placeholders / render_layout skip the
+        line showing it instead of printing "`0` kc at `unknown`".
+        """
+        kc_int = cls._coerce_int(kc)
+        kc = kc if kc_int is not None and kc_int > 0 else None
+        if str(npc_name or "").strip().lower() in ("", "unknown", "none"):
+            npc_name = None
+        return kc, npc_name
+
     @staticmethod
     def _format_group_points_members(value) -> str:
         """Render awarded member details into a concise placeholder-friendly string."""
@@ -5160,8 +5175,7 @@ class NotificationService:
             item_name = data.get('item_name')
             image_url = data.get('image_url')
             item_id = data.get('item_id')
-            kc = data.get('kc_received')
-            npc_name = data.get('npc_name')
+            kc, npc_name = self._clog_kc_and_source(data.get('kc_received'), data.get('npc_name'))
             collection_name = data.get('collection_name')
             if not collection_name:
                 # No sender supplies it; derive it from the game's log layout.
