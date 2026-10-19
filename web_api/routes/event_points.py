@@ -15,7 +15,7 @@ amount is the hours with a multiplier on it.
 
 Writes need the clan's admins or event managers (the owner's call: event
 managers run the clan's events end to end), and turning a payout on needs the
-clan's points system — the ``custom_points`` entitlement; superadmins may
+clan's points system (entitlement + ``points_enabled``); superadmins may
 configure regardless, but nothing is ever *paid* into a clan whose points
 system is off. Awarding needs the event to be over. Scoring, the diff/re-sync
 ledger and the auto-at-end path live in services/event_point_awards.py.
@@ -316,10 +316,10 @@ async def put_clan_points(event_id: int):
             if (merged["enabled"] and not before["enabled"]
                     and not svc.points_system_active(group_id) and not is_superadmin(user)):
                 abort_problem(
-                    403, "Subscription required",
-                    "Clan points need this clan's points system — the Clan Points "
-                    "feature on its subscription.",
-                    extra={"code": "entitlement_required", "entitlement": "custom_points"})
+                    403, "Points system is off",
+                    "Clan points pay into this clan's points system. Turn it on in "
+                    "the clan's Points settings first.",
+                    extra={"code": "points_disabled"})
             if row is None:
                 row = EventPointConfig(event_id=ev.id, group_id=group_id, status="pending")
                 s.add(row)

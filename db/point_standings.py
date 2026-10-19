@@ -41,6 +41,20 @@ from utils.rsn import rsn_contains
 #: route as "1"/"0". Absent means off.
 COMBINE_CONFIG_KEY = "points_combine_accounts"
 
+#: Group behavior key: the clan has switched its points system on ("1"/"0",
+#: absent means off). Every tier has the ``custom_points`` entitlement since the
+#: system went free, so the entitlement alone no longer says a clan *uses*
+#: points -- without this switch every clan would start minting default-rule
+#: points on its first drop. Clans that were paying for points when it went
+#: free were switched on by ``scripts/backfill_points_enabled.py``.
+ENABLED_CONFIG_KEY = "points_enabled"
+
+#: How long a process trusts its answer to "is this clan's points system on".
+#: Short: the switch is flipped from the web API, and the award engine in the
+#: other processes has no other way to hear about it.
+_ACTIVE_CACHE_TTL = 30
+_active_cache: dict = {}
+
 #: Expanding IN lists are sent in slices: a big clan's roster is thousands of
 #: ids, and one statement carrying all of them is a needless packet.
 _IN_CHUNK = 500
@@ -304,6 +318,77 @@ def combine_enabled(session, group_id: int) -> bool:
     # Strictly "1", the way the settings route reads it back: a looser parse
     # here would let the boards combine while the admin's toggle shows off.
     return str(row[0]).strip() == "1"
+
+
+def points_enabled(session, group_id: int) -> bool:
+    """Whether ``group_id`` has switched its points system on. Same lowest-id,
+    strictly-"1" read as :func:`combine_enabled`, for the same reason."""
+    row = session.execute(
+        text(
+            "SELECT config_value FROM group_configurations "
+            "WHERE group_id = :gid AND config_key = :key "
+            "ORDER BY id ASC LIMIT 1"
+        ),
+        {"gid": int(group_id), "key": ENABLED_CONFIG_KEY},
+    ).first()
+    return row is not None and row[0] is not None and str(row[0]).strip() == "1"
+
+
+def enabled_group_ids(session, group_ids: Sequence[int]) -> set:
+    """The subset of ``group_ids`` whose points switch is on (one query)."""
+    ids = sorted({int(g) for g in group_ids})
+    if not ids:
+        return set()
+    stmt = text(
+        "SELECT group_id, config_value FROM group_configurations "
+        "WHERE config_key = :key AND group_id IN :ids ORDER BY id ASC"
+    ).bindparams(bindparam("ids", expanding=True))
+    first: dict = {}
+    for chunk in _chunks(ids):
+        for gid, value in session.execute(stmt, {"key": ENABLED_CONFIG_KEY, "ids": chunk}).fetchall():
+            first.setdefault(int(gid), value)
+    return {gid for gid, value in first.items() if value is not None and str(value).strip() == "1"}
+
+
+def group_points_active(group_id, session=None) -> bool:
+    """THE gate for a clan's points system: the ``custom_points`` entitlement
+    (every tier has it; a superadmin can still take it away) AND the clan's own
+    ``points_enabled`` switch. Cached per process for ``_ACTIVE_CACHE_TTL``.
+
+    Fails closed: minting currency on a guess is worse than a missed award.
+    """
+    if not group_id:
+        return False
+    gid = int(group_id)
+    import time
+
+    now = time.monotonic()
+    cached = _active_cache.get(gid)
+    if cached and cached[0] > now:
+        return cached[1]
+    try:
+        from db.entitlements import group_has_entitlement
+
+        active = bool(group_has_entitlement(gid, "custom_points"))
+        if active:
+            if session is not None:
+                active = points_enabled(session, gid)
+            else:
+                from db.models import Session
+
+                with Session() as own:
+                    active = points_enabled(own, gid)
+    except Exception:
+        return False
+    _active_cache[gid] = (now + _ACTIVE_CACHE_TTL, active)
+    return active
+
+
+def invalidate_points_active_cache(group_id: Optional[int] = None) -> None:
+    if group_id is None:
+        _active_cache.clear()
+    else:
+        _active_cache.pop(int(group_id), None)
 
 
 def member_player_ids(session, group_id: int, player_ids: Optional[Sequence[int]] = None) -> set:

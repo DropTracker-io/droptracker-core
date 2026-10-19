@@ -314,13 +314,6 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
             pass
 
         print("New collection log -- Creating notification")
-        if not is_seasonal:
-            award_points_to_player(
-                player_id=player_id,
-                amount=5,
-                source=f"Collection Log slot: {item_name}",
-                expires_in_days=60,
-            )
         player_groups = get_player_groups_with_global(session, player)
         # Per-group manual policy (suggestion #45): withhold this group's
         # notification (and group points) for a manual submission the group

@@ -1001,24 +1001,9 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                         continue ## Skipping this group in the loop; as there is no image despite the group's requirement of one
 
                 debug_print(f"Notification criteria met for group {group_id} (reason: {notify_reason})")
-                if not is_seasonal:
-                    point_divisor = get_point_divisor()
-                    # Global (non-group) points ride the original value gate
-                    # only — a forced always-list/points announcement must not
-                    # widen who earns global points.
-                    if group_id != 2 and has_awarded_points == False and int(drop_value) > point_divisor and value_criteria_met:
-                        print(
-                            f"Awarding points to {player_name} for drop {item_name} from {npc_name}"
-                        )
-                        has_awarded_points = True
-                        points_to_award = int(drop_value / point_divisor)
-                        # Global points award (not group-scoped)
-                        award_points_to_player(
-                            player_id=player_id,
-                            amount=points_to_award,
-                            source=f"Drop: {item_name} from {npc_name}",
-                            expires_in_days=60,
-                        )
+                # Global (site-wide) points are retired: nothing spends them,
+                # and the award cost a commit + a balance SUM per notable drop.
+                # Clan points come from the group engine above.
                 notification_data = {
                     "drop_id": drop.drop_id,
                     "guid": guid,

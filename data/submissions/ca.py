@@ -280,23 +280,6 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
             ca_tier = "grandmaster_ca"
         case _:
             points = 1
-    if not is_seasonal:
-        try:
-            award_points_to_player(
-                player_id=player_id,
-                amount=points,
-                source=f"Combat Achievement: {task_name}",
-                expires_in_days=60,
-            )
-        except Exception as e:
-            debug_print(f"Couldn't award points to player: {e}")
-            from .common import app_logger
-            app_logger.log(
-                log_type="error",
-                data=f"Couldn't award points to player: {e}",
-                app_name="core",
-                description="ca_processor",
-            )
     if is_new_ca:
         debug_print("New CA entry, creating notification")
         player_groups = get_player_groups_with_global(session, player)

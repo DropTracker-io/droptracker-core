@@ -745,13 +745,11 @@ def screenshot_gate_notice(session, player_id, group_name, what, *,
     return f"{head} Check that screenshots are turned on in the DropTracker plugin settings."
 
 def check_group_point_system_active(group_id, external_session=None):
-    """Whether the group's custom point system is enabled (subscription entitlement).
-
-    Resolution + 60s caching live in db.entitlements; the external_session
-    parameter is kept for call-site compatibility but no longer used.
-    """
-    from db.entitlements import group_has_entitlement
-    return group_has_entitlement(group_id, "custom_points")
+    """Whether the group's points system is on: the ``custom_points``
+    entitlement AND the clan's own ``points_enabled`` switch
+    (``db.point_standings.group_points_active``, cached 30s)."""
+    from db.point_standings import group_points_active
+    return group_points_active(group_id, session=external_session)
     
 
 def _announce_new_player(session, player) -> None:

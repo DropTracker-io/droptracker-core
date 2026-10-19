@@ -92,6 +92,10 @@ KNOWN_REASONS = (
 EVENT_TYPES = ("any",) + KNOWN_REASONS
 
 BEHAVIOR_BOOL_KEYS = (
+    # The clan's on-switch for its whole points system. Every tier has the
+    # entitlement, so this is what says a clan *uses* points (awards, boards,
+    # profile figures). Mirrors db/point_standings.ENABLED_CONFIG_KEY.
+    "points_enabled",
     "stacks_award_points",
     "point_sharing",
     "points_require_group_only",
@@ -109,6 +113,7 @@ BEHAVIOR_BOOL_KEYS = (
 BEHAVIOR_INT_KEYS = ("min_submission_pts", "max_submission_pts")
 SHARING_METHODS = ("equal_split", "award_all")
 BEHAVIOR_DEFAULTS = {
+    "points_enabled": False,
     "stacks_award_points": False,
     "point_sharing": False,
     "point_sharing_method": "equal_split",
@@ -481,6 +486,10 @@ async def update_points_settings(group_id: int):
                     details={"changed": changed},
                 )
             s.commit()
+            if "points_enabled" in (changed.get("behavior") or {}):
+                from db.point_standings import invalidate_points_active_cache
+
+                invalidate_points_active_cache(group_id)
             return {
                 "rules": _rules_payload(s, group_id),
                 "behavior": _read_behavior(s, group_id),
@@ -1498,3 +1507,130 @@ async def points_leaderboard(group_id: int):
     # A members-only board was just authorised for THIS viewer; it must never
     # be labelled cacheable for everyone else.
     return with_cache_headers(resp, max_age=15) if is_public else private_no_store(resp)
+
+
+# --------------------------------------------------------------------------- #
+# A player's clan points, as their profile shows them
+# --------------------------------------------------------------------------- #
+#: The global group every player sits in. It has no clan points of its own.
+GLOBAL_GROUP_ID = 2
+
+
+def _viewer_group_ids(s, viewer_id) -> set[int]:
+    """Clans the viewer belongs to: their Discord membership rows plus the
+    groups of every RSN they have claimed. ``0`` is a real user id."""
+    if viewer_id is None:
+        return set()
+    from sqlalchemy import text
+
+    rows = s.execute(
+        text(
+            "SELECT DISTINCT uga.group_id FROM user_group_association uga "
+            "WHERE uga.user_id = :uid "
+            "OR uga.player_id IN (SELECT p.player_id FROM players p WHERE p.user_id = :uid)"
+        ),
+        {"uid": int(viewer_id)},
+    ).fetchall()
+    return {int(gid) for (gid,) in rows if gid is not None}
+
+
+def pick_featured(standings: list[dict], viewer_group_ids: set[int]) -> dict | None:
+    """Which clan a profile quotes points for: one the viewer shares with the
+    player if there is any, otherwise the player's best placing anywhere.
+    Within either pool the best rank wins, then more points, then lower id."""
+    shared = [g for g in standings if g["group_id"] in viewer_group_ids]
+    pool = shared or standings
+    if not pool:
+        return None
+    best = min(pool, key=lambda g: (g["rank"], -g["points"], g["group_id"]))
+    return {**best, "reason": "shared" if shared else "best"}
+
+
+@points_bp.get("/players/<int:player_id>/group-points")
+async def player_group_points(player_id: int):
+    """Clan points for one player, for their profile.
+
+    Only clans whose points system is ON appear (``group_points_active``), and a
+    clan with a members-only board appears only to its own members. Every
+    standing comes from ``db/point_standings`` like the boards. ``featured`` is
+    the one a profile shows (see ``pick_featured``); null means the player has
+    nothing to show this viewer, and the profile shows no points at all.
+    """
+    viewer_id = optional_user_id()
+
+    def _load():
+        from sqlalchemy import text
+
+        from db.point_standings import (
+            combine_enabled,
+            enabled_group_ids,
+            find_standing,
+            group_names,
+            group_points_active,
+            load_standings,
+            resolve_period,
+        )
+
+        with db_session() as s:
+            player = s.execute(
+                text("SELECT hidden FROM players WHERE player_id = :pid"), {"pid": player_id},
+            ).first()
+            if player is None:
+                abort_problem(404, "Not found", "No such player.")
+            if player[0]:
+                return {"player_id": player_id, "featured": None, "groups": []}, False
+
+            member_of = {
+                int(gid)
+                for (gid,) in s.execute(
+                    text("SELECT DISTINCT group_id FROM user_group_association WHERE player_id = :pid"),
+                    {"pid": player_id},
+                ).fetchall()
+                if gid is not None and int(gid) != GLOBAL_GROUP_ID
+            }
+            candidates = [
+                gid for gid in sorted(enabled_group_ids(s, member_of))
+                if group_points_active(gid, session=s)
+            ]
+            viewer_groups = _viewer_group_ids(s, viewer_id)
+
+            standings: list[dict] = []
+            for gid in candidates:
+                behavior = _read_behavior(s, gid)
+                if not behavior["points_leaderboard_public"] and gid not in viewer_groups:
+                    continue
+                board = load_standings(s, gid, combine=bool(behavior["points_combine_accounts"]))
+                st = find_standing(board, player_id=player_id)
+                if st is None:
+                    continue
+                standings.append({
+                    "group_id": gid,
+                    "points": int(st.points),
+                    "rank": int(st.rank),
+                    "ranked": len(board),
+                    "combined": bool(st.combined),
+                })
+
+            names = group_names(s, [g["group_id"] for g in standings])
+            for g in standings:
+                g["group_name"] = names.get(g["group_id"], f"Group #{g['group_id']}")
+            standings.sort(key=lambda g: (g["rank"], -g["points"], g["group_id"]))
+
+            featured = pick_featured(standings, viewer_groups)
+            if featured is not None:
+                # This month as well, for the featured clan only: a second
+                # board per clan would double the cost of a profile view.
+                gid = featured["group_id"]
+                _token, start, end = resolve_period("month")
+                month = load_standings(s, gid, start=start, end=end,
+                                       combine=combine_enabled(s, gid))
+                mst = find_standing(month, player_id=player_id)
+                featured["month_points"] = int(mst.points) if mst else 0
+                featured["month_rank"] = int(mst.rank) if mst else None
+
+            return {"player_id": player_id, "featured": featured, "groups": standings}, bool(viewer_groups)
+
+    payload, personalised = await asyncio.to_thread(_load)
+    resp = jsonify(payload)
+    # The pick depends on who is looking once they belong to any clan.
+    return private_no_store(resp) if personalised else with_cache_headers(resp, max_age=30)

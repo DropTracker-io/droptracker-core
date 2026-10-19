@@ -55,16 +55,6 @@ profiles_bp = Blueprint("v1_profiles", __name__)
 IMG_BASE = "https://www.droptracker.io/img"
 
 
-def _player_points(s, player_id: int):
-    """Lifetime points earned (best-effort; omitted on error)."""
-    try:
-        from services.points import get_player_lifetime_points_earned
-
-        return int(get_player_lifetime_points_earned(player_id=player_id, session=s))
-    except Exception:
-        return None
-
-
 def _player_top_npc(s, player: Player, partition: int):
     """The player's highest-loot NPC name this month over the tracked NPC set
     (best-effort; omitted on error). Reads the hourly analytics rollup — the
@@ -568,9 +558,6 @@ async def player_profile(player_id: int):
                     )
             except Exception:
                 pass
-            points = _player_points(s, player_id)
-            if points is not None:
-                payload["points"] = points
             top_npc = _player_top_npc(s, player, partition)
             if top_npc:
                 payload["top_npc"] = top_npc
@@ -1082,6 +1069,14 @@ async def group_profile(group_id: int):
             flair = group_flair(s, group_id)
             if flair:
                 payload["flair"] = flair
+            # Whether the clan runs its points system, so pages only offer a
+            # points board to clans that have one.
+            try:
+                from db.point_standings import group_points_active
+
+                payload["points_enabled"] = group_points_active(group_id, session=s)
+            except Exception:
+                payload["points_enabled"] = False
             return payload
 
     payload = await asyncio.to_thread(_load)

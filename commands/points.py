@@ -130,12 +130,9 @@ def _add_month_loot(accounts: list) -> list:
 
 
 def _points_active(group_id: int) -> bool:
-    try:
-        from db.entitlements import group_has_entitlement
+    from db.point_standings import group_points_active
 
-        return bool(group_has_entitlement(group_id, "custom_points"))
-    except Exception:
-        return True
+    return group_points_active(group_id)
 
 
 def _load_board(guild_id, discord_id, period: str, page, *, jump_to_viewer: bool = False) -> dict:

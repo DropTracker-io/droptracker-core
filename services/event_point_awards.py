@@ -494,12 +494,13 @@ def scope_group_ids(session, event) -> list:
 
 
 def points_system_active(group_id) -> bool:
-    """The clan's points system (``custom_points`` entitlement). Fails closed:
-    minting currency on a guess is worse than a retry."""
+    """The clan's points system is on (``custom_points`` entitlement AND the
+    clan's ``points_enabled`` switch). Fails closed: minting currency on a
+    guess is worse than a retry."""
     try:
-        from db.entitlements import group_has_entitlement
+        from db.point_standings import group_points_active
 
-        return bool(group_has_entitlement(int(group_id), "custom_points"))
+        return group_points_active(int(group_id))
     except Exception:
         return False
 

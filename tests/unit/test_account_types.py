@@ -202,7 +202,6 @@ class TestPlayerProfileAccountType:
         monkeypatch.setattr(profiles, "NotifiedSubmission", MagicMock())
         monkeypatch.setattr(profiles, "player_month_total", lambda *a, **k: 0)
         monkeypatch.setattr(profiles, "player_global_rank", lambda *a, **k: None)
-        monkeypatch.setattr(profiles, "_player_points", lambda *a, **k: None)
         monkeypatch.setattr(profiles, "_player_top_npc", lambda *a, **k: None)
         monkeypatch.setattr(profiles, "_build_submissions", lambda *a, **k: [])
         # Side-payload helpers irrelevant to this contract; neutralize the ones

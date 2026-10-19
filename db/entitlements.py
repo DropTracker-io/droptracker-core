@@ -86,8 +86,8 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "key": "custom_points",
         "label": "Custom points system",
         "category": "features",
-        "help": "Configure a custom point system: award rules per submission type, per-item/NPC overrides, timed boosts, and points leaderboards.",
-        "default": False,
+        "help": "Configure a custom point system: award rules per submission type, per-item/NPC overrides, timed boosts, and points leaderboards. Free on every tier since 2026-10; a clan still switches it on itself (points_enabled).",
+        "default": True,
     },
     {
         # Daily allowance for AI-assisted event task generation. Each accepted

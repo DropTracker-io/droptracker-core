@@ -60,12 +60,12 @@ def _check_points_active(group_id: int) -> bool:
     Was a direct read of the XenForo ``xf_dt_group_upgrade_active`` table, which
     the subscription cutover left with a handful of rows — so every group paying
     through Stripe read as points-inactive here. ``custom_points`` is the
-    authority (60s cache, fails closed), same as the points routes and the
-    submission pipeline.
+    authority together with the clan's ``points_enabled`` switch (cached,
+    fails closed), same as the points routes and the submission pipeline.
     """
-    from db.entitlements import group_has_entitlement
+    from db.point_standings import group_points_active
 
-    return group_has_entitlement(group_id, "custom_points")
+    return group_points_active(group_id)
 
 
 def _detect_api_usage(player_id: int, db, limit: int = 20):

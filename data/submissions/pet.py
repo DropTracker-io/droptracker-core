@@ -190,9 +190,6 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     elif downloaded:
         dl_path = image_url
     if is_new_pet and not is_seasonal:
-        award_points_to_player(
-            player_id=player_id, amount=50, source=f"Pet: {pet_name}", expires_in_days=60
-        )
         # Site-wide ticker (rt:feed): pets are rare enough to always announce.
         try:
             from services.realtime import publish_feed_pet

@@ -158,7 +158,7 @@ class TestPut:
         _wire(monkeypatch, _S(), _svc(active=False))
         r = await client.put("/api/v1/events/1/clan-points", json={"config": {"enabled": True}})
         assert r.status_code == 403
-        assert (await r.get_json())["entitlement"] == "custom_points"
+        assert (await r.get_json())["code"] == "points_disabled"
 
     async def test_superadmin_may_configure_without_it(self, client, monkeypatch):
         s = _S()

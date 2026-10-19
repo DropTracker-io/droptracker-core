@@ -23,11 +23,16 @@ from sqlalchemy.pool import StaticPool
 # package with a MagicMock, whose attribute lookup would hand back a mock.
 from db.point_standings import (
     COMBINE_CONFIG_KEY,
+    ENABLED_CONFIG_KEY,
     MemberTotal,
     build_standings,
     combine_enabled,
     counted_player_ids,
     display_total,
+    enabled_group_ids,
+    group_points_active,
+    invalidate_points_active_cache,
+    points_enabled,
     find_standing,
     load_member_totals,
     load_seasons,
@@ -481,3 +486,50 @@ class TestSmallReads:
                 {"g": GROUP, "n": name, "s": start, "e": end},
             )
         assert [s["name"] for s in load_seasons(clan, GROUP)] == ["Autumn", "Spring"]
+
+
+class TestPointsEnabledSwitch:
+    def _switch(self, s, group_id, value):
+        s.execute(
+            text("INSERT INTO group_configurations (group_id, config_key, config_value) "
+                 "VALUES (:g, :k, :v)"),
+            {"g": group_id, "k": ENABLED_CONFIG_KEY, "v": value},
+        )
+
+    def test_absent_is_off_and_only_a_strict_one_is_on(self, session):
+        assert points_enabled(session, GROUP) is False
+        self._switch(session, GROUP, "1")
+        self._switch(session, OTHER_GROUP, "true")
+        assert points_enabled(session, GROUP) is True
+        assert points_enabled(session, OTHER_GROUP) is False
+
+    def test_lowest_id_row_wins_like_the_settings_route(self, session):
+        self._switch(session, GROUP, "0")
+        self._switch(session, GROUP, "1")
+        assert points_enabled(session, GROUP) is False
+        assert enabled_group_ids(session, [GROUP]) == set()
+
+    def test_batch_read(self, session):
+        self._switch(session, GROUP, "1")
+        self._switch(session, OTHER_GROUP, "0")
+        assert enabled_group_ids(session, [GROUP, OTHER_GROUP, 999]) == {GROUP}
+        assert enabled_group_ids(session, []) == set()
+
+    def test_gate_needs_entitlement_and_switch(self, session, monkeypatch):
+        import sys
+
+        ent = {"on": True}
+        monkeypatch.setattr(
+            sys.modules["db.entitlements"], "group_has_entitlement",
+            lambda gid, key: ent["on"] and key == "custom_points", raising=False,
+        )
+        invalidate_points_active_cache()
+        assert group_points_active(GROUP, session=session) is False
+        self._switch(session, GROUP, "1")
+        invalidate_points_active_cache(GROUP)
+        assert group_points_active(GROUP, session=session) is True
+        ent["on"] = False
+        invalidate_points_active_cache(GROUP)
+        assert group_points_active(GROUP, session=session) is False
+        assert group_points_active(None) is False
+        invalidate_points_active_cache()

@@ -208,3 +208,98 @@ async def test_malformed_partition_is_a_400(client, monkeypatch, clan):
     _wire(monkeypatch, clan)
     resp = await client.get(f"/api/v1/groups/{GROUP}/points/leaderboard?period=20261399")
     assert resp.status_code == 400
+
+
+# ── GET /players/{id}/group-points: what a profile shows ────────────────────
+from tests.unit.test_point_standings import OTHER_GROUP  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+
+
+def _enable(s, group_id):
+    s.execute(
+        text("INSERT INTO group_configurations (group_id, config_key, config_value) "
+             "VALUES (:g, 'points_enabled', '1')"),
+        {"g": group_id},
+    )
+
+
+@pytest.fixture()
+def two_clans(monkeypatch, clan):
+    """Solo (3) tops GROUP with 100; in OTHER_GROUP they sit 2nd behind Rival.
+    Viewer user 50 owns Fan, who is only in OTHER_GROUP."""
+    import sys
+
+    standings = sys.modules["db.point_standings"]
+    monkeypatch.setattr(
+        standings, "group_points_active",
+        lambda gid, session=None: standings.points_enabled(session, gid),
+    )
+    clan.execute(text("CREATE TABLE `groups` (group_id INTEGER PRIMARY KEY, group_name VARCHAR(60))"))
+    clan.execute(text(f"INSERT INTO `groups` VALUES ({GROUP}, 'Frontier'), ({OTHER_GROUP}, 'Seven')"))
+    _player(clan, 4, "Rival")
+    _player(clan, 5, "Fan", user_id=50)
+    for pid in (3, 4, 5):
+        _join(clan, pid, OTHER_GROUP)
+    _award(clan, 3, 10, group_id=OTHER_GROUP)
+    _award(clan, 4, 40, group_id=OTHER_GROUP)
+    _enable(clan, GROUP)
+    _enable(clan, OTHER_GROUP)
+    return clan
+
+
+async def _profile_points(client, player_id=3):
+    resp = await client.get(f"/api/v1/players/{player_id}/group-points")
+    return resp.status_code, await resp.get_json()
+
+
+async def test_anonymous_viewer_sees_the_best_placing(client, monkeypatch, two_clans):
+    _wire(monkeypatch, two_clans)
+    status, body = await _profile_points(client)
+    assert status == 200
+    assert body["featured"]["group_id"] == GROUP
+    assert (body["featured"]["rank"], body["featured"]["points"]) == (1, 100)
+    assert body["featured"]["reason"] == "best"
+    assert [g["group_id"] for g in body["groups"]] == [GROUP, OTHER_GROUP]
+
+
+async def test_a_shared_clan_beats_a_better_placing(client, monkeypatch, two_clans):
+    _wire(monkeypatch, two_clans, viewer_id=50)
+    _, body = await _profile_points(client)
+    assert body["featured"]["group_id"] == OTHER_GROUP
+    assert (body["featured"]["rank"], body["featured"]["reason"]) == (2, "shared")
+
+
+async def test_a_clan_with_points_off_is_never_shown(client, monkeypatch, two_clans):
+    two_clans.execute(text("DELETE FROM group_configurations WHERE group_id = :g"), {"g": GROUP})
+    _wire(monkeypatch, two_clans)
+    _, body = await _profile_points(client)
+    assert [g["group_id"] for g in body["groups"]] == [OTHER_GROUP]
+
+
+async def test_members_only_boards_stay_with_members(client, monkeypatch, two_clans):
+    _wire(monkeypatch, two_clans, behavior={"points_leaderboard_public": False})
+    _, body = await _profile_points(client)
+    assert body == {"player_id": 3, "featured": None, "groups": []}
+    _wire(monkeypatch, two_clans, behavior={"points_leaderboard_public": False}, viewer_id=50)
+    _, body = await _profile_points(client)
+    assert [g["group_id"] for g in body["groups"]] == [OTHER_GROUP]
+
+
+async def test_no_points_anywhere_means_no_figure(client, monkeypatch, two_clans):
+    _wire(monkeypatch, two_clans)
+    _, body = await _profile_points(client, player_id=5)
+    assert body["featured"] is None
+
+
+async def test_hidden_player_shows_nothing(client, monkeypatch, two_clans):
+    two_clans.execute(text("UPDATE players SET hidden = 1 WHERE player_id = 3"))
+    _wire(monkeypatch, two_clans)
+    _, body = await _profile_points(client)
+    assert body["featured"] is None and body["groups"] == []
+
+
+def test_points_enabled_key_matches_the_standings_module():
+    from db.point_standings import ENABLED_CONFIG_KEY
+
+    assert ENABLED_CONFIG_KEY in pts.BEHAVIOR_BOOL_KEYS
+    assert pts.BEHAVIOR_DEFAULTS[ENABLED_CONFIG_KEY] is False
