@@ -283,6 +283,16 @@ def render_layout(layout: Dict[str, Any], replacements: Dict[str, Any]) -> Optio
     from utils.game_emojis import with_derived_tokens
     replacements = with_derived_tokens(replacements)
 
+    # A value the sender has no data for (None, or the "None" text a blind
+    # str() leaves) is treated as never supplied, so the unresolved-token rule
+    # drops its line rather than rendering "**Kill count** None".
+    try:
+        from utils.format import is_missing_value
+    except Exception:
+        def is_missing_value(_token, value):
+            return value is None
+    replacements = {k: v for k, v in replacements.items() if not is_missing_value(k, v)}
+
     children: List[Dict[str, Any]] = []
 
     for block in blocks[:MAX_BLOCKS]:

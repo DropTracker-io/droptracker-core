@@ -396,10 +396,67 @@ def strip_known_tokens(text):
     return _known_token_pattern().sub("", str(text))
 
 
+# What ``str(None)`` leaves behind once a sender has stringified (and maybe
+# backticked) a missing value: "None", "`None`". Compared case-folded.
+_MISSING_VALUE_TEXT = {"none", "null"}
+
+# Tokens carrying text a player chose. An RSN can genuinely be "None", so these
+# are only missing when the value really is None, never by its text.
+_FREE_TEXT_TOKEN_PARTS = ("player_name", "rsn", "team_name", "group_name", "display_name")
+
+
+def is_missing_value(token, value):
+    """True when ``value`` stands for "no data" rather than something to show.
+
+    Senders build their value maps by hand and many stringify blindly
+    (``str(kill_count)``), so a clan-broadcast drop with no KC arrives as the
+    text "None". Shown, that reads as a real value; it is never what the group
+    meant.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    if any(part in str(token) for part in _FREE_TEXT_TOKEN_PARTS):
+        return False
+    return value.strip().strip("`").strip().lower() in _MISSING_VALUE_TEXT
+
+
+def missing_tokens(value_dict):
+    """The tokens in ``value_dict`` whose value is missing (see is_missing_value)."""
+    return {k for k, v in (value_dict or {}).items() if is_missing_value(k, v)}
+
+
+def _mentions_any(text, tokens):
+    return bool(text) and any(t in str(text) for t in tokens)
+
+
+def _drop_missing_value_parts(embed, missing):
+    """Skip the embed parts that exist to show a value this notification lacks.
+
+    A field referencing a missing token goes entirely ("Kill count: None" is
+    worse than no field), and so does a description line ("They currently have
+    `None` kc at Zulrah"). Title, footer and author are single strings with no
+    smaller unit to drop; the caller blanks the token there instead.
+    """
+    if embed.fields:
+        embed.fields = [
+            f for f in embed.fields
+            if not (_mentions_any(f.name, missing) or _mentions_any(f.value, missing))
+        ]
+    if embed.description and _mentions_any(embed.description, missing):
+        lines = [ln for ln in str(embed.description).split("\n") if not _mentions_any(ln, missing)]
+        embed.description = "\n".join(lines).strip() or None
+
+
 def replace_placeholders(embed: interactions.Embed, value_dict: dict, global_server: bool = False):
     from utils.game_emojis import with_derived_tokens
 
     value_dict = with_derived_tokens(value_dict)
+    missing = missing_tokens(value_dict)
+    if missing:
+        _drop_missing_value_parts(embed, missing)
+        value_dict = {**value_dict, **{k: "" for k in missing}}
     embed = _replace_placeholders(embed, value_dict, global_server)
 
     # Safety net: whatever this sender could not fill renders as nothing rather
@@ -501,7 +558,7 @@ def _replace_placeholders(embed: interactions.Embed, value_dict: dict, global_se
             if field_name:
                 field_name = replace_placeholders_in_text(field_name, value_dict)
 
-            if field_name == "Source:" and value_dict.get("{kill_count}", None) is None:
+            if field_name == "Source:" and value_dict.get("{kill_count}", None) in (None, ""):
                 continue
 
             if field_value:
@@ -556,7 +613,8 @@ def _replace_placeholders(embed: interactions.Embed, value_dict: dict, global_se
 def replace_placeholders_in_text(text, value_dict):
     for placeholder, value in value_dict.items():
         try:
-            value = str(value)
+            # Missing data renders as nothing, never as the word "None".
+            value = "" if is_missing_value(placeholder, value) else str(value)
             if "`" in value:
                 # The value is already inline code: the drop sender's
                 # {item_value} is "`1.2M`", or "`3.6M` (3 x `1.2M`)" for a

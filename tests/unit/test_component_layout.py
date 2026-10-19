@@ -340,6 +340,31 @@ class TestALineWithNoValueDisappears:
         assert "Location" not in text
 
 
+class TestAMissingValueDropsItsLine:
+    """None (or the "None" a blind str() leaves) means the sender has no data;
+    the line goes even when other tokens on it resolved."""
+
+    def test_the_clog_default_drops_the_kc_line_for_a_chat_broadcast(self):
+        payload = render_layout(
+            default_layout("clog"),
+            {"{player_name}": "Ron", "{item_name}": "Tanzanite fang", "{item_link}": "Tanzanite fang",
+             "{item_id}": "12922", "{kc_received}": None, "{npc_name}": "Zulrah"},
+        )
+        text = str(payload)
+        assert "kc at" not in text
+        assert "Tanzanite fang" in text
+
+    def test_the_drop_default_drops_a_none_kill_count(self):
+        payload = render_layout(
+            default_layout("drop"),
+            {"{player_name}": "Ron", "{item_link}": "Twisted bow", "{item_value}": "`1.3B`",
+             "{npc_name}": "Chambers of Xeric", "{kill_count}": "None"},
+        )
+        text = "\n".join(c.get("content", "") for c in blocks_of(payload) if "content" in c)
+        assert "Kill count" not in text
+        assert "None" not in text
+
+
 class TestDefaultsMirrorTheEmbeds:
     """A group switching a type over should recognise the message. The
     defaults reproduce the shipped embed templates, so the headline wording,

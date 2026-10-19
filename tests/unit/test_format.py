@@ -737,3 +737,55 @@ class TestUnresolvedKnownTokens:
         for text in (out.title or "", out.description or "", *(f.value for f in out.fields)):
             leaked = [t for t in tokens if "{%s}" % t in text]
             assert not leaked, f"{notification_type}: {leaked}"
+
+
+# ── missing values ("None") ───────────────────────────────────────────────────
+
+class _StubField:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+
+class TestMissingValuesAreSkipped:
+    """A sender with no data for a token (a clan-broadcast drop has no KC)
+    often stringifies it to "None". The part showing it goes, not the word."""
+
+    def test_a_field_referencing_a_none_value_is_skipped(self):
+        embed = _StubEmbed(title="{item_name}")
+        embed.fields = [_StubField("Kill count", "`{kill_count}`"), _StubField("Rank", "{group_rank}")]
+        out = replace_placeholders(embed, {"{item_name}": "Twisted bow", "{kill_count}": "None",
+                                           "{group_rank}": "`3`/`40`"})
+        assert [f.name for f in out.fields] == ["Rank"]
+
+    def test_a_real_none_object_is_skipped_too(self):
+        embed = _StubEmbed(title="{item_name}")
+        embed.fields = [_StubField("KC", "{kill_count}")]
+        out = replace_placeholders(embed, {"{item_name}": "Twisted bow", "{kill_count}": None})
+        assert out.fields == []
+
+    def test_the_clog_description_line_without_kc_is_dropped(self):
+        embed = _StubEmbed(title="{item_name}",
+                           description="They currently have `{kc_received}` kc at `{npc_name}`")
+        out = replace_placeholders(embed, {"{item_name}": "Tanzanite fang", "{kc_received}": None,
+                                           "{npc_name}": "Zulrah"})
+        assert out.description is None
+
+    def test_only_the_line_with_the_missing_value_goes(self):
+        embed = _StubEmbed(title="{item_name}", description="G/E Value: {item_value}\nKC: `{kill_count}`")
+        out = replace_placeholders(embed, {"{item_name}": "Twisted bow", "{item_value}": "`1.3B`",
+                                           "{kill_count}": "`None`"})
+        assert out.description == "G/E Value: `1.3B`"
+
+    def test_a_missing_value_in_the_title_is_blanked(self):
+        out = replace_placeholders(_embed("{item_name} at {kill_count} KC"),
+                                   {"{item_name}": "Twisted bow", "{kill_count}": "None"})
+        assert "None" not in out.title
+
+    def test_a_player_literally_named_none_still_shows(self):
+        embed = _StubEmbed(title="{item_name}", description="{player_name_plain} got it")
+        out = replace_placeholders(embed, {"{item_name}": "Twisted bow", "{player_name_plain}": "None"})
+        assert out.description == "None got it"
+
+    def test_text_substitution_never_prints_none(self):
+        assert replace_placeholders_in_text("KC {kill_count}", {"{kill_count}": None}) == "KC "
