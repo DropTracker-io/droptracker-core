@@ -278,13 +278,14 @@ class TestEnsureCanCreate:
         assert await self.ensure_can_create(session, "guid-known-dup", "drop") is False
         assert session.query_count == 1
 
-    @pytest.mark.parametrize("missing", [None, ""])
+    @pytest.mark.parametrize("missing", [None, "", "unknown"])
     async def test_missing_unique_id_is_never_a_duplicate(self, missing):
         """No GUID means no dedup key — allow it, and never query.
 
         `unique_id == None` renders as `IS NULL`, which matches the ~200k
         legacy rows carrying no GUID. Unbounded, that would reject every
         guid-less submission forever; the old one-hour window masked it.
+        "unknown" is the plugin's shared fallback, equally no key.
         """
         session = _RecordingSession(existing=object())
         assert await self.ensure_can_create(session, missing, "pb") is True

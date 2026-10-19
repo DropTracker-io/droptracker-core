@@ -1069,7 +1069,11 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
     # month). Unbounded, that would match one of them every time and reject
     # every guid-less submission forever. The old one-hour window hid this by
     # only ever considering NULL rows written in the last hour.
-    if not unique_id:
+    # "unknown" is the plugin's fallback when it has no API object to mint a
+    # GUID with (BaseEventHandler.addCommonFields) — a placeholder shared by
+    # every such submission, so it is no key either. Matched, the first one
+    # would make every later one a "duplicate".
+    if not unique_id or unique_id == "unknown":
         return True
     if submission_type not in unique_id_cache:
         unique_id_cache[submission_type] = []
