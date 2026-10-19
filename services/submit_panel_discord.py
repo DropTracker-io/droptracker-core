@@ -169,8 +169,8 @@ async def reconcile_all(bot, session_factory) -> None:
 def _patch_modal_context() -> None:
     """Make interactions.py's ModalContext tolerate Label-wrapped components.
 
-    Only changes behaviour for payloads that would otherwise raise, so every
-    existing modal (entry_modifier, onboarding) parses exactly as before.
+    Only Label-shaped payloads are rewritten, so every existing modal
+    (entry_modifier, onboarding) parses exactly as before.
     """
     try:
         from interactions.models.internal.context import ModalContext
@@ -181,12 +181,14 @@ def _patch_modal_context() -> None:
     original = ModalContext.from_dict.__func__
 
     def from_dict(cls, client, payload):
-        try:
-            return original(cls, client, payload)
-        except (KeyError, IndexError, TypeError):
-            data = dict(payload.get("data") or {})
-            data["components"] = core.flatten_modal_components(data.get("components"))
-            return original(cls, client, {**payload, "data": data})
+        # Flatten up front rather than retrying after a failure: the first
+        # attempt pops ``member["user"]`` from the payload, so a retry on the
+        # same dict always died with KeyError 'user' (ticket #489).
+        data = payload.get("data") or {}
+        if core.has_label_components(data.get("components")):
+            data = {**data, "components": core.flatten_modal_components(data.get("components"))}
+            payload = {**payload, "data": data}
+        return original(cls, client, payload)
 
     ModalContext.from_dict = classmethod(from_dict)
     ModalContext._dt_label_patch = True
@@ -344,11 +346,18 @@ class SubmitPanel(Extension):
             except Exception:
                 log.exception("[SubmitPanel] couldn't edit the deferred reply")
 
-        user = (data.get("member") or {}).get("user") or data.get("user") or {}
-        discord_id = user.get("id")
+        discord_id = core.interaction_user_id(data)
         if not discord_id:
+            log.warning("[SubmitPanel] modal submit %s carried no user id", interaction_id)
+            await reply("Couldn't submit that", "Something went wrong. Please try again.",
+                        _COLOR_ERROR)
             return
-        result = await self._process(sub_type, data.get("data") or {}, discord_id)
+        try:
+            result = await self._process(sub_type, data.get("data") or {}, discord_id)
+        except Exception:
+            log.exception("[SubmitPanel] modal submit failed")
+            result = ("Couldn't submit that", "Something went wrong. Please try again.",
+                      _COLOR_ERROR)
         await reply(*result)
 
     async def _process(self, sub_type: str, modal_data: dict, discord_id):

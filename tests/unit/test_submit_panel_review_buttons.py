@@ -104,6 +104,36 @@ class TestParseModalSubmit:
             ("item", "Whip"), ("proof", "1,2"), ("npc", "Demon")]
 
 
+class TestInteractionUserId:
+    """Ticket #489: the modal sat on "is thinking..." because the library had
+    already popped ``member["user"]`` from the shared payload."""
+
+    def test_guild_member_untouched(self):
+        assert sp.interaction_user_id({"member": {"user": {"id": "42"}}}) == "42"
+
+    def test_guild_member_after_the_library_parsed_it(self):
+        assert sp.interaction_user_id({"member": {"id": "42", "bot": False}}) == "42"
+
+    def test_dm_user(self):
+        assert sp.interaction_user_id({"user": {"id": 7}}) == "7"
+
+    def test_missing(self):
+        assert sp.interaction_user_id({}) is None
+
+    def test_ticket_payload_is_label_shaped_and_parses(self):
+        data = {"custom_id": "dtsubmit:modal:drop", "components": [
+            {"type": 18, "component": {"type": 4, "custom_id": "item", "value": "Abyssal whip"}},
+            {"type": 18, "component": {"type": 4, "custom_id": "npc", "value": "Abyssal demon"}},
+            {"type": 18, "component": {"type": 4, "custom_id": "quantity", "value": "1"}},
+            {"type": 18, "component": {"type": 19, "custom_id": "proof", "values": None}},
+        ]}
+        assert sp.has_label_components(data["components"])
+        assert not sp.has_label_components(
+            [{"type": 1, "components": [{"type": 4, "custom_id": "x", "value": ""}]}])
+        assert sp.parse_modal_submit(data) == (
+            {"item": "Abyssal whip", "npc": "Abyssal demon", "quantity": "1"}, [])
+
+
 def _parse_ms(raw):
     from data.submissions.manual_discord import parse_kill_time_ms
 

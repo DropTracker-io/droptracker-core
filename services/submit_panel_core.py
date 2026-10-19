@@ -249,6 +249,25 @@ def payload_fields(sub_type: str, values: dict, parse_kill_time_ms) -> dict:
     raise ValueError("Unknown submission type.")
 
 
+def interaction_user_id(payload: dict) -> Optional[str]:
+    """The Discord id of whoever sent a raw interaction payload.
+
+    interactions.py parses the same dict our raw listener gets, and its
+    ``Member._process_dict`` pops ``member["user"]`` and leaves ``member["id"]``
+    behind. Which listener runs first is not fixed, so read both shapes.
+    """
+    member = (payload or {}).get("member") or {}
+    user = member.get("user") or (payload or {}).get("user") or {}
+    found = user.get("id") or member.get("id")
+    return str(found) if found else None
+
+
+def has_label_components(components) -> bool:
+    """True when a modal's components use the Label shape (``component``)."""
+    return any(isinstance(top, dict) and isinstance(top.get("component"), dict)
+               for top in components or [])
+
+
 def flatten_modal_components(components) -> list:
     """Label-wrapped modal components -> the ActionRow shape interactions.py
     expects (``[{"components": [{"custom_id", "value"}]}]``)."""
