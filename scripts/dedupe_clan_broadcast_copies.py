@@ -23,7 +23,8 @@ What it does
    one-to-one: a plugin row absorbs at most one chat copy, so two real drops
    and one broadcast never cost a real drop.
 3. Keeps the plugin row (it carries the kill count and the screenshot) and
-   deletes the chat copy with its ``notified`` and ``group_recent_drops`` rows.
+   deletes the chat copy with its ``notified``, ``group_recent_drops`` and
+   automatic ``drop_group_moderation`` 'excluded' rows.
 4. Recomputes the affected ``player_npc_hourly_totals`` /
    ``player_item_hourly_totals`` buckets from ``drops``, rebuilds the Redis
    loot leaderboards for each affected player, and repairs their per-NPC
@@ -33,8 +34,8 @@ What chat copies never had
 --------------------------
 The chat path awards no clan points, no event credit and no GP splits (see
 ``_process_chat_drop``). A copy that nevertheless has a ``player_points``,
-``web_event_completions``, ``drop_splits``, ``drop_group_moderation`` or
-``video_uploads`` row is left alone and listed, never cascaded.
+``web_event_completions``, ``drop_splits``, ``video_uploads`` or a
+human-reviewed ``drop_group_moderation`` row is left alone and listed.
 
 Discord messages
 ----------------
@@ -80,7 +81,9 @@ BLOCKING_REFS = (
     ("player_points", "entry_id", "AND reason = 'drop'"),
     ("web_event_completions", "source_id", "AND source_type = 'drop'"),
     ("drop_splits", "drop_id", ""),
-    ("drop_group_moderation", "drop_id", ""),
+    # A human review is a decision to keep; the chat path's own automatic
+    # 'excluded' rows (no reviewer) are cascaded below instead.
+    ("drop_group_moderation", "drop_id", "AND reviewed_by_user_id IS NOT NULL"),
     ("video_uploads", "drop_id", ""),
 )
 
@@ -88,6 +91,8 @@ BLOCKING_REFS = (
 CASCADE_REFS = (
     ("notified", "drop_id"),
     ("group_recent_drops", "drop_id"),
+    # Written by clan_broadcast._record_group_exclusions for non-opted groups.
+    ("drop_group_moderation", "drop_id"),
 )
 
 
@@ -292,6 +297,7 @@ def main(argv=None) -> int:
             kinds["different id (the #491 bug)" if c["item_id"] != p["item_id"] else "same id"] += 1
         notified = _rows_of(s, "notified", "drop_id", [c["drop_id"] for c, _ in pairs_ok])
         recent = _rows_of(s, "group_recent_drops", "drop_id", [c["drop_id"] for c, _ in pairs_ok])
+        moderation = _rows_of(s, "drop_group_moderation", "drop_id", [c["drop_id"] for c, _ in pairs_ok])
         for n in notified:
             per_group_posts[n["group_id"]] += 1
         surplus = sum(int(c["value"] or 0) * int(c["quantity"] or 0) for c, _ in pairs_ok)
@@ -329,6 +335,7 @@ def main(argv=None) -> int:
                           for c, p in pairs_ok],
                 "notified_deleted": [{k: _json_safe(v) for k, v in r.items()} for r in notified],
                 "group_recent_drops_deleted": [{k: _json_safe(v) for k, v in r.items()} for r in recent],
+                "drop_group_moderation_deleted": [{k: _json_safe(v) for k, v in r.items()} for r in moderation],
                 "blocked": {str(k): v for k, v in blocked.items()},
             }, fh, indent=1, default=str)
         print(f"\nSnapshot written: {snap}")
