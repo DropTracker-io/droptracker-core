@@ -18,7 +18,11 @@ alone avoids the entire NPC-attribution minefield (every Barrows brother credits
 to ``Barrows``, the Moons to ``Lunar Chest``) and is what makes the query cheap:
 the catalog is ~300 rare items, so ``item_id IN (...)`` reads thousands of rows
 where a roster-wide scan reads millions. A section's ``npc_keys`` are kept for
-display and for the future bounty export, not for matching.
+display and for the future bounty export, not for matching, with one
+exception: an item that sits in more than one section (godsword shards on all
+four generals, the dragon pickaxe on six bosses) is matched per section on the
+dropping NPC, or one drop would fill every one of those slots. See
+:func:`scope_shared_items`.
 
 **The ledger is monthly; the views are folds.** ``clan_log_firsts`` stores one
 row per (group, item, month). A month view is those rows, a year view is the
@@ -114,9 +118,11 @@ def load_catalog(session) -> dict:
     """The curated list of obtainable slots, shaped for both matching and render.
 
     Returns ``{"sections": [...], "canonical": {item_id: canonical_item_id},
-    "version": str}``. ``canonical`` folds variant ids (charged/uncharged,
-    damaged) onto the slot they represent, so a drop of any of them credits the
-    one board cell.
+    "scoped": {item_id: {npc_key: slot_id}}, "version": str}``. ``canonical``
+    folds variant ids (charged/uncharged, damaged) onto the slot they
+    represent, so a drop of any of them credits the one board cell. ``scoped``
+    lists the items that appear in more than one section; every item entry
+    carries the ``slot_id`` its ledger rows are keyed by.
     """
     rows = session.execute(
         text(
@@ -150,6 +156,7 @@ def load_catalog(session) -> dict:
             "name": item_name,
             "attributable": bool(attributable),
             "source": source_hint or SOURCE_DROP,
+            "slot_id": item_id,
         })
         canonical[item_id] = item_id
         for variant in _json_list(variants):
@@ -158,7 +165,43 @@ def load_catalog(session) -> dict:
             except (TypeError, ValueError):
                 continue
     return {"sections": sections, "canonical": canonical,
+            "scoped": scope_shared_items(sections),
             "version": catalog_version(session)}
+
+
+def slot_id_for(section_id: int, item_id: int) -> int:
+    """Ledger key for one section's copy of a shared item.
+
+    Negative so it can never collide with a real item id, and derived rather
+    than stored so the ledger needs no extra column. Item ids are well under
+    100000.
+    """
+    return -(int(section_id) * 100000 + int(item_id))
+
+
+def scope_shared_items(sections: list[dict]) -> dict[int, dict[str, int]]:
+    """Give every item that appears in more than one section a per-section slot.
+
+    Returns ``{item_id: {npc_key: slot_id}}`` and rewrites those items'
+    ``slot_id`` in place. A drop of a shared item credits the section whose
+    ``npc_keys`` hold the dropping NPC, and nothing when no section does (a
+    draconic visage from a frost dragon fills neither Vorkath nor KBD).
+    """
+    seen: dict[int, int] = defaultdict(int)
+    for section in sections:
+        for item in section["items"]:
+            seen[item["item_id"]] += 1
+    scoped: dict[int, dict[str, int]] = {}
+    for section in sections:
+        for item in section["items"]:
+            if seen[item["item_id"]] < 2 or item["source"] == SOURCE_PET:
+                continue
+            slot = slot_id_for(section["id"], item["item_id"])
+            item["slot_id"] = slot
+            keys = scoped.setdefault(item["item_id"], {})
+            for npc_key in section["npc_keys"]:
+                keys.setdefault(npc_key, slot)
+    return scoped
 
 
 def catalog_version(session) -> str:
@@ -214,7 +257,7 @@ def _claims_from_drops(session, item_ids: list[int], player_ids: list[int],
     if not item_ids or not player_ids:
         return []
     sql = (
-        "SELECT drop_id, item_id, player_id, date_added, image_url "
+        "SELECT drop_id, item_id, player_id, date_added, image_url, npc_id "
         "FROM drops "
         "WHERE item_id IN :items AND player_id IN :players AND hidden = 0"
     )
@@ -230,7 +273,8 @@ def _claims_from_drops(session, item_ids: list[int], player_ids: list[int],
     ).fetchall()
     return [
         {"ref_id": int(r[0]), "item_id": int(r[1]), "player_id": int(r[2]),
-         "at": r[3], "proof": r[4], "source": SOURCE_DROP}
+         "at": r[3], "proof": r[4], "source": SOURCE_DROP,
+         "npc_id": int(r[5]) if r[5] is not None else None}
         for r in rows if r[3]
     ]
 
@@ -293,12 +337,42 @@ def _claims_from_pets(session, item_ids: list[int], player_ids: list[int],
     ]
 
 
-def fold_claims(claims: list[dict], canonical: dict[int, int]) -> dict[tuple[int, str], dict]:
-    """Collapse raw claims into one ledger row per (item, month).
+def attach_npc_keys(session, claims: list[dict], catalog: dict) -> None:
+    """Set ``npc_key`` on the drop claims of shared items (see
+    :func:`scope_shared_items`). One small ``npc_list`` read for the distinct
+    NPCs involved; every other claim is left alone."""
+    from utils.npc_names import npc_match_key
+
+    scoped = catalog.get("scoped") or {}
+    if not scoped:
+        return
+    canonical = catalog["canonical"]
+    wanted = [c for c in claims
+              if c.get("npc_id") is not None and canonical.get(c["item_id"]) in scoped]
+    npc_ids = sorted({c["npc_id"] for c in wanted})
+    if not npc_ids:
+        return
+    names = dict(session.execute(
+        text("SELECT npc_id, npc_name FROM npc_list WHERE npc_id IN :ids")
+        .bindparams(bindparam("ids", expanding=True)),
+        {"ids": npc_ids},
+    ).fetchall())
+    for claim in wanted:
+        name = names.get(claim["npc_id"])
+        claim["npc_key"] = npc_match_key(name) if name else None
+
+
+def fold_claims(claims: list[dict], canonical: dict[int, int],
+                scoped: Optional[dict[int, dict[str, int]]] = None,
+                ) -> dict[tuple[int, str], dict]:
+    """Collapse raw claims into one ledger row per (slot, month).
 
     The winner of a month is the earliest claim in it; a drop beats a
     supplement at the same instant. Everything else in the month becomes count.
+    A shared item's claim lands on the slot of the section that names its NPC.
+    Supplements carry no NPC, so they never fill a shared slot.
     """
+    scoped = scoped or {}
     out: dict[tuple[int, str], dict] = {}
     players: dict[tuple[int, str], set] = defaultdict(set)
     counts: dict[tuple[int, str], int] = defaultdict(int)
@@ -306,6 +380,10 @@ def fold_claims(claims: list[dict], canonical: dict[int, int]) -> dict[tuple[int
         item_id = canonical.get(int(claim["item_id"]))
         if not item_id:
             continue
+        if item_id in scoped:
+            item_id = scoped[item_id].get(claim.get("npc_key") or "")
+            if not item_id:
+                continue
         when = claim["at"]
         if not isinstance(when, datetime):
             continue
@@ -441,8 +519,10 @@ def rebuild_group(session, group_id: int, catalog: Optional[dict] = None,
     claims = _claims_from_drops(session, item_ids, player_ids)
     claims += _claims_from_collection(session, item_ids, player_ids)
     claims += _claims_from_pets(session, pet_ids or item_ids, player_ids)
+    attach_npc_keys(session, claims, catalog)
 
-    stats = upsert_ledger(session, group_id, fold_claims(claims, catalog["canonical"]))
+    stats = upsert_ledger(session, group_id, fold_claims(
+        claims, catalog["canonical"], catalog.get("scoped")))
     stats["roster"] = len(player_ids)
     stats["claims"] = len(claims)
     return stats
@@ -522,7 +602,7 @@ def build_payload(session, group_id: int, period: str,
         items = []
         section_obtained = 0
         for item in section["items"]:
-            claim = claims.get(item["item_id"])
+            claim = claims.get(item.get("slot_id", item["item_id"]))
             entry = {
                 "item_id": item["item_id"],
                 "name": item["name"],
@@ -730,7 +810,9 @@ def _tail_group(session, group_id: int, catalog: dict, player_ids: list[int],
     claims += _claims_from_collection(session, item_ids, player_ids, cursor.get("log_id"))
     claims += _claims_from_pets(session, pet_ids or item_ids, player_ids,
                                cursor.get("pet_id"))
-    stats = upsert_ledger(session, group_id, fold_claims(claims, catalog["canonical"]))
+    attach_npc_keys(session, claims, catalog)
+    stats = upsert_ledger(session, group_id, fold_claims(
+        claims, catalog["canonical"], catalog.get("scoped")))
     stats["claims"] = len(claims)
     stats["roster"] = len(player_ids)
     return stats

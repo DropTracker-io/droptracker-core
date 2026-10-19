@@ -1,6 +1,6 @@
-"""Clan Log: claim folding, period windows, and the catalog name repair.
+"""Clan Log: claim folding, period windows, shared slots, and the catalog.
 
-The three things that decide whether a board tells the truth:
+The things that decide whether a board tells the truth:
 
 * **Folding.** A month's cell names the *first* member to get the item, counts
   every occurrence, and lets a drop outrank a supplement at the same instant.
@@ -9,10 +9,12 @@ The three things that decide whether a board tells the truth:
 * **Period windows.** Month / year / all-time all read the same monthly ledger,
   so `period_contains` is the only thing keeping "what did we get in August"
   apart from "what have we ever got".
-* **Name repair.** The curated sheet's shorthand is correct in context and
-  wrong out of it — under the Ahrim header "Staff" means Ahrim's staff, and the
-  `items` table has a plain item called "Staff" waiting to be picked. This is
-  the guard that turned 40 mis-resolved rows into 0.
+* **Shared slots.** An item on several sections (godsword shards, 3rd age on
+  three clue tiers) is credited by the dropping NPC, or one drop fills them all.
+* **Slot ids.** A slot is keyed by the id drops carry. A first-match name lookup
+  put Vorkath's head on a 16-drop twin of the 6,995-drop id.
+* **The catalog spec** against the real cache structure: the regressions from
+  suggestion #207 (Tiny tempor on Tormented Demon, missing Moons armour).
 
 Loaded from file paths so the conftest ``services`` stub doesn't shadow them.
 """
@@ -82,9 +84,12 @@ clan_log = _load_with_stubs(
 catalog_source = _load(
     "_clan_log_catalog_under_test", "scripts", "clan_log", "catalog_source.py"
 )
+catalog_spec = _load(
+    "_clan_log_spec_under_test", "scripts", "clan_log", "catalog_spec.py"
+)
 
 
-def _claim(item_id, player_id, when, source=None, ref_id=None, proof=None):
+def _claim(item_id, player_id, when, source=None, ref_id=None, proof=None, npc_key=None):
     return {
         "item_id": item_id,
         "player_id": player_id,
@@ -92,6 +97,7 @@ def _claim(item_id, player_id, when, source=None, ref_id=None, proof=None):
         "source": source or clan_log.SOURCE_DROP,
         "ref_id": ref_id,
         "proof": proof,
+        "npc_key": npc_key,
     }
 
 
@@ -201,80 +207,155 @@ def test_clean_proof_maps_on_disk_paths_and_drops_junk():
 
 
 # --------------------------------------------------------------------------- #
-# Catalog name repair
+# Shared slots
 # --------------------------------------------------------------------------- #
-_BARROWS = {
-    4708: "Ahrim's hood", 4710: "Ahrim's staff",
-    1169: "Coif", 4732: "Karil's coif", 4734: "Karil's crossbow",
-    4747: "Torag's hammers",
-}
+SHARD = 11818
 
 
-def test_repair_rewrites_shorthand_to_the_bosss_own_item():
-    # "Staff" resolves to the plain item 1379; the boss's table says otherwise.
-    item_id, note = catalog_source.repair_item_id("Staff", 1379, _BARROWS)
-    assert item_id == 4710
-    assert "repaired" in note
+def _sections():
+    return [
+        {"id": 1, "npc_keys": ["general-graardor", "sergeant-strongstack"], "items": [
+            {"item_id": SHARD, "source": "drop", "slot_id": SHARD},
+            {"item_id": 11832, "source": "drop", "slot_id": 11832},
+        ]},
+        {"id": 2, "npc_keys": ["kree-arra"], "items": [
+            {"item_id": SHARD, "source": "drop", "slot_id": SHARD},
+        ]},
+    ]
 
 
-def test_repair_handles_singular_shorthand_for_a_plural_drop():
-    item_id, _ = catalog_source.repair_item_id("Hammer", 2347, _BARROWS)
-    assert item_id == 4747
+def test_scope_gives_each_section_its_own_slot_for_a_shared_item():
+    sections = _sections()
+    scoped = clan_log.scope_shared_items(sections)
+    graardor, kree = sections[0]["items"][0], sections[1]["items"][0]
+    assert graardor["slot_id"] != kree["slot_id"]
+    assert graardor["slot_id"] < 0 and kree["slot_id"] < 0
+    assert scoped[SHARD] == {
+        "general-graardor": graardor["slot_id"],
+        "sergeant-strongstack": graardor["slot_id"],
+        "kree-arra": kree["slot_id"],
+    }
+    # An item on one section only keeps its own id.
+    assert sections[0]["items"][1]["slot_id"] == 11832
+    assert 11832 not in scoped
 
 
-def test_repair_falls_back_to_the_distinctive_first_word():
-    """The sheet names the finished item where the boss drops a component."""
-    table = {13204: "Pegasian crystal", 13202: "Primordial crystal"}
-    item_id, note = catalog_source.repair_item_id("Pegasian boots", 13237, table)
-    assert item_id == 13204
-    assert "repaired" in note
+def test_fold_credits_a_shared_item_only_to_the_dropping_bosss_section():
+    sections = _sections()
+    scoped = clan_log.scope_shared_items(sections)
+    folded = clan_log.fold_claims(
+        [_claim(SHARD, 1, datetime(2026, 8, 1), npc_key="sergeant-strongstack")],
+        {SHARD: SHARD}, scoped,
+    )
+    assert set(folded) == {(sections[0]["items"][0]["slot_id"], "2026-08")}
 
 
-def test_repair_leaves_an_ambiguous_name_alone_and_says_so():
-    table = {1: "Noxious point", 2: "Noxious blade", 3: "Noxious pommel"}
-    item_id, note = catalog_source.repair_item_id("Noxious halberd", 29796, table)
-    assert item_id == 29796
-    assert "ambiguous" in note
+def test_fold_drops_a_shared_item_no_section_claims():
+    """A visage from a frost dragon fills neither Vorkath nor KBD, and a
+    collection-log unlock carries no NPC at all."""
+    scoped = clan_log.scope_shared_items(_sections())
+    claims = [
+        _claim(SHARD, 1, datetime(2026, 8, 1), npc_key="frost-dragon"),
+        _claim(SHARD, 1, datetime(2026, 8, 1), source=clan_log.SOURCE_CLOG),
+    ]
+    assert clan_log.fold_claims(claims, {SHARD: SHARD}, scoped) == {}
 
 
-def test_repair_accepts_a_clean_resolution_silently():
-    item_id, note = catalog_source.repair_item_id("Ahrim's hood", 4708, _BARROWS)
-    assert item_id == 4708
-    assert note is None
+def test_pets_are_never_scoped():
+    sections = [
+        {"id": 1, "npc_keys": ["chaos-elemental"],
+         "items": [{"item_id": 11995, "source": "pet", "slot_id": 11995}]},
+        {"id": 2, "npc_keys": ["chaos-fanatic"],
+         "items": [{"item_id": 11995, "source": "pet", "slot_id": 11995}]},
+    ]
+    assert clan_log.scope_shared_items(sections) == {}
 
 
-def test_repair_without_a_wiki_table_changes_nothing():
-    """No coverage is not evidence of a bad name — new content has no rows."""
-    item_id, note = catalog_source.repair_item_id("Yama's unique", 5000, {})
-    assert item_id == 5000
-    assert note is None
+# --------------------------------------------------------------------------- #
+# Slot ids
+# --------------------------------------------------------------------------- #
+def test_pick_slot_ids_keys_the_slot_by_the_id_drops_carry():
+    primary, variants = catalog_source.pick_slot_ids(
+        21907, {2425, 21907}, {2425: 16, 21907: 6995})
+    assert primary == 21907
+    assert variants == [2425]
+
+
+def test_pick_slot_ids_keeps_the_drawn_id_as_a_variant():
+    """Unsired is stored as 13273 and drawn as 25624; a clog sync reports 25624."""
+    primary, variants = catalog_source.pick_slot_ids(25624, {13273}, {13273: 3419})
+    assert primary == 13273
+    assert variants == [25624]
+
+
+def test_pick_slot_ids_without_evidence_falls_back_to_the_drawn_id():
+    primary, variants = catalog_source.pick_slot_ids(20014, {20014, 20015}, {})
+    assert primary == 20014
+    assert variants == []
 
 
 def test_slug_and_variant_helpers():
     assert catalog_source.slugify("Vet'ion / Calvar'ion") == "vet_ion_calvar_ion"
     assert catalog_source.base_item_name("Scythe of vitur (uncharged)") == "Scythe of vitur"
+    assert catalog_source.base_item_name("Tome of Fire (empty)") == "Tome of Fire"
     assert catalog_source.base_item_name("Twisted bow") == "Twisted bow"
 
 
-def test_sections_from_template_flattens_groups_into_board_rows():
-    template = {
-        "tasks": [
-            {
-                "label": "Barrows Brothers",
-                "config": {
-                    "groups": [
-                        {"label": "Ahrim", "npcs": ["Ahrim the Blighted"],
-                         "items": [{"item_name": "Ahrim's hood"}]},
-                        {"label": "Dharok", "npcs": ["Dharok the Wretched"],
-                         "items": [{"item_name": "Dharok's helm"}]},
-                    ]
-                },
-            },
-            # A group with no items contributes no board row.
-            {"label": "Empty", "config": {"groups": [{"label": "Empty", "items": []}]}},
-        ]
-    }
-    sections = catalog_source.sections_from_template(template)
-    assert [s["label"] for s in sections] == ["Ahrim", "Dharok"]
-    assert sections[0]["category"] == "group_bosses"
-    assert sections[0]["slug"] == "barrows_brothers_ahrim"
+# --------------------------------------------------------------------------- #
+# Catalog spec, against the tracked cache structure
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def spec_sections():
+    return catalog_spec.build_sections(catalog_spec.load_structure())
+
+
+def _section(sections, label):
+    return next(s for s in sections if s["label"] == label)
+
+
+def _names(section):
+    return {i["item_name"] for i in section["items"]}
+
+
+def test_spec_slugs_are_unique(spec_sections):
+    slugs = [s["slug"] for s in spec_sections]
+    assert len(slugs) == len(set(slugs))
+
+
+def test_spec_fixes_the_suggestion_207_gaps(spec_sections):
+    assert "Tiny tempor" not in _names(_section(spec_sections, "Tormented Demons"))
+    assert "Tiny tempor" in _names(_section(spec_sections, "Tempoross"))
+    assert {"Eclipse moon helm", "Eclipse moon chestplate", "Eclipse moon tassets",
+            "Eclipse atlatl"} == _names(_section(spec_sections, "Eclipse Moon"))
+    for boss in ("Corporeal Beast", "Yama", "Doom of Mokhaiotl", "Maggot King"):
+        assert _section(spec_sections, boss)["category"] == "bosses"
+    assert _section(spec_sections, "Skotizo")["category"] == "slayer"
+    assert _section(spec_sections, "Sarachnis")["category"] == "bosses"
+    assert _section(spec_sections, "Shellbane Gryphon")["category"] == "bosses"
+    assert {"Ring of nature", "Lava dragon mask"} <= _names(_section(spec_sections, "Elite (rare)"))
+    assert {"Ring of coins", "Bucket helm (g)"} <= _names(_section(spec_sections, "Master (rare)"))
+    assert "Mystic hat (dusk)" in _names(_section(spec_sections, "Slayer (non-boss)"))
+
+
+def test_spec_never_lists_an_excluded_slot(spec_sections):
+    for section in spec_sections:
+        assert not (_names(section) & catalog_spec.EXCLUDE), section["label"]
+
+
+def test_spec_marks_pets_and_clog_only_slots_non_attributable(spec_sections):
+    tempoross = {i["item_name"]: i for i in _section(spec_sections, "Tempoross")["items"]}
+    assert tempoross["Tiny tempor"]["source_hint"] == "pet"
+    assert not tempoross["Tiny tempor"]["attributable"]
+    misc = {i["item_name"]: i for i in _section(spec_sections, "Miscellaneous")["items"]}
+    assert misc["Evil chicken head"]["source_hint"] == "clog"
+    assert not misc["Evil chicken head"]["attributable"]
+    assert misc["Dragon warhammer"]["attributable"]
+
+
+def test_every_shared_item_can_be_credited(spec_sections):
+    assert catalog_spec.shared_items_without_npc_keys(spec_sections) == []
+
+
+def test_godsword_shards_credit_the_generals_bodyguards(spec_sections):
+    assert "sergeant-strongstack" in _section(spec_sections, "General Graardor")["npc_keys"]
+    assert "clue-scroll-master" in _section(spec_sections, "Master (rare)")["npc_keys"]

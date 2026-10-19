@@ -1,23 +1,26 @@
 """Seed / refresh the Clan Log catalog (``clan_log_sections`` + ``clan_log_items``).
 
 The catalog is the list of *possible* slots a clan's board is scored against.
-It is curated, not derived: ``xenforo.dt_npc_loot`` has the wiki drop tables but
-no notion of "unique", its raid rarities are conditional on a unique roll, and
-new content lands with no rows at all. So the source of truth is the balancing
-sheet already curated for Loot Sweep (``scripts/loot_sweep/``), and the wiki
-tables are used only to *check* it — see :func:`catalog_source.repair_item_id`,
-which catches the sheet's in-context shorthand ("Staff" under the Ahrim header
-is Ahrim's staff, not the plain staff a name lookup finds).
+Which slots exist comes from the game's collection log, read from the cache
+(``scripts/collection_log_structure.json``); which of them a clan board shows,
+and how they are grouped, is :mod:`scripts.clan_log.catalog_spec`. This script
+resolves each slot to the ``items`` id drops actually carry
+(:func:`catalog_source.pick_slot_ids`) and writes the result.
 
 Idempotent: sections match on ``slug`` and items on ``(section, item_id)``, so
-re-running refreshes labels and ordering rather than duplicating. Rows an admin
-disabled in ``/admin`` stay disabled — a re-seed never re-enables something
-somebody deliberately turned off.
+re-running refreshes labels and ordering rather than duplicating. A section or
+item the spec no longer lists is disabled, never deleted: groups may have
+ledger rows pointing at it. Rows an admin disabled in ``/admin`` stay disabled;
+a re-seed never re-enables something somebody deliberately turned off.
+
+After an ``--apply`` the catalog version changes, so every group's board needs
+a rebuild. Run ``scripts/clan_log/backfill_group.py --all --apply`` rather than
+waiting for the 20-minute round-robin to reach ~300 groups.
 
 Usage
 -----
     # what would change? (writes nothing)
-    python -m scripts.clan_log.seed_catalog
+    python -m scripts.clan_log.seed_catalog [--show]
 
     # write it
     python -m scripts.clan_log.seed_catalog --apply
@@ -37,268 +40,129 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from sqlalchemy import bindparam, text  # noqa: E402
 
 from db.models.base import Session  # noqa: E402
-from db.models.clan_log import (  # noqa: E402
-    ClanLogItem,
-    ClanLogSection,
-    SOURCE_DROP,
-    SOURCE_PET,
-)
+from db.models.clan_log import ClanLogItem, ClanLogSection  # noqa: E402
 from scripts.clan_log.catalog_source import (  # noqa: E402
-    ASSEMBLED_ITEM_PARTS,
-    CATEGORY_ORDER,
-    MIN_USEFUL_TABLE_ROWS,
-    WIKI_SOURCE_OVERRIDE,
     base_item_name,
     norm,
-    repair_item_id,
-    sections_from_template,
-    slugify,
+    pick_slot_ids,
 )
-from utils.npc_names import (  # noqa: E402
-    canonical_encounter_name,
-    npc_family_tiers,
-    npc_match_key,
-    npc_slug_sql_expr,
+from scripts.clan_log.catalog_spec import (  # noqa: E402
+    CATEGORY_ORDER,
+    SOURCE_PET,
+    build_sections,
+    load_structure,
+    shared_items_without_npc_keys,
 )
-from utils.osrs_pets import canonical_pet_name  # noqa: E402
-
-TEMPLATE_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "loot_sweep", "all_content_template.json"
-)
-
-# Boss section label -> its pet. Pets are part of a clan's "did we get
-# everything" question but they never arrive as drops, so they are catalogued
-# with attributable=False: creditable from a `pet` submission, never counted as
-# evidence that a slot is missing.
-PET_BY_SECTION = {
-    "kree'arra": "Pet kree'arra", "general graardor": "Pet general graardor",
-    "commander zilyana": "Pet zilyana", "k'ril tsutsaroth": "Pet k'ril tsutsaroth",
-    "nex": "Nexling", "chaos elemental": "Pet chaos elemental",
-    "venenatis / spindel": "Venenatis spiderling", "callisto / artio": "Callisto cub",
-    "vet'ion / calvar'ion": "Vet'ion jr.", "king black dragon": "Prince black dragon",
-    "sarachnis": "Sraracha", "dagannoth supreme": "Pet dagannoth supreme",
-    "dagannoth rex": "Pet dagannoth rex", "dagannoth prime": "Pet dagannoth prime",
-    "zulrah": "Pet snakeling", "vorkath": "Vorki", "vardorvis": "Butch",
-    "duke sucellus": "Baron", "the whisperer": "Wisp", "the leviathan": "Lil'viathan",
-    "phantom muspah": "Muphin", "kalphite queen": "Kalphite princess",
-    "hueycoatl": "Huberte", "nightmare": "Little nightmare", "amoxliatl": "Moxi",
-    "grotesque guardians": "Noon", "kraken (boss)": "Pet kraken", "cerberus": "Hellpuppy",
-    "araxxor": "Nid", "thermonuclear devil": "Pet smoke devil",
-    "alchemical hydra": "Ikkle hydra", "gauntlet": "Youngllef", "scurrius": "Scurry",
-    "chambers of xeric": "Olmlet", "theater of blood": "Lil' zik",
-    "tombs of amascut": "Tumeken's guardian", "abyssal sire": "Abyssal orphan",
-    "fortis colosseum": "Smol heredit", "tormented demon": "Tiny tempor",
-    "demonic gorillas": "Tiny tempor",
-}
-# Section labels where a pet mapping would be wrong (the pet belongs to a
-# sibling section, or the set has no pet of its own).
-PET_SKIP = {"demonic gorillas"}
-
-# Untradeables are NOT special here. A jar, a champion scroll, a boss head and
-# the raid dusts all arrive through the normal drop pipeline (they are in
-# `valued_items.txt`, which is what makes the plugin send zero-GP items), so
-# their absence is real evidence. Pets are the only slot that genuinely cannot
-# be attributed from `drops` — they come in as their own submission type.
+from utils.npc_names import npc_match_key  # noqa: E402
 
 
-def _load_template() -> dict:
-    with open(TEMPLATE_PATH) as fh:
-        return json.load(fh)
-
-
-def _item_lookup(session) -> tuple[dict[str, int], dict[int, str]]:
-    rows = session.execute(
+def _ids_by_base_name(session, names: list[str]) -> dict[str, set[int]]:
+    wanted = {norm(base_item_name(n)) for n in names}
+    out: dict[str, set[int]] = {}
+    for iid, name in session.execute(
         text("SELECT item_id, item_name FROM items WHERE item_name IS NOT NULL")
-    ).fetchall()
-    by_norm: dict[str, int] = {}
-    name_by_id: dict[int, str] = {}
-    for iid, name in rows:
-        name_by_id[int(iid)] = name
-        by_norm.setdefault(norm(name), int(iid))
-    return by_norm, name_by_id
+    ).fetchall():
+        key = norm(base_item_name(name))
+        if key in wanted:
+            out.setdefault(key, set()).add(int(iid))
+    return out
 
 
-def _npc_ids_for(session, npc_names: list[str]) -> list[int]:
-    """``npc_list`` ids for a section's sources, including family donors.
-
-    The wiki importer landed each family's table on one arbitrary member, so a
-    section naming "Tombs of Amascut" has to reach the row that actually holds
-    the table. Same fallback ladder ``web_api/routes/npcs`` uses.
-    """
-    if not npc_names:
-        return []
-    expr = npc_slug_sql_expr("npc_name")
+def _drop_counts(session, item_ids: list[int]) -> dict[int, int]:
+    """All-time ``drops`` rows per id. Index-only on ``drops.item_id``."""
+    counts: dict[int, int] = {}
     sql = text(
-        f"SELECT npc_id FROM npc_list WHERE {expr} IN :slugs"
-    ).bindparams(bindparam("slugs", expanding=True))
-    out: list[int] = []
-    for name in npc_names:
-        tiers = npc_family_tiers(name) or [[npc_match_key(name)]]
-        for tier in tiers:
-            if not tier:
-                continue
-            ids = [int(r[0]) for r in session.execute(sql, {"slugs": list(tier)}).fetchall()]
-            if ids:
-                out.extend(ids)
-                break
-    return sorted(set(out))
+        "SET STATEMENT max_statement_time=30 FOR "
+        "SELECT item_id, COUNT(*) FROM drops WHERE item_id IN :ids GROUP BY item_id"
+    ).bindparams(bindparam("ids", expanding=True))
+    for start in range(0, len(item_ids), 80):
+        chunk = item_ids[start:start + 80]
+        for iid, count in session.execute(sql, {"ids": chunk}).fetchall():
+            counts[int(iid)] = int(count)
+    return counts
 
 
-def _wiki_table(session, npc_ids: list[int]) -> dict[int, str]:
-    """``{item_id: item_name}`` the wiki says these NPCs drop."""
-    if not npc_ids:
-        return {}
-    rows = session.execute(
-        text(
-            "SELECT DISTINCT l.item_id, COALESCE(i.item_name, CONCAT('Item ', l.item_id)) "
-            "FROM xenforo.dt_npc_loot l "
-            "LEFT JOIN items i ON i.item_id = l.item_id "
-            "WHERE l.npc_id IN :ids"
-        ).bindparams(bindparam("ids", expanding=True)),
-        {"ids": npc_ids},
-    ).fetchall()
-    return {int(iid): name for iid, name in rows}
+def build_catalog(session, notes: list[str], structure: dict | None = None) -> list[dict]:
+    """The spec's sections with every slot keyed by the id drops carry."""
+    structure = structure or load_structure()
+    sections = build_sections(structure)
+    for problem in shared_items_without_npc_keys(sections):
+        notes.append(f"shared item with no npc_keys, can never be credited: {problem}")
 
+    # The cache stores a dozen slots under one id and draws them as another;
+    # drops carry the stored one (Unsired: 13273 stored, 25624 drawn).
+    stored_for = {int(v): int(k) for k, v in (structure.get("replacements") or {}).items()}
+    names = [i["item_name"] for s in sections for i in s["items"]]
+    by_base = _ids_by_base_name(session, names)
+    all_ids = sorted({i for ids in by_base.values() for i in ids}
+                     | {i["item_id"] for s in sections for i in s["items"]}
+                     | set(stored_for.values()))
+    counts = _drop_counts(session, all_ids)
 
-def _is_attributable(name: str, source: str) -> bool:
-    return source != SOURCE_PET
-
-
-def build_catalog(session, notes: list[str]) -> list[dict]:
-    """Resolve the template into catalog rows, repairing names as it goes."""
-    by_norm, name_by_id = _item_lookup(session)
-    sections = sections_from_template(_load_template())
-
-    # Variants ("Scythe of vitur (uncharged)") fold onto the base slot so a
-    # board row isn't three near-identical cells.
     for section in sections:
-        # Route to the collective encounter when that is where the table lives
-        # (every Barrows brother's gear sits on `Barrows`).
-        override = WIKI_SOURCE_OVERRIDE.get(norm(section["label"]))
-        sources = [override] if override else section["npcs"]
-        table = _wiki_table(session, _npc_ids_for(session, sources))
-        if len(table) < MIN_USEFUL_TABLE_ROWS:
-            # The sheet names a sub-boss the table doesn't sit on ("Dusk" for
-            # the Grotesque Guardians). The encounter canonicaliser is the
-            # codebase's answer to exactly that.
-            encounters = [canonical_encounter_name(n) for n in sources]
-            encounters = [e for e in encounters if e and norm(e) not in {norm(s) for s in sources}]
-            table = _wiki_table(session, _npc_ids_for(session, encounters)) if encounters else {}
-            if len(table) < MIN_USEFUL_TABLE_ROWS:
-                table = {}
-            elif encounters:
-                override = override or encounters[0]
-
-        keys = {npc_match_key(n) for n in section["npcs"] if n}
-        if override:
-            keys.add(npc_match_key(override))
-        section["npc_keys"] = sorted(keys)
-        if section["npcs"] and not table:
-            notes.append(f"[{section['label']}] no usable wiki drop table — names unchecked")
-
-        resolved: dict[int, dict] = {}
-        raw_items = []
-        for raw in section["items"]:
-            parts = ASSEMBLED_ITEM_PARTS.get((norm(section["label"]), norm(raw["name"])))
-            if parts:
-                notes.append(
-                    f"[{section['label']}] '{raw['name']}' is assembled, never dropped "
-                    f"— catalogued as its parts: {', '.join(parts)}"
-                )
-                raw_items.extend({**raw, "name": p, "item_id": None} for p in parts)
+        resolved, seen = [], set()
+        for item in section["items"]:
+            drawn = item["item_id"]
+            candidates = set(by_base.get(norm(base_item_name(item["item_name"])), set()))
+            if drawn in stored_for:
+                candidates.add(stored_for[drawn])
+            if item["source_hint"] == SOURCE_PET:
+                # player_pets stores the collection log's own id for every pet.
+                primary, variants = drawn, []
             else:
-                raw_items.append(raw)
-
-        for raw in raw_items:
-            name = raw["name"]
-            item_id = raw.get("item_id") or by_norm.get(norm(name))
-            if raw["source"] != SOURCE_PET:
-                item_id, note = repair_item_id(name, item_id, table)
-                if note:
-                    notes.append(f"[{section['label']}] {note}")
-            if not item_id:
-                notes.append(f"[{section['label']}] DROPPED '{name}' — no item id")
+                primary, variants = pick_slot_ids(drawn, candidates, counts)
+            if primary in seen:
                 continue
-
-            canonical_name = name_by_id.get(item_id, name)
-            base = base_item_name(canonical_name)
-            base_id = by_norm.get(norm(base))
-            variants: list[int] = []
-            # Fold a charged/uncharged pair onto whichever id the sheet named.
-            if base_id and base_id != item_id and norm(base) != norm(canonical_name):
-                variants.append(base_id)
-
-            entry = resolved.get(item_id)
-            if entry:
-                entry["variant_item_ids"].extend(v for v in variants if v not in entry["variant_item_ids"])
-                continue
-            resolved[item_id] = {
-                "item_id": item_id,
-                "item_name": canonical_name,
-                "variant_item_ids": variants,
-                "source_hint": raw["source"],
-                "attributable": _is_attributable(canonical_name, raw["source"]),
-            }
-
-        # The section's pet, if it has one.
-        pet_name = PET_BY_SECTION.get(norm(section["label"]))
-        if pet_name and norm(section["label"]) not in PET_SKIP:
-            canon = canonical_pet_name(pet_name) or pet_name
-            pet_id = by_norm.get(norm(canon))
-            if pet_id and pet_id not in resolved:
-                resolved[pet_id] = {
-                    "item_id": pet_id,
-                    "item_name": name_by_id.get(pet_id, canon),
-                    "variant_item_ids": [],
-                    "source_hint": SOURCE_PET,
-                    "attributable": False,
-                }
-            elif not pet_id:
-                notes.append(f"[{section['label']}] pet '{canon}' is not in `items` — skipped")
-
-        section["resolved"] = list(resolved.values())
-    return [s for s in sections if s.get("resolved")]
+            seen.add(primary)
+            if primary != drawn and counts.get(primary, 0):
+                notes.append(f"[{section['label']}] {item['item_name']}: keyed by {primary} "
+                             f"({counts.get(primary, 0)} drops), not drawn id {drawn}")
+            if item["attributable"] and not any(counts.get(i, 0) for i in [primary, *variants]):
+                notes.append(f"[{section['label']}] {item['item_name']}: no drop on record yet")
+            resolved.append({**item, "item_id": primary, "variant_item_ids": variants})
+        section["resolved"] = resolved
+    return sections
 
 
 def apply_catalog(session, sections: list[dict], apply: bool) -> dict:
-    """Upsert sections + items. Returns a summary of what changed."""
-    stats = {"sections_new": 0, "sections_updated": 0, "items_new": 0,
-             "items_updated": 0, "items_disabled": 0}
+    """Upsert sections + items, disabling what the spec dropped.
+
+    With ``apply=False`` nothing is written; the stats say what would change.
+    """
+    stats = {"sections_new": 0, "sections_updated": 0, "sections_disabled": 0,
+             "items_new": 0, "items_updated": 0, "items_disabled": 0}
     order_of = {c: i for i, c in enumerate(CATEGORY_ORDER)}
+    rows_by_slug = {r.slug: r for r in session.query(ClanLogSection).all()}
+    wanted_slugs = {s["slug"] for s in sections}
 
     for index, section in enumerate(sections):
-        slug = section["slug"]
-        row = session.query(ClanLogSection).filter(ClanLogSection.slug == slug).first()
+        row = rows_by_slug.get(section["slug"])
         sort_order = order_of.get(section["category"], len(CATEGORY_ORDER)) * 1000 + index
         npc_keys = json.dumps(section["npc_keys"])
         if row is None:
             stats["sections_new"] += 1
+            stats["items_new"] += len(section["resolved"])
+            if not apply:
+                continue
             row = ClanLogSection(
-                slug=slug, label=section["label"], category=section["category"],
+                slug=section["slug"], label=section["label"], category=section["category"],
                 npc_keys=npc_keys, sort_order=sort_order, enabled=True,
             )
+            session.add(row)
+            session.flush()
+        elif (row.label != section["label"] or row.category != section["category"]
+              or row.npc_keys != npc_keys or row.sort_order != sort_order):
+            stats["sections_updated"] += 1
             if apply:
-                session.add(row)
-                session.flush()
-        else:
-            changed = (row.label != section["label"] or row.category != section["category"]
-                       or row.npc_keys != npc_keys or row.sort_order != sort_order)
-            if changed:
-                stats["sections_updated"] += 1
-                if apply:
-                    row.label = section["label"]
-                    row.category = section["category"]
-                    row.npc_keys = npc_keys
-                    row.sort_order = sort_order
-
-        if not apply:
-            stats["items_new"] += len(section["resolved"])
-            continue
+                row.label = section["label"]
+                row.category = section["category"]
+                row.npc_keys = npc_keys
+                row.sort_order = sort_order
 
         existing = {
             int(i.item_id): i
             for i in session.query(ClanLogItem).filter(ClanLogItem.section_id == row.id).all()
-        }
+        } if row.id else {}
         seen = set()
         for position, item in enumerate(section["resolved"]):
             seen.add(item["item_id"])
@@ -306,36 +170,45 @@ def apply_catalog(session, sections: list[dict], apply: bool) -> dict:
             current = existing.get(item["item_id"])
             if current is None:
                 stats["items_new"] += 1
-                session.add(ClanLogItem(
-                    section_id=row.id, item_id=item["item_id"],
-                    item_name=item["item_name"], variant_item_ids=variants,
-                    attributable=item["attributable"], source_hint=item["source_hint"],
-                    sort_order=position, enabled=True,
-                ))
-            else:
-                if (current.item_name != item["item_name"]
-                        or current.variant_item_ids != variants
-                        or current.sort_order != position
-                        or bool(current.attributable) != item["attributable"]):
-                    stats["items_updated"] += 1
+                if apply:
+                    session.add(ClanLogItem(
+                        section_id=row.id, item_id=item["item_id"],
+                        item_name=item["item_name"], variant_item_ids=variants,
+                        attributable=item["attributable"], source_hint=item["source_hint"],
+                        sort_order=position, enabled=True,
+                    ))
+                continue
+            if (current.item_name != item["item_name"]
+                    or current.variant_item_ids != variants
+                    or current.sort_order != position
+                    or current.source_hint != item["source_hint"]
+                    or bool(current.attributable) != item["attributable"]):
+                stats["items_updated"] += 1
+                if apply:
                     current.item_name = item["item_name"]
                     current.variant_item_ids = variants
                     current.sort_order = position
+                    current.source_hint = item["source_hint"]
                     current.attributable = item["attributable"]
-        # An item the sheet no longer lists is disabled, never deleted: a group
-        # may already have progress rows pointing at it.
         for item_id, current in existing.items():
             if item_id not in seen and current.enabled:
                 stats["items_disabled"] += 1
-                current.enabled = False
+                if apply:
+                    current.enabled = False
+
+    for slug, row in rows_by_slug.items():
+        if slug not in wanted_slugs and row.enabled:
+            stats["sections_disabled"] += 1
+            if apply:
+                row.enabled = False
     return stats
 
 
 def suggest_gaps(session, limit: int = 40) -> list[str]:
     """Rare wiki lines from catalogued NPCs that the catalog does not carry.
 
-    Advisory only — a flat rarity threshold is exactly what the catalog exists
-    to avoid — but it is the cheapest way to notice a new boss's uniques after
+    Advisory only. A flat rarity threshold is exactly what the catalog exists
+    to avoid, but it is the cheapest way to notice a new boss's uniques after
     a wiki sync.
     """
     rows = session.execute(
@@ -351,11 +224,15 @@ def suggest_gaps(session, limit: int = 40) -> list[str]:
     ).fetchall()
     have = {
         int(r[0])
-        for r in session.execute(text("SELECT DISTINCT item_id FROM clan_log_items")).fetchall()
+        for r in session.execute(
+            text("SELECT DISTINCT item_id FROM clan_log_items WHERE enabled = 1")
+        ).fetchall()
     }
     keys = {
         npc_match_key(r[0])
-        for r in session.execute(text("SELECT DISTINCT label FROM clan_log_sections")).fetchall()
+        for r in session.execute(
+            text("SELECT DISTINCT label FROM clan_log_sections WHERE enabled = 1")
+        ).fetchall()
     }
     out = []
     for npc_name, item_id, item_name, p in rows:
@@ -393,7 +270,7 @@ def main() -> int:
                 print(f"  [{s['category']}] {s['label']} ({len(s['resolved'])}): {names}")
 
         if notes:
-            print(f"\n{len(notes)} name checks:")
+            print(f"\n{len(notes)} notes:")
             for note in notes:
                 print("  ", note)
 
@@ -403,7 +280,7 @@ def main() -> int:
             session.commit()
         else:
             session.rollback()
-            print("(nothing written — re-run with --apply)")
+            print("(nothing written; re-run with --apply)")
         return 0
     finally:
         session.close()
