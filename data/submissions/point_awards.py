@@ -9,6 +9,8 @@ import json
 import os
 from datetime import datetime
 
+from sqlalchemy import func
+
 from db import PlayerPoints, GroupPointConfig
 from db.models import (
     GroupConfiguration,
@@ -516,23 +518,18 @@ async def _check_and_award_points(
             return own
 
     def _current_total_for(target_player_id) -> int:
+        # Summed by the server: the ledger grows by a row per award, and
+        # fetching every row to add them up here cost more each time.
         try:
-            total = 0
-            rows = (
-                session.query(PlayerPoints.amount)
+            total = (
+                session.query(func.coalesce(func.sum(PlayerPoints.amount), 0))
                 .filter(
                     PlayerPoints.group_id == int(group_id),
                     PlayerPoints.player_id.in_(_counted_ids_for(target_player_id)),
                 )
-                .all()
+                .scalar()
             )
-            for row in rows:
-                amount = _extract_scalar(row)
-                try:
-                    total += int(amount)
-                except Exception:
-                    continue
-            return int(total)
+            return int(total or 0)
         except Exception:
             return 0
 

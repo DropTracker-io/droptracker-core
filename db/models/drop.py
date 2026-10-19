@@ -14,7 +14,7 @@ Classes:
 Author: joelhalen
 """
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Index
 from sqlalchemy import func
 from sqlalchemy.orm import relationship
 
@@ -65,13 +65,16 @@ class Drop(Base):
         notified_drops: List of NotifiedSubmission objects for this drop
     """
     __tablename__ = 'drops'
-    __table_args__ = {
-        'extend_existing': True,
-    }
+    __table_args__ = (
+        # Also backs the player_id foreign key; the single-column player_id
+        # index it made redundant was dropped in data02.
+        Index('ix_drops_player_id_date_added', 'player_id', 'date_added'),
+        {'extend_existing': True},
+    )
 
     drop_id = Column(Integer, primary_key=True, autoincrement=True)
     item_id = Column(Integer, ForeignKey('items.item_id'), index=True)
-    player_id = Column(Integer, ForeignKey('players.player_id'), index=True, nullable=False)
+    player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
     date_added = Column(DateTime, index=True, default=func.now())
     npc_id = Column(Integer, ForeignKey('npc_list.npc_id'), index=True)
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())

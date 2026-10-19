@@ -1069,7 +1069,11 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
     # month). Unbounded, that would match one of them every time and reject
     # every guid-less submission forever. The old one-hour window hid this by
     # only ever considering NULL rows written in the last hour.
-    if not unique_id:
+    # "unknown" is the plugin's fallback when it has no API object to mint a
+    # GUID with (BaseEventHandler.addCommonFields) — a placeholder shared by
+    # every such submission, so it is no key either. Matched, the first one
+    # would make every later one a "duplicate".
+    if not unique_id or unique_id == "unknown":
         return True
     if submission_type not in unique_id_cache:
         unique_id_cache[submission_type] = []
@@ -1434,12 +1438,15 @@ def get_player_groups_with_global(session, player: Player):
     ).all()
 
     group_ids = {gid[0] for gid in player_gids} if player_gids else set()
-    global_group = session.query(Group).filter(Group.group_id == 2).first()
 
-    if global_group and global_group.group_id not in group_ids:
-        player.add_group(global_group)
-        session.commit()
-        group_ids.add(global_group.group_id)
+    # Nearly every player is already in the global group, so it is only loaded
+    # when they are not -- a read per submission otherwise.
+    if 2 not in group_ids:
+        global_group = session.query(Group).filter(Group.group_id == 2).first()
+        if global_group:
+            player.add_group(global_group)
+            session.commit()
+            group_ids.add(global_group.group_id)
 
     if not group_ids:
         return []

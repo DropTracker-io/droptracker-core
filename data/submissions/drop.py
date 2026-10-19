@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from datetime import datetime, timedelta
 import time
 
 from .common import (
@@ -25,7 +24,6 @@ from .common import (
     RedisClient,
     DatabaseOperations,
     debug_print,
-    FeatureActivation,
     award_points_to_player,
     player_list,
     redis_updates,
@@ -43,7 +41,6 @@ from utils.valuation_guard import sanitize_quantity, exceeds_value_sanity_limit
 
 redis_client = RedisClient()
 db = DatabaseOperations()
-last_board_updates = {}
 
 
 def _verify_high_value_drop_sync(item_name, npc_name, timeout: float = 20.0) -> bool:
@@ -784,7 +781,6 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         )
         group_ids = [group.group_id for group in player_groups]
         group_config_values = {}
-        instant_update_group_ids = set()
         if group_ids:
             from utils import group_config as gc
             group_config_values = gc.get_bulk(
@@ -805,17 +801,6 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                 if group_config_values
                 else "Loaded group notification configs: none"
             )
-
-            instant_update_rows = (
-                session.query(FeatureActivation.group_id)
-                .filter(
-                    FeatureActivation.group_id.in_(group_ids),
-                    FeatureActivation.feature_id == 2,
-                    FeatureActivation.status == "active",
-                )
-                .all()
-            )
-            instant_update_group_ids = {row[0] for row in instant_update_rows}
 
         log_checkpoint("group_config_queries")
 
@@ -1040,16 +1025,6 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     group_id,
                     existing_session=session if use_external_session else None,
                 )
-                should_instantly_update = group_id in instant_update_group_ids
-                if group_id == 2 or should_instantly_update:
-                    if group_id not in last_board_updates:
-                        last_board_updates[group_id] = datetime.now() - timedelta(seconds=10)
-                    if last_board_updates[group_id] > datetime.now() - timedelta(seconds=10):
-                        debug_print(
-                            f"Skipping group {group_id}: within 10 second window for instant update"
-                        )
-                        continue
-                    last_board_updates[group_id] = datetime.now()
             else:
                 debug_print(
                     f"Notification criteria NOT met for group {group_id} - skipping"
