@@ -245,32 +245,38 @@ def roster_hash(player_ids: Iterable[int]) -> str:
 # --------------------------------------------------------------------------- #
 # Evidence collection
 # --------------------------------------------------------------------------- #
-def _claims_from_drops(session, item_ids: list[int], player_ids: list[int],
+def _claims_from_drops(session, item_ids: list[int], player_ids: Optional[list[int]],
                        since_drop_id: Optional[int] = None) -> list[dict]:
-    """Raw catalog drops for a roster.
+    """Raw catalog drops for a roster (``player_ids=None``: every player).
 
-    Deliberately not aggregated in SQL: the row count is small (a 500-member
-    clan's entire history of ~300 rare items is a couple of thousand rows) and
-    folding in Python keeps the exact ``drop_id`` and screenshot of the first
-    claim, which a ``MIN(date_added)`` aggregate throws away.
+    Deliberately not aggregated in SQL: a clan's share is a few thousand rows,
+    and folding in Python keeps the exact ``drop_id`` and screenshot of the
+    first claim, which a ``MIN(date_added)`` aggregate throws away.
+
+    A full read forces ``ix_drops_item_id``. With ~600 catalog ids the
+    optimizer prefers the roster's ``player_id`` index and walks every drop
+    those members ever had (4+ minutes for a 286-member clan, against ~50s
+    cold for the item index). A tail is left to the planner: its
+    ``drop_id > cursor`` range is the cheap path there.
     """
-    if not item_ids or not player_ids:
+    if not item_ids or (player_ids is not None and not player_ids):
         return []
+    index_hint = "" if since_drop_id else " FORCE INDEX (ix_drops_item_id)"
     sql = (
         "SELECT drop_id, item_id, player_id, date_added, image_url, npc_id "
-        "FROM drops "
-        "WHERE item_id IN :items AND player_id IN :players AND hidden = 0"
+        f"FROM drops{index_hint} "
+        "WHERE item_id IN :items AND hidden = 0"
     )
-    params = {"items": item_ids, "players": player_ids}
+    params = {"items": item_ids}
+    binds = [bindparam("items", expanding=True)]
+    if player_ids is not None:
+        sql += " AND player_id IN :players"
+        params["players"] = player_ids
+        binds.append(bindparam("players", expanding=True))
     if since_drop_id:
         sql += " AND drop_id > :cursor"
         params["cursor"] = int(since_drop_id)
-    rows = session.execute(
-        text(sql).bindparams(
-            bindparam("items", expanding=True), bindparam("players", expanding=True)
-        ),
-        params,
-    ).fetchall()
+    rows = session.execute(text(sql).bindparams(*binds), params).fetchall()
     return [
         {"ref_id": int(r[0]), "item_id": int(r[1]), "player_id": int(r[2]),
          "at": r[3], "proof": r[4], "source": SOURCE_DROP,
@@ -497,9 +503,32 @@ def upsert_ledger(session, group_id: int, folded: dict[tuple[int, str], dict]) -
     return stats
 
 
+def prefetch_drop_claims(session, catalog: dict) -> dict:
+    """Every catalog drop for every player, read once, for a many-group rebuild.
+
+    A full rebuild's drop read costs the same whatever the roster: the plan
+    walks ``ix_drops_item_id`` across all ~380k catalog rows and filters by
+    player afterwards (~50s cold on the 677-slot catalog). Rebuilding ~300
+    groups one by one repeats that read ~300 times. ``backfill_group`` reads it
+    once here and each :func:`rebuild_group` takes its roster's share.
+
+    ``max_drop_id`` is read BEFORE the scan and rows above it are discarded, so
+    a rebuild can tail from it without gaps or double counts.
+    """
+    ceiling = _max_id(session, "drops", "drop_id")
+    claims = [c for c in _claims_from_drops(session, sorted(catalog["canonical"]), None)
+              if c["ref_id"] <= ceiling]
+    return {"claims": claims, "max_drop_id": ceiling}
+
+
 def rebuild_group(session, group_id: int, catalog: Optional[dict] = None,
-                  player_ids: Optional[list[int]] = None) -> dict:
-    """Recompute a group's whole ledger from every source, from the beginning."""
+                  player_ids: Optional[list[int]] = None,
+                  prefetched: Optional[dict] = None) -> dict:
+    """Recompute a group's whole ledger from every source, from the beginning.
+
+    ``prefetched`` (from :func:`prefetch_drop_claims`) replaces the drop read
+    with the roster's share of it, plus a tail of anything newer.
+    """
     catalog = catalog or load_catalog(session)
     player_ids = player_ids if player_ids is not None else visible_group_player_ids(
         session, group_id
@@ -516,7 +545,14 @@ def rebuild_group(session, group_id: int, catalog: Optional[dict] = None,
         i["item_id"] for s in catalog["sections"] for i in s["items"]
         if i["source"] == SOURCE_PET
     ]
-    claims = _claims_from_drops(session, item_ids, player_ids)
+    if prefetched is not None:
+        roster = set(player_ids)
+        # Copies: attach_npc_keys writes into claims, and the list is shared.
+        claims = [dict(c) for c in prefetched["claims"] if c["player_id"] in roster]
+        claims += _claims_from_drops(session, item_ids, player_ids,
+                                     prefetched["max_drop_id"])
+    else:
+        claims = _claims_from_drops(session, item_ids, player_ids)
     claims += _claims_from_collection(session, item_ids, player_ids)
     claims += _claims_from_pets(session, pet_ids or item_ids, player_ids)
     attach_npc_keys(session, claims, catalog)
@@ -746,7 +782,8 @@ def ledger_periods(session, group_id: int) -> list[str]:
 # Refresh orchestration
 # --------------------------------------------------------------------------- #
 def refresh_group(session, group_id: int, catalog: Optional[dict] = None,
-                  full: bool = False, periods: Optional[list[str]] = None) -> dict:
+                  full: bool = False, periods: Optional[list[str]] = None,
+                  prefetched: Optional[dict] = None) -> dict:
     """Bring one group's ledger and stored boards up to date.
 
     A roster change or a catalog change forces the full path: a new member
@@ -783,7 +820,8 @@ def refresh_group(session, group_id: int, catalog: Optional[dict] = None,
     }
 
     if stale:
-        stats = rebuild_group(session, group_id, catalog=catalog, player_ids=player_ids)
+        stats = rebuild_group(session, group_id, catalog=catalog, player_ids=player_ids,
+                              prefetched=prefetched)
         mode = "rebuild"
     else:
         stats = _tail_group(session, group_id, catalog, player_ids, cursor)

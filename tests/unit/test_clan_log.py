@@ -359,3 +359,92 @@ def test_every_shared_item_can_be_credited(spec_sections):
 def test_godsword_shards_credit_the_generals_bodyguards(spec_sections):
     assert "sergeant-strongstack" in _section(spec_sections, "General Graardor")["npc_keys"]
     assert "clue-scroll-master" in _section(spec_sections, "Master (rare)")["npc_keys"]
+
+
+# --------------------------------------------------------------------------- #
+# Drop reads: forced index on full reads, prefetch for many-group rebuilds
+# --------------------------------------------------------------------------- #
+class _FakeSession:
+    """Records each statement; answers drop reads from canned rows."""
+
+    def __init__(self, drop_rows=(), max_drop_id=0):
+        self.sql = []
+        self.drop_rows = list(drop_rows)
+        self.max_drop_id = max_drop_id
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.sql.append((sql, dict(params or {})))
+        rows = []
+        if "MAX(drop_id)" in sql:
+            rows = [(self.max_drop_id,)]
+        elif "FROM drops" in sql:
+            players = (params or {}).get("players")
+            cursor = (params or {}).get("cursor")
+            rows = [r for r in self.drop_rows
+                    if (players is None or r[2] in players)
+                    and (cursor is None or r[0] > cursor)]
+
+        class _Result:
+            def fetchall(self_inner):
+                return rows
+
+            def first(self_inner):
+                return rows[0] if rows else None
+
+        return _Result()
+
+
+def _drop_row(drop_id, item_id, player_id, when=datetime(2026, 8, 1), npc_id=1):
+    return (drop_id, item_id, player_id, when, None, npc_id)
+
+
+def test_a_full_drop_read_forces_the_item_index_and_a_tail_does_not():
+    session = _FakeSession()
+    clan_log._claims_from_drops(session, [100], [1, 2])
+    clan_log._claims_from_drops(session, [100], [1, 2], since_drop_id=50)
+    full, tail = session.sql[0][0], session.sql[1][0]
+    assert "FORCE INDEX (ix_drops_item_id)" in full
+    assert "FORCE INDEX" not in tail
+    assert "drop_id > :cursor" in tail
+
+
+def test_an_all_player_read_has_no_roster_filter():
+    session = _FakeSession([_drop_row(1, 100, 7), _drop_row(2, 100, 8)])
+    claims = clan_log._claims_from_drops(session, [100], None)
+    assert "player_id IN" not in session.sql[0][0]
+    assert {c["player_id"] for c in claims} == {7, 8}
+    # An empty roster still reads nothing.
+    assert clan_log._claims_from_drops(_FakeSession(), [100], []) == []
+
+
+def test_prefetch_drops_rows_above_the_ceiling_read_before_the_scan():
+    session = _FakeSession([_drop_row(10, 100, 7), _drop_row(20, 100, 7)], max_drop_id=15)
+    prefetched = clan_log.prefetch_drop_claims(session, {"canonical": {100: 100}})
+    assert prefetched["max_drop_id"] == 15
+    assert [c["ref_id"] for c in prefetched["claims"]] == [10]
+
+
+def test_a_prefetched_rebuild_takes_its_roster_share_and_tails_without_double_counting(
+        monkeypatch):
+    catalog = {"sections": [], "canonical": {100: 100}, "scoped": {}}
+    prefetched = {"claims": [
+        {"ref_id": 10, "item_id": 100, "player_id": 7, "at": datetime(2026, 8, 1),
+         "proof": None, "source": "drop", "npc_id": 1},
+        {"ref_id": 11, "item_id": 100, "player_id": 99, "at": datetime(2026, 8, 1),
+         "proof": None, "source": "drop", "npc_id": 1},
+    ], "max_drop_id": 15}
+    # Drop 10 is below the ceiling (already prefetched); 20 landed after it.
+    session = _FakeSession([_drop_row(10, 100, 7), _drop_row(20, 100, 7)])
+    captured = {}
+    monkeypatch.setattr(clan_log, "_claims_from_collection", lambda *a, **k: [])
+    monkeypatch.setattr(clan_log, "_claims_from_pets", lambda *a, **k: [])
+    monkeypatch.setattr(clan_log, "upsert_ledger",
+                        lambda s, gid, folded: captured.update(folded) or {})
+    clan_log.rebuild_group(session, 5, catalog=catalog, player_ids=[7],
+                           prefetched=prefetched)
+    row = captured[(100, "2026-08")]
+    assert row["obtained_count"] == 2      # drop 10 once + drop 20, never 10 twice
+    assert row["player_count"] == 1        # player 99 is not on this roster
+    # The shared prefetch list is never written into.
+    assert "npc_key" not in prefetched["claims"][0]

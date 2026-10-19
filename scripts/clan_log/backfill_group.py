@@ -34,6 +34,7 @@ from services.clan_log import (  # noqa: E402
     RosterTooLarge,
     load_board,
     load_catalog,
+    prefetch_drop_claims,
     refresh_group,
 )
 
@@ -52,7 +53,8 @@ def _candidate_groups(session, min_members: int) -> list[tuple[int, str, int]]:
     return [(int(r[0]), r[1], int(r[2])) for r in rows]
 
 
-def _refresh_with_retry(session, group_id: int, catalog: dict, attempts: int = 3):
+def _refresh_with_retry(session, group_id: int, catalog: dict, attempts: int = 3,
+                        prefetched=None):
     """``refresh_group``, retried through a dropped connection.
 
     A full rebuild is a long read against ``drops``; MySQL timing the query out
@@ -67,7 +69,8 @@ def _refresh_with_retry(session, group_id: int, catalog: dict, attempts: int = 3
     """
     for attempt in range(1, attempts + 1):
         try:
-            return refresh_group(session, group_id, catalog=catalog, full=True)
+            return refresh_group(session, group_id, catalog=catalog, full=True,
+                                 prefetched=prefetched)
         except RosterTooLarge:
             raise
         except Exception as exc:
@@ -108,10 +111,21 @@ def main() -> int:
             targets = targets[: args.limit]
         print(f"{len(targets)} group(s) to process\n")
 
+        # One drop read for every group: the full-rebuild read costs the same
+        # for any roster (see services.clan_log.prefetch_drop_claims).
+        prefetched = None
+        if len(targets) > 1:
+            started = time.time()
+            prefetched = prefetch_drop_claims(session, catalog)
+            session.rollback()
+            print(f"prefetched {len(prefetched['claims'])} catalog drops up to drop_id "
+                  f"{prefetched['max_drop_id']} [{time.time() - started:.1f}s]\n", flush=True)
+
         for group_id, name, members in targets:
             started = time.time()
             try:
-                stats = _refresh_with_retry(session, group_id, catalog)
+                stats = _refresh_with_retry(session, group_id, catalog,
+                                            prefetched=prefetched)
             except RosterTooLarge as exc:
                 print(f"  group {group_id}: SKIPPED — {exc}")
                 session.rollback()
@@ -134,7 +148,7 @@ def main() -> int:
                 summary = f" -> {s.get('obtained')}/{s.get('total')} slots ({s.get('pct')}%)"
             label = f"{name} " if name else ""
             print(f"  group {group_id} {label}({members} members): {stats}"
-                  f"{summary}  [{time.time() - started:.1f}s]")
+                  f"{summary}  [{time.time() - started:.1f}s]", flush=True)
 
             if not args.apply:
                 session.rollback()
