@@ -311,10 +311,14 @@ async def my_inbox():
             items += _suggestion_items(s, user_id)
             items.sort(key=_item_activity, reverse=True)
             items = items[:_ITEM_CAP]
+            from web_api.routes.tickets import viewer_discord_member
+
             return {
                 "items": items,
                 "total_unread": sum(_item_unread(i) for i in items),
                 "open_ticket_id": open_ticket_id,
+                # The new-ticket form's "join our Discord" nudge.
+                "discord_member": viewer_discord_member(load_user(s, user_id)),
             }
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))

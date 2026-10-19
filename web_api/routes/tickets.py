@@ -3,6 +3,8 @@
   GET   /api/v1/me/tickets           -> tickets the user created or wrote in
   POST  /api/v1/me/tickets           -> {type, body} open a ticket from the site
   GET   /api/v1/tickets/{id}         -> full transcript (participant/superadmin)
+                                        + discord_member: is the VIEWER in the
+                                        main Discord (null = unknown)
   POST  /api/v1/tickets/{id}/messages-> {content} reply from the site
   GET   /api/v1/admin/tickets        -> all tickets, filterable + stats (superadmin)
   PATCH /api/v1/admin/tickets/{id}   -> {action: claim|unclaim|close} (superadmin)
@@ -198,6 +200,20 @@ def _message_row(m: TicketMessage) -> dict:
     }
 
 
+def viewer_discord_member(user) -> Optional[bool]:
+    """Is the viewer in the main DropTracker Discord? None when unknown
+    (no linked Discord id, or the bot's member cache is stale). Drives the
+    site's "join our Discord" nudge on tickets; the cache is written by the
+    webhook bot (services/discord_membership.py)."""
+    try:
+        from services.discord_membership import is_member
+
+        value = is_member(getattr(user, "discord_id", None))
+    except Exception:
+        return None
+    return value if isinstance(value, bool) else None
+
+
 def _is_participant(s, user_id: int, ticket: Ticket) -> bool:
     if ticket.created_by == user_id or ticket.claimed_by == user_id:
         return True
@@ -328,6 +344,7 @@ async def create_ticket():
             payload = _ticket_summary(s, ticket)
             payload["messages"] = [_message_row(first)]
             payload["mentions"] = {}
+            payload["discord_member"] = viewer_discord_member(user)
             return payload
 
     payload = await asyncio.to_thread(_create)
@@ -357,6 +374,7 @@ async def ticket_detail(ticket_id: int):
             # discord_id -> username for any <@id> mentions in the transcript,
             # so the web view can render real names instead of raw ids.
             payload["mentions"] = resolve_user_mentions(s, (m.content for m in messages))
+            payload["discord_member"] = viewer_discord_member(user)
             return payload
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))

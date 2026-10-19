@@ -3,9 +3,9 @@ import time
 from datetime import datetime, timedelta
 from urllib.parse import quote
 import interactions
-from sqlalchemy import text
+from sqlalchemy import func, text
 from interactions import ActionRow, AllowedMentions, Button, ButtonStyle, ComponentContext, Embed, Extension, IntervalTrigger, OverwriteType, Permissions, SlashCommandChoice, Task, slash_command, slash_option, OptionType, SlashContext, listen
-from interactions.api.events import MessageCreate, MessageUpdate, Component, Startup
+from interactions.api.events import MemberAdd, MessageCreate, MessageUpdate, Component, Startup
 from interactions.models import (
     ContainerComponent,
     SectionComponent,
@@ -21,6 +21,7 @@ from services.ticket_transcripts import (
     STAFF_ROLE_IDS,
     SUPPORT_ROLE_ID,
     TICKETS_ROLE_ID,
+    add_system_message,
     backfill_open_tickets,
     close_and_archive,
     upsert_message,
@@ -408,6 +409,34 @@ def build_ticket_snapshot_error():
 
 TICKET_CATEGORY_ID = 1210785948892274698
 
+# What a ticket opener is granted on their channel (creation and late join alike).
+OPENER_PERMISSIONS = [
+    Permissions.VIEW_CHANNEL,
+    Permissions.SEND_MESSAGES,
+    Permissions.READ_MESSAGE_HISTORY,
+]
+
+
+def _has_member_overwrite(channel, discord_id) -> bool:
+    """True if the channel already carries an overwrite for this member.
+
+    Any overwrite counts, including a deny: a deny is staff's decision and
+    is never replaced by the late-join grant.
+    """
+    did = str(discord_id)
+    for ow in (getattr(channel, "permission_overwrites", None) or []):
+        if str(getattr(ow, "id", "")) == did:
+            return True
+    return False
+
+
+def _late_join_text(discord_id) -> str:
+    return (
+        f"👋 <@{discord_id}> joined the DropTracker Discord, so they've been "
+        "added to this ticket. You can reply here or on the website."
+    )
+
+
 
 async def create_ticket_channel(bot, *, ticket_type: str, author_name: str,
                                 member_target=None):
@@ -432,11 +461,7 @@ async def create_ticket_channel(bot, *, ticket_type: str, author_name: str,
         await channel.add_permission(
             target=member_target,
             type=OverwriteType.MEMBER,
-            allow=[
-                Permissions.VIEW_CHANNEL,
-                Permissions.SEND_MESSAGES,
-                Permissions.READ_MESSAGE_HISTORY,
-            ],
+            allow=OPENER_PERMISSIONS,
         )
     try:
         # Ticket-helper role: granted explicitly so access never depends on
@@ -455,6 +480,34 @@ async def create_ticket_channel(bot, *, ticket_type: str, author_name: str,
     except Exception as e:
         print(f"[tickets] helper-role grant failed on {channel.id}: {e}")
     return channel
+
+
+async def grant_opener_access(bot, ticket_id: int, channel_id, discord_id: str,
+                              member=None) -> bool:
+    """Give a late-joining opener their overwrite if the channel has none
+    for them. Returns True when access was granted (and announced)."""
+    try:
+        channel = await bot.fetch_channel(int(channel_id))
+    except Exception as e:
+        print(f"[tickets] late-join fetch_channel failed ({ticket_id}): {e}")
+        return False
+    if channel is None or _has_member_overwrite(channel, discord_id):
+        return False
+    await channel.add_permission(
+        target=member if member is not None else int(discord_id),
+        type=OverwriteType.MEMBER,
+        allow=OPENER_PERMISSIONS,
+        reason=f"Ticket #{ticket_id} opener joined the server",
+    )
+    try:
+        await channel.send(
+            _late_join_text(discord_id),
+            allowed_mentions=AllowedMentions(users=[str(discord_id)]),
+        )
+    except Exception as e:
+        print(f"[tickets] late-join notice failed ({ticket_id}): {e}")
+    print(f"[tickets] added opener {discord_id} to ticket {ticket_id} after they joined")
+    return True
 
 
 class Tickets(Extension):
@@ -651,6 +704,13 @@ class Tickets(Extension):
                 opened_ts=int(time.time()),
             )
             await channel.send(components=welcome)
+            if member is None:
+                await channel.send(
+                    "-# The opener isn't in the DropTracker Discord yet, so they "
+                    "can't see this channel. Replies here still reach them on the "
+                    "website, and they're added automatically if they join.",
+                    allowed_mentions=AllowedMentions.none(),
+                )
             loading_message = await channel.send(components=build_ticket_loading())
             if discord_id:
                 asyncio.create_task(
@@ -710,6 +770,10 @@ class Tickets(Extension):
         5-day clock; only tickets that stay silent through the 24h grace window
         are archived + closed.
         """
+        try:
+            await self._sweep_late_joiners()
+        except Exception as e:
+            print(f"[tickets] late-join sweep failed: {e}")
         now = datetime.now()
         to_warn = []   # (ticket_id, channel_id, created_by)
         to_close = []  # ticket_id
@@ -765,6 +829,89 @@ class Tickets(Extension):
                 closed_by_name="DropTracker (auto-close)",
                 reason="closed automatically after 5 days of inactivity with no reply to the warning",
             )
+
+    # --- Late joiners -------------------------------------------------------
+    # A site-created ticket whose opener isn't in the server gets a channel
+    # without their overwrite (create_ticket_channel). When they join later,
+    # MemberAdd grants it at once; the 5-minute sweep below catches joins the
+    # bot missed while it was down. Both only ever ADD an overwrite where the
+    # opener has none, so a staff-set deny is left alone.
+
+    @listen(MemberAdd)
+    async def _ticket_member_join(self, event: MemberAdd):
+        try:
+            from services.discord_roles import MAIN_GUILD_ID
+
+            if str(event.guild_id) != str(MAIN_GUILD_ID):
+                return
+            discord_id = str(event.member.id)
+            rows = await asyncio.to_thread(self._open_tickets_for_discord_id, discord_id)
+            for ticket_id, channel_id in rows:
+                await grant_opener_access(self.bot, ticket_id, channel_id, discord_id, member=event.member)
+        except Exception as e:
+            print(f"[tickets] member-join ticket grant failed: {e}")
+
+    @staticmethod
+    def _open_tickets_for_discord_id(discord_id: str):
+        """(ticket_id, channel_id) of open tickets this Discord user opened."""
+        s = Session()
+        try:
+            return [
+                (t_id, ch)
+                for t_id, ch in (
+                    s.query(Ticket.ticket_id, Ticket.channel_id)
+                    .join(User, User.user_id == Ticket.created_by)
+                    .filter(
+                        User.discord_id == discord_id,
+                        Ticket.status == "open",
+                        Ticket.channel_id.isnot(None),
+                    )
+                    .all()
+                )
+            ]
+        finally:
+            s.close()
+
+    @staticmethod
+    def _web_tickets_awaiting_opener():
+        """(ticket_id, channel_id, opener discord_id) for open tickets that
+        were opened on the site (their first transcript row is web-origin).
+        Tickets opened from the Discord button always carried the opener's
+        overwrite, so a missing one there was removed on purpose."""
+        s = Session()
+        try:
+            first_ids = (
+                s.query(func.min(TicketMessage.id))
+                .join(Ticket, Ticket.ticket_id == TicketMessage.ticket_id)
+                .filter(Ticket.status == "open", Ticket.channel_id.isnot(None))
+                .group_by(TicketMessage.ticket_id)
+            )
+            rows = (
+                s.query(Ticket.ticket_id, Ticket.channel_id, User.discord_id)
+                .join(TicketMessage, TicketMessage.ticket_id == Ticket.ticket_id)
+                .join(User, User.user_id == Ticket.created_by)
+                .filter(
+                    TicketMessage.id.in_(first_ids),
+                    TicketMessage.origin == "web",
+                    User.discord_id.isnot(None),
+                )
+                .all()
+            )
+            return [(t, c, str(d)) for t, c, d in rows if d]
+        finally:
+            s.close()
+
+    async def _sweep_late_joiners(self):
+        from services import discord_membership
+
+        rows = await asyncio.to_thread(self._web_tickets_awaiting_opener)
+        for ticket_id, channel_id, discord_id in rows:
+            if await asyncio.to_thread(discord_membership.is_member, discord_id) is not True:
+                continue
+            try:
+                await grant_opener_access(self.bot, ticket_id, channel_id, discord_id)
+            except Exception as e:
+                print(f"[tickets] late-join grant failed ({ticket_id}): {e}")
 
     async def _warn_inactive(self, ticket_id: int, channel_id, created_by):
         """Post the 5-day idle warning (pinging both parties) and mark the ticket."""

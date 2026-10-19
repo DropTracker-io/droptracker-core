@@ -6,7 +6,7 @@ import signal
 import sys
 from datetime import datetime
 from dotenv import load_dotenv
-from interactions.api.events import MemberAdd, MemberUpdate, MessageCreate, MessageReactionAdd, Startup
+from interactions.api.events import MemberAdd, MemberRemove, MemberUpdate, MessageCreate, MessageReactionAdd, Startup
 from interactions import Embed, Intents, Message, ChannelType, OptionType, SlashContext, listen, slash_command, Permissions, slash_option
 from interactions.models import Member
 from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Player, User, UserConfiguration
@@ -24,6 +24,7 @@ from data.submissions.dispatch import (
 from api.services.metrics import MetricsTracker
 from services.points import award_points_to_player
 from services import discord_roles
+from services import discord_membership
 from services import reaction_roles
 from services import nitro_attribution
 from services import nitro_notifications
@@ -443,8 +444,19 @@ async def on_member_add(event: MemberAdd):
     try:
         if str(event.guild_id) == str(discord_roles.MAIN_GUILD_ID):
             _role_sync_dirty.set()
+            await asyncio.to_thread(discord_membership.mark_joined, event.member.id)
     except Exception as e:
         print(f"[roles] member join handling failed: {e}")
+
+
+@listen(MemberRemove)
+async def on_member_remove(event: MemberRemove):
+    """Keep the cached member set (services/discord_membership.py) current."""
+    try:
+        if str(event.guild_id) == str(discord_roles.MAIN_GUILD_ID):
+            await asyncio.to_thread(discord_membership.mark_left, event.member.id)
+    except Exception as e:
+        print(f"[roles] member leave handling failed: {e}")
 
 
 def _load_desired_roles():
@@ -457,6 +469,15 @@ async def run_role_sync(desired, dry_run: bool) -> dict:
     if not role_map:
         return {"skipped": "no role map"}
     members = await discord_roles.fetch_guild_members(bot.http)
+    try:
+        # The site's "join our Discord" nudge reads this (web_api never
+        # talks to Discord); the full listing is the authoritative refresh.
+        await asyncio.to_thread(
+            discord_membership.replace_members,
+            discord_membership.ids_from_member_objects(members),
+        )
+    except Exception as e:
+        print(f"[roles] member cache refresh failed: {e}")
     plan = discord_roles.plan_role_changes(
         desired, members, role_map, max_removals=discord_roles.max_removals_per_pass()
     )
