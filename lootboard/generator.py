@@ -220,6 +220,26 @@ async def get_drops_for_group_optimized(player_ids: List[int], partition: str, g
     
     return group_items_formatted, player_totals_dict, recent_drops, total_loot
 
+_BOARD_PREFETCH_CHUNK = 500
+
+
+def _prefetch_monthly_player_keys(player_ids, partition) -> dict:
+    """The three monthly per-player keys get_drops_for_group reads, for every
+    player in ``player_ids``, in one pipelined round trip. Keyed by Redis key;
+    values are exactly what the single-command calls return."""
+    keys = []
+    pipe = redis_client.client.pipeline(transaction=False)
+    for player_id in player_ids:
+        items_key = f"player:{player_id}:{partition}:total_items"
+        loot_key = f"player:{player_id}:{partition}:total_loot"
+        recent_key = f"player:{player_id}:{partition}:recent_items"
+        pipe.hgetall(items_key)
+        pipe.get(loot_key)
+        pipe.lrange(recent_key, 0, -1)
+        keys.extend((items_key, loot_key, recent_key))
+    return dict(zip(keys, pipe.execute()))
+
+
 async def get_drops_for_group(player_ids, partition: str, only_include_items_over_minimum: bool = False, group_minimum_value: int = 500000,
                               group_id: int = None):
     """ Returns the drops stored in redis cache
@@ -236,7 +256,18 @@ async def get_drops_for_group(player_ids, partition: str, only_include_items_ove
     player_totals = {}
     
     # Determine if we're using a daily partition (contains a dash) or monthly partition
-    
+
+    prefetched = {}
+
+    def _hgetall(key):
+        return prefetched[key] if key in prefetched else redis_client.client.hgetall(key)
+
+    def _get(key):
+        return prefetched[key] if key in prefetched else redis_client.client.get(key)
+
+    def _lrange(key):
+        return prefetched[key] if key in prefetched else redis_client.client.lrange(key, 0, -1)
+
     async def process_player(player_id):
         nonlocal total_loot
         player_total = 0
@@ -258,7 +289,7 @@ async def get_drops_for_group(player_ids, partition: str, only_include_items_ove
             loot_key = f"player:{player_id}:{partition}:total_loot"
 
         # Get total items
-        total_items = redis_client.client.hgetall(total_items_key)
+        total_items = _hgetall(total_items_key)
         
         for key, value in total_items.items():
             key = key.decode('utf-8')
@@ -293,7 +324,7 @@ async def get_drops_for_group(player_ids, partition: str, only_include_items_ove
             if only_include_items_over_minimum:
                 player_total_included += total_value
                 
-        player_total = redis_client.client.get(loot_key)
+        player_total = _get(loot_key)
         if player_total:
             player_total = int(player_total.decode('utf-8'))
         else:
@@ -306,19 +337,30 @@ async def get_drops_for_group(player_ids, partition: str, only_include_items_ove
         # Get recent items and ensure uniqueness
         if len(str(partition)) > 6:
             # Get all recent items first
-            all_recent_items = [json.loads(item.decode('utf-8')) for item in redis_client.client.lrange(recent_items_key, 0, -1)]
+            all_recent_items = [json.loads(item.decode('utf-8')) for item in _lrange(recent_items_key)]
             # Filter to only include items from the specified day
             target_date = partition  # Format: 2025-03-04
             recent_items = list({item['date_added']: item for item in all_recent_items 
                                if item['date_added'].startswith(target_date)}.values())
         else:
             recent_items = list({json.loads(item.decode('utf-8'))['date_added']: json.loads(item.decode('utf-8')) 
-                            for item in redis_client.client.lrange(recent_items_key, 0, -1)}.values())
+                            for item in _lrange(recent_items_key)}.values())
         
         return player_id, player_total, recent_items
 
-    # Use asyncio.gather to process all players concurrently
-    results = await asyncio.gather(*[process_player(player_id) for player_id in player_ids])
+    # process_player never awaits, so gather ran the players one after another
+    # with three Redis round trips each -- ~81k for the global board. Their
+    # keys are now fetched one pipelined chunk at a time, then processed in the
+    # same order from the chunk's results.
+    results = []
+    ordered_ids = list(player_ids)
+    for start in range(0, len(ordered_ids), _BOARD_PREFETCH_CHUNK):
+        chunk = ordered_ids[start:start + _BOARD_PREFETCH_CHUNK]
+        prefetched.clear()
+        if len(str(partition)) <= 6:
+            prefetched.update(_prefetch_monthly_player_keys(chunk, partition))
+        results.extend(await asyncio.gather(*[process_player(player_id) for player_id in chunk]))
+    prefetched.clear()
 
     for player_id, player_total, player_recent_items in results:
         player_totals[player_id] = player_total

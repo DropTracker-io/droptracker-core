@@ -1248,8 +1248,11 @@ async def associate_player_ids(player_wom_ids, before_date: datetime = None, ses
     # Create a mapping of WOM ID to Player ID
     db_wom_to_ids = [{"wom": player.wom_id, "id": player.player_id} for player in all_players]
 
-    # Filter out the Player IDs where the WOM ID matches any of the given `player_wom_ids`
-    matched_ids = [player['id'] for player in db_wom_to_ids if player['wom'] in player_wom_ids]
+    # Filter out the Player IDs where the WOM ID matches any of the given `player_wom_ids`.
+    # A set, not the caller's list: `in` on a list made this every player
+    # times every member -- ~730M comparisons for the global board.
+    wanted_wom_ids = set(player_wom_ids)
+    matched_ids = [player['id'] for player in db_wom_to_ids if player['wom'] in wanted_wom_ids]
 
     return matched_ids
 
