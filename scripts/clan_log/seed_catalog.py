@@ -141,8 +141,8 @@ def apply_catalog(session, sections: list[dict], apply: bool) -> dict:
         npc_keys = json.dumps(section["npc_keys"])
         if row is None:
             stats["sections_new"] += 1
-            stats["items_new"] += len(section["resolved"])
             if not apply:
+                stats["items_new"] += len(section["resolved"])
                 continue
             row = ClanLogSection(
                 slug=section["slug"], label=section["label"], category=section["category"],
