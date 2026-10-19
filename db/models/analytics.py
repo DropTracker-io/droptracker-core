@@ -11,6 +11,9 @@ class PlayerItemHourlyTotals(Base):
         Index('idx_player_date_hour', 'player_id', 'date_hour'),
         Index('idx_item_date_hour', 'item_id', 'date_hour'),
         Index('idx_partition_date_hour', 'partition', 'date_hour'),
+        # Index-only item stats (web_api/routes/items.py); recorded in data02.
+        Index('idx_item_stats_covering', 'item_id', 'player_id', 'partition',
+              'total_value', 'quantity', 'drop_count', 'last_drop_time'),
         {'extend_existing': True},
     )
 
