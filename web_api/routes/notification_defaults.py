@@ -141,6 +141,36 @@ BUILTIN_EMBEDS = {
         ),
         thumbnail="{slayer_icon}",
     ),
+    # PvP kills and deaths (data/submissions/pvp.py): every figure under the
+    # description can be absent on an older plugin, and each drops alone.
+    "pvp_kill": _builtin_embed(
+        "pvp_kill",
+        "PvP Kill",
+        "{player_name} killed {victim_name} and took **{pvp_value}** in loot.",
+        "#D4A017",
+        (
+            ("Loot", "{pvp_items}", False),
+            ("Victim level", "{victim_combat_level}", True),
+            ("Wilderness level", "{wilderness_level}", True),
+            ("World", "{world}", True),
+            ("Kills this month", "{pvp_kills_month}", True),
+            ("PvP rank", "{pvp_rank}", True),
+            ("Video", "{video_link}", False),
+        ),
+        thumbnail="{item_icon}",
+    ),
+    "pvp_death": _builtin_embed(
+        "pvp_death",
+        "Killed in PvP",
+        "{player_name} was killed by **{killer_name}**.",
+        "#7A1F1F",
+        (
+            ("Killer level", "{killer_combat_level}", True),
+            ("Location", "{location}", True),
+            ("Value lost", "{value_lost}", True),
+            ("Video", "{video_link}", False),
+        ),
+    ),
 }
 
 

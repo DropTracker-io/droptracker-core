@@ -256,6 +256,37 @@ async def death_processor(death_data, external_session=None, world_type="main"):
             existing_session=session if use_external_session else None,
         )
 
+    # A death to another player also counts on the PvP standings, and posts
+    # to the PvP channel for groups that turned pvp_notify_deaths on. Separate
+    # from the loop above: a group can want PvP deaths without all deaths.
+    if not is_seasonal:
+        try:
+            from .pvp import is_pvp_death, record_pvp_death
+
+            if is_pvp_death(killer_type, region_id, world_type):
+                await record_pvp_death(
+                    session, player, death_entry, player_groups,
+                    {
+                        "guid": unique_id,
+                        "player_name": player_name,
+                        "source": source,
+                        "killer_combat_level": killer_combat_level,
+                        "location": location,
+                        "region_id": region_id,
+                        "value_lost": value_lost,
+                        "image_url": image_url or "",
+                        "video_key": video_key,
+                        "plugin_version": plugin_version,
+                    },
+                    use_external_session=use_external_session,
+                )
+        except Exception as e:
+            # A broken transaction cannot be saved by swallowing the error.
+            from .common import reraise_if_session_broken
+
+            reraise_if_session_broken(e)
+            print(f"[PvP] Couldn't record PvP death {getattr(death_entry, 'id', '?')}: {e}")
+
     # Personal submission DM (supporter perk): queued once per death,
     # OUTSIDE the group loop — group notify/screenshot criteria must not
     # gate or duplicate a personal DM (same fix as drops, c258115).

@@ -1577,6 +1577,10 @@ GROUP_CHANNEL_NOTIFICATION_KEYS = {
     "pet": ("channel_id_to_post_pets",),
     "kc_milestone": ("channel_id_to_post_kc", "channel_id_to_post_loot"),
     "rank_milestone": ("channel_id_to_post_ranks", "channel_id_to_post_loot"),
+    # PvP has no fallback on purpose: a group that never set a PvP channel
+    # should not start getting PK posts in its drops channel.
+    "pvp_kill": ("channel_id_to_post_pvp",),
+    "pvp_death": ("channel_id_to_post_pvp",),
 }
 
 

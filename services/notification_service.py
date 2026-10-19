@@ -78,6 +78,11 @@ CONTRIBUTION_COLOR = "#00f0f0"
 SLAYER_ICON_URL = f"{IMG_BASE}/metrics/slayer.png"
 SLAYER_COLOR = "#8B1A1A"
 
+# PvP kills and deaths (data/submissions/pvp.py). Kills are loot, so gold;
+# a PvP death a dark red apart from an ordinary death's #B23B3B.
+PVP_KILL_COLOR = "#D4A017"
+PVP_DEATH_COLOR = "#7A1F1F"
+
 # Direct-message queue types. Submission DMs (everything except dm_name_change)
 # are a supporter perk gated on the `dm_submissions` user entitlement; queueing
 # is opt-in via user_configurations `dm_*` keys (see data/submissions/*).
@@ -573,6 +578,100 @@ class NotificationService:
             "{slayer_xp}": number("xp_gained", positive_only=True),
             "{slayer_icon}": SLAYER_ICON_URL,
         }
+
+    @classmethod
+    def _pvp_placeholder_map(cls, data: dict) -> dict:
+        """The PvP placeholders, shared by the embed template, the components
+        layout and the code-built defaults, for both pvp_kill and pvp_death.
+
+        Anything the plugin could not report (combat level and Wilderness
+        level before plugin 6.1.9, a rank on an empty board) resolves to "" so
+        its field or line drops.
+        """
+        def number(key, *, positive_only=False):
+            value = cls._coerce_int(data.get(key))
+            if value is None or (positive_only and value <= 0):
+                return ""
+            return f"{value:,}"
+
+        def gp(key):
+            value = cls._coerce_int(data.get(key))
+            return format_number(value) if value is not None else ""
+
+        victim = str(data.get("victim_name") or "").strip()
+        victim_id = cls._coerce_int(data.get("victim_player_id"))
+        top_item_id = cls._coerce_int(data.get("top_item_id"))
+        rank = cls._coerce_int(data.get("pvp_rank"))
+        return {
+            "{victim_name}": player_link(victim, victim_id) if victim and victim_id is not None else victim,
+            "{victim_name_plain}": victim,
+            "{victim_combat_level}": number("victim_combat_level", positive_only=True),
+            "{pvp_value}": gp("total_value"),
+            "{pvp_items}": str(data.get("items_text") or ""),
+            "{item_count}": number("item_count", positive_only=True),
+            "{top_item_name}": str(data.get("top_item_name") or ""),
+            "{item_icon}": f"{IMG_BASE}/itemdb/{top_item_id}.png" if top_item_id is not None else "",
+            "{wilderness_level}": number("wilderness_level", positive_only=True),
+            "{world}": number("world", positive_only=True),
+            "{location}": str(data.get("location") or ""),
+            "{kill_location}": str(data.get("location") or ""),
+            "{pvp_kills_month}": number("kills_this_month", positive_only=True),
+            "{pvp_loot_month}": gp("loot_this_month") if cls._coerce_int(data.get("loot_this_month")) else "",
+            "{pvp_rank}": f"#{rank:,}" if rank else "",
+            "{killer_name}": str(data.get("killer_name") or ""),
+            "{killer_combat_level}": number("killer_combat_level", positive_only=True),
+            "{value_lost}": gp("value_lost") if cls._coerce_int(data.get("value_lost")) else "",
+        }
+
+    def _build_default_pvp_embed(self, notification_type: str, data: dict, player_name: str,
+                                 player_id: int, video_url: str = "") -> interactions.Embed:
+        """The default PvP kill / death embed when the group has no template.
+
+        Mirrored as templates by BUILTIN_EMBEDS["pvp_kill"/"pvp_death"]
+        (web_api/routes/notification_defaults.py) and as components layouts
+        by DEFAULT_LAYOUTS; test_pvp keeps the pairs together.
+        """
+        values = self._pvp_placeholder_map(data)
+        if notification_type == "pvp_death":
+            killer = values["{killer_name}"] or "another player"
+            embed = interactions.Embed(
+                title="Killed in PvP",
+                description=f"{player_link(player_name, player_id)} was killed by **{killer}**.",
+                color=PVP_DEATH_COLOR,
+            )
+            fields = (
+                ("Killer level", "{killer_combat_level}"),
+                ("Location", "{location}"),
+                ("Value lost", "{value_lost}"),
+            )
+        else:
+            victim = values["{victim_name}"] or "a player"
+            embed = interactions.Embed(
+                title="PvP Kill",
+                description=(
+                    f"{player_link(player_name, player_id)} killed {victim} and took "
+                    f"**{values['{pvp_value}'] or '0'}** in loot."
+                ),
+                color=PVP_KILL_COLOR,
+            )
+            if values["{item_icon}"]:
+                embed.set_thumbnail(values["{item_icon}"])
+            if values["{pvp_items}"]:
+                embed.add_field(name="Loot", value=values["{pvp_items}"], inline=False)
+            fields = (
+                ("Victim level", "{victim_combat_level}"),
+                ("Wilderness level", "{wilderness_level}"),
+                ("World", "{world}"),
+                ("Kills this month", "{pvp_kills_month}"),
+                ("PvP rank", "{pvp_rank}"),
+            )
+        for name, token in fields:
+            if values[token]:
+                embed.add_field(name=name, value=values[token], inline=True)
+        if video_url:
+            embed.add_field(name="Video", value=f"[Watch clip]({video_url})", inline=False)
+        embed.set_footer(global_footer)
+        return embed
 
     def _build_default_slayer_embed(self, data: dict, player_name: str, player_id: int, video_url: str = "") -> interactions.Embed:
         """
@@ -1672,6 +1771,8 @@ class NotificationService:
                 await self.send_diary_notification_with_session(notification, data, db_session)
             elif notification_type == 'slayer':
                 await self.send_slayer_notification_with_session(notification, data, db_session)
+            elif notification_type in ('pvp_kill', 'pvp_death'):
+                await self.send_pvp_notification_with_session(notification, data, db_session)
             elif notification_type == 'new_npc':
                 await self.send_new_npc_notification_with_session(notification, data, db_session)
             elif notification_type == 'new_item':
@@ -2727,6 +2828,123 @@ class NotificationService:
                     try:
                         # Resolved + containment-checked (local tree or our B2 bucket;
                         # anything else needs the remote-host allowlist — see the resolver).
+                        attachment, _img_tmp = await self._resolve_image_attachment(
+                            image_url, notification.id)
+                        if attachment:
+                            await self._send(channel, content, embed=embed, files=attachment)
+                        else:
+                            await self._send(channel, content, embed=embed)
+                    except Exception:
+                        await self._send(channel, content, embed=embed)
+                else:
+                    await self._send(channel, content, embed=embed)
+            finally:
+                if video_local_path:
+                    try:
+                        os.remove(video_local_path)
+                    except Exception:
+                        pass
+
+            await self._cleanup_processed_local_video_after_send(db_session, data)
+            notification.status = 'sent'
+            notification.processed_at = datetime.now()
+            db_session.commit()
+
+        except Exception as e:
+            notification.status = 'failed'
+            notification.error_message = str(e)
+            db_session.commit()
+            raise
+
+    async def send_pvp_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
+        """Send a PvP kill or PvP death notification.
+
+        Queued by data/submissions/pvp.py, only to groups with a PvP channel
+        (no drops-channel fallback: GROUP_CHANNEL_NOTIFICATION_KEYS). No
+        group-1 template row ships, so groups without their own embed get
+        _build_default_pvp_embed, like slayer.
+        """
+        notification.status = 'processing'
+        db_session.commit()
+        try:
+            group_id = notification.group_id
+            player_id = notification.player_id
+            kind = notification.notification_type
+
+            channel_id_value = self._resolve_group_channel_id(
+                db_session, group_id, 'channel_id_to_post_pvp', fallback_key=None
+            )
+            if not channel_id_value:
+                notification.status = 'failed'
+                notification.error_message = f"No channel configured for group {group_id}"
+                db_session.commit()
+                return
+
+            channel, channel_error = await self._fetch_sendable_channel(channel_id_value)
+            if channel is None:
+                notification.status = 'failed'
+                notification.error_message = channel_error or f"Channel not found for group {group_id}"
+                db_session.commit()
+                return
+
+            if has_custom_embeds(group_id):
+                embed_template = await self.db_ops.get_group_embed(kind, group_id)
+            else:
+                embed_template = await self.db_ops.get_group_embed(kind, 1)
+
+            player_name = data.get("player_name") or ""
+            image_url = data.get("image_url") or ""
+            video_url = self._maybe_get_video_url(db_session, data)
+
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
+            replacements = {
+                "{player_name}": player_link(player_name, player_id),
+                "{player_name_plain}": player_name,
+                "{video_url}": video_url or "",
+                "{video_link}": f"[Video]({video_url})" if video_url else "",
+                "{image_url}": video_url or image_url or "",
+            }
+            replacements.update(self._pvp_placeholder_map(data))
+            replacements.update(self._plugin_version_placeholder_map(data))
+
+            # One literal call per type, each paired with its finish:
+            # test_notification_component_send reads both off the source.
+            if kind == "pvp_death":
+                if await self._try_send_component_layout(
+                    db_session, notification, channel, group_id, "pvp_death", replacements
+                ):
+                    await self._finish_component_send(db_session, notification, data)
+                    return
+            elif await self._try_send_component_layout(
+                db_session, notification, channel, group_id, "pvp_kill", replacements
+            ):
+                await self._finish_component_send(db_session, notification, data)
+                return
+
+            if embed_template:
+                embed = replace_placeholders(embed_template, replacements)
+                if group_id == 2:
+                    embed = await self.remove_group_field(embed)
+            else:
+                embed = self._build_default_pvp_embed(
+                    kind, data=data, player_name=player_name, player_id=player_id,
+                    video_url=video_url,
+                )
+
+            if kind == "pvp_death":
+                content = f"{formatted_name} was killed in PvP!"
+            else:
+                content = f"{formatted_name} got a PvP kill!"
+
+            video_attachment, video_local_path = (None, None)
+            if video_url:
+                video_attachment, video_local_path = await self._download_video_attachment(video_url, notification.id)
+
+            try:
+                if video_attachment:
+                    await self._send(channel, content, embed=embed, files=video_attachment)
+                elif image_url:
+                    try:
                         attachment, _img_tmp = await self._resolve_image_attachment(
                             image_url, notification.id)
                         if attachment:

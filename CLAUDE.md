@@ -268,7 +268,7 @@ A full walkthrough is in `docs/SUBMISSION_PIPELINE.md`. Short version:
 4. Each processor: deduplicates → validates player/item/NPC → resolves identity → writes DB row → updates Redis leaderboard → creates a `NotificationQueue` entry → queues the submission for Events v2
 5. `services/notification_service.py` (polls every 3s) builds Discord embeds and sends them to the group's configured channel
 
-**Submission types:** `drop`, `pb`, `clog`, `ca`, `pet`, `quest`, `experience`, `death`, `diary`, `slayer`, `adventure_log` (webhook.py accepts aliases — `npc`/`other`→drop, `player_death`→death, `achievement_diary`→diary, …)
+**Submission types:** `drop`, `pb`, `clog`, `ca`, `pet`, `quest`, `experience`, `death`, `diary`, `slayer`, `adventure_log`, `pvp_kill` (webhook.py accepts aliases — `npc`/`other`→drop, `player_death`→death, `achievement_diary`→diary, …). A player kill arrives as a `drop` bundle tagged `source_type=pvp`; `data/submissions/pvp.collapse_pvp_bundle` folds it into one `pvp_kill` before routing, so it never touches the NPC drop pipeline.
 
 ---
 
@@ -427,6 +427,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Site-wide default notification designs (template group 1: embeds, event layouts, component starting layouts) | `web_api/routes/notification_defaults.py` (staff editor behind the web's `/admin/embeds`); quest/death/diary/slayer have no stored default and use `NotificationService._build_default_*_embed` |
 | Change event message wording/layout | `services/event_message_layouts.py` (DB-seeded — reseed on default change) |
 | Change leaderboard ranking logic | `services/redis_updates.py` |
+| PvP kills: intake, counting rules, standings, board, messages | `data/submissions/pvp.py` (collapse + processor + PvP deaths), `db/models/pvp.py` (`pvp_kills` / `pvp_kill_items` / `pvp_kill_groups`, web136a), `services/pvp_standings.py` (`pvp:` Redis namespace; `scripts/rebuild_pvp_standings.py` rebuilds it), `lootboard/pvp_board.py` + `services/pvp_lootboard_poster.py` (board kind `pvp` in `lootboard/schedule.py`), `web_api/routes/pvp.py`. Settings are the registry's `pvp` category; `channel_id_to_post_pvp` has NO drops-channel fallback |
 | Change lootboard image layout | `lootboard/generator.py` or `lootboard/flexible_generator.py` |
 | Add/change DB schema | Alembic migration in `alembic/versions/` (commit it with the model; `alembic heads` must print one) |
 | NPC name matching / aliases | `utils/npc_names.py` |

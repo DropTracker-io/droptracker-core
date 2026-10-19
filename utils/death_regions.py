@@ -130,3 +130,31 @@ def activity_for_region(region_id) -> str | None:
         if region in regions:
             return activity
     return None
+
+
+#: PvP minigames, where a player kill pays out nothing that leaves the arena:
+#: LMS hands out its own kit, Emir's Arena and Clan Wars risk nothing, Castle
+#: Wars and Soul Wars are team games, and the PK tutor lends the gear. A kill
+#: here is stored but counts toward no PvP standing, board or notification
+#: (data/submissions/pvp.py). Keyed name -> regions so the stored reason says
+#: which one it was.
+PVP_MINIGAME_REGIONS: dict[str, frozenset[int]] = {
+    "lms": _LAST_MAN_STANDING,
+    "pvp_arena": _EMIRS_ARENA,
+    "clan_wars": _CLAN_WARS,
+    "castle_wars": _CASTLE_WARS,
+    "soul_wars": _SOUL_WARS,
+    "pk_tutor": _PK_TUTOR,
+}
+
+
+def pvp_minigame_for_region(region_id) -> str | None:
+    """The PvP minigame this region belongs to (``"lms"``), or ``None``."""
+    try:
+        region = int(region_id)
+    except (TypeError, ValueError):
+        return None
+    for name, regions in PVP_MINIGAME_REGIONS.items():
+        if region in regions:
+            return name
+    return None

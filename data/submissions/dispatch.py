@@ -47,6 +47,8 @@ TYPE_ALIASES = {
     "slayer_task": "slayer",
     "slayer_completion": "slayer",
     "slayer_task_completion": "slayer",
+    "pvp": "pvp_kill",
+    "player_kill": "pvp_kill",
 }
 
 
@@ -68,6 +70,11 @@ _PROCESSORS = {
     "clan_chat": "clan_chat_processor",
     # Plugin settings snapshot for debugging (JSON in the embed description).
     "config_snapshot": "config_snapshot_processor",
+    # A player kill. The plugin sends it as a "drop" bundle tagged
+    # source_type=pvp; data.submissions.pvp.collapse_pvp_bundle folds that into
+    # one pvp_kill before routing, so it never reaches the NPC drop pipeline.
+    # Main world only, like experience: seasonal PvP is not tracked.
+    "pvp_kill": "pvp_kill_processor",
 }
 
 SUPPORTED_TYPES = frozenset(_PROCESSORS)

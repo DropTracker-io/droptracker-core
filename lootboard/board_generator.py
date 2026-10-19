@@ -133,6 +133,86 @@ async def update_boards():
         print("Finished lootboard pass.")
 
 
+# PvP boards are cheaper than drop boards (one indexed read of the month's
+# counted kills) but get their own cap so a backlog never delays the drop
+# boards above.
+PVP_SCHEDULED_PER_RUN = 20
+
+
+def _pvp_board_groups(session) -> set:
+    """Groups that need a PvP board: those posting one to Discord, and those
+    with a counted kill this month (their group page shows it). Plus the
+    global board."""
+    from sqlalchemy import text
+
+    partition = datetime.now().year * 100 + datetime.now().month
+    ids = {int(r[0]) for r in session.execute(text(
+        "SELECT DISTINCT group_id FROM group_configurations "
+        "WHERE config_key = 'pvp_lootboard_channel_id' "
+        "AND config_value IS NOT NULL AND config_value NOT IN ('', '0')"
+    )).all()}
+    ids |= {int(r[0]) for r in session.execute(text(
+        "SELECT DISTINCT g.group_id FROM pvp_kill_groups g "
+        "JOIN pvp_kills k ON k.id = g.kill_id "
+        "WHERE k.`partition` = :p AND g.counted = 1"
+    ), {"p": partition}).all()}
+    ids.add(schedule.GLOBAL_GROUP_ID)
+    return ids
+
+
+async def _draw_pvp(group_id: int) -> bool:
+    from lootboard.pvp_board import generate_pvp_board
+
+    try:
+        with Session() as gen_session:
+            path = await generate_pvp_board(group_id, gen_session)
+        print(f"PvP board generated for group {group_id}: {path}")
+        return True
+    except Exception as e:
+        print(f"Error generating PvP board for group {group_id}: {e}")
+        return False
+
+
+async def update_pvp_boards():
+    """PvP lootboards, on the same tier schedule as the drop boards. Isolated
+    like the event boards: a failure here never touches the boards above."""
+    try:
+        with Session() as session:
+            wanted = _pvp_board_groups(session)
+            existing = {int(r[0]) for r in session.query(Group.group_id)
+                        .filter(Group.group_id.in_(wanted)).all()}
+            policies = schedule.load_policies(session, existing)
+        now = time.time()
+        mtimes = {g: schedule.board_mtime(g, schedule.PVP) for g in existing}
+        try:
+            redis = schedule._redis()
+            dirty_ready = schedule.ready_dirty_group_ids(redis, schedule.PVP)
+        except Exception as e:
+            print(f"Error reading instant PvP board flags (scheduled redraws only): {e}")
+            redis, dirty_ready = None, set()
+        instant, scheduled, deferred = schedule.plan_pass(
+            sorted(existing), policies, dirty_ready, now, mtimes, PVP_SCHEDULED_PER_RUN
+        )
+        print(f"PvP boards: {len(instant)} instant, {len(scheduled)} scheduled "
+              f"(deferring {deferred})")
+        for group_id in instant:
+            try:
+                if not schedule.claim_instant(group_id, redis, schedule.PVP):
+                    continue
+            except Exception:
+                continue
+            await _draw_pvp(group_id)
+        for group_id in scheduled:
+            if redis is not None and policies[group_id].instant:
+                try:
+                    schedule.consume_for_scheduled(group_id, redis, schedule.PVP)
+                except Exception:
+                    pass
+            await _draw_pvp(group_id)
+    except Exception as e:
+        print(f"Error updating PvP boards: {e}")
+
+
 async def update_event_team_boards():
     """Per-team event lootboards (lootboard/team_boards.py), piggy-backing on
     this subprocess's pass. They throttle themselves by PNG mtime.
@@ -169,6 +249,7 @@ async def update_event_boards():
 async def startup():
     print("Starting lootboard pass")
     await update_boards()
+    await update_pvp_boards()
     await update_event_team_boards()
     await update_event_boards()
 

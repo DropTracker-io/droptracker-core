@@ -730,6 +730,7 @@ def build_message_bundle(message) -> list:
     the per-transport dispatch copies did (see data/submissions/dispatch.py).
     """
     pending = []
+    embed_datas = []
     for embed in message.embeds:
         embed_data = _embed_to_dict(embed)
         if not embed_data:
@@ -743,7 +744,7 @@ def build_message_bundle(message) -> list:
         field_names = [field.name for field in embed.fields]
         field_values = [field.value.lower().strip() for field in embed.fields]
         if "source_type" in field_names and "loot chest" in field_values:
-            ## Skip pvp
+            # Wilderness loot-key chests: the key's loot is not a drop.
             continue
 
         # Transport flag for the DB rows only (API vs webhook intake).
@@ -753,9 +754,21 @@ def build_message_bundle(message) -> list:
         # as plugin under confirm_non_api / api_only policies.
         embed_data['used_api'] = False
         embed_data['world_type'] = _normalize_world_type(embed_data.get("world_type"))
+        embed_data["_title"] = embed.title
+        embed_data["_field_names"] = field_names
+        embed_data["_field_values"] = field_values
+        embed_datas.append(embed_data)
 
+    # A player kill is one embed per item; fold them into a single pvp_kill
+    # exactly as process_webhook_data does for the other two transports.
+    from data.submissions.pvp import collapse_pvp_bundle
+
+    for embed_data in collapse_pvp_bundle(embed_datas):
+        title = embed_data.pop("_title", None)
+        field_names = embed_data.pop("_field_names", None)
+        field_values = embed_data.pop("_field_values", None)
         submission_type = resolve_submission_type(
-            embed_data.get("type"), embed.title, field_names, field_values
+            embed_data.get("type"), title, field_names, field_values
         )
         if submission_type:
             pending.append((submission_type, embed_data))

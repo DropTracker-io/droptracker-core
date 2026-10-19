@@ -33,6 +33,7 @@ from .quest_completion import QuestCompletionEntry
 from .player_death import PlayerDeath
 from .diary_completion import DiaryCompletionEntry
 from .slayer_task_completion import SlayerTaskCompletionEntry
+from .pvp import PvpKill, PvpKillGroup, PvpKillItem
 from .group_configuration import GroupConfiguration
 from .group_notification import GroupNotification
 from .group_notification_blacklist import GroupNotificationBlacklist
@@ -288,6 +289,9 @@ __all__ = [
     "PlayerDeath",
     "DiaryCompletionEntry",
     "SlayerTaskCompletionEntry",
+    "PvpKill",
+    "PvpKillItem",
+    "PvpKillGroup",
     "GroupConfiguration",
     "GroupNotification",
     "GroupNotificationBlacklist",

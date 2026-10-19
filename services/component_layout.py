@@ -413,6 +413,8 @@ NOTIFICATION_TYPES = (
     "slayer",
     "kc_milestone",
     "rank_milestone",
+    "pvp_kill",
+    "pvp_death",
 )
 
 
@@ -700,11 +702,59 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
         "help": "Link to the Slayer skill icon, for a thumbnail",
         "sample": "https://www.droptracker.io/img/metrics/slayer.png",
     },
+    # PvP (data/submissions/pvp.py). Combat, Wilderness level and world come
+    # from plugin 6.1.9+, so older clients leave those lines out.
+    "victim_name": {
+        "help": "The player who was killed (a profile link when we track them)",
+        "sample": "Zezima",
+    },
+    "victim_name_plain": {"help": "The player who was killed, with no link", "sample": "Zezima"},
+    "victim_combat_level": {"help": "The victim's combat level", "sample": "103", "optional": True},
+    "pvp_value": {"help": "GP value of the loot taken", "sample": "12.4M"},
+    "pvp_items": {
+        "help": "The loot, most valuable first, one item per line",
+        "sample": "Abyssal whip (1.4M)\n2 x Saradomin brew(4) (18.2K)",
+    },
+    "item_count": {"help": "How many items the kill dropped", "sample": "14"},
+    "top_item_name": {"help": "The most valuable item taken", "sample": "Abyssal whip"},
+    "item_icon": {
+        "help": "Link to the most valuable item's icon, for a thumbnail",
+        "sample": "https://www.droptracker.io/img/itemdb/4151.png",
+    },
+    "wilderness_level": {"help": "The Wilderness level of the kill", "sample": "31", "optional": True},
+    "world": {"help": "The world the kill happened on", "sample": "318", "optional": True},
+    "kill_location": {"help": "Where the kill happened", "sample": "Lava Maze", "optional": True},
+    "pvp_kills_month": {"help": "The killer's PvP kills this month, counting this one", "sample": "27"},
+    "pvp_loot_month": {"help": "GP the killer has taken in PvP this month", "sample": "184.2M"},
+    "pvp_rank": {"help": "The killer's PvP loot rank in your group this month", "sample": "#3", "optional": True},
+    "killer_name": {"help": "The player who made the kill", "sample": "Zezima"},
 }
 
 # {type: {"label", "group", "description", "tokens"}} — ``tokens`` extends
 # _COMMON_TOKENS and is the editor's display order.
 TYPE_META: Dict[str, Dict[str, Any]] = {
+    "pvp_kill": {
+        "label": "PvP kill",
+        "group": "PvP",
+        "description": (
+            "Posted to your PvP channel when a member kills another player for "
+            "loot worth at least your PvP minimum."
+        ),
+        "tokens": ("victim_name", "victim_name_plain", "victim_combat_level", "pvp_value",
+                   "pvp_items", "item_count", "top_item_name", "item_icon",
+                   "wilderness_level", "world", "kill_location", "pvp_kills_month",
+                   "pvp_loot_month", "pvp_rank") + _MEDIA_TOKENS,
+    },
+    "pvp_death": {
+        "label": "PvP death",
+        "group": "PvP",
+        "description": (
+            "Posted to your PvP channel when a member is killed by another "
+            "player, if you turned PvP deaths on."
+        ),
+        "tokens": ("killer_name", "killer_combat_level", "location", "value_lost")
+        + _MEDIA_TOKENS,
+    },
     "drop": {
         "label": "Drop",
         "group": "Loot",
@@ -1070,6 +1120,52 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
                     "**Slayer XP** {slayer_xp}"
                 ),
                 "thumbnail": "{slayer_icon}",
+            },
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    # PvP: no group-1 rows, mirrors _build_default_pvp_embed. The loot list
+    # sits beside the top item's icon; every figure under it can be absent
+    # (older plugins send no combat or Wilderness level).
+    "pvp_kill": {
+        "accent_color": "#D4A017",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** got a PvP kill!"},
+            {"type": "separator", "divider": True},
+            {
+                "type": "section",
+                "content": (
+                    "## {pvp_value} from {victim_name}\n"
+                    "{pvp_items}"
+                ),
+                "thumbnail": "{item_icon}",
+            },
+            {
+                "type": "text",
+                "content": (
+                    "**Victim level** {victim_combat_level}\n"
+                    "**Wilderness level** {wilderness_level}\n"
+                    "**World** {world}\n"
+                    "**Kills this month** {pvp_kills_month}\n"
+                    "**PvP rank** {pvp_rank}"
+                ),
+            },
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "pvp_death": {
+        "accent_color": "#7A1F1F",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** was killed in PvP!"},
+            {"type": "separator", "divider": True},
+            {
+                "type": "text",
+                "content": (
+                    "**Killed by** {killer_name}\n"
+                    "**Killer level** {killer_combat_level}\n"
+                    "**Location** {location}\n"
+                    "**Value lost** {value_lost}"
+                ),
             },
             {"type": "media", "urls": ["{image_url}"]},
         ],

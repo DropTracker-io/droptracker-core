@@ -93,10 +93,14 @@ def _mark_submission_outcome(processed_data, submission_type, response):
     the pre-status-marker behavior.
     """
     guid = processed_data.get("guid") or processed_data.get("unique_id")
-    if response is not None and getattr(response, "success", True) is False:
-        mark_submission_rejected(guid, submission_type, reason=getattr(response, "message", None))
-    else:
-        mark_submission_processed(guid, submission_type)
+    # A collapsed PvP kill stands for several item embeds, each with its own
+    # GUID the plugin polls /check for; every one of them gets the outcome.
+    guids = [guid] + [g for g in (processed_data.get("_bundle_guids") or []) if g != guid]
+    for one in guids:
+        if response is not None and getattr(response, "success", True) is False:
+            mark_submission_rejected(one, submission_type, reason=getattr(response, "message", None))
+        else:
+            mark_submission_processed(one, submission_type)
 
 
 # Type routing lives in data/submissions/dispatch.py so this path, the queue
@@ -786,7 +790,12 @@ async def process_webhook_data(webhook_data):
                     f"normalized_players_included={normalized_players}"
                 )
             processed_items.append(processed_data)
-        return processed_items
+        # A player kill arrives as one "drop" embed per item; fold those into a
+        # single pvp_kill here so neither transport that calls this ever
+        # routes them to the NPC drop processor (data/submissions/pvp.py).
+        from data.submissions.pvp import collapse_pvp_bundle
+
+        return collapse_pvp_bundle(processed_items)
     except Exception as e:
         print(f"Error processing webhook data: {e}")
         return None

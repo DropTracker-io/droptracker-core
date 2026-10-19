@@ -139,6 +139,7 @@ NON_DROP_TYPES = {
     "pb": ("personal_best", "id"),
     "quest": ("quest_completions", "id"),
     "death": ("player_deaths", "id"),
+    "pvp_kill": ("pvp_kills", "id"),
 }
 # Rows per window query / ids per UPDATE. Keeps each statement well inside
 # MariaDB's read_timeout and bounds memory on a 175M-row table.

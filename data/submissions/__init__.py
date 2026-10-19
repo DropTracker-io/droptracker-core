@@ -33,6 +33,7 @@ from .death import death_processor  # noqa: F401
 from .diary import diary_processor  # noqa: F401
 from .slayer import slayer_processor  # noqa: F401
 from .config_snapshot import config_snapshot_processor  # noqa: F401
+from .pvp import pvp_kill_processor  # noqa: F401
 
 # Utilities used externally
 from .common import (
@@ -56,6 +57,7 @@ __all__ = [
     "diary_processor",
     "slayer_processor",
     "config_snapshot_processor",
+    "pvp_kill_processor",
     "SubmissionResponse",
     "RawDropData",
     "try_create_player",

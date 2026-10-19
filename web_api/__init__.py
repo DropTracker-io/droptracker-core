@@ -53,6 +53,7 @@ from web_api.routes.member_messages import member_messages_bp
 from web_api.routes.item_values import item_values_bp
 from web_api.routes.items import items_bp
 from web_api.routes.leaderboards import leaderboards_bp
+from web_api.routes.pvp import pvp_bp
 from web_api.routes.lootboard import lootboard_bp
 from web_api.routes.manual_submissions import manual_submissions_bp
 from web_api.routes.me import me_bp
@@ -244,6 +245,7 @@ def create_app() -> Quart:
     app.register_blueprint(npcs_bp, url_prefix=API_PREFIX)
     app.register_blueprint(paypal_ipn_bp, url_prefix=API_PREFIX)
     app.register_blueprint(leaderboards_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(pvp_bp, url_prefix=API_PREFIX)
     app.register_blueprint(personal_bests_bp, url_prefix=API_PREFIX)
     app.register_blueprint(platform_bp, url_prefix=API_PREFIX)
     app.register_blueprint(player_claims_bp, url_prefix=API_PREFIX)

@@ -801,6 +801,29 @@ def _record_lootboard_posted(group_id: int, drawn_at: float) -> None:
         print(f"Couldn't record the posted lootboard for group {group_id}: {e}")
 
 
+_pvp_lootboard_posting = False
+
+
+@Task.create(IntervalTrigger(seconds=30))
+async def pvp_lootboard_updates():
+    """Post PvP lootboards whose image is newer than the last one posted
+    (services/pvp_lootboard_poster.py). Never raises."""
+    global _pvp_lootboard_posting
+    if _pvp_lootboard_posting:
+        return
+    _pvp_lootboard_posting = True
+    try:
+        from services.pvp_lootboard_poster import post_due
+
+        posted = await post_due(bot)
+        if posted:
+            print(f"Posted {posted} updated PvP lootboard(s)")
+    except Exception as e:
+        print(f"PvP lootboard update error: {e}")
+    finally:
+        _pvp_lootboard_posting = False
+
+
 @Task.create(IntervalTrigger(seconds=15))
 async def lootboard_updates():
     global _lootboard_posting
@@ -1024,6 +1047,7 @@ async def create_tasks():
     # warm-ups below starve posting). Fire-and-forget; the task body has its own
     # top-level try/except so it can never surface as an unhandled task error.
     asyncio.create_task(lootboard_updates())
+    pvp_lootboard_updates.start()
     # #status channel upkeep: schedule the 1-min sweep and kick an immediate
     # first render (fire-and-forget; the task body never raises).
     status_channel_updates.start()

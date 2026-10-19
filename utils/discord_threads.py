@@ -54,6 +54,7 @@ PROBLEM_STATES = frozenset({LOCKED, FORBIDDEN})
 FEATURE_LABELS = {
     "hall_of_fame": "Hall of Fame",
     "lootboard": "Loot leaderboard",
+    "pvp_lootboard": "PvP lootboard",
     "event_board": "Event standings",
     "clan_log": "Clan Log",
 }

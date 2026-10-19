@@ -24,6 +24,11 @@ debounce would leave it off the board until the next scheduled redraw).
 
 The image's mtime is the "last drawn" record: it survives a Redis flush and
 the generator runs in a fresh subprocess every pass.
+
+Boards come in kinds. ``loot`` is the drop board; ``pvp`` is the PvP board
+(``lootboard/pvp_board.py``). Every helper takes ``kind`` (default ``loot``,
+whose file names and Redis keys are unchanged), and both kinds follow the
+same tier schedule.
 """
 from __future__ import annotations
 
@@ -49,33 +54,51 @@ DIRTY_TTL_SECONDS = 6 * 3600
 
 IMG_ROOT = "/store/droptracker/disc/static/assets/img/clans"
 
+LOOT = "loot"
+PVP = "pvp"
+KINDS = (LOOT, PVP)
+
 _DIRTY_PREFIX = "lootboard:dirty:"
 _COOLDOWN_PREFIX = "lootboard:instant_cd:"
 _POSTED_PREFIX = "lootboard:posted:"
 
+#: Image file and Redis key prefix per board kind. The loot entries are the
+#: names the drop board always had.
+_FILES = {LOOT: "lootboard.png", PVP: "pvp_lootboard.png"}
+_PREFIXES = {
+    LOOT: (_DIRTY_PREFIX, _COOLDOWN_PREFIX, _POSTED_PREFIX),
+    PVP: ("lootboard:pvp:dirty:", "lootboard:pvp:instant_cd:", "lootboard:pvp:posted:"),
+}
 
-def board_path(group_id: int) -> str:
-    return f"{IMG_ROOT}/{int(group_id)}/lb/lootboard.png"
+
+def _check_kind(kind: str) -> str:
+    if kind not in KINDS:
+        raise ValueError(f"unknown lootboard kind {kind!r}")
+    return kind
 
 
-def board_mtime(group_id: int) -> Optional[float]:
+def board_path(group_id: int, kind: str = LOOT) -> str:
+    return f"{IMG_ROOT}/{int(group_id)}/lb/{_FILES[_check_kind(kind)]}"
+
+
+def board_mtime(group_id: int, kind: str = LOOT) -> Optional[float]:
     """When the group's current board image was drawn, or None if it has none."""
     try:
-        return os.path.getmtime(board_path(group_id))
+        return os.path.getmtime(board_path(group_id, kind))
     except OSError:
         return None
 
 
-def dirty_key(group_id: int) -> str:
-    return f"{_DIRTY_PREFIX}{int(group_id)}"
+def dirty_key(group_id: int, kind: str = LOOT) -> str:
+    return f"{_PREFIXES[_check_kind(kind)][0]}{int(group_id)}"
 
 
-def cooldown_key(group_id: int) -> str:
-    return f"{_COOLDOWN_PREFIX}{int(group_id)}"
+def cooldown_key(group_id: int, kind: str = LOOT) -> str:
+    return f"{_PREFIXES[_check_kind(kind)][1]}{int(group_id)}"
 
 
-def posted_key(group_id: int) -> str:
-    return f"{_POSTED_PREFIX}{int(group_id)}"
+def posted_key(group_id: int, kind: str = LOOT) -> str:
+    return f"{_PREFIXES[_check_kind(kind)][2]}{int(group_id)}"
 
 
 @dataclass(frozen=True)
@@ -195,10 +218,11 @@ def _redis():
     return redis_client.client
 
 
-def mark_dirty(group_id: Optional[int]) -> bool:
-    """A drop notification was posted for this group: redraw its board soon,
-    if its tier has instant lootboards. Never raises (called from the
-    notification send path, which must not fail over a lootboard)."""
+def mark_dirty(group_id: Optional[int], kind: str = LOOT) -> bool:
+    """A drop notification was posted (or, for ``pvp``, a kill counted) for
+    this group: redraw its board soon, if its tier has instant lootboards.
+    Never raises (called from send and intake paths, which must not fail over
+    a lootboard)."""
     try:
         if group_id is None or int(group_id) == GLOBAL_GROUP_ID or int(group_id) <= 0:
             return False
@@ -206,67 +230,68 @@ def mark_dirty(group_id: Optional[int]) -> bool:
 
         if not group_has_entitlement(int(group_id), "lootboard_instant"):
             return False
-        _redis().set(dirty_key(group_id), str(int(time.time())), ex=DIRTY_TTL_SECONDS)
+        _redis().set(dirty_key(group_id, kind), str(int(time.time())), ex=DIRTY_TTL_SECONDS)
         return True
     except Exception as e:
         print(f"[lootboard] could not queue an instant redraw for group {group_id}: {e}")
         return False
 
 
-def dirty_group_ids(client=None) -> set:
+def dirty_group_ids(client=None, kind: str = LOOT) -> set:
     """Groups with an instant redraw waiting."""
     client = client or _redis()
+    prefix = _PREFIXES[_check_kind(kind)][0]
     out = set()
-    for key in client.scan_iter(match=f"{_DIRTY_PREFIX}*", count=500):
+    for key in client.scan_iter(match=f"{prefix}*", count=500):
         raw = key.decode() if isinstance(key, bytes) else key
         try:
-            out.add(int(raw[len(_DIRTY_PREFIX):]))
+            out.add(int(raw[len(prefix):]))
         except ValueError:
             continue
     return out
 
 
-def ready_dirty_group_ids(client=None) -> set:
+def ready_dirty_group_ids(client=None, kind: str = LOOT) -> set:
     """Dirty groups whose cooldown has lapsed (what the generator can take now)."""
     client = client or _redis()
-    dirty = sorted(dirty_group_ids(client))
+    dirty = sorted(dirty_group_ids(client, kind))
     if not dirty:
         return set()
     pipe = client.pipeline()
     for gid in dirty:
-        pipe.exists(cooldown_key(gid))
+        pipe.exists(cooldown_key(gid, kind))
     return {gid for gid, busy in zip(dirty, pipe.execute()) if not busy}
 
 
-def claim_instant(group_id: int, client=None) -> bool:
+def claim_instant(group_id: int, client=None, kind: str = LOOT) -> bool:
     """Take a dirty board for an instant redraw: start its cooldown and clear
     the flag. Clearing BEFORE drawing means a drop that lands mid-draw sets
     the flag again and is picked up after the cooldown."""
     client = client or _redis()
-    if not client.set(cooldown_key(group_id), "1", nx=True, ex=INSTANT_COOLDOWN_SECONDS):
+    if not client.set(cooldown_key(group_id, kind), "1", nx=True, ex=INSTANT_COOLDOWN_SECONDS):
         return False
-    client.delete(dirty_key(group_id))
+    client.delete(dirty_key(group_id, kind))
     return True
 
 
-def consume_for_scheduled(group_id: int, client=None) -> None:
+def consume_for_scheduled(group_id: int, client=None, kind: str = LOOT) -> None:
     """A scheduled redraw already includes any pending drop: clear the flag and
     start the cooldown so it is not drawn again straight away."""
     client = client or _redis()
-    if client.delete(dirty_key(group_id)):
-        client.set(cooldown_key(group_id), "1", ex=INSTANT_COOLDOWN_SECONDS)
+    if client.delete(dirty_key(group_id, kind)):
+        client.set(cooldown_key(group_id, kind), "1", ex=INSTANT_COOLDOWN_SECONDS)
 
 
 # --------------------------------------------------------------------------- #
 # Posting (core bot)
 # --------------------------------------------------------------------------- #
-def posted_mtimes(group_ids: Iterable[int], client=None) -> Dict[int, float]:
+def posted_mtimes(group_ids: Iterable[int], client=None, kind: str = LOOT) -> Dict[int, float]:
     """The board mtime each group last had posted to Discord (0 if never)."""
     ids = [int(g) for g in group_ids]
     if not ids:
         return {}
     client = client or _redis()
-    values = client.mget([posted_key(g) for g in ids])
+    values = client.mget([posted_key(g, kind) for g in ids])
     out = {}
     for gid, raw in zip(ids, values):
         try:
@@ -276,10 +301,10 @@ def posted_mtimes(group_ids: Iterable[int], client=None) -> Dict[int, float]:
     return out
 
 
-def record_posted(group_id: int, mtime: float, client=None) -> None:
+def record_posted(group_id: int, mtime: float, client=None, kind: str = LOOT) -> None:
     client = client or _redis()
     # Long TTL only so ids of deleted groups do not linger forever.
-    client.set(posted_key(group_id), repr(float(mtime)), ex=30 * 86400)
+    client.set(posted_key(group_id, kind), repr(float(mtime)), ex=30 * 86400)
 
 
 def needs_post(drawn_at: Optional[float], posted_at: float) -> bool:
