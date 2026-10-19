@@ -91,7 +91,10 @@ USER_AGENT = "DropTracker/1.0 (+https://www.droptracker.io; game emoji sync)"
 #: ~69% to ~93%. Do not lower it casually: a rerun at a smaller budget drops
 #: entries from the map, and --prune would then delete emojis that already-sent
 #: messages still reference.
-DEFAULT_BUDGET = 1700
+#: Lowered to 1680 on 2026-10-19 (with NPC_FLOOR 100 -> 165) to free 20 slots
+#: for the skill icons in utils/app_emojis.py; the 20 NPCs cut were slayer
+#: mobs, and NPC glyphs only show in Hall of Fame and bridge PB lines.
+DEFAULT_BUDGET = 1680
 
 #: Ceiling on the NPC pool. Only ~490 NPC names ever appear, so this is a
 #: safety rail rather than the binding constraint — NPC_FLOOR is.
@@ -103,7 +106,7 @@ DEFAULT_NPC_SHARE = 0.35
 #: a glyph anyway. Everything above it is a boss, a raid, a clue tier or a
 #: named slayer target. Items have no equivalent floor: they compete for a
 #: fixed number of slots instead.
-NPC_FLOOR = 100
+NPC_FLOOR = 165
 
 #: Share of the item budget held back for entries admitted on importance rather
 #: than volume — see RESCUE_AVG_VALUE. 3rd age, the sigils and the damaged Torva
@@ -735,6 +738,7 @@ def build_manifest(chosen_items, chosen_npcs, fanout, budget) -> dict:
             "rescue_avg_value": RESCUE_AVG_VALUE,
             "fanout_window_days": FANOUT_WINDOW_DAYS,
             "measured_fanout": fanout,
+            "npc_floor": NPC_FLOOR,
         },
         "items": entries(chosen_items, names),
         "npcs": entries(chosen_npcs, names),

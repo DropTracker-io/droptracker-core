@@ -191,3 +191,49 @@ def test_seeded_emoji_never_returns_the_unicode_fallback(monkeypatch):
     assert app_emojis.seeded_emoji("group_ironman", "core") is None
     assert app_emojis.seeded_emoji("ironman", "hof") is None
     assert app_emojis.seeded_emoji("not_a_key", "core") is None
+
+
+# ── skill icons ─────────────────────────────────────────────────────────────
+
+_SKILLS_SEEDED = {"core": {
+    "skill_slayer": "<:skill_slayer:1>",
+    "skill_attack": "<:skill_attack:2>",
+    "construction": "<:construction:3>",
+    "stats": "<:stats:4>",
+}}
+
+
+def test_every_experience_skill_has_an_icon_key():
+    from data.submissions.experience import SKILL_NAMES
+    from utils import app_emojis
+
+    for skill in list(SKILL_NAMES) + ["combat", "total"]:
+        key = app_emojis._SKILL_KEY_ALIASES.get(skill) or f"skill_{skill}"
+        assert key in SPECS, skill
+
+
+def test_skill_emoji_resolves_names_and_aliases(monkeypatch):
+    from utils import app_emojis
+
+    monkeypatch.setattr(app_emojis, "load_map", lambda path=None: _SKILLS_SEEDED)
+    assert app_emojis.skill_emoji("Slayer", "core") == "<:skill_slayer:1>"
+    assert app_emojis.skill_emoji(" construction ", "core") == "<:construction:3>"
+    assert app_emojis.skill_emoji("total", "core") == "<:stats:4>"
+    # Unseeded or not a skill: nothing, never the 📈 stand-in.
+    assert app_emojis.skill_emoji("Mining", "core") is None
+    assert app_emojis.skill_emoji("Twisted bow", "core") is None
+    assert app_emojis.skill_emoji("", "core") is None
+
+
+def test_with_skill_icons_prefixes_each_segment(monkeypatch):
+    from utils import app_emojis
+
+    monkeypatch.setattr(app_emojis, "load_map", lambda path=None: _SKILLS_SEEDED)
+    icons = app_emojis.with_skill_icons
+    assert icons("Slayer 99 (+1), Attack 80 (+2), Mining 70", "core") == (
+        "<:skill_slayer:1> Slayer 99 (+1), <:skill_attack:2> Attack 80 (+2), Mining 70"
+    )
+    # XP milestones: the thousands separators carry no space, so no split.
+    assert icons("Slayer — 25,000,000 XP", "core") == "<:skill_slayer:1> Slayer — 25,000,000 XP"
+    assert icons("", "core") == ""
+    assert icons("Slayer 99", "hof") == "Slayer 99"

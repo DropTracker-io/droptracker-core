@@ -654,14 +654,30 @@ def broadcast_hints(parsed, message: str) -> dict:
         hints["npc"] = "Doom of Mokhaiotl"
     elif kind in ("coffer_donation", "coffer_withdrawal"):
         hints["item"] = "Coins"
+    elif kind in ("level_up", "xp_milestone"):
+        hints["skill"] = _broadcast_skill(message)
     return hints
+
+
+def _broadcast_skill(message: str):
+    """The skill a level/XP broadcast names ("Slayer", "combat", "total"), or
+    None. Read with the parser's own patterns but kept out of
+    ``parse_broadcast``, which classifies these kinds without recording them."""
+    from utils.clan_broadcasts import _LEVEL_RE, _XP_RE
+
+    text = str(message or "").strip()
+    for pattern in (_LEVEL_RE, _XP_RE):
+        match = pattern.match(text)
+        if match:
+            return match["skill"].strip()
+    return None
 
 
 def broadcast_icon(entry: dict) -> str:
     """The leading icon for a staged broadcast.
 
-    Drops and pets use the item's own glyph, personal bests the boss's, when
-    the game emoji set has one (it is a budget, not a catalogue); otherwise
+    Drops and pets use the item's own glyph, personal bests the boss's and
+    level-ups the skill's, when the emoji set has one (it is a budget, not a catalogue); otherwise
     each kind has its own icon, and only lines nobody recognizes keep the
     generic :data:`BROADCAST_PREFIX`."""
     from utils import app_emojis, game_emojis
@@ -672,6 +688,8 @@ def broadcast_icon(entry: dict) -> str:
         glyph = game_emojis.emoji_for_item(entry["item"])
     elif entry.get("npc"):
         glyph = game_emojis.emoji_for_npc(entry["npc"])
+    elif entry.get("skill"):
+        glyph = app_emojis.skill_emoji(entry["skill"])
     if glyph:
         return glyph
     if kind in _KIND_APP_EMOJI:

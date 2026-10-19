@@ -310,7 +310,7 @@ def emoji_for_npc_id(npc_id, profile=None) -> Optional[str]:
 
 
 # Tokens with_derived_tokens fills, so no sender has to.
-DERIVED_TOKENS = ("item_emoji", "item_link", "npc_link")
+DERIVED_TOKENS = ("item_emoji", "item_link", "npc_link", "skill_emoji", "skills_text_emoji")
 
 
 def with_derived_tokens(values: dict, profile=None) -> dict:
@@ -344,6 +344,23 @@ def with_derived_tokens(values: dict, profile=None) -> dict:
         derived["{item_link}"] = wiki_link(name)
     if "{npc_link}" not in values and "{npc_name}" in values:
         derived["{npc_link}"] = wiki_link(values.get("{npc_name}"))
+    # Level-up glyphs: {skill_emoji} is the first skill's icon (a multi-skill
+    # level-up names several), {skills_text_emoji} is {skills_text} with every
+    # skill's icon in front of it. Skill icons are app emojis, not game ones.
+    if "{skill_emoji}" not in values and ("{skill_name}" in values or "{skills_names}" in values):
+        first = str(values.get("{skill_name}") or values.get("{skills_names}") or "").split(",")[0]
+        try:
+            from utils.app_emojis import skill_emoji
+            derived["{skill_emoji}"] = skill_emoji(first, profile) or ""
+        except Exception:
+            derived["{skill_emoji}"] = ""
+    if "{skills_text_emoji}" not in values and "{skills_text}" in values:
+        text = values.get("{skills_text}") or ""
+        try:
+            from utils.app_emojis import with_skill_icons
+            derived["{skills_text_emoji}"] = with_skill_icons(text, profile)
+        except Exception:
+            derived["{skills_text_emoji}"] = text
     return {**values, **derived} if derived else values
 
 

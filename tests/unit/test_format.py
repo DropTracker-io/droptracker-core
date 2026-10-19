@@ -657,6 +657,39 @@ class TestDerivedItemEmoji:
         assert text == "## <:item_elidinis_ward:1> Elidinis' ward"
 
 
+class TestDerivedSkillEmoji:
+    """{skill_emoji} and {skills_text_emoji} follow from the level-up values
+    every level sender already supplies."""
+
+    @pytest.fixture(autouse=True)
+    def _glyphs(self, monkeypatch):
+        import utils.app_emojis as ae
+        monkeypatch.setattr(ae, "load_map", lambda path=None: {"core": {
+            "skill_slayer": "<:skill_slayer:1>", "skill_attack": "<:skill_attack:2>"}})
+        monkeypatch.setattr(ae, "current_profile", lambda: "core")
+
+    def test_filled_from_the_level_up_values(self):
+        out = replace_placeholders(
+            _embed("{skill_emoji} {skills_text_emoji}"),
+            {"{skill_name}": "Slayer, Attack", "{skills_text}": "Slayer 99 (+1), Attack 80"},
+        )
+        assert out.title == "<:skill_slayer:1> <:skill_slayer:1> Slayer 99 (+1), <:skill_attack:2> Attack 80"
+
+    def test_unseeded_skill_renders_bare(self):
+        out = replace_placeholders(
+            _embed("{skill_emoji} {skills_text_emoji}"),
+            {"{skill_name}": "Mining", "{skills_text}": "Mining 70"},
+        )
+        assert out.title == "Mining 70"
+
+    def test_other_notification_types_are_untouched(self):
+        from utils.game_emojis import with_derived_tokens
+
+        values = {"{item_name}": "Bronze dagger"}
+        out = with_derived_tokens(values)
+        assert "{skill_emoji}" not in out and "{skills_text_emoji}" not in out
+
+
 class TestDerivedWikiLinks:
     """{item_name} is plain text; only an embed title links it (through the
     title url). Component layouts have no title url, so the linked form is

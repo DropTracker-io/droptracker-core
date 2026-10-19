@@ -25,7 +25,7 @@ from db.models import (
 )
 from db.ops import DatabaseOperations, associate_player_ids, get_formatted_name, resolve_player_for_display
 from db.entitlements import has_custom_embeds
-from utils.app_emojis import emoji as app_emoji
+from utils.app_emojis import emoji as app_emoji, with_skill_icons
 from utils.game_emojis import emoji_for_item, emoji_for_item_id
 from utils.redis import redis_client
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
@@ -2007,7 +2007,7 @@ class NotificationService:
                     else f"{formatted_name} reached a total level milestone!"
                 )
             else:
-                content = f"{formatted_name} reached an XP milestone: {skills_text}"
+                content = f"{formatted_name} reached an XP milestone: {with_skill_icons(skills_text)}"
 
             if image_url:
                 try:
@@ -4373,7 +4373,7 @@ class NotificationService:
             skills_text = data.get('skills_text') or data.get('skill_name') or 'a skill'
             embed = interactions.Embed(
                 title="Level up!",
-                description=f"**{player_name}** advanced: {skills_text}",
+                description=f"**{player_name}** advanced: {with_skill_icons(skills_text)}",
                 color="#F1C40F",
             )
             if data.get('total_level'):

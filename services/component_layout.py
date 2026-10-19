@@ -609,6 +609,18 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     "skill_name": {"help": "The skill that levelled", "sample": "Slayer"},
     "skills_names": {"help": "Every skill that levelled at once", "sample": "Slayer, Attack"},
     "skills_text": {"help": "Formatted level-up summary", "sample": "Slayer 99 (+1)"},
+    # Both optional and sampled blank for the reason {item_emoji} is: the value
+    # is a `<:name:id>` reference, and an unseeded skill icon resolves to nothing.
+    "skill_emoji": {
+        "help": "The skill's icon (the first one, when several levelled at once)",
+        "sample": "",
+        "optional": True,
+    },
+    "skills_text_emoji": {
+        "help": "The level-up summary with each skill's icon in front of it",
+        "sample": "Slayer 99 (+1)",
+        "optional": True,
+    },
     "new_level": {"help": "The new level", "sample": "99"},
     "levels_gained": {"help": "Levels gained", "sample": "1"},
     "xp_total": {"help": "XP in that skill", "sample": "13,034,431"},
@@ -740,7 +752,8 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
             "Posted when a member reaches a new level. XP and total-level "
             "milestones use this layout too."
         ),
-        "tokens": ("skill_name", "skills_names", "skills_text", "new_level", "levels_gained",
+        "tokens": ("skill_name", "skill_emoji", "skills_names", "skills_text",
+                   "skills_text_emoji", "new_level", "levels_gained",
                    "xp_total", "total_level", "total_xp", "combat_level",
                    "milestone_xp") + _MEDIA_TOKENS,
     },
@@ -984,7 +997,7 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
         "blocks": [
             {"type": "text", "content": "**{player_name}** levelled-up:"},
             {"type": "separator", "divider": True},
-            {"type": "text", "content": "## Levels achieved: {skills_text}"},
+            {"type": "text", "content": "## Levels achieved: {skills_text_emoji}"},
             {
                 "type": "text",
                 "content": (

@@ -170,6 +170,33 @@ SPECS = {
     ),
 }
 
+# Skill icons for level-up / XP milestone notifications and the clan chat
+# bridge, keyed ``skill_<skill>``. The art is the wiki's skill icon, upscaled
+# nearest-neighbour into static/emoji/. Construction reuses the existing
+# ``construction`` emoji (the same icon) and total level the ``stats`` one, so
+# neither costs a slot. Read through :func:`skill_emoji`, which never returns
+# a fallback: a level-up line with no icon reads fine, a ⚙️ before "Slayer"
+# does not.
+SKILL_EMOJI_SKILLS = (
+    "attack", "strength", "defence", "ranged", "prayer", "magic", "runecraft",
+    "hitpoints", "crafting", "mining", "smithing", "woodcutting", "farming",
+    "firemaking", "fishing", "hunter", "herblore", "cooking", "thieving",
+    "slayer", "agility", "fletching", "sailing", "combat",
+)
+for _skill in SKILL_EMOJI_SKILLS:
+    SPECS[f"skill_{_skill}"] = Spec(
+        f"skill_{_skill}", "📈", False, None,
+        f"{_skill.title()} skill icon on level-up notifications and bridge lines",
+    )
+del _skill
+
+#: Skill name → registry key for the skills that borrow an existing emoji.
+_SKILL_KEY_ALIASES = {
+    "construction": "construction",
+    "total": "stats",
+    "overall": "stats",
+}
+
 _state = {"profile": os.getenv("DROPTRACKER_EMOJI_PROFILE") or DEFAULT_PROFILE}
 _map_cache = {"mtime": None, "map": {}}
 
@@ -240,6 +267,40 @@ def seeded_emoji(key: str, profile: str = None) -> Optional[str]:
     if key not in SPECS:
         return None
     return load_map().get(profile or current_profile(), {}).get(key) or None
+
+
+def skill_emoji(skill, profile: str = None) -> Optional[str]:
+    """The uploaded icon for a skill name (``"Slayer"``, ``"runecraft"``,
+    ``"Total"``), or None when the name is not a skill or the icon is unseeded."""
+    name = str(skill or "").strip().lower()
+    if not name:
+        return None
+    key = _SKILL_KEY_ALIASES.get(name) or f"skill_{name}"
+    return seeded_emoji(key, profile)
+
+
+#: A skills summary segment: the skill name leads, whatever follows is kept.
+_SKILL_SEGMENT = re.compile(r"^(\s*)([A-Za-z]+)\b")
+
+
+def with_skill_icons(skills_text, profile: str = None) -> str:
+    """``"Slayer 99 (+1), Attack 80"`` with each skill's icon in front of it.
+
+    Works on the formatted text rather than the structured skill list so it
+    covers every payload shape (level-ups, XP milestones ``"Slayer — 25,000,000
+    XP"``, old queued rows). Splits on ``", "`` only: the thousands separators
+    inside XP figures carry no space. Segments with no known icon are left as
+    they were, so an unseeded profile returns the text unchanged.
+    """
+    text = str(skills_text or "")
+    if not text:
+        return text
+    out = []
+    for segment in text.split(", "):
+        match = _SKILL_SEGMENT.match(segment)
+        glyph = skill_emoji(match.group(2), profile) if match else None
+        out.append(f"{match.group(1)}{glyph} {segment[match.end(1):]}" if glyph else segment)
+    return ", ".join(out)
 
 
 def partial_emoji(key: str, profile: str = None):

@@ -661,3 +661,27 @@ def test_bot_lines_carry_a_flag_humans_do_not(monkeypatch):
     assert bridge.fan_out_discord_message("clan", "Bob", "hi") == 1
     assert sent[0][1] == {"sender": "WOM", "message": "hi", "bot": True}
     assert sent[1][1] == {"sender": "Bob", "message": "hi"}
+
+
+def test_level_broadcasts_carry_their_skill_for_the_icon(monkeypatch):
+    from utils import app_emojis
+    from utils.clan_broadcasts import parse_broadcast
+
+    lines = {
+        "Ann has reached Slayer level 99.": "Slayer",
+        "Ann has reached combat level 100.": "combat",
+        "Ann has reached a total level of 2,000.": "total",
+        "Ann has reached 50,000,000 XP in Fishing.": "Fishing",
+    }
+    for line, skill in lines.items():
+        hints = bridge.broadcast_hints(parse_broadcast(line), line)
+        assert hints["bkind"] in ("level_up", "xp_milestone"), line
+        assert hints["skill"] == skill, line
+
+    monkeypatch.setattr(app_emojis, "load_map",
+                        lambda path=None: {"core": {"skill_slayer": "<:skill_slayer:1>",
+                                                    "stats": "<:stats:4>"}})
+    monkeypatch.setattr(app_emojis, "current_profile", lambda: "core")
+    assert bridge.broadcast_icon({"bkind": "level_up", "skill": "Slayer"}) == "<:skill_slayer:1>"
+    # Unseeded skill: the generic stats icon, as before.
+    assert bridge.broadcast_icon({"bkind": "level_up", "skill": "Fishing"}) == "<:stats:4>"
