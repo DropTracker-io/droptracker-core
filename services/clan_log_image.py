@@ -59,20 +59,33 @@ def clan_log_image_page_url(group_id: int, period: str) -> str:
 def board_state_hash(payload: dict) -> str:
     """What must change before the card is worth re-shooting.
 
-    Only the things the *card* shows: the headline counts, the catalog it was
-    scored against, and the latest unlocks. A board whose grid changed
-    somewhere the card doesn't display still re-renders via ``generated_at``,
-    which the refresh task only moves when the ledger actually changed.
+    Only the board's content: the catalog it was scored against, the headline
+    counts, every obtained slot and who holds it, and the latest unlocks.
+
+    It used to fold in ``generated_at`` on the theory that the stamp only
+    moved when the ledger changed. It moves on every sweep (``refresh_group``
+    re-saves each board it visits with ``datetime.now()``), so every enabled
+    clan read as changed on every cycle. With a fixed per-cycle budget the
+    clans at the front of the list took every slot and a clan that enabled
+    the board later never got its first post (ticket #476: group 381 was 9th
+    of 10 candidates behind a budget of 6).
     """
     summary = payload.get("summary") or {}
     recent = payload.get("recent") or []
+    slots = sorted(
+        f"{item.get('item_id')}:{item.get('player_id')}:{item.get('count')}"
+        for section in payload.get("sections") or []
+        for item in section.get("items") or []
+        if item.get("obtained")
+    )
     raw = "|".join(
         [
             str(payload.get("group_id")),
             str(payload.get("period")),
             str(payload.get("catalog_version")),
-            str(payload.get("generated_at")),
+            str(payload.get("group_name")),
             f"{summary.get('obtained')}/{summary.get('total')}",
+            ",".join(slots),
             ",".join(f"{r.get('item_id')}@{r.get('at')}" for r in recent[:5]),
         ]
     )

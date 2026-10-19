@@ -88,6 +88,21 @@ async def build_card_payload(session, group_id: int, period: str = "all"):
     return build_message_text(payload), file, state_hash
 
 
+def _has_message(config, group_id: int) -> bool:
+    message_id = (config.get((group_id, "clan_log_message_id")) or "").strip()
+    return bool(message_id) and message_id not in {"0", "None"}
+
+
+def _skip(stats: dict, group_id: int, reason: str) -> None:
+    """Count and log a candidate the cycle passed over. These paths used to
+    ``continue`` silently, which is what made ticket #476 invisible."""
+    stats["skipped_reasons"][reason] = stats["skipped_reasons"].get(reason, 0) + 1
+    app_logger.log(
+        log_type="warning",
+        data=f"Clan Log standing message skipped for group {group_id}: {reason}",
+        app_name="clan_log_discord", description="refresh_standing_messages")
+
+
 def _scan_standing_candidates() -> Optional[tuple]:
     """Which clans' standing boards actually moved. MUST run off the event loop.
 
@@ -150,6 +165,9 @@ def _scan_standing_candidates() -> Optional[tuple]:
             except Exception:
                 current_hash = None
             candidates.append((group_id, channel_id, current_hash))
+        # A clan that has never had its message posted goes first: it has
+        # nothing on Discord at all, while everyone else only has a stale one.
+        candidates.sort(key=lambda c: 1 if _has_message(config, c[0]) else 0)
         return checked, skipped, config, candidates
     finally:
         session.close()
@@ -167,12 +185,14 @@ async def refresh_standing_messages(bot, session, *, limit: int = MAX_RENDERS_PE
     """
     from utils.redis import redis_client
 
-    stats = {"checked": 0, "posted": 0, "edited": 0, "skipped": 0, "failed": 0}
+    stats = {"checked": 0, "candidates": 0, "posted": 0, "edited": 0, "skipped": 0,
+             "failed": 0, "skipped_reasons": {}}
 
     scan = await asyncio.to_thread(_scan_standing_candidates)
     if not scan:
         return stats
     stats["checked"], stats["skipped"], config, candidates = scan
+    stats["candidates"] = len(candidates)
 
     # Budget spent past this point; the rest keep their stale message until the
     # next cycle.
@@ -181,15 +201,19 @@ async def refresh_standing_messages(bot, session, *, limit: int = MAX_RENDERS_PE
         try:
             text, file, state_hash = await build_card_payload(session, group_id, "all")
             if text is None:
+                _skip(stats, group_id, "no board")
                 continue
 
             channel = await bot.fetch_channel(channel_id=channel_id)
             if not channel:
+                _skip(stats, group_id, f"channel {channel_id} not found")
                 continue
             # Edits are not thread activity; reopen an auto-archived thread.
-            if await ensure_thread_open(
+            thread_state = await ensure_thread_open(
                 bot.http, channel, group_id=group_id, feature="clan_log",
-            ) in THREAD_PROBLEM_STATES:
+            )
+            if thread_state in THREAD_PROBLEM_STATES:
+                _skip(stats, group_id, f"thread {channel_id} {thread_state}")
                 continue
 
             message_id = (config.get((group_id, "clan_log_message_id")) or "").strip()

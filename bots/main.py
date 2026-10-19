@@ -669,11 +669,14 @@ async def clan_log_refresh():
         from db.models.base import Session
         from services.clan_log_discord import refresh_standing_messages
 
+        started = time.monotonic()
         await asyncio.to_thread(_clan_log_advance_ledgers)
+        print(f"Clan Log ledgers advanced in {time.monotonic() - started:.0f}s")
 
         # Discord half: genuinely async, and cheap enough to stay on the loop.
         session = Session()
-        await refresh_standing_messages(bot, session)
+        stats = await refresh_standing_messages(bot, session)
+        print(f"Clan Log standing messages: {stats}")
     except Exception as e:
         print(f"Clan Log refresh error: {e}")
     finally:
