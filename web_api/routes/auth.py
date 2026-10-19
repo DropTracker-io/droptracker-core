@@ -219,6 +219,15 @@ async def auth_discord():
 
     user_id = await asyncio.to_thread(_find_or_create_user, discord_id, display_name)
 
+    # Admins added by Discord ID before they had an account only exist on the
+    # bot's authed_users list; give them their website grants now (ticket 479).
+    try:
+        from web_api.admin_grants import activate_pending_grants
+
+        await asyncio.to_thread(activate_pending_grants, user_id)
+    except Exception:
+        pass  # never fail a login over this
+
     # Cache display profile + manageable guilds for /me and role derivation.
     cache_profile(user_id, discord_id, display_name, avatar)
     guild_meta = await _fetch_manageable_guilds(access_token)
