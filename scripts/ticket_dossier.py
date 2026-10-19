@@ -6,9 +6,12 @@ accounts and groups, and recent drops / notification rows for those accounts
 plus any extra RSNs named in the ticket. Duplicate-shaped evidence is flagged
 inline:
 
-  * DUP-ROW   two ``drops`` rows for one player with the same item, value and
-              quantity within ``--dup-window`` seconds (plugin double-submit,
-              see the multi-path loot sources).
+  * DUP-ROW   two ``drops`` rows for one player with the same item NAME and
+              quantity within ``--dup-window`` seconds. Name, not id: a chat
+              copy resolves the name to any of several ids (noted/unnoted,
+              variants), and value drifts between GE lookups. A pair with a
+              ``src=clan_chat`` row is a broadcast copy; two plugin rows are a
+              plugin double-submit (multi-path loot sources).
   * DUP-POST  one drop with more than one ``notified`` row in the same group
               (send-side duplicate, e.g. a non-idempotent retry).
   * RETRIED   ``notification_queue`` rows whose error_message starts with
@@ -115,7 +118,8 @@ def _drops_for(s, player_id, limit, since, dup_window):
     # (not monotonic with drop_id), so compare on timestamps, not ids.
     by_key = defaultdict(list)
     for r in rows:
-        by_key[(r["item_id"], r["value"], r["quantity"])].append(r)
+        name = (r.get("item_name") or "").lower() or r["item_id"]
+        by_key[(name, r["quantity"])].append(r)
     for group in by_key.values():
         group.sort(key=lambda r: r["date_added"] or datetime.min)
         for a, b in zip(group, group[1:]):
@@ -248,7 +252,7 @@ def render(r):
         for d in a["drops"]:
             posts = ",".join(f"g{n['group_id']}" for n in d["notified"]) or "-"
             flags = " ".join(d.get("flags", []))
-            print(f"    {d['drop_id']} {_fmt(d['date_added'])} {d['item_name']!r} x{d['quantity']} "
+            print(f"    {d['drop_id']} {_fmt(d['date_added'])} {d['item_name']!r} (id {d['item_id']}) x{d['quantity']} "
                   f"v={d['value']} npc={d['npc_name']!r} kc={d['kill_count']} src={d['source']} "
                   f"guid={d['unique_id']} img={int(bool(d['has_image']))} posted={posts} {flags}")
         print(f"  notification_queue (newest first, {len(a['queue'])}):")

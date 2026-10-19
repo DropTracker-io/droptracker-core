@@ -11,9 +11,9 @@ _spec.loader.exec_module(td)
 T0 = datetime(2026, 10, 18, 12, 0, 0)
 
 
-def _drop(drop_id, item_id, seconds, value=1000, qty=1):
+def _drop(drop_id, item_id, seconds, value=1000, qty=1, name=None):
     return {"drop_id": drop_id, "item_id": item_id, "value": value, "quantity": qty,
-            "date_added": T0 + timedelta(seconds=seconds)}
+            "item_name": name, "date_added": T0 + timedelta(seconds=seconds)}
 
 
 def test_same_content_inside_window_flags_both_rows(monkeypatch):
@@ -25,8 +25,17 @@ def test_same_content_inside_window_flags_both_rows(monkeypatch):
     assert "flags" not in out[9]
 
 
-def test_outside_window_or_different_value_is_not_flagged(monkeypatch):
-    rows = [_drop(2, 5, 30), _drop(1, 5, 0), _drop(3, 5, 31, value=999)]
+def test_noted_and_unnoted_ids_with_one_name_still_pair(monkeypatch):
+    # Ticket #491: plugin row id 452 (noted), clan-chat copy id 451, values differ.
+    rows = [_drop(2, 451, 3, value=10015, qty=27, name="Runite ore"),
+            _drop(1, 452, 0, value=10020, qty=27, name="Runite ore")]
+    monkeypatch.setattr(td, "_q", lambda *a, **k: rows)
+    out = {r["drop_id"]: r for r in td._drops_for(None, 1, 50, None, 10)}
+    assert out[1]["flags"] == ["DUP-ROW~2"] and out[2]["flags"] == ["DUP-ROW~1"]
+
+
+def test_outside_window_or_different_quantity_is_not_flagged(monkeypatch):
+    rows = [_drop(2, 5, 30), _drop(1, 5, 0), _drop(3, 5, 31, qty=2)]
     monkeypatch.setattr(td, "_q", lambda *a, **k: rows)
     assert not any("flags" in r for r in td._drops_for(None, 1, 50, None, 10))
 
