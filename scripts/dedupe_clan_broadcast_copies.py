@@ -44,7 +44,10 @@ Discord messages
 ----------------
 The duplicate posts stay up by default; their channel/message ids are in the
 snapshot. ``--delete-discord-messages`` removes them through the REST API
-(no gateway needed).
+(no gateway needed). For copies already deleted by an earlier run, use
+``--delete-messages-from <snapshot.json>`` (dry run unless ``--apply``): it
+deletes the posts recorded in that snapshot's ``notified_deleted``. A post
+that is already gone (404) counts as done.
 
 Safety
 ------
@@ -272,6 +275,76 @@ def _recompute_bucket(s, table, key_col, player_id, key_id, date_hour, ceiling):
     s.execute(text(f"UPDATE {table} SET {sets} WHERE {where}"), params)
 
 
+def _delete_message(channel_id, message_id):
+    """REST delete of one post. Returns 'deleted', 'gone' (404) or an error."""
+    import urllib.error
+    import urllib.request
+
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.join(REPO_ROOT, ".env"))
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        return "no bot token"
+    req = urllib.request.Request(
+        f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}",
+        method="DELETE",
+        headers={"Authorization": f"Bot {token}",
+                 # Cloudflare 403s urllib's default UA (error 1010).
+                 "User-Agent": "DiscordBot (https://www.droptracker.io, 1.0)",
+                 "X-Audit-Log-Reason": "Duplicate clan-broadcast drop post (ticket 491)"},
+    )
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return "deleted" if resp.status in (200, 204) else f"http {resp.status}"
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return "gone"
+            if e.code == 429 and attempt < 2:
+                try:
+                    wait = float(json.loads(e.read() or b"{}").get("retry_after", 2))
+                except ValueError:
+                    wait = 2
+                time.sleep(min(wait, 30) + 0.25)
+                continue
+            return f"http {e.code}"
+        except Exception as e:
+            return f"error {e}"
+    return "rate limited"
+
+
+def delete_snapshot_messages(path, apply) -> int:
+    with open(path) as fh:
+        snap = json.load(fh)
+    if not snap.get("applied"):
+        print(f"{path} is a dry-run snapshot; its rows were never deleted. Refusing.")
+        return 1
+    posts = [(str(n["channel_id"]), str(n["message_id"]), n.get("group_id"))
+             for n in snap.get("notified_deleted", [])
+             if n.get("channel_id") and n.get("message_id")]
+    by_group = defaultdict(int)
+    for _, _, g in posts:
+        by_group[g] += 1
+    print(f"{len(posts)} duplicate post(s) recorded in {os.path.basename(path)}: "
+          + ", ".join(f"g{g}x{n}" for g, n in sorted(by_group.items(), key=lambda kv: -kv[1])))
+    if not apply:
+        print("Dry run — nothing deleted. Re-run with --apply.")
+        return 0
+    results = defaultdict(int)
+    failures = []
+    for channel_id, message_id, gid in posts:
+        outcome = _delete_message(channel_id, message_id)
+        results[outcome if outcome in ("deleted", "gone") else "failed"] += 1
+        if outcome not in ("deleted", "gone"):
+            failures.append((gid, channel_id, message_id, outcome))
+        time.sleep(0.35)
+    print("  " + ", ".join(f"{k} {v}" for k, v in results.items()))
+    for gid, channel_id, message_id, outcome in failures:
+        print(f"    ! g{gid} channel {channel_id} message {message_id}: {outcome}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--apply", action="store_true", help="write (default: dry run)")
@@ -282,7 +355,11 @@ def main(argv=None) -> int:
     ap.add_argument("--delete-discord-messages", action="store_true",
                     help="also delete the duplicate Discord posts (default: keep them)")
     ap.add_argument("--skip-redis", action="store_true", help="skip the Redis rebuild")
+    ap.add_argument("--delete-messages-from", metavar="SNAPSHOT",
+                    help="delete the Discord posts recorded in an applied snapshot, then exit")
     args = ap.parse_args(argv)
+    if args.delete_messages_from:
+        return delete_snapshot_messages(args.delete_messages_from, args.apply)
 
     from sqlalchemy import text
 
