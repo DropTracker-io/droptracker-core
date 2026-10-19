@@ -254,11 +254,13 @@ def test_plugin_copy_check_matches_non_chat_drop_in_window(monkeypatch):
 
     class _Item:
         item_id = 999
+        item_name = "Twisted bow"
 
     async def fake_ensure_item(_session, _name):
         return _Item()
 
     monkeypatch.setattr(cb, "ensure_item_by_name", fake_ensure_item)
+    monkeypatch.setattr(cb, "_equivalent_item_ids", lambda _s, item: [item.item_id])
     # db.models is conftest-stubbed (MagicMock columns don't support >=, and
     # the real sqlalchemy or_() rejects MagicMock operands). The SQL itself
     # isn't under test here — only the covered/missing decision.
@@ -280,6 +282,9 @@ def test_plugin_copy_check_matches_non_chat_drop_in_window(monkeypatch):
 
         def is_(self, other):
             return ("is", other)
+
+        def in_(self, other):
+            return ("in", other)
 
     class _Drop:
         drop_id = _Col()
@@ -316,6 +321,124 @@ def test_plugin_copy_check_matches_non_chat_drop_in_window(monkeypatch):
     missing = asyncio.run(cb._plugin_copy_exists(_Session(None), _Subject(), parsed, stamp))
     assert covered is True
     assert missing is False
+
+
+def test_equivalent_item_ids_folds_every_row_sharing_the_name(monkeypatch):
+    """Ticket #491: the plugin stored noted Runite ore (452), the name lookup
+    picked 451. Coverage must compare against both."""
+    import db.models as dm
+
+    seen = {}
+
+    class _Col:
+        def __eq__(self, other):
+            seen["name"] = other
+            return ("eq", other)
+
+    class _ItemList:
+        item_id = "item_id"
+        item_name = _Col()
+
+    monkeypatch.setattr(dm, "ItemList", _ItemList, raising=False)
+
+    class _Query:
+        def filter(self, *_a):
+            return self
+
+        def all(self):
+            return [(451,), (452,), (None,)]
+
+    class _Session:
+        def query(self, *_a):
+            return _Query()
+
+    class _Item:
+        item_id = 451
+        item_name = "Runite ore"
+
+    assert cb._equivalent_item_ids(_Session(), _Item()) == [451, 452]
+    assert seen["name"] == "Runite ore"
+
+
+def test_equivalent_item_ids_falls_back_to_the_exact_id_on_error():
+    class _Boom:
+        def query(self, *_a):
+            raise RuntimeError("db down")
+
+    class _Item:
+        item_id = 8465
+        item_name = "Dragon bolts (unf)"
+
+    assert cb._equivalent_item_ids(_Boom(), _Item()) == [8465]
+
+
+def test_plugin_copy_check_queries_the_whole_name_family(monkeypatch):
+    """The drop query filters on item_id IN (family), not == the looked-up id."""
+    from datetime import datetime
+
+    import sqlalchemy
+
+    import db.models as dm
+
+    class _Item:
+        item_id = 451
+        item_name = "Runite ore"
+
+    async def fake_ensure_item(_session, _name):
+        return _Item()
+
+    monkeypatch.setattr(cb, "ensure_item_by_name", fake_ensure_item)
+    monkeypatch.setattr(cb, "_equivalent_item_ids", lambda _s, _i: [451, 452])
+    monkeypatch.setattr(sqlalchemy, "or_", lambda *clauses: ("or", clauses))
+
+    class _Col:
+        def __init__(self, name):
+            self.name = name
+
+        def __eq__(self, other):
+            return (self.name, "eq", other)
+
+        def __ne__(self, other):
+            return (self.name, "ne", other)
+
+        def __ge__(self, other):
+            return (self.name, "ge", other)
+
+        def is_(self, other):
+            return (self.name, "is", other)
+
+        def in_(self, other):
+            return (self.name, "in", tuple(other))
+
+    class _Drop:
+        drop_id = _Col("drop_id")
+        player_id = _Col("player_id")
+        item_id = _Col("item_id")
+        date_added = _Col("date_added")
+        source = _Col("source")
+
+    monkeypatch.setattr(dm, "Drop", _Drop)
+    filters = []
+
+    class _Query:
+        def filter(self, *clauses):
+            filters.extend(clauses)
+            return self
+
+        def first(self):
+            return ("row",)
+
+    class _Session:
+        def query(self, *_a):
+            return _Query()
+
+    class _Subject:
+        player_id = 5772293
+
+    parsed = cb.parse_broadcast("Akizoku received a drop: 27 x Runite ore (270,405 coins) from The Leviathan.")
+    assert asyncio.run(cb._plugin_copy_exists(_Session(), _Subject(), parsed, datetime(2026, 10, 19, 12, 41, 37))) is True
+    assert ("item_id", "in", (451, 452)) in filters
+    assert not any(isinstance(f, tuple) and f[:2] == ("item_id", "eq") for f in filters)
 
 
 def test_plugin_copy_check_unresolvable_item_is_not_covered(monkeypatch):

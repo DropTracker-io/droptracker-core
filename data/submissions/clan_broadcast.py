@@ -488,6 +488,33 @@ def _pb_bracket(parsed) -> str:
     )
 
 
+def _equivalent_item_ids(session, item) -> list:
+    """Every item id that shares ``item``'s name, ``item.item_id`` included.
+
+    A broadcast line names the item; the plugin stores the id the client saw.
+    One name often maps to several rows (the noted variant: Runite ore is 451
+    and 452 noted; Dragon bolts (unf) is 8465 and 21930), and
+    ``ensure_item_by_name`` returns whichever row comes first. Comparing that
+    one id against the plugin's row missed the plugin copy, and the chat copy
+    was recorded and posted a second time (ticket #491). So the coverage
+    checks below compare against the whole name family instead.
+    """
+    ids = {item.item_id}
+    try:
+        from db.models import ItemList
+
+        rows = (
+            session.query(ItemList.item_id)
+            .filter(ItemList.item_name == item.item_name)
+            .all()
+        )
+        ids.update(r[0] for r in rows if r and r[0] is not None)
+    except Exception as e:
+        # Fall back to the exact id: the old behaviour, never worse.
+        print(f"[ClanBroadcast] item-family lookup failed for {item.item_name!r}: {e}")
+    return sorted(ids)
+
+
 async def _plugin_copy_exists(session, subject, parsed, stamp) -> bool:
     """Did the subject's own plugin (or a manual submit) already record this?
 
@@ -521,6 +548,7 @@ async def _plugin_copy_exists(session, subject, parsed, stamp) -> bool:
     item = await ensure_item_by_name(session, parsed.item_name)
     if not item:
         return False
+    item_ids = _equivalent_item_ids(session, item)
 
     if parsed.kind in ("item_drop", "raid_drop", "clue_item"):
         from sqlalchemy import or_
@@ -532,7 +560,7 @@ async def _plugin_copy_exists(session, subject, parsed, stamp) -> bool:
             session.query(Drop.drop_id)
             .filter(
                 Drop.player_id == subject.player_id,
-                Drop.item_id == item.item_id,
+                Drop.item_id.in_(item_ids),
                 Drop.date_added >= window_start,
                 or_(Drop.source.is_(None), Drop.source != "clan_chat"),
             )
@@ -546,7 +574,7 @@ async def _plugin_copy_exists(session, subject, parsed, stamp) -> bool:
             session.query(PlayerPet.player_id)
             .filter(
                 PlayerPet.player_id == subject.player_id,
-                PlayerPet.item_id == item.item_id,
+                PlayerPet.item_id.in_(item_ids),
             )
             .first()
         ) is not None
@@ -558,7 +586,7 @@ async def _plugin_copy_exists(session, subject, parsed, stamp) -> bool:
             session.query(CollectionLogEntry.log_id)
             .filter(
                 CollectionLogEntry.player_id == subject.player_id,
-                CollectionLogEntry.item_id == item.item_id,
+                CollectionLogEntry.item_id.in_(item_ids),
             )
             .first()
         ) is not None
