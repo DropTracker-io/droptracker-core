@@ -51,6 +51,7 @@ def _wire(monkeypatch, session):
         item_match_quantity=lambda task, target, qty: (
             qty * 3 if target == "Odium shard 1" else None),
         apply_completion=lambda s, c: applied.append(c),
+        parse_task_config=lambda raw: json.loads(raw) if raw else {},
     )
     monkeypatch.setitem(sys.modules, "services.competition", comp)
     monkeypatch.setattr(sys.modules["services"], "event_credit_receipt",
@@ -162,3 +163,59 @@ class TestOrdinaryAward:
         assert r.status_code == 422
         assert (await r.get_json())["title"] == "Invalid credit"
         assert not applied
+
+
+ORIGINAL = SimpleNamespace(id=20, event_id=1, type="item_collection", config="{}")
+
+
+def _instance(id, source_task_id, team_id=3):
+    return SimpleNamespace(id=id, event_id=1, type="item_collection", config=json.dumps({
+        "board_instance": True, "source_task_id": source_task_id,
+        "team_id": team_id, "tile_idx": 37}))
+
+
+def _board_session(task, *, position, instance=None):
+    """Board-game event: event, task, team, then the position lookup and
+    (when the position holds a task) the instance lookup."""
+    batches = [[_event(kind="board_game")], [task], [_team(3, "A1 Steaks")], [position]]
+    if position is not None and position.current_task_id:
+        batches.append([instance])
+    return _S(*batches)
+
+
+class TestBoardAward:
+    """Suggestion #200: an award on a tile's original task lands on the team's
+    live instance, the only task that moves the piece."""
+
+    async def test_original_task_redirects_to_the_live_instance(self, client, monkeypatch):
+        pos = SimpleNamespace(team_id=3, event_id=1, current_task_id=88)
+        s = _board_session(ORIGINAL, position=pos, instance=_instance(88, 20))
+        applied = _wire(monkeypatch, s)
+        r = await client.post(URL, json={"task_id": 20, "team_id": 3, "quantity": 2})
+        assert r.status_code == 200, await r.get_json()
+        assert (await r.get_json())["task_id"] == 88
+        assert applied[0].task_id == 88
+        assert applied[0].submission_guid.startswith("manual:88:3:")
+        assert not s._batches
+
+    async def test_other_tile_keeps_the_picked_task(self, client, monkeypatch):
+        pos = SimpleNamespace(team_id=3, event_id=1, current_task_id=89)
+        s = _board_session(ORIGINAL, position=pos, instance=_instance(89, 21))
+        applied = _wire(monkeypatch, s)
+        r = await client.post(URL, json={"task_id": 20, "team_id": 3})
+        assert r.status_code == 200, await r.get_json()
+        assert applied[0].task_id == 20
+
+    async def test_no_position_keeps_the_picked_task(self, client, monkeypatch):
+        s = _board_session(ORIGINAL, position=None)
+        applied = _wire(monkeypatch, s)
+        r = await client.post(URL, json={"task_id": 20, "team_id": 3})
+        assert r.status_code == 200, await r.get_json()
+        assert applied[0].task_id == 20
+
+    async def test_an_instance_is_never_redirected(self, client, monkeypatch):
+        s = _S([_event(kind="board_game")], [_instance(88, 20)], [_team(3, "A1 Steaks")])
+        applied = _wire(monkeypatch, s)
+        r = await client.post(URL, json={"task_id": 88, "team_id": 3})
+        assert r.status_code == 200, await r.get_json()
+        assert applied[0].task_id == 88

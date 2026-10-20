@@ -558,7 +558,7 @@ async def award_completion(event_id: int):
         # rebinding one that isn't makes it local to the whole closure, and
         # the reads above the assignment raise UnboundLocalError (every award
         # 500'd that way from 2026-09-24). ``credit`` is read-only in here.
-        nonlocal quantity, note, matched_target
+        nonlocal quantity, note, matched_target, task_id
         # P0-10: manual rows have no submission_guid, so the ledger's unique
         # (task, team, guid) index can't dedupe them — an organizer's double
         # click would insert and apply two identical awards. A short one-shot
@@ -610,6 +610,13 @@ async def award_completion(event_id: int):
             )
             if not team:
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
+            # Board game: a landing clones the tile's task into a per-team
+            # instance, and only that instance moves the piece. An award picked
+            # against the original task lands on the team's live instance
+            # instead (suggestion #200: event 125 had 155 awards on originals).
+            live = _board_live_instance(s, ev, task, team_id)
+            if live is not None:
+                task, task_id = live, live.id
             if player_id is not None:
                 # EventTeamMember's primary key is (team_id, player_id) — it
                 # has no ``id`` column.
@@ -747,7 +754,39 @@ async def award_completion(event_id: int):
 
     comp_id, score_change = await asyncio.to_thread(_apply)
     _bump(event_id)
-    return private_no_store(jsonify({"id": comp_id, "score_change": score_change}))
+    return private_no_store(jsonify({"id": comp_id, "task_id": task_id,
+                                     "score_change": score_change}))
+
+
+def _board_live_instance(s, ev, task, team_id: int):
+    """The team's live board instance of ``task``, or None.
+
+    Only on board_game events, and only when ``task`` is an original (not an
+    instance) and the team's current tile task was cloned from it. Anything
+    else keeps the award on the task the organizer picked."""
+    if (getattr(ev, "kind", None) or "standard") != "board_game":
+        return None
+    from db.models import EventBoardPosition
+
+    cfg = _engine().parse_task_config(task.config)
+    if cfg.get("board_instance"):
+        return None
+    pos = (s.query(EventBoardPosition)
+           .filter(EventBoardPosition.team_id == team_id,
+                   EventBoardPosition.event_id == ev.id)
+           .first())
+    if pos is None or not pos.current_task_id:
+        return None
+    inst = (s.query(EventTask)
+            .filter(EventTask.id == pos.current_task_id,
+                    EventTask.event_id == ev.id)
+            .first())
+    if inst is None:
+        return None
+    inst_cfg = _engine().parse_task_config(inst.config)
+    if inst_cfg.get("board_instance") and inst_cfg.get("source_task_id") == task.id:
+        return inst
+    return None
 
 
 def _competition_award_fields(task, *, player_id, credit, complete, path_idx,
