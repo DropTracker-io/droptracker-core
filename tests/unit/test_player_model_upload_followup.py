@@ -213,8 +213,17 @@ class TestStoreThread:
         assert not any(c[0] in ("store", "prune") for c in calls)
 
 
+def _stub_queue(monkeypatch, enqueue):
+    """The follow-up queues the render (services.gear_render_queue) rather
+    than drawing it inline; stand in for the queue."""
+    import types
+
+    monkeypatch.setitem(sys.modules, "services.gear_render_queue",
+                        types.SimpleNamespace(enqueue=enqueue))
+
+
 class TestFollowUp:
-    async def test_prunes_with_protected_set_then_renders(self, calls, monkeypatch):
+    async def test_prunes_with_protected_set_then_queues_the_render(self, calls, monkeypatch):
         rendered = []
         threads = []
         monkeypatch.setattr(
@@ -226,7 +235,7 @@ class TestFollowUp:
             rendered.append((pid, fp))
             calls.append(("render", pid, fp))
 
-        monkeypatch.setattr(sys.modules["services.gear_image"], "render_gear_image", fake_render)
+        _stub_queue(monkeypatch, fake_render)
 
         await route._finish_in_background(42, "abcd", frozenset({"keepme"}))
 
@@ -244,7 +253,7 @@ class TestFollowUp:
         async def fake_render(pid, fp):
             rendered.append((pid, fp))
 
-        monkeypatch.setattr(sys.modules["services.gear_image"], "render_gear_image", fake_render)
+        _stub_queue(monkeypatch, fake_render)
 
         await route._finish_in_background(1, "fp", frozenset())
 
@@ -254,7 +263,7 @@ class TestFollowUp:
         async def bad_render(pid, fp):
             raise RuntimeError("chromium died")
 
-        monkeypatch.setattr(sys.modules["services.gear_image"], "render_gear_image", bad_render)
+        _stub_queue(monkeypatch, bad_render)
 
         await route._finish_in_background(1, "fp")  # must not raise
 

@@ -68,12 +68,18 @@ def _page_url(player_id: int, fingerprint: str, *, with_pet: bool) -> str:
 
 
 async def render_gear_image(player_id: int, fingerprint: str,
-                            *, force: bool = False) -> Optional[str]:
+                            *, force: bool = False, raise_busy: bool = False,
+                            queue_timeout: Optional[float] = None) -> Optional[str]:
     """Renders and stores the character image, returning its public URL.
 
     Returns None rather than raising: this decorates a notification, and a
     notification must never be delayed or lost because a picture could not be
     drawn.
+
+    ``raise_busy`` lets :class:`services.page_screenshot.ScreenshotBusy`
+    through instead of returning None, so the render queue
+    (:mod:`services.gear_render_queue`) can put the job back rather than lose
+    it. ``queue_timeout`` is how long to wait for render capacity.
 
     ``force`` redraws an image that already exists. The upload path never
     needs it, because the fingerprint names the outfit. But a render drawn by
@@ -86,7 +92,7 @@ async def render_gear_image(player_id: int, fingerprint: str,
     if not force and image_exists(player_id, fingerprint):
         return image_url(player_id, fingerprint)
 
-    from services.page_screenshot import screenshot_url
+    from services.page_screenshot import ScreenshotBusy, screenshot_url
 
     with_pet = model_exists(player_id, fingerprint, pet=True)
     try:
@@ -100,7 +106,13 @@ async def render_gear_image(player_id: int, fingerprint: str,
             # A Discord client can be light or dark; a baked-in background
             # rectangle looks broken on whichever one we did not assume.
             transparent=True,
+            queue_timeout=queue_timeout,
         )
+    except ScreenshotBusy:
+        if raise_busy:
+            raise
+        print(f"Could not render gear image for player {player_id}: no capacity")
+        return None
     except Exception as exc:
         print(f"Could not render gear image for player {player_id}: {exc}")
         return None

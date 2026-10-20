@@ -213,9 +213,9 @@ async def _render_if_missing(player_id: int, fingerprint: str) -> None:
     except Exception:
         pass  # no Redis: render anyway, the exists-check still short-circuits
     try:
-        from services.gear_image import render_gear_image
+        from services.gear_render_queue import enqueue
 
-        await render_gear_image(player_id, fingerprint)
+        await enqueue(player_id, fingerprint)
     except Exception as exc:
         print(f"Re-render of gear image failed for player {player_id}: {exc}")
 
@@ -239,9 +239,12 @@ async def _finish_in_background(player_id: int, fingerprint: str,
     except Exception as exc:
         print(f"Background model prune failed for player {player_id}: {exc}")
     try:
-        from services.gear_image import render_gear_image
+        # Queued, not drawn here: renders arrive in bursts (a game-update login
+        # wave) far faster than the box can draw them, and the queue absorbs
+        # that instead of dropping them (services/gear_render_queue).
+        from services.gear_render_queue import enqueue
 
-        await render_gear_image(player_id, fingerprint)
+        await enqueue(player_id, fingerprint)
     except Exception as exc:
         print(f"Background gear render failed for player {player_id}: {exc}")
 

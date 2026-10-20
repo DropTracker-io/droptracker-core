@@ -124,11 +124,14 @@ def create_app() -> Quart:
         app.loop_lag_task = asyncio.create_task(_monitor_event_loop())
         from api import notify_wake
         app.notify_wake_task = asyncio.create_task(notify_wake.run_listener())
+        from services import gear_render_queue
+        app.gear_render_tasks = gear_render_queue.start()
 
     @app.after_serving
     async def _stop_monitor():
-        for attr in ("loop_lag_task", "notify_wake_task"):
-            task = getattr(app, attr, None)
+        tasks = [getattr(app, a, None) for a in ("loop_lag_task", "notify_wake_task")]
+        tasks += getattr(app, "gear_render_tasks", None) or []
+        for task in tasks:
             if task:
                 task.cancel()
                 try:
