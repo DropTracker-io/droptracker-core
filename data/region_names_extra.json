@@ -15,6 +15,7 @@
   {"name": "Venenatis", "type": "BOSSES", "regions": [13727]},
   {"name": "Vet'ion", "type": "BOSSES", "regions": [13215]},
   {"name": "Wyrd", "type": "BOSSES", "regions": [11892]},
+  {"name": "The Fractured Archive", "type": "RAIDS", "regions": [16214, 16471, 16727]},
   {"name": "Pete Kayer's challenges", "type": "MINIGAMES", "regions": [10588, 11100]},
   {"name": "Clan Hall", "type": "REGIONS", "regions": [6997]},
   {"name": "Player Owned House", "type": "REGIONS", "regions": [7257]},
