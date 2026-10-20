@@ -588,7 +588,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         pb_notify_configs = {}
         if group_ids:
             from utils import group_config as gc
-            bulk = gc.get_bulk(session, group_ids, [f"{config_prefix}notify_pbs"])
+            bulk = gc.get_bulk_effective(session, group_ids, [f"{config_prefix}notify_pbs"])
             pb_notify_configs = {gid: val for (gid, _key), val in bulk.items()}
 
         # Per-group manual policy (suggestion #45): suppress this group's

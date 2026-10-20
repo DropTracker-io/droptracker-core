@@ -328,11 +328,11 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                 except Exception as e:
                     print(f"Couldn't perform check against group point awards... e: {e}")
             from utils import group_config as gc
-            ca_notify_val = gc.get(session, group_id, f"{config_prefix}notify_cas")
+            ca_notify_val = gc.get_effective(session, group_id, f"{config_prefix}notify_cas")
             debug_print("CA notify config: " + str(ca_notify_val))
             tier_notify_ok = False
             if gc.is_truthy(ca_notify_val):
-                min_tier_raw = gc.get(session, group_id, f"{config_prefix}min_ca_tier_to_notify")
+                min_tier_raw = gc.get_effective(session, group_id, f"{config_prefix}min_ca_tier_to_notify")
                 # Wrap in a 1-tuple to preserve the existing min_tier[0] access pattern below
                 min_tier = (min_tier_raw,) if min_tier_raw is not None else None
                 tier_order = ["easy", "medium", "hard", "elite", "master", "grandmaster"]

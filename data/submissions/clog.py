@@ -369,7 +369,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
             from utils import group_config as gc
             notify_reason = (
                 "config"
-                if gc.is_truthy(gc.get(session, group_id, f"{config_prefix}notify_clogs"))
+                if gc.is_truthy(gc.get_effective(session, group_id, f"{config_prefix}notify_clogs"))
                 else None
             )
             if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:

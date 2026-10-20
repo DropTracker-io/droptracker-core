@@ -420,19 +420,29 @@ def _group_configs_for(player_name, acc_hash, db_session):
 
     group_configs = []
     def get_config_value(current_group_configs, key: str):
+        from utils import group_config as gc
         for group_config in current_group_configs:
             if group_config.config_key == key:
                 if key == "level_minimum_for_notifications":
                     return group_config.config_value
                 config_val = group_config.config_value if group_config.config_value and group_config.config_value != "" else group_config.long_value
-                if config_val == "true" or config_val == "1":
-                    return True
-                elif config_val == "false" or config_val == "0":
-                    return False
-                elif config_val == "":
-                    return None
+                break
+        else:
+            # No row: send what the website shows and the processors use, the
+            # registry default (ticket 495: "" read as off in the plugin
+            # panel while the site showed the toggle on).
+            config_val = gc.absent_default(key)
+            if config_val is None:
+                return ""
+            if key == "level_minimum_for_notifications":
                 return config_val
-        return ""
+        if config_val == "true" or config_val == "1":
+            return True
+        elif config_val == "false" or config_val == "0":
+            return False
+        elif config_val == "":
+            return None
+        return config_val
     for group_id_row in player_gids:
         group_id = group_id_row[0]
         group = db_session.query(Group).filter(Group.group_id == group_id).first()

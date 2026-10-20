@@ -589,10 +589,10 @@ def test_notify_toggle_off_excludes_the_group(monkeypatch):
     assert _enabled(monkeypatch, config, "notify_clogs", gids=(10, 11)) == {10}
 
 
-def test_notify_toggle_unset_reads_as_off(monkeypatch):
-    """Matches is_truthy(gc.get(...)) in clog_processor/pet_processor: a group
-    with no row gets no plugin clog either, so no chat clog."""
-    assert _enabled(monkeypatch, {}, "notify_clogs", gids=(10,)) == set()
+def test_notify_toggle_unset_reads_as_registry_default(monkeypatch):
+    """Matches gc.get_effective in clog_processor/pet_processor (ticket 495):
+    a group with no row gets what the site shows, which is on for clogs."""
+    assert _enabled(monkeypatch, {}, "notify_clogs", gids=(10,)) == {10}
 
 
 def test_notify_toggle_accepts_both_truthy_spellings(monkeypatch):

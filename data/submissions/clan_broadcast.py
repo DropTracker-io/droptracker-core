@@ -737,14 +737,14 @@ def _notify_enabled_groups(session, group_ids, key):
     Broadcast tracking is an opt-in for *tracking*, not a blanket re-opt-in to
     every announcement: a group that turned ``notify_clogs`` off did not ask
     for clog embeds back because a clanmate now relays chat. Every kind must
-    honour the same toggle its plugin processor reads, and unset reads as off
-    to match ``is_truthy(gc.get(...))`` there. Chat tracking is main-world
+    honour the same toggle its plugin processor reads, and unset reads as the
+    registry default, as it does there (``gc.get_bulk_effective``). Chat tracking is main-world
     only (see clan_broadcast_processor), so never a ``seasonal_`` prefix.
     """
     from utils import group_config as gc
 
     gids = sorted(set(group_ids))
-    bulk = gc.get_bulk(session, gids, [key])
+    bulk = gc.get_bulk_effective(session, gids, [key])
     return {gid for gid in gids if gc.is_truthy(bulk.get((gid, key)))}
 
 

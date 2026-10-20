@@ -266,7 +266,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
             if group_id in manual_suppressed:
                 continue
             from utils import group_config as gc
-            pet_notify_val = gc.get(session, group_id, f"{config_prefix}notify_pets")
+            pet_notify_val = gc.get_effective(session, group_id, f"{config_prefix}notify_pets")
             group_points_result = {
                 "receiver_points_awarded": 0,
                 "receiver_current_points": 0,

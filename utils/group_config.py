@@ -54,6 +54,41 @@ SLAYER_EXCLUDED_MASTERS = "slayer_excluded_masters"
 # points_replies_ephemeral() below, never directly.
 POINTS_EPHEMERAL_MESSAGES = "points_ephemeral_messages"
 
+# What an absent row means, in storage form. These MUST equal the registry
+# defaults (web_api/config_registry.py), which is what the website shows for a
+# group with no row: before ticket 495 the site showed PBs/clogs/CAs/pets as on
+# while the processors and the plugin read the same absent row as off. Read
+# these keys through get_effective()/get_bulk_effective(), never get() + a
+# local default. tests/unit/test_group_config_defaults.py keeps the two in step
+# (importing the registry here would load the whole web_api package).
+SEASONAL_PREFIX = "seasonal_"
+ABSENT_DEFAULTS: Dict[str, str] = {
+    NOTIFY_PBS: "true",
+    NOTIFY_CLOGS: "true",
+    NOTIFY_CAS: "true",
+    NOTIFY_PETS: "true",
+    MIN_CA_TIER_TO_NOTIFY: "EASY",
+    MINIMUM_VALUE_TO_NOTIFY: "2500000",
+    ONLY_SEND_MESSAGES_WITH_IMAGES: "false",
+    SEND_STACKS_OF_ITEMS: "false",
+    NOTIFY_DEATHS: "false",
+    NOTIFY_DIARIES: "false",
+    NOTIFY_SLAYER_TASKS: "false",
+    NOTIFY_QUESTS: "false",
+    "notify_levels": "false",
+    "level_minimum_for_notifications": "1",
+}
+
+
+def absent_default(key: str) -> Optional[str]:
+    """Storage-form value of ``key`` (or its ``seasonal_`` mirror) when unset."""
+    if key in ABSENT_DEFAULTS:
+        return ABSENT_DEFAULTS[key]
+    if key.startswith(SEASONAL_PREFIX):
+        return ABSENT_DEFAULTS.get(key[len(SEASONAL_PREFIX):])
+    return None
+
+
 # ── Cache internals ───────────────────────────────────────────────────────────
 _TTL: float = 30.0  # seconds
 # group_id → {config_key → (value_or_None, expires_monotonic)}
@@ -141,6 +176,30 @@ def get_bulk(
             if row.config_value is not None:
                 result[(row.group_id, row.config_key)] = row.config_value
 
+    return result
+
+
+def get_effective(session, group_id: int, key: str) -> Optional[str]:
+    """``get`` with the registry default for an absent row: the value the
+    website shows for this group."""
+    value = get(session, group_id, key)
+    return absent_default(key) if value is None else value
+
+
+def get_bulk_effective(
+    session,
+    group_ids: List[int],
+    keys: List[str],
+) -> Dict[Tuple[int, str], str]:
+    """``get_bulk`` with every absent ``(group, key)`` filled from the registry
+    default. Keys with no default stay absent."""
+    result = get_bulk(session, group_ids, keys)
+    for gid in group_ids:
+        for key in keys:
+            if (gid, key) not in result:
+                default = absent_default(key)
+                if default is not None:
+                    result[(gid, key)] = default
     return result
 
 
