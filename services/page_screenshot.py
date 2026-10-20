@@ -34,6 +34,26 @@ app_logger = AppLogger()
 
 _CHROMIUM = os.getenv("CHROMIUM_BIN", "/usr/bin/chromium")
 
+# Browsers one process may run at once. Each chromium is ~80 threads, and every
+# service on the box runs as the same user under one LimitNPROC=4096: on the
+# 2026-10-20 game update a login burst put ~24 gear renders in flight across
+# the intake API's workers and it died with "can't start new thread". Callers
+# past the cap wait their turn rather than fail.
+_MAX_CONCURRENT = max(1, int(os.getenv("SCREENSHOT_MAX_CONCURRENCY", "2") or 2))
+
+# One semaphore per event loop: an asyncio primitive is bound to the loop that
+# first waits on it, and scripts call asyncio.run() more than once.
+_slots: dict = {}
+
+
+def _slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _slots.get(loop)
+    if sem is None:
+        _slots.clear()  # a previous loop's semaphore is unusable now
+        sem = _slots[loop] = asyncio.Semaphore(_MAX_CONCURRENT)
+    return sem
+
 # JS readiness probe: DOM parsed and every <img> settled (loaded or errored).
 _READY_JS = (
     "(function(){try{return document.readyState==='complete'"
@@ -262,6 +282,16 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
     poster) pass a short viewport to get an exactly-cropped image. Keep it tall
     enough to cover anything lazily loaded — nothing below the fold will have
     started fetching."""
+    async with _slot():
+        return await _screenshot(url, width=width, scale=scale, timeout=timeout,
+                                 max_height=max_height,
+                                 viewport_height=viewport_height,
+                                 ready_js=ready_js, transparent=transparent)
+
+
+async def _screenshot(url: str, *, width: int, scale: float, timeout: float,
+                      max_height: int, viewport_height: int,
+                      ready_js: str | None, transparent: bool) -> bytes:
     tmp = tempfile.mkdtemp(prefix="dt-shot-")
     proc = None
     try:
