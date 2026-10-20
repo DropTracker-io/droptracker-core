@@ -28,6 +28,7 @@ from web_api.routes.api_keys import api_keys_bp
 from web_api.routes.badges import badges_bp
 from web_api.routes.chat import chat_bp
 from web_api.routes.config import config_bp
+from web_api.routes.data_removal import data_removal_bp
 from web_api.routes.dev_tracker import dev_tracker_bp
 from web_api.routes.docs import docs_bp
 from web_api.routes.embeds import embeds_bp
@@ -207,6 +208,7 @@ def create_app() -> Quart:
     app.register_blueprint(plugin_config_bp, url_prefix=API_PREFIX)
     app.register_blueprint(announcements_bp, url_prefix=API_PREFIX)
     app.register_blueprint(auth_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(data_removal_bp, url_prefix=API_PREFIX)
     app.register_blueprint(api_keys_bp, url_prefix=API_PREFIX)
     app.register_blueprint(badges_bp, url_prefix=API_PREFIX)
     app.register_blueprint(chat_bp, url_prefix=API_PREFIX)

@@ -121,3 +121,4 @@ scripts/cache/*.live.json.dryrun
 # see its README). 300 MB of scipy etc., never committed.
 /.conquest_mapgen/
 var/
+private/
