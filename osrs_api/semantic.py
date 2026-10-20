@@ -8,6 +8,7 @@ replacing the deprecated Semantic MediaWiki (SMW) API.
 import asyncio
 import json
 import html
+import re
 from datetime import date, datetime
 from typing import Dict, List, Optional, Union, Any
 from urllib.parse import quote
@@ -46,6 +47,23 @@ class SemanticAPI:
         ("pharaoh's sceptre", "pyramid plunder"),
         ("amulet of eternal glory", "fountain of rune"),
     })
+
+    # Reward-container wiki pages are disambiguated by the content they belong
+    # to — "Chest (Tombs of Amascut)", "Rewards Chest (Fortis Colosseum)",
+    # "Reward Chest (The Gauntlet)" — and RuneLite names that loot after the
+    # content, so the parenthetical IS the submitted source. Matching it
+    # generically means a new raid's chest is accepted the day the wiki
+    # publishes its drop table, without waiting for an ALT_NAMES entry (The
+    # Fractured Archive released before its chest page existed). Only
+    # container heads qualify: a monster page like "Armoured zombie
+    # (Zemouregal's Fort)" names a location, not a loot source.
+    _CONTAINER_PAGE = re.compile(
+        r"^(?P<head>.*\b(?:chest|reward|rewards|vault|coffer|cache)\b.*?)\s*\((?P<owner>[^()]+)\)$",
+        re.IGNORECASE,
+    )
+    _MODE_SUFFIX = re.compile(
+        r"(?::|\s)\s*(?:challenge|hard|expert|entry|practice) mode$", re.IGNORECASE
+    )
 
     # Drop tables only change with the weekly game update (Tue/Wed), so a
     # per-item source list is safe to reuse for days. Serving allows from
@@ -106,6 +124,24 @@ class SemanticAPI:
         # None disables drop-source caching entirely.
         self.cache = getattr(client, "cache", None)
         self._ca_tiers_cache = None  # Cache for Combat Achievement tiers
+
+    @classmethod
+    def _fold_source(cls, name: str) -> str:
+        """Case, leading article and raid-mode suffix folded away, so
+        "Tombs of Amascut: Expert Mode" and "The Fractured Archive" compare
+        equal to the base content name."""
+        folded = cls._MODE_SUFFIX.sub("", str(name or "").strip()).strip().lower()
+        if folded.startswith("the "):
+            folded = folded[4:].strip()
+        return folded
+
+    @classmethod
+    def _container_owner(cls, page_name: str) -> Optional[str]:
+        """Folded content name a reward-container page belongs to, else None."""
+        match = cls._CONTAINER_PAGE.match(str(page_name or "").strip())
+        if not match:
+            return None
+        return cls._fold_source(match.group("owner")) or None
 
     def _cache_get(self, key: str):
         """JSON-decode a cached value; None on miss, no cache, or any error.
@@ -520,6 +556,7 @@ class SemanticAPI:
         # itself plus any aliased wiki page names.
         acceptable = {npc_name} | reverse_alt_names.get(npc_name, set())
         acceptable_norm = {a.lower().strip() for a in acceptable}
+        acceptable_folded = {self._fold_source(a) for a in acceptable}
         if acceptable_norm != {npc_name.lower().strip()}:
             print(f"Accepting drop sources {sorted(acceptable)} for {npc_name}")
 
@@ -568,6 +605,11 @@ class SemanticAPI:
                 # Check if this drop source matches our NPC name (or an alias).
                 if dropped_from.lower().strip() in acceptable_norm:
                     print(f"Drop found & valid for {item_name} from {dropped_from}")
+                    return True, used_cache
+                owner = self._container_owner(dropped_from)
+                if owner and owner in acceptable_folded:
+                    print(f"Drop found & valid for {item_name} from {dropped_from} "
+                          f"(reward container of {npc_name})")
                     return True, used_cache
 
             # A full page means the wiki had at least as many drop-source rows

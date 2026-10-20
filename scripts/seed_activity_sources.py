@@ -40,6 +40,10 @@ ACTIVITY_SOURCES = [
     # Server-side only: data/submissions/clog_drop_mirror.py records a new
     # eternal glory collection log slot as a drop from here.
     ("Fountain of Rune", 900005),
+    # The Fractured Archive's reward chest: RuneLite 1.13.3 names the loot
+    # event "Fractured Archive" (no article), and the chest has no monster
+    # infobox for the wiki lookup to mint a row from.
+    ("Fractured Archive", 900006),
 ]
 
 

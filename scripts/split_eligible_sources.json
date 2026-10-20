@@ -30,6 +30,13 @@
       "note": "The raid chest only. Lower roster rate (62-82%) than ToB is genuine solo raiding, not missing data."
     },
     {
+      "encounter": "The Fractured Archive",
+      "category": "raid",
+      "status": "proposed",
+      "names": ["Fractured Archive"],
+      "note": "Raids 4, released 2026-10-20; the raid chest only (RuneLite's loot event name, no article). Listed by analogy with the other three raids before any party data exists - promote to confirmed once splitscan shows the roster rate. No modes at launch; Practice Mode, when it arrives, is not expected to award loot."
+    },
+    {
       "encounter": "Nex",
       "category": "team_boss",
       "status": "proposed",

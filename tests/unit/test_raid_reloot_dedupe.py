@@ -376,6 +376,8 @@ class TestRaidBaseKey:
         assert _raid_base_key("Theatre of Blood") == "theatre-of-blood"
         assert _raid_base_key("Tombs of Amascut") == "tombs-of-amascut"
         assert _raid_base_key("Chambers of Xeric") == "chambers-of-xeric"
+        assert _raid_base_key("Fractured Archive") == "fractured-archive"
+        assert _raid_base_key("The Fractured Archive") == "fractured-archive"
 
     def test_mode_variants_fold_to_base(self):
         assert _raid_base_key("Theatre of Blood: Entry Mode") == "theatre-of-blood"

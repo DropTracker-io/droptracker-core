@@ -250,6 +250,8 @@ def sanitize_team_size(raw) -> str:
 RAID_TEAM_SIZE_CAPS = {
     "theatre-of-blood": 5,
     "tombs-of-amascut": 8,
+    # The Fractured Archive (2026-10-20): wiki infobox "players = 1-8".
+    "fractured-archive": 8,
 }
 
 #: Leading integer of a canonical team-size token — "6" and the low end of the

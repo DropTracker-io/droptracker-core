@@ -82,6 +82,39 @@ def test_alias_does_not_widen_spoof_surface():
     assert _run(api.check_drop("Granite hammer", "Zulrah")) is False
 
 
+def test_reward_container_page_vouches_for_its_content():
+    # A raid chest page disambiguated by its content accepts the source
+    # RuneLite reports, with no ALT_NAMES entry: The Fractured Archive
+    # (2026-10-20) shipped before its chest page existed, and RuneLite names
+    # the loot "Fractured Archive" without the article.
+    cases = [
+        ("Obligator (uncharged)", "Fractured Archive", "Chest (The Fractured Archive)"),
+        ("Obligator (uncharged)", "Fractured Archive", "Rewards Chest (Fractured Archive)"),
+        ("Obligator (uncharged)", "Fractured Archive", "Reward chest (The Fractured Archive)#Uniques"),
+        ("Rondache", "The Fractured Archive", "Chest (Fractured Archive)"),
+        # A future mode variant folds to the base raid's chest.
+        ("Rondache", "Fractured Archive: Practice Mode", "Chest (The Fractured Archive)"),
+        # Existing raids keep working through the same rule.
+        ("Osmumten's fang", "Tombs of Amascut: Expert Mode", "Chest (Tombs of Amascut)"),
+        ("Dragon pickaxe", "Fortis Colosseum", "Rewards Chest (Fortis Colosseum)"),
+    ]
+    for item, npc, wiki_page in cases:
+        api = _api({"bucket": [{"page_name": wiki_page}]})
+        assert _run(api.check_drop(item, npc)) is True, (item, npc, wiki_page)
+
+
+def test_reward_container_rule_does_not_widen_spoof_surface():
+    # Another content's chest still rejects.
+    api = _api({"bucket": [{"page_name": "Chest (Tombs of Amascut)"}]})
+    assert _run(api.check_drop("Tumeken's shadow (uncharged)", "Fractured Archive")) is False
+    # A parenthetical on a monster page names a location, not a loot source.
+    api = _api({"bucket": [{"page_name": "Armoured zombie (Zemouregal's Fort)"}]})
+    assert _run(api.check_drop("Broken zombie axe", "Zemouregal's Fort")) is False
+    # The owner must match whole, not as a prefix.
+    api = _api({"bucket": [{"page_name": "Chest (The Fractured Archive)"}]})
+    assert _run(api.check_drop("Obligator (uncharged)", "Fractured")) is False
+
+
 def test_activity_source_is_exempt():
     # Kingdom of Miscellania is an activity; dropsline can never confirm it.
     api = _api({"bucket": [{"page_name": "Coal rocks"}]})

@@ -216,6 +216,9 @@ def test_team_size_cap_is_the_games_own_party_ceiling():
     # Five health orbs / eight health orbs — the raid cannot hold more.
     assert team_size_cap("Theatre of Blood") == 5
     assert team_size_cap("Tombs of Amascut") == 8
+    # The Fractured Archive: RuneLite drops the article, the wiki keeps it.
+    assert team_size_cap("Fractured Archive") == 8
+    assert team_size_cap("The Fractured Archive") == 8
     # Mode variants inherit the base raid's ceiling.
     assert team_size_cap("Theatre of Blood: Hard Mode") == 5
     assert team_size_cap("Theatre of Blood: Entry Mode") == 5

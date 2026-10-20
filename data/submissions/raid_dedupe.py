@@ -70,7 +70,11 @@ from utils.npc_names import (
 log = logging.getLogger(__name__)
 
 #: Base-raid match keys whose reward chests can be re-opened at a bank chest.
-RAID_BASE_KEYS = {"theatre-of-blood", "tombs-of-amascut", "chambers-of-xeric"}
+#: The Fractured Archive (2026-10-20) is listed ahead of confirmation: its
+#: lobby has a bank chest and RuneLite treats its TFA_CHESTS interface like
+#: ToB/ToA's (one loot event per instance entry), and the kill-count watermark
+#: keeps back-to-back identical bundles from being misread as a re-open.
+RAID_BASE_KEYS = {"theatre-of-blood", "tombs-of-amascut", "chambers-of-xeric", "fractured-archive"}
 
 RELOOT_TTL_SECONDS = 2 * 60 * 60
 
