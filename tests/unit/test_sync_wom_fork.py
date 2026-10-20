@@ -118,3 +118,85 @@ def test_install_rejects_a_sha_that_did_not_actually_land(mod, monkeypatch):
     assert mod.install(SHA_B) is False
     monkeypatch.setattr(mod, "installed_sha", lambda: SHA_B)
     assert mod.install(SHA_B) is True
+
+
+# --- sync_upstream: the job adds WOM's new metrics to the fork itself --------
+# (The fork's GitHub schedule disabled itself after 60 quiet days on
+# 2026-09-28, so The Fractured Archive never reached the library.)
+
+class _Runs:
+    """Scripted `run`: answers by matching a substring of the command."""
+
+    def __init__(self, answers):
+        self.answers = answers  # [(needle, returncode, stdout)]
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(cmd)
+        joined = " ".join(cmd)
+        rc, out = 0, ""
+        for needle, code, text in self.answers:
+            if needle in joined:
+                rc, out = code, text
+                break
+        return type("R", (), {"returncode": rc, "stdout": out, "stderr": ""})()
+
+    def ran(self, needle):
+        return [c for c in self.calls if needle in " ".join(c)]
+
+
+@pytest.fixture()
+def clone(mod, tmp_path, monkeypatch):
+    path = tmp_path / "wom-fork"
+    (path / ".git").mkdir(parents=True)
+    monkeypatch.setattr(mod, "FORK_CLONE", str(path))
+    return path
+
+
+NEW = "New metrics: Boss: TheFracturedArchive='the_fractured_archive'"
+
+
+def test_upstream_nothing_new(mod, clone, monkeypatch):
+    runs = _Runs([("sync_metrics.py", 0, "")])
+    monkeypatch.setattr(mod, "run", runs)
+    assert mod.sync_upstream(apply=True) is None
+    assert not runs.ran(" push ")
+
+
+def test_upstream_new_metric_is_tested_committed_and_pushed(mod, clone, monkeypatch):
+    runs = _Runs([("sync_metrics.py", 10, NEW + "\n")])
+    monkeypatch.setattr(mod, "run", runs)
+    status = mod.sync_upstream(apply=True)
+    assert status.startswith("pushed") and "the_fractured_archive" in status
+    assert runs.ran("pytest tests")
+    commit = runs.ran(" commit ")[0]
+    assert commit[-2:] == ["--", "wom/enums.py"]  # only the enum
+    assert runs.ran("push -q origin droptracker")
+
+
+def test_upstream_dry_run_only_reports(mod, clone, monkeypatch):
+    runs = _Runs([("sync_metrics.py", 10, NEW + "\n")])
+    monkeypatch.setattr(mod, "run", runs)
+    assert mod.sync_upstream(apply=False).startswith("DRY RUN")
+    assert "--check" in runs.ran("sync_metrics.py")[0]
+    assert not runs.ran(" commit ") and not runs.ran(" push ")
+
+
+def test_upstream_failing_fork_tests_are_never_pushed(mod, clone, monkeypatch):
+    runs = _Runs([("sync_metrics.py", 10, NEW + "\n"), ("-m pytest", 1, "1 failed")])
+    monkeypatch.setattr(mod, "run", runs)
+    assert mod.sync_upstream(apply=True).startswith("ERROR: fork tests failed")
+    assert not runs.ran(" commit ") and not runs.ran(" push ")
+
+
+def test_upstream_rejected_push_resets_the_clone(mod, clone, monkeypatch):
+    runs = _Runs([("sync_metrics.py", 10, NEW + "\n"), (" push -q origin", 1, "")])
+    monkeypatch.setattr(mod, "run", runs)
+    assert mod.sync_upstream(apply=True).startswith("ERROR: push")
+    assert runs.calls[-1][-1] == "origin/droptracker" and "reset" in runs.calls[-1]
+
+
+def test_upstream_tool_failure_is_an_error_not_a_crash(mod, clone, monkeypatch):
+    runs = _Runs([("sync_metrics.py", 1, "could not locate `declare const Boss`")])
+    monkeypatch.setattr(mod, "run", runs)
+    assert mod.sync_upstream(apply=True).startswith("ERROR: tools/sync_metrics.py exited 1")

@@ -1273,6 +1273,10 @@ _BOSS_METRIC_OVERRIDES = {
     "whisperer": "the_whisperer",
     "royal_titans": "the_royal_titans",
     "fortis_colosseum": "sol_heredit",
+    # Raid 4: RuneLite names the chest loot "Fractured Archive"; WOM's boss
+    # metric (wise-old-man/utils 4.0.28) keeps the article. Also caught by the
+    # article fallback in wom_boss_metric, listed so the mapping is explicit.
+    "fractured_archive": "the_fractured_archive",
 }
 
 
@@ -1302,7 +1306,12 @@ def wom_boss_metric(npc_name: str) -> Optional[str]:
     token = _norm_metric_token(npc_name)
     token = _BOSS_METRIC_OVERRIDES.get(token, token)
     if _WOM_BOSS_SLUGS and token not in _WOM_BOSS_SLUGS:
-        return None
+        # WOM is inconsistent about a leading article (the_hueycoatl and
+        # the_fractured_archive, but nightmare), and RuneLite/plugin names
+        # differ the other way, so a new boss should not need an override
+        # just for "the".
+        alt = token[4:] if token.startswith("the_") else f"the_{token}"
+        return alt if alt in _WOM_BOSS_SLUGS else None
     return token or None
 
 

@@ -213,10 +213,20 @@ class TestMetricMapping:
             "The Whisperer": "the_whisperer",
             "Vet'ion": "vetion",
             "Yama": "yama",
+            "Fractured Archive": "the_fractured_archive",
+            "The Fractured Archive": "the_fractured_archive",
             "Made Up Boss": None,
         }
         for name, slug in cases.items():
             assert womutils.wom_boss_metric(name) == slug, name
+
+    def test_leading_article_needs_no_override(self, monkeypatch):
+        # A new boss whose WOM slug adds or drops "the_" resolves on its own.
+        monkeypatch.setattr(womutils, "_BOSS_METRIC_OVERRIDES", {})
+        assert womutils.wom_boss_metric("Fractured Archive") == "the_fractured_archive"
+        assert womutils.wom_boss_metric("Hueycoatl") == "the_hueycoatl"
+        assert womutils.wom_boss_metric("The Nightmare") == "nightmare"
+        assert womutils.wom_boss_metric("The Made Up Boss") is None
 
     def test_metric_families_do_not_cross(self):
         # A kc_target named like a skill must not resolve onto the skill

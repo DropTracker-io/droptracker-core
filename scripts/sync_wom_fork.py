@@ -12,6 +12,8 @@ plugin-only, logged by the reconciler).
 
 This script closes that last gap. Run on a timer, it:
 
+  0. adds any metrics WOM has published to the fork itself (``sync_upstream``)
+     — the fork's GitHub schedule turned itself off after 60 quiet days,
   1. compares the fork's branch HEAD against what is actually installed
      (``dist-info/direct_url.json`` — NOT ``pip show``, see below),
   2. installs the new commit,
@@ -57,6 +59,9 @@ VENV_PIP = os.path.join(DISC, "venv", "bin", "pip")
 REQUIREMENTS = os.path.join(DISC, "requirements.txt")
 DIST_INFO_GLOB = os.path.join(DISC, "venv", "lib", "python*", "site-packages", "wom_py-*.dist-info", "direct_url.json")
 NOTIFIER = "/home/debian/bin/notify_dm.py"
+#: Private work clone for sync_upstream (disc/var is gitignored).
+FORK_CLONE = os.path.join(DISC, "var", "wom-fork")
+FORK_PUSH_URL = "git@github.com:DropTracker-io/wom.py.git"
 
 # Services that hold the wom enum in memory. A running process keeps the old
 # module, so installing without restarting changes nothing for them.
@@ -176,6 +181,72 @@ def verify(before: dict | None) -> tuple[bool, str]:
     return True, json.dumps(after)
 
 
+def sync_upstream(apply: bool) -> str | None:
+    """Add any metrics WOM has published to the fork, and push them.
+
+    The fork's own scheduled GitHub workflow used to do this, but GitHub
+    disables a repository's scheduled workflows after 60 days without a
+    commit, and a quiet catalogue means no commits: it stopped on 2026-09-28
+    and nobody was told. WOM shipped The Fractured Archive's boss metric on
+    2026-10-20 and the fork never got it. Running the same tool from this
+    timer makes the whole chain depend only on this box.
+
+    Works in a private clone under disc/var (reset to the fork's branch every
+    run), runs the fork's ``tools/sync_metrics.py`` (stdlib, additive only),
+    and when that adds members runs the fork's test suite against the clone
+    before committing and pushing. Returns a status line, or None when there
+    was nothing to do. Never raises: a failure here must not stop the install
+    of whatever the fork already has.
+    """
+    clone = FORK_CLONE
+    git = ["git", "-C", clone]
+    try:
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            os.makedirs(os.path.dirname(clone), exist_ok=True)
+            r = run(["git", "clone", "-q", "-b", BRANCH, REPO_URL, clone])
+            if r.returncode != 0:
+                return f"ERROR: could not clone the fork: {r.stderr.strip()[-200:]}"
+            run(git + ["remote", "set-url", "--push", "origin", FORK_PUSH_URL])
+        r = run(git + ["fetch", "-q", "origin", BRANCH])
+        if r.returncode != 0:
+            return f"ERROR: could not fetch the fork: {r.stderr.strip()[-200:]}"
+        # Our own scratch clone: nothing is ever edited here by hand.
+        run(git + ["reset", "-q", "--hard", f"origin/{BRANCH}"])
+
+        sync = run([VENV_PY, "tools/sync_metrics.py"] + ([] if apply else ["--check"]),
+                   cwd=clone)
+        if sync.returncode == 0:
+            return None
+        if sync.returncode != 10:
+            return (f"ERROR: tools/sync_metrics.py exited {sync.returncode}: "
+                    f"{(sync.stdout + sync.stderr).strip()[-300:]}")
+        added = " ".join(line for line in sync.stdout.splitlines()
+                         if line.startswith("New metrics:"))
+        if not apply:
+            return f"DRY RUN: would add to the fork — {added}"
+
+        tests = run([VENV_PY, "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider"],
+                    cwd=clone)
+        if tests.returncode != 0:
+            run(git + ["reset", "-q", "--hard", f"origin/{BRANCH}"])
+            return (f"ERROR: fork tests failed with the new metrics ({added}); not "
+                    f"pushed: {tests.stdout.strip()[-300:]}")
+        run(git + ["add", "wom/enums.py"])
+        msg = (f"sync: add new WOM metrics from @wise-old-man/utils\n\n{added}\n\n"
+               "Committed by DropTracker's scripts/sync_wom_fork.py after the fork's "
+               "tests passed.")
+        if run(git + ["commit", "-q", "-m", msg, "--", "wom/enums.py"]).returncode != 0:
+            return "ERROR: commit to the fork clone failed"
+        push = run(git + ["push", "-q", "origin", BRANCH])
+        if push.returncode != 0:
+            # Likely someone else pushed first; the next run re-fetches.
+            run(git + ["reset", "-q", "--hard", f"origin/{BRANCH}"])
+            return f"ERROR: push to the fork failed: {push.stderr.strip()[-200:]}"
+        return f"pushed to the fork — {added}"
+    except Exception as e:  # pragma: no cover - defensive
+        return f"ERROR: upstream sync crashed: {e}"
+
+
 def update_pin(sha: str) -> str:
     """Point requirements.txt at `sha` and commit/push it.
 
@@ -207,7 +278,9 @@ def update_pin(sha: str) -> str:
         "then services restarted. Committed so CI and a fresh venv match what "
         "is actually running."
     )
-    if run(git + ["commit", "-m", msg]).returncode != 0:
+    # Pathspec commit: anything else already staged in this shared tree by
+    # another session stays out of it.
+    if run(git + ["commit", "-m", msg, "--", "requirements.txt"]).returncode != 0:
         return "commit failed — pin updated on disk only"
     branch = run(git + ["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
     push = run(git + ["push", "origin", branch])
@@ -259,6 +332,15 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="reinstall even when the installed sha already matches")
     args = ap.parse_args()
+
+    upstream = sync_upstream(args.apply)
+    if upstream:
+        log(f"upstream: {upstream}")
+        if upstream.startswith("ERROR") and args.apply:
+            notify("wom.py upstream sync FAILED",
+                   f"BLOCKED: {upstream[:700]}",
+                   "New WOM metrics are not reaching the fork; installed code is unaffected.")
+            report_status(False, [], upstream[:300])
 
     remote = remote_head()
     if not remote:
