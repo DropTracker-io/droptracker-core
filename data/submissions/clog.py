@@ -145,7 +145,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     video_url = clog_data.get("video_url")
     plugin_version = clog_data.get("p_v", None)
     notice = ""
-    item = await ensure_item_by_name(session, item_name)
+    item = await ensure_item_by_name(session, item_name, clog_data.get("item_id"))
 
     dedup_type = "seasonal_clog" if is_seasonal else "clog"
     if not await ensure_can_create(session, unique_id, dedup_type):

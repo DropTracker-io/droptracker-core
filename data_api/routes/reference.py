@@ -3,8 +3,8 @@
 Not about any player. This is the catalogue an integration needs to make
 sense of ``clog_slots``: which item ids are collection log slots, what each is
 called, and how they group into tabs and pages — read from the OSRS game
-cache by ``scripts/sync_collection_log.py`` and refreshed weekly after the
-game update (``droptracker-clog-structure.timer``). Consumers that keep a
+cache by ``scripts/sync_collection_log.py`` and refreshed within the hour of
+a new game cache build (``droptracker-game-cache.timer``). Consumers that keep a
 local copy of "which ids count" (the clan point bots do) should fetch this
 rather than hand-maintain it: a new boss lands, the timer runs, and the
 next fetch already knows the drop.

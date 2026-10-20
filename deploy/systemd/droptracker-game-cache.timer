@@ -1,0 +1,18 @@
+# Hourly trigger for droptracker-game-cache.service. A quiet hour is one GitHub
+# API call; only a new cache build does real work.
+#
+# Install:  sudo cp deploy/systemd/droptracker-game-cache.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-game-cache.timer
+
+[Unit]
+Description=Hourly DropTracker game-cache refresh (no-op unless the cache changed)
+
+[Timer]
+OnCalendar=*-*-* *:07:00 UTC
+RandomizedDelaySec=300
+Persistent=true
+Unit=droptracker-game-cache.service
+
+[Install]
+WantedBy=timers.target

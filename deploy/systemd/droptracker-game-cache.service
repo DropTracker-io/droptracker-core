@@ -1,0 +1,40 @@
+# Refresh everything derived from the OSRS game cache, when the cache changes.
+# Triggered hourly by droptracker-game-cache.timer — do not enable the service itself.
+#
+# What it does: scripts.refresh_game_cache asks abextm's public cache mirror for
+# its newest commit and does nothing more unless that differs from what the
+# live files were built from (one GitHub API call per quiet hour). On a new
+# game build it regenerates, pinned to that one commit:
+#   * scripts/cache/item_catalogue.live.json — item ids/names; utils/item_catalogue
+#     reloads it on mtime, and ensure_item_by_name mints items from it, so an
+#     update's new items resolve without waiting for the wiki
+#   * the collection log structure + manifest row (scripts.sync_collection_log
+#     --refresh --apply, with its own truncated-extract guards)
+# A catalogue naming >2% fewer items than the last is refused as a broken extract.
+#
+# Replaced droptracker-clog-structure.timer (weekly, Thursday) on 2026-10-20:
+# game updates do not reliably land on Wednesdays (The Fractured Archive came
+# out on a Tuesday, and its items were unresolvable until a manual refresh).
+#
+# Manual dry run:  cd /store/droptracker/disc && PATH=/home/debian/.nvm/versions/node/v20.20.1/bin:$PATH venv/bin/python -m scripts.refresh_game_cache
+# Manual real run: sudo systemctl start droptracker-game-cache.service
+# Watch it:        journalctl -u droptracker-game-cache.service -f
+
+[Unit]
+Description=DropTracker game-cache refresh (item catalogue + collection log, on cache change)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service redis-server.service
+
+[Service]
+Type=oneshot
+User=debian
+WorkingDirectory=/store/droptracker/disc
+# node lives under nvm for the debian user; the system /usr/bin/node is 18 and
+# the extractors' dependency (@abextm/cache2) is run under 20 everywhere else.
+Environment=PATH=/home/debian/.nvm/versions/node/v20.20.1/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.refresh_game_cache --apply
+# A full rebuild fetches a few hundred small cache files; minutes, never hours.
+TimeoutStartSec=30min
+# Reference data, never urgent.
+Nice=15
+IOSchedulingClass=idle

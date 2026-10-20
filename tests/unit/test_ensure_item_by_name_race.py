@@ -12,7 +12,16 @@ dead-lettered a whole multi-embed entry).
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from data.submissions import common
+
+
+@pytest.fixture(autouse=True)
+def _wiki_path(monkeypatch):
+    """These tests are about the wiki-minted insert; keep the game-cache step
+    (tested in test_game_item_id_for_name) out of the way."""
+    monkeypatch.setattr(common, "game_item_id_for_name", lambda *a, **k: None)
 
 
 class _FakeSemanticClient:

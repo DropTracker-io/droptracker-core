@@ -112,9 +112,10 @@ scripts/.event_task_stats_cache.json
 # repopulated on demand. Path is configurable via KB_EMBED_CACHE.
 .fastembed_cache/
 
-# Weekly cache-derived structure written by droptracker-clog-structure.timer
+# Cache-derived files written by droptracker-game-cache.timer (hourly, on cache change)
 scripts/cache/*.live.json
 scripts/cache/*.live.json.new
+scripts/cache/*.live.json.dryrun
 
 # Conquest map generator toolchain + cache (services/conquest_mapgen.py;
 # see its README). 300 MB of scipy etc., never committed.

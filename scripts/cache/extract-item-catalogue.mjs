@@ -119,6 +119,12 @@ function displayName(item, depth = 0) {
   return "";
 }
 
+/** A noted copy or a bank placeholder: not an item of its own. */
+function isStandIn(item) {
+  return (typeof item?.noteTemplate === "number" && item.noteTemplate >= 0)
+    || (typeof item?.placeholderTemplate === "number" && item.placeholderTemplate >= 0);
+}
+
 const items = {};
 let named = 0;
 let viaLink = 0;
@@ -131,6 +137,12 @@ for (const item of all) {
   if (!name) continue;
   if (!ownName(item)) viaLink += 1;
   const entry = { n: name };
+  // Noted copies and bank placeholders share their item's name, so a lookup by
+  // name must be able to skip them (utils/item_catalogue.canonical_item_id).
+  if (isStandIn(item) || !ownName(item)) entry.x = 1;
+  // Tradeable on the Grand Exchange: the tie-break between two real items that
+  // share a name, where the tradeable one is almost always the base item.
+  if (item.isGrandExchangable) entry.g = 1;
   const variants = stackVariants(item);
   if (variants.length) {
     entry.sv = variants;

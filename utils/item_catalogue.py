@@ -32,14 +32,43 @@ import os
 import threading
 from typing import Dict, List, Optional, Tuple
 
-CATALOGUE_PATH = "/store/droptracker/disc/scripts/item_catalogue.json"
+_SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+
+#: The committed catalogue: what a fresh checkout (and CI) has.
+CATALOGUE_PATH = os.path.join(_SCRIPTS, "item_catalogue.json")
+#: Written by ``scripts/refresh_game_cache.py`` whenever the game cache mirror
+#: publishes a new build, so production knows an update's items within the
+#: hour instead of whenever someone next commits the file. Untracked, and
+#: preferred whenever it exists.
+LIVE_CATALOGUE_PATH = os.path.join(_SCRIPTS, "cache", "item_catalogue.live.json")
+#: Collection log slot ids, to break ties between same-named items.
+_CLOG_PATHS = (
+    os.path.join(_SCRIPTS, "cache", "collection_log_structure.live.json"),
+    os.path.join(_SCRIPTS, "collection_log_structure.json"),
+)
 
 # name, and ascending [(threshold, variant_id)] for stackables.
 _Entry = Tuple[str, List[Tuple[int, int]]]
 
 _lock = threading.Lock()
 _catalogue: Optional[Dict[int, _Entry]] = None
-_loaded_mtime: Optional[float] = None
+#: folded name -> [(item_id, is_stand_in, is_ge_tradeable)]
+_by_name: Dict[str, List[Tuple[int, bool, bool]]] = {}
+_meta: Dict[str, object] = {}
+_loaded_key: Optional[tuple] = None
+_clog_ids: frozenset = frozenset()
+_clog_key: Optional[tuple] = None
+
+
+def _active_path() -> Optional[str]:
+    for path in (LIVE_CATALOGUE_PATH, CATALOGUE_PATH):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _fold(name) -> str:
+    return " ".join(str(name or "").split()).lower()
 
 
 def _load() -> Dict[int, _Entry]:
@@ -49,26 +78,29 @@ def _load() -> Dict[int, _Entry]:
     restart, which matters because the natural time to regenerate is right after
     a game update — when new item ids are already arriving.
     """
-    global _catalogue, _loaded_mtime
+    global _catalogue, _by_name, _meta, _loaded_key
+    path = _active_path()
     try:
-        mtime = os.path.getmtime(CATALOGUE_PATH)
+        key = (path, os.path.getmtime(path)) if path else None
     except OSError:
+        key = None
+    if key is None:
         # No catalogue on this box: callers degrade to their own fallbacks
         # rather than failing. An empty dict is a valid answer to every query
         # here ("we do not know"), which is what those fallbacks expect.
         return {}
-
     with _lock:
-        if _catalogue is not None and _loaded_mtime == mtime:
+        if _catalogue is not None and _loaded_key == key:
             return _catalogue
         try:
-            with open(CATALOGUE_PATH, "r", encoding="utf-8") as fh:
+            with open(path, "r", encoding="utf-8") as fh:
                 raw = json.load(fh)
             items = raw.get("items") or {}
             parsed: Dict[int, _Entry] = {}
-            for key, entry in items.items():
+            by_name: Dict[str, List[Tuple[int, bool, bool]]] = {}
+            for key_id, entry in items.items():
                 try:
-                    item_id = int(key)
+                    item_id = int(key_id)
                 except (TypeError, ValueError):
                     continue
                 if not isinstance(entry, dict):
@@ -89,12 +121,97 @@ def _load() -> Dict[int, _Entry]:
                         variants.append((pair[0], pair[1]))
                 variants.sort()
                 parsed[item_id] = (name, variants)
+                by_name.setdefault(_fold(name), []).append(
+                    (item_id, bool(entry.get("x")), bool(entry.get("g"))))
             _catalogue = parsed
-            _loaded_mtime = mtime
+            _by_name = by_name
+            _meta = {k: v for k, v in raw.items() if k != "items"}
+            _loaded_key = key
         except Exception:
             # A corrupt or half-written file must not take the API down.
             _catalogue = _catalogue or {}
         return _catalogue
+
+
+def _collection_log_ids() -> frozenset:
+    """Every collection log slot id, from the newest structure on disk."""
+    global _clog_ids, _clog_key
+    for path in _CLOG_PATHS:
+        try:
+            key = (path, os.path.getmtime(path))
+        except OSError:
+            continue
+        if key == _clog_key:
+            return _clog_ids
+        ids = set()
+
+        def walk(node):
+            if isinstance(node, dict):
+                listed = node.get("items")
+                if isinstance(listed, list):
+                    ids.update(i for i in listed if isinstance(i, int))
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                walk(json.load(fh))
+        except Exception:
+            continue
+        _clog_ids, _clog_key = frozenset(ids), key
+        return _clog_ids
+    return frozenset()
+
+
+def catalogue_info() -> Dict[str, object]:
+    """Which game build the loaded catalogue came from (``cache_commit``...)."""
+    _load()
+    return dict(_meta)
+
+
+def ids_for_name(name) -> List[int]:
+    """Every real item id the game gives ``name`` (case-insensitive), lowest
+    first. Noted copies and bank placeholders are left out: they are stand-ins
+    for an item, not items. Entries from a catalogue built before those were
+    flagged count as real, so an old file still answers."""
+    if not _load():
+        return []
+    return sorted(i for i, stand_in, _ in _by_name.get(_fold(name), ()) if not stand_in)
+
+
+def canonical_item_id(name) -> Optional[int]:
+    """The id to mint for an item known only by name, or None if the game
+    has no such item.
+
+    Many ids share a name (a quest copy, a cosmetic variant, a pet's
+    metamorphs), so this picks the one the rest of the site means: a
+    collection log slot first, then a Grand Exchange tradeable, then the
+    lowest id. Measured on 2026-10-20 against the 10,773 names the ``items``
+    table and the cache share, it agreed with the stored id on 99.8%; every
+    disagreement was a row holding a noted id or a name the table already
+    has (which callers look up first, so this never overrides it).
+    """
+    if not _load():
+        return None
+    candidates = [(i, ge) for i, stand_in, ge in _by_name.get(_fold(name), ())
+                  if not stand_in]
+    if not candidates:
+        return None
+    clog = _collection_log_ids()
+    candidates.sort(key=lambda c: (c[0] not in clog, not c[1], c[0]))
+    return candidates[0][0]
+
+
+def name_matches(item_id, name) -> Optional[bool]:
+    """Whether the game names ``item_id`` ``name``: True/False, or None when
+    the catalogue does not know the id (it predates the item)."""
+    known = item_name(item_id)
+    if known is None:
+        return None
+    return _fold(known) == _fold(name)
 
 
 def item_name(item_id) -> Optional[str]:

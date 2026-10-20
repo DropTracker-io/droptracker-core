@@ -1513,18 +1513,58 @@ def wants_drop_confirmation(session, submission_data: dict, player_id) -> bool:
     return player_pref_enabled(session, player_id, "drop_confirmation")
 
 
-async def ensure_item_by_name(session, item_name):
+def game_item_id_for_name(item_name, item_id_hint=None):
+    """The game's id for an item known by name, from the game cache, or None.
+
+    ``item_id_hint`` is an id the client sent alongside the name (collection
+    log submissions carry the slot id). It wins when the cache confirms it is
+    a real item of that name, and also when the cache simply predates it and
+    has no other item by that name: the same trust drops give the plugin's ids
+    (``ensure_item_for_drop``). A hint the cache knows under another name, or
+    as a noted copy or bank placeholder, is ignored.
+
+    Exists because the wiki is updated by hand: on 2026-10-20 it had no page
+    for 16 of The Fractured Archive's 17 collection log items hours after
+    release, and 195 clog notifications were dropped as "not found".
+    """
+    from utils import item_catalogue
+
+    canonical = item_catalogue.canonical_item_id(item_name)
+    try:
+        hint = int(item_id_hint) if item_id_hint not in (None, "") else None
+    except (TypeError, ValueError):
+        hint = None
+    if hint is not None and hint >= 0:
+        if hint in item_catalogue.ids_for_name(item_name):
+            return hint
+        if canonical is None and item_catalogue.item_name(hint) is None:
+            return hint
+    return canonical
+
+
+async def ensure_item_by_name(session, item_name, item_id_hint=None):
+    """The ``items`` row for ``item_name``, minting it if needed.
+
+    Resolution order: the row we already have (so an existing item never
+    changes id), then the game cache (``game_item_id_for_name``), then the
+    wiki for names the cache does not know (renamed or wiki-only spellings).
+    """
     if not item_name:
         return None
     item = session.query(ItemList).filter(ItemList.item_name == item_name).first()
     if item:
         return item
     try:
-        async with osrs_api.create_client() as client:
-            item_id = await client.semantic.get_item_id(item_name)
+        item_id = game_item_id_for_name(item_name, item_id_hint)
     except Exception:
-        return None
-    if not item_id:
+        item_id = None
+    if item_id is None:
+        try:
+            async with osrs_api.create_client() as client:
+                item_id = await client.semantic.get_item_id(item_name)
+        except Exception:
+            return None
+    if item_id is None:
         return None
     try:
         item = ItemList(item_name=item_name, item_id=item_id, noted=0, stackable=0, stacked=0)

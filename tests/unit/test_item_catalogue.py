@@ -39,8 +39,11 @@ def _isolated_catalogue(tmp_path, monkeypatch):
         )
     )
     monkeypatch.setattr(item_catalogue, "CATALOGUE_PATH", str(path))
+    monkeypatch.setattr(item_catalogue, "LIVE_CATALOGUE_PATH", str(tmp_path / "absent.live.json"))
+    monkeypatch.setattr(item_catalogue, "_CLOG_PATHS", (str(tmp_path / "clog.json"),))
     monkeypatch.setattr(item_catalogue, "_catalogue", None)
-    monkeypatch.setattr(item_catalogue, "_loaded_mtime", None)
+    monkeypatch.setattr(item_catalogue, "_loaded_key", None)
+    monkeypatch.setattr(item_catalogue, "_clog_key", None)
     return path
 
 
@@ -125,7 +128,74 @@ class TestMissingCatalogue:
         # "we do not know" and must not take the API down.
         monkeypatch.setattr(item_catalogue, "CATALOGUE_PATH", "/nonexistent/x.json")
         monkeypatch.setattr(item_catalogue, "_catalogue", None)
-        monkeypatch.setattr(item_catalogue, "_loaded_mtime", None)
+        monkeypatch.setattr(item_catalogue, "_loaded_key", None)
         assert item_catalogue.item_name(995) is None
         assert item_catalogue.stack_display_id(995, 10_000) == 995
         assert item_catalogue.stack_variant_ids() == set()
+
+
+def _write(path, items, **meta):
+    path.write_text(json.dumps({**meta, "items": items}))
+
+
+class TestNameLookup:
+    """Minting an item known only by name (clogs, pets, clan broadcasts) from
+    the game cache instead of the hand-edited wiki."""
+
+    @pytest.fixture
+    def cat(self, _isolated_catalogue, tmp_path):
+        _write(_isolated_catalogue, {
+            "1069": {"n": "Steel platelegs", "g": 1},
+            "1070": {"n": "Steel platelegs", "x": 1},        # noted
+            "4151": {"n": "Abyssal whip", "g": 1},
+            "4178": {"n": "Abyssal whip"},                   # quest copy
+            "20405": {"n": "Abyssal whip"},
+            "34646": {"n": "Orion"},
+            "34648": {"n": "Orion"},                         # metamorph
+            "30803": {"n": "Dossier"},
+            "30805": {"n": "Dossier"},
+        }, cache_commit="abc")
+        (tmp_path / "clog.json").write_text(json.dumps(
+            {"tabs": [{"pages": [{"name": "X", "items": [34646, 30805]}]}]}))
+        return _isolated_catalogue
+
+    def test_names_fold_case_and_spaces(self, cat):
+        assert item_catalogue.ids_for_name("  steel   PLATELEGS ") == [1069]
+
+    def test_noted_copies_and_placeholders_are_not_candidates(self, cat):
+        assert item_catalogue.canonical_item_id("Steel platelegs") == 1069
+
+    def test_tradeable_beats_a_lower_untradeable_copy(self, cat):
+        assert item_catalogue.canonical_item_id("Abyssal whip") == 4151
+
+    def test_collection_log_slot_beats_everything(self, cat):
+        assert item_catalogue.canonical_item_id("Orion") == 34646
+        assert item_catalogue.canonical_item_id("Dossier") == 30805
+
+    def test_unknown_name(self, cat):
+        assert item_catalogue.canonical_item_id("Not an item") is None
+        assert item_catalogue.ids_for_name(None) == []
+
+    def test_name_matches(self, cat):
+        assert item_catalogue.name_matches(34646, "orion") is True
+        assert item_catalogue.name_matches(34646, "Dossier") is False
+        assert item_catalogue.name_matches(99999, "Orion") is None
+
+    def test_live_catalogue_is_preferred(self, cat, tmp_path, monkeypatch):
+        live = tmp_path / "item_catalogue.live.json"
+        _write(live, {"40000": {"n": "Brand new item"}}, cache_commit="newer")
+        monkeypatch.setattr(item_catalogue, "LIVE_CATALOGUE_PATH", str(live))
+        assert item_catalogue.canonical_item_id("Brand new item") == 40000
+        assert item_catalogue.catalogue_info()["cache_commit"] == "newer"
+
+    def test_a_catalogue_without_flags_still_answers(self, _isolated_catalogue):
+        _write(_isolated_catalogue, {"5": {"n": "Thing"}, "9": {"n": "Thing"}})
+        assert item_catalogue.canonical_item_id("Thing") == 5
+
+    def test_rewritten_file_is_picked_up(self, cat):
+        assert item_catalogue.canonical_item_id("Later") is None
+        import os
+        _write(cat, {"7": {"n": "Later"}})
+        st = os.stat(cat)
+        os.utime(cat, (st.st_atime, st.st_mtime + 5))
+        assert item_catalogue.canonical_item_id("Later") == 7
