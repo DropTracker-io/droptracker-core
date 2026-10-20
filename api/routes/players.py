@@ -464,6 +464,10 @@ def _group_configs_for(player_name, acc_hash, db_session):
                             "send_clogs": get_config_value(current_group_configs, "notify_clogs"),
                             "send_cas": get_config_value(current_group_configs, "notify_cas"),
                             "send_pets": get_config_value(current_group_configs, "notify_pets"),
+                            # The plugin's GroupConfig reads send_quests for its
+                            # panel and Submission Feed; never sent before
+                            # ticket 495, so quests always showed as off there.
+                            "send_quests": get_config_value(current_group_configs, "notify_quests"),
                             "send_deaths": get_config_value(current_group_configs, "notify_deaths"),
                             # Whether this group posts members' own death messages
                             # (db/member_messages.py); a real boolean, unlike the
