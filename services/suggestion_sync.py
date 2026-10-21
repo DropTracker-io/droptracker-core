@@ -29,7 +29,15 @@ from interactions.api.events import (
     ThreadUpdate,
 )
 
+from interactions.client.errors import Forbidden
+
 from db.models import Session, Suggestion, SuggestionMessage, User
+from services.suggestion_naming import (
+    fallback_note,
+    is_numbered,
+    strip_number_prefix,
+    thread_name,
+)
 
 
 def _forum_type_map() -> dict[str, str]:
@@ -70,6 +78,10 @@ class SuggestionSync(Extension):
     def __init__(self, bot):
         self.forum_types = _forum_type_map()
         self._started = False
+        # Thread ids already renamed/noted this process: one attempt each (thread
+        # renames are tightly rate limited, and a missing permission would
+        # otherwise re-post the fallback note on every message).
+        self._numbered: set[str] = set()
         # Loaded from webhook_bot's own Startup handler, so a @listen(Startup)
         # here can register after the event fired — defer via a ready-wait
         # task instead (same pattern as the Tickets extension).
@@ -112,8 +124,11 @@ class SuggestionSync(Extension):
         author = starter.author
         return not (getattr(author, "bot", False) or getattr(author, "system", False))
 
-    def _ensure_thread(self, s, thread, kind: str, starter_message=None) -> Optional[Suggestion]:
+    def _ensure_thread(
+        self, s, thread, kind: str, starter_message=None
+    ) -> tuple[Optional[Suggestion], bool]:
         """Fetch-or-create the Suggestion row for a Discord forum post.
+        Returns ``(row_or_None, created)``.
 
         Only creates rows for human-started posts: bot-started posts are the
         web's own syndicated threads, which already exist (the outbox drain
@@ -125,12 +140,12 @@ class SuggestionSync(Extension):
             .first()
         )
         if sug is not None:
-            return sug
+            return sug, False
         if starter_message is None:
-            return None
+            return None, False
         author = starter_message.author
         if getattr(author, "bot", False) or getattr(author, "system", False):
-            return None
+            return None, False
         created = _plain_datetime(getattr(starter_message, "created_at", None))
         sug = Suggestion(
             user_id=_resolve_author_user_id(s, str(author.id)),
@@ -138,7 +153,7 @@ class SuggestionSync(Extension):
             author_discord_id=str(author.id),
             author_name=_display_name(author),
             type=kind,
-            title=str(getattr(thread, "name", "") or "Untitled")[:100],
+            title=strip_number_prefix(str(getattr(thread, "name", "") or "")) or "Untitled",
             body_md=(starter_message.content or "").strip() or "*(no text content)*",
             status="posted",
             discord_thread_id=str(thread.id),
@@ -147,7 +162,39 @@ class SuggestionSync(Extension):
         )
         s.add(sug)
         s.flush()
-        return sug
+        return sug, True
+
+    async def _ensure_numbered(self, thread, sug_id: int, kind: str, history=None) -> None:
+        """Put the suggestion id in the thread name (``💡 #12 · Title``).
+
+        Archived threads are skipped (editing one would unarchive it). When
+        the bot may not rename (missing Manage Threads) a one-line
+        ``Tracked as ... #id`` note is posted instead, unless ``history``
+        already holds one. Never raises: numbering must not break the mirror.
+        """
+        thread_id = str(thread.id)
+        if thread_id in self._numbered:
+            return
+        name = str(getattr(thread, "name", "") or "")
+        if is_numbered(name, sug_id) or getattr(thread, "archived", False):
+            return
+        self._numbered.add(thread_id)
+        try:
+            await thread.edit(
+                name=thread_name(kind, sug_id, name),
+                reason=f"Add {kind} id #{sug_id} to the thread name",
+            )
+        except Forbidden:
+            note = fallback_note(kind, sug_id)
+            if any(note in (getattr(m, "content", "") or "") for m in (history or [])):
+                return
+            print(f"[suggestion_sync] cannot rename thread {thread_id}; posting id note")
+            try:
+                await thread.send(note)
+            except Exception as e:  # noqa: BLE001
+                print(f"[suggestion_sync] id note failed (thread {thread_id}): {e}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[suggestion_sync] rename failed (thread {thread_id}): {e}")
 
     def _upsert_reply(self, s, sug: Suggestion, message) -> bool:
         """Idempotently mirror one human Discord message as a reply.
@@ -206,11 +253,11 @@ class SuggestionSync(Extension):
         def _mirror():
             s = Session()
             try:
-                sug = self._ensure_thread(s, thread, kind, starter_message=message)
+                sug, created = self._ensure_thread(s, thread, kind, starter_message=message)
                 if sug is None:
                     # Reply in a web-origin thread whose id write-back hasn't
                     # landed yet (≤10s window); the startup backfill heals it.
-                    return
+                    return None
                 inserted = False
                 if str(message.id) != str(thread.id):  # starter is the body
                     inserted = self._upsert_reply(s, sug, message)
@@ -229,13 +276,17 @@ class SuggestionSync(Extension):
                         suggestion_participant_user_ids(s, sug),
                         exclude_user_id=author_uid,
                     )
+                return sug.id if created else None
             except Exception as e:  # noqa: BLE001
                 s.rollback()
                 print(f"[suggestion_sync] mirror failed (thread {thread.id}): {e}")
+                return None
             finally:
                 s.close()
 
-        await asyncio.to_thread(_mirror)
+        new_id = await asyncio.to_thread(_mirror)
+        if new_id is not None:
+            await self._ensure_numbered(thread, new_id, kind)
 
     @listen(MessageUpdate)
     async def on_forum_message_edit(self, event: MessageUpdate):
@@ -383,12 +434,12 @@ class SuggestionSync(Extension):
             print(f"[suggestion_sync] history fetch failed for post {post.id}: {e}")
         messages.reverse()  # history yields newest-first
 
-        def _apply() -> bool:
+        def _apply() -> Optional[int]:
             s = Session()
             try:
-                sug = self._ensure_thread(s, post, kind, starter_message=starter)
+                sug, _created = self._ensure_thread(s, post, kind, starter_message=starter)
                 if sug is None:
-                    return False
+                    return None
                 for m in messages:
                     author = m.author
                     if getattr(author, "bot", False) or getattr(author, "system", False):
@@ -400,14 +451,18 @@ class SuggestionSync(Extension):
                 locked = bool(getattr(post, "locked", False))
                 sug.is_open = not (archived or locked)
                 s.commit()
-                return True
+                return sug.id
             except Exception:
                 s.rollback()
                 raise
             finally:
                 s.close()
 
-        return await asyncio.to_thread(_apply)
+        sug_id = await asyncio.to_thread(_apply)
+        if sug_id is None:
+            return False
+        await self._ensure_numbered(post, sug_id, kind, history=messages)
+        return True
 
 
 def setup(bot):
