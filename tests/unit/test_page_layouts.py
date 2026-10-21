@@ -22,6 +22,7 @@ def test_minimal_layout_normalizes_defaults():
     assert block["hide_on"] == "none"
     assert block["title"] is None
     assert block["stats"] == ["members", "rank", "monthly_loot", "top_player"]
+    assert block["columns"] == "auto"
     assert out["theme"]["preset"] == "default"
     assert out["theme"]["palette"] == {}
 
@@ -139,3 +140,34 @@ def test_malformed_input():
     for raw in (None, [], "x", {"blocks": "no"}):
         with pytest.raises(LayoutError):
             validate_layout(raw, "group")
+
+
+def test_stats_choices_are_the_owners_and_capped():
+    out = validate_layout(_layout({"id": "s", "type": "stats_row", "stats": [
+        "clan_log", "bank_balance", "pvp_kills", "nonsense", "members", "rank", "top_boss",
+        "records_held", "events_running", "points_leader"]}), "group")
+    stats = out["blocks"][0]["stats"]
+    assert stats[:3] == ["clan_log", "bank_balance", "pvp_kills"]
+    assert "nonsense" not in stats and len(stats) == 8
+    p = validate_layout(_layout({"id": "s", "type": "player_stats", "stats": ["clog_slots", "ca_tasks"],
+                                 "columns": "3"}), "player")["blocks"][0]
+    assert p["stats"] == ["clog_slots", "ca_tasks"] and p["columns"] == "3"
+
+
+def test_highlight_types_filter():
+    b = validate_layout(_layout({"id": "h", "type": "highlights", "types": ["pet", "evil", "pb"]}), "group")
+    assert b["blocks"][0]["types"] == ["pet", "pb"]
+    fresh = validate_layout(_layout({"id": "h", "type": "player_highlights"}), "player")
+    assert fresh["blocks"][0]["types"] == ["pet", "clog", "pb"]
+
+
+def test_window_surface_allowed():
+    b = validate_layout(_layout({"id": "w", "type": "records", "surface": "window"}), "group")
+    assert b["blocks"][0]["surface"] == "window"
+
+
+def test_highlight_types_are_what_the_feed_serves():
+    from web_api.page_layouts_shared import HIGHLIGHT_TYPES as SHARED
+    from web_api.routes.page_layouts import HIGHLIGHT_TYPES as SERVED
+
+    assert set(SHARED) == set(SERVED)

@@ -382,3 +382,110 @@ def _register(scope: str, base: str) -> None:
 
 for _scope, _base in _SCOPE_PATHS:
     _register(_scope, _base)
+
+
+# --- highlights feed (the Highlights blocks) -------------------------------------
+# A typed, filterable version of the profiles' "recent submissions": notified
+# drops, collection log slots and PBs, plus pets (which live in their own
+# table). Public, hidden players omitted, same shape as SubmissionSchema.
+
+HIGHLIGHT_TYPES = ("drop", "pet", "clog", "pb")
+_HIGHLIGHT_MAX = 25
+
+
+def _parse_types() -> tuple[str, ...]:
+    from quart import request
+
+    raw = (request.args.get("types") or "").split(",")
+    picked = tuple(t for t in HIGHLIGHT_TYPES if t in raw)
+    return picked or HIGHLIGHT_TYPES
+
+
+def _parse_limit() -> int:
+    from quart import request
+
+    try:
+        return max(1, min(_HIGHLIGHT_MAX, int(request.args.get("limit") or 8)))
+    except ValueError:
+        return 8
+
+
+def _highlights(s, *, group_id: Optional[int], player_id: Optional[int], types, limit: int) -> list:
+    from sqlalchemy import or_
+
+    from db.models import NotifiedSubmission, Player, PlayerPet, user_group_association
+    from web_api.common import hidden_player_ids, period_to_partition
+    from web_api.routes.profiles import IMG_BASE, _build_submissions
+
+    hidden = hidden_player_ids()
+    out: list = []
+
+    cols = {"drop": NotifiedSubmission.drop_id, "clog": NotifiedSubmission.clog_id, "pb": NotifiedSubmission.pb_id}
+    wanted = [cols[t].isnot(None) for t in types if t in cols]
+    if wanted:
+        q = s.query(NotifiedSubmission).filter(or_(*wanted))
+        q = q.filter(NotifiedSubmission.group_id == group_id) if group_id else q.filter(
+            NotifiedSubmission.player_id == player_id
+        )
+        rows = [r for r in q.order_by(NotifiedSubmission.date_added.desc()).limit(limit * 2).all()
+                if r.player_id not in hidden]
+        ids = {r.player_id for r in rows if r.player_id}
+        names = {p.player_id: p.player_name for p in s.query(Player).filter(Player.player_id.in_(ids))} if ids else {}
+        out.extend(_build_submissions(rows, s, period_to_partition("month"), names))
+
+    if "pet" in types:
+        pq = s.query(PlayerPet, Player.player_name).join(Player, Player.player_id == PlayerPet.player_id)
+        if group_id:
+            members = s.query(user_group_association.c.player_id).filter(
+                user_group_association.c.group_id == group_id
+            )
+            pq = pq.filter(PlayerPet.player_id.in_(members))
+        else:
+            pq = pq.filter(PlayerPet.player_id == player_id)
+        for pet, name in pq.filter(PlayerPet.date_added.isnot(None)).order_by(PlayerPet.date_added.desc()).limit(limit):
+            if pet.player_id in hidden:
+                continue
+            out.append({
+                "id": int(pet.id),
+                "type": "pet",
+                "label": pet.pet_name,
+                "image_url": f"{IMG_BASE}/itemdb/{pet.item_id}.png" if pet.item_id else None,
+                "item_id": int(pet.item_id) if pet.item_id else None,
+                "player_id": pet.player_id,
+                "player_name": name,
+                "ts": int(pet.date_added.timestamp()),
+            })
+
+    for o in out:
+        if o.get("image_url") is None:
+            o.pop("image_url", None)
+    out.sort(key=lambda o: o.get("ts") or 0, reverse=True)
+    return out[:limit]
+
+
+@page_layouts_bp.get("/groups/<int:group_id>/highlights")
+async def group_highlights(group_id: int):
+    types, limit = _parse_types(), _parse_limit()
+
+    def _run():
+        with db_session() as s:
+            return _highlights(s, group_id=group_id, player_id=None, types=types, limit=limit)
+
+    items = await asyncio.to_thread(_run)
+    return with_cache_headers(jsonify({"items": items}), max_age=30)
+
+
+@page_layouts_bp.get("/players/<int:player_id>/highlights")
+async def player_highlights(player_id: int):
+    types, limit = _parse_types(), _parse_limit()
+
+    def _run():
+        from web_api.common import hidden_player_ids
+
+        if player_id in hidden_player_ids():
+            return []
+        with db_session() as s:
+            return _highlights(s, group_id=None, player_id=player_id, types=types, limit=limit)
+
+    items = await asyncio.to_thread(_run)
+    return with_cache_headers(jsonify({"items": items}), max_age=30)

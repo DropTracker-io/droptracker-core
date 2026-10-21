@@ -35,7 +35,7 @@ MAX_PALETTE_KEYS = 24
 
 WIDTHS = ("full", "two_thirds", "half", "third")
 # OSRS-styled containers a block can sit in. "plain" draws nothing.
-SURFACES = ("plain", "card", "stone", "parchment", "scroll", "panel")
+SURFACES = ("plain", "card", "stone", "window", "parchment", "scroll", "panel")
 HIDE_ON = ("none", "mobile", "desktop")
 
 # Built-in links a group page can show (rendered only when the group actually
@@ -197,8 +197,20 @@ def _npc_id(v: Any, where: str) -> int:
     return n
 
 
-GROUP_STATS = ("members", "rank", "monthly_loot", "top_player")
-PLAYER_STATS = ("monthly_loot", "rank", "clan_points", "top_npc")
+GROUP_STATS = (
+    "members", "rank", "monthly_loot", "top_player", "top_boss", "records_held",
+    "clan_log", "pvp_kills", "pvp_loot", "points_leader", "bank_balance", "events_running",
+)
+PLAYER_STATS = (
+    "monthly_loot", "rank", "clan_points", "top_npc", "last_month_loot", "clog_slots",
+    "ca_tasks", "quests", "combat_level", "pbs_count", "badges_count", "pvp_kills",
+)
+# What the stats block shows when someone adds it: the classic four.
+GROUP_STATS_DEFAULT = ("members", "rank", "monthly_loot", "top_player")
+PLAYER_STATS_DEFAULT = ("monthly_loot", "rank", "clan_points", "top_npc")
+STAT_COLUMNS = ("auto", "2", "3", "4")
+# What the highlights feed can filter on (routes/page_layouts.py serves it).
+HIGHLIGHT_TYPES = ("drop", "pet", "clog", "pb")
 
 # --- block catalog --------------------------------------------------------------
 # type -> (label, scopes, default surface, props)
@@ -236,7 +248,8 @@ _GROUP: dict[str, tuple[str, tuple, str, dict[str, Spec]]] = {
     }),
     "support_card": ("Support this clan", ("group",), "plain", {}),
     "stats_row": ("Stats", ("group",), "plain", {
-        "stats": key_list(GROUP_STATS, GROUP_STATS, len(GROUP_STATS)),
+        "stats": key_list(GROUP_STATS, GROUP_STATS_DEFAULT, 8),
+        "columns": enum(STAT_COLUMNS, "auto"),
     }),
     "bank": ("Clan bank", ("group",), "plain", {}),
     "records": ("Clan records", ("group",), "plain", {
@@ -260,6 +273,28 @@ _GROUP: dict[str, tuple[str, tuple, str, dict[str, Spec]]] = {
     }),
     "leaderboard": ("Loot leaderboard", ("group",), "card", {
         "limit": int_range(3, 50, 10),
+        "period": enum(("month", "week", "day", "all"), "month"),
+    }),
+    "clan_log": ("Clan Log", ("group",), "card", {
+        "view": enum(("summary", "board"), "summary"),
+        "show_categories": boolean(True),
+        "recent": int_range(0, 20, 6),
+    }),
+    "points_leaderboard": ("Clan points", ("group",), "card", {
+        "limit": int_range(3, 50, 10),
+    }),
+    "pvp_summary": ("PvP", ("group",), "card", {
+        "period": enum(("month", "all"), "month"),
+        "limit": int_range(3, 25, 5),
+        "show_recent": boolean(True),
+    }),
+    "events_list": ("Events", ("group",), "card", {
+        "show": enum(("active", "active_and_past"), "active_and_past"),
+        "limit": int_range(1, 10, 4),
+    }),
+    "highlights": ("Highlights", ("group",), "card", {
+        "types": key_list(HIGHLIGHT_TYPES, ("pet", "clog", "pb"), len(HIGHLIGHT_TYPES)),
+        "limit": int_range(1, 25, 8),
     }),
     "npc_board": ("Boss leaderboard", ("group",), "card", {
         "npc_id": optional(_npc_id),
@@ -297,7 +332,19 @@ _PLAYER: dict[str, tuple[str, tuple, str, dict[str, Spec]]] = {
     }),
     "player_showcase": ("Character and account", ("player",), "plain", {}),
     "player_stats": ("Stats", ("player",), "plain", {
-        "stats": key_list(PLAYER_STATS, PLAYER_STATS, len(PLAYER_STATS)),
+        "stats": key_list(PLAYER_STATS, PLAYER_STATS_DEFAULT, 8),
+        "columns": enum(STAT_COLUMNS, "auto"),
+    }),
+    "player_clog": ("Collection log", ("player",), "card", {
+        "view": enum(("summary", "browser"), "summary"),
+    }),
+    "player_ca": ("Combat achievements", ("player",), "card", {
+        "view": enum(("summary", "browser"), "summary"),
+    }),
+    "player_quests": ("Quests and diaries", ("player",), "card", {}),
+    "player_highlights": ("Highlights", ("player",), "card", {
+        "types": key_list(HIGHLIGHT_TYPES, ("pet", "clog", "pb"), len(HIGHLIGHT_TYPES)),
+        "limit": int_range(1, 25, 8),
     }),
     "personal_bests": ("Personal bests", ("player",), "plain", {
         "limit": int_range(1, 60, 12),

@@ -85,7 +85,8 @@ THEME_KEYS = ("dusk", "parchment", "wilderness")
 # What a claimed subdomain does. "builder" rendered the block pages; it was
 # retired with web137a in favour of the page builder on the group's own
 # DropTracker page, so an address is now always a redirect: to that page
-# (group_page) or to a link of the group's choosing (redirect). Sites still
+# (group_page) or to a link of the group's choosing (redirect). Claiming and
+# keeping an address needs the custom_site perk, like the page builder. Sites still
 # stored as "builder" behave as group_page; their pages are kept, unused.
 SITE_MODES = ("builder", "group_page", "redirect")
 SELECTABLE_SITE_MODES = ("group_page", "redirect")
@@ -453,10 +454,9 @@ async def claim_site(group_id: int):
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
-            # Claiming an address is open to every group: a subdomain that just
-            # redirects is useful on its own. Building pages on it is what the
-            # custom_site entitlement gates (see _assert_builder_access).
-            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+            # The address is part of the custom page perk (custom_site, the
+            # $10 tier and up since web137a), so claiming one needs it.
+            _assert_builder_access(s, user_id, group_id, user)
             if _load_site(s, group_id) is not None:
                 abort_problem(409, "Already claimed", "This group already has a site.")
             taken = s.query(GroupSite).filter(GroupSite.subdomain == sub).first()
@@ -589,20 +589,13 @@ async def update_site(group_id: int):
         else:
             css_out = ""
 
-    # Only the builder half is subscription-gated. A request that just points
-    # the address somewhere needs group admin; one that configures pages,
-    # theming or selects builder mode needs the entitlement too.
-    touches_builder = any(body.get(f) is not None for f in BUILDER_ONLY_FIELDS) or mode == "builder"
+    # Every change to the address needs the custom_site perk (web137a): the
+    # subdomain is a subscriber feature, not just the old page builder.
 
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
-            if touches_builder:
-                _assert_builder_access(s, user_id, group_id, user)
-            else:
-                assert_group_admin(
-                    s, user_id, group_id, manageable_guild_ids(user_id), user=user
-                )
+            _assert_builder_access(s, user_id, group_id, user)
             site = _load_site(s, group_id)
             if site is None:
                 abort_problem(404, "No site", "Claim a subdomain first.")
@@ -1285,8 +1278,10 @@ def _render_gate(site: GroupSite) -> str:
         return "suspended"
     if not site.published:
         return "unavailable"
-    # Every address is a redirect now (web137a), and redirects are free, so
-    # a lapsed subscription no longer takes the address down.
+    # The address is a subscriber perk (custom_site): a lapsed plan parks it
+    # on the "unavailable" card, which links back to the group page.
+    if not group_has_entitlement(site.group_id, ENTITLEMENT):
+        return "unavailable"
     return "ok"
 
 
@@ -1303,7 +1298,13 @@ async def resolve_site():
                 abort_problem(404, "No such site", "Unknown site.")
             gate = _render_gate(site)
             if gate != "ok":
-                return {"status": gate, "subdomain": site.subdomain}, 30
+                # group_id lets the parked card link to the group page instead
+                # of dead-ending (suspended sites get no link).
+                return {
+                    "status": gate,
+                    "subdomain": site.subdomain,
+                    "group_id": site.group_id if gate == "unavailable" else None,
+                }, 30
             group = s.query(Group).filter(Group.group_id == site.group_id).first()
             return {
                 "status": "ok",
