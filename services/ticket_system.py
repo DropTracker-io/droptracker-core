@@ -711,6 +711,14 @@ class Tickets(Extension):
                     "website, and they're added automatically if they join.",
                     allowed_mentions=AllowedMentions.none(),
                 )
+            # Data-removal requests open their ticket from the site; the
+            # card with the verification steps and staff buttons goes here.
+            try:
+                from services.data_removal_discord import post_removal_card
+
+                await post_removal_card(self.bot, ticket_id, channel)
+            except Exception as e:
+                print(f"[tickets] removal card failed for ticket {ticket_id}: {e}")
             loading_message = await channel.send(components=build_ticket_loading())
             if discord_id:
                 asyncio.create_task(
@@ -1176,7 +1184,12 @@ class Tickets(Extension):
         print("On component called")
         try:
             custom_id = event.ctx.custom_id
-            
+
+            from services.data_removal_discord import handle_component as _removal_component
+
+            if await _removal_component(event.ctx):
+                return
+
             if "create_ticket_" in custom_id:
                 # Split on the prefix, not on "_": custom_id.split("_")[2] read
                 # "create_ticket_api_token" as "api" and silently opened the
