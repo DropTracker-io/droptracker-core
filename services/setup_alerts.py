@@ -168,7 +168,7 @@ def build_message(kind: str, *, group_id: Optional[int], group_name: Optional[st
             f"{head}Thanks for adding DropTracker to {server}! One step left: create your group "
             f"so drops start posting.\n\n{SITE}/groups/new (or run /group-setup in your server)."
         )
-    footer = "" if reminder else "\n\nThis is the only reminder we'll send about it, apart from one follow-up."
+    footer = "" if reminder else "\n\nIf it isn't fixed, we'll send one reminder in a few days, then stop."
     return (body + footer)[:1900]
 
 
