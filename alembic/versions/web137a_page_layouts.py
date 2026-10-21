@@ -7,14 +7,14 @@ published are separate columns, copy-on-publish, like group_site_pages. See
 db/models/page_layout.py.
 
 Revision ID: web137a_page_layouts
-Revises: data02_drops_index_cleanup
+Revises: web137a_data_removal_requests
 """
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import mysql
 
 revision = "web137a_page_layouts"
-down_revision = "data02_drops_index_cleanup"
+down_revision = "web137a_data_removal_requests"
 branch_labels = None
 depends_on = None
 
