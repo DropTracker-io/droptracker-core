@@ -82,9 +82,18 @@ IMG_BASE = "https://www.droptracker.io/img"
 TOS_VERSION = "2026-08-07"
 THEME_KEYS = ("dusk", "parchment", "wilderness")
 
-# What a claimed subdomain does. "builder" renders the block pages; the other
-# two make the address a pure redirect, which is all a lot of clans want.
+# What a claimed subdomain does. "builder" rendered the block pages; it was
+# retired with web137a in favour of the page builder on the group's own
+# DropTracker page, so an address is now always a redirect: to that page
+# (group_page) or to a link of the group's choosing (redirect). Sites still
+# stored as "builder" behave as group_page; their pages are kept, unused.
 SITE_MODES = ("builder", "group_page", "redirect")
+SELECTABLE_SITE_MODES = ("group_page", "redirect")
+
+
+def _effective_mode(site: GroupSite) -> str:
+    mode = site.mode or "builder"
+    return "group_page" if mode == "builder" else mode
 
 
 # Fields that only mean something for a builder site. Touching any of these,
@@ -124,9 +133,10 @@ def _redirect_url_error(url: str) -> str | None:
 def _resolved_redirect_target(site: GroupSite) -> str | None:
     """Absolute URL this subdomain should bounce visitors to, or None when it
     renders its own pages."""
-    if site.mode == "redirect":
+    mode = _effective_mode(site)
+    if mode == "redirect":
         return (site.redirect_url or "").strip() or None
-    if site.mode == "group_page":
+    if mode == "group_page":
         # Numeric id is always valid; the profile itself canonicalises to the
         # slug, so this survives clan renames.
         base = (os.getenv("WEB_SITE_URL") or "https://www.droptracker.io/").rstrip("/")
@@ -187,7 +197,7 @@ def _site_admin_view(site: GroupSite, s=None) -> dict:
         "site_id": site.site_id,
         "group_id": site.group_id,
         "subdomain": site.subdomain,
-        "mode": site.mode or "builder",
+        "mode": _effective_mode(site),
         "redirect_url": site.redirect_url or "",
         "redirect_target": _resolved_redirect_target(site),
         "theme_key": site.theme_key,
@@ -538,9 +548,14 @@ async def update_site(group_id: int):
         abort_problem(422, "Invalid setting", "'roster_public' must be a boolean.")
 
     mode = body.get("mode")
-    if mode is not None and mode not in SITE_MODES:
+    if mode == "builder":
         abort_problem(
-            422, "Invalid mode", f"'mode' must be one of {', '.join(SITE_MODES)}."
+            422, "Custom sites are retired",
+            "Clan sites are now redirects. Design your group page in Page design instead.",
+        )
+    if mode is not None and mode not in SELECTABLE_SITE_MODES:
+        abort_problem(
+            422, "Invalid mode", f"'mode' must be one of {', '.join(SELECTABLE_SITE_MODES)}."
         )
     redirect_url = body.get("redirect_url")
     if redirect_url is not None and not isinstance(redirect_url, str):
@@ -1264,19 +1279,14 @@ async def report_site():
 
 
 def _render_gate(site: GroupSite) -> str:
-    """'ok' | 'suspended' | 'unavailable'. Fail-closed: entitlement resolver
-    errors read as no entitlement (db.entitlements caches 60s)."""
+    """'ok' | 'suspended' | 'unavailable'. The moderation kill switch and an
+    unpublished address still win over the redirect."""
     if site.suspended_at is not None:
         return "suspended"
     if not site.published:
         return "unavailable"
-    # Redirect addresses keep working for every group; only rendered pages
-    # need the subscription. A lapsed builder site therefore goes dark, but
-    # the group can switch it to a redirect and keep the address alive.
-    if (site.mode or "builder") == "builder" and not group_has_entitlement(
-        site.group_id, ENTITLEMENT
-    ):
-        return "unavailable"
+    # Every address is a redirect now (web137a), and redirects are free, so
+    # a lapsed subscription no longer takes the address down.
     return "ok"
 
 
@@ -1299,7 +1309,7 @@ async def resolve_site():
                 "status": "ok",
                 "subdomain": site.subdomain,
                 # Redirect modes short-circuit rendering in the tenant layout.
-                "mode": site.mode or "builder",
+                "mode": _effective_mode(site),
                 "redirect_target": _resolved_redirect_target(site),
                 "group_id": site.group_id,
                 "group_name": (group.group_name if group else "") or "",
