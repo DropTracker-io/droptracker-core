@@ -406,6 +406,7 @@ NOTIFICATION_TYPES = (
     "pb",
     "ca",
     "pet",
+    "pet_dupe",
     "level_up",
     "quest",
     "death",
@@ -795,6 +796,16 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "tokens": ("pet_name", "source", "npc_name", "killcount", "milestone", "duplicate",
                    "previously_owned") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
+    "pet_dupe": {
+        "label": "Duplicate pet",
+        "group": "Achievements",
+        "description": (
+            "Posted when a member receives a pet they already have, if your "
+            "settings announce it. Without this layout, duplicates use the Pet layout."
+        ),
+        "tokens": ("pet_name", "source", "npc_name", "killcount", "milestone", "duplicate",
+                   "previously_owned") + _POINTS_TOKENS + _MEDIA_TOKENS,
+    },
     "level_up": {
         "label": "Level up",
         "group": "Progress",
@@ -1034,6 +1045,16 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
         "accent_color": "#c8aa6e",
         "blocks": [
             {"type": "text", "content": "**{player_name}** has acquired a new pet!"},
+            {"type": "separator", "divider": True},
+            {"type": "text", "content": "## {pet_name}\nReceived at `{killcount}`"},
+            {"type": "text", "content": _POINTS_LINES},
+            {"type": "media", "urls": ["{image_url}"]},
+        ],
+    },
+    "pet_dupe": {
+        "accent_color": "#c8aa6e",
+        "blocks": [
+            {"type": "text", "content": "**{player_name}** has received a duplicate pet!"},
             {"type": "separator", "divider": True},
             {"type": "text", "content": "## {pet_name}\nReceived at `{killcount}`"},
             {"type": "text", "content": _POINTS_LINES},

@@ -48,9 +48,15 @@ TEMPLATE_GROUP_ID = 1
 # Embed types the notification pipeline actually renders (see
 # services/notification_service.py + the lootboard loop in bots/main.py).
 EMBED_TYPES = (
-    "drop", "clog", "pb", "ca", "pet", "level_up", "quest", "death", "diary", "slayer",
-    "pvp_kill", "pvp_death", "lb",
+    "drop", "clog", "pb", "ca", "pet", "pet_dupe", "level_up", "quest", "death", "diary",
+    "slayer", "pvp_kill", "pvp_death", "lb",
 )
+
+# Types sent with another type's design when they have none of their own
+# (NotificationService._pet_embed_template): a duplicate pet without a
+# duplicate design is sent the pet design. The editor shows that design as the
+# default, since it is what the group receives.
+FALLBACK_EMBED_TYPES = {"pet_dupe": "pet"}
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -275,6 +281,7 @@ async def list_group_embeds(group_id: int):
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
 
             out = []
+            sent_designs = {}
             for embed_type in EMBED_TYPES:
                 custom_rows = _load_rows(s, group_id, embed_type)
                 default_rows = (
@@ -282,21 +289,26 @@ async def list_group_embeds(group_id: int):
                     if group_id != TEMPLATE_GROUP_ID
                     else custom_rows
                 )
-                out.append(
-                    {
-                        "embed_type": embed_type,
-                        "custom": (
-                            _serialize_embed(custom_rows[0])
-                            if custom_rows and group_id != TEMPLATE_GROUP_ID
-                            else None
-                        ),
-                        "default": (
-                            _serialize_embed(default_rows[0])
-                            if default_rows
-                            else _builtin_default(embed_type)
-                        ),
-                    }
+                custom = (
+                    _serialize_embed(custom_rows[0])
+                    if custom_rows and group_id != TEMPLATE_GROUP_ID
+                    else None
                 )
+                base = sent_designs.get(FALLBACK_EMBED_TYPES.get(embed_type))
+                if base is not None and (base["own"] or not default_rows):
+                    # The group's own base design, or the default base design
+                    # when there is no default for this type: what is sent.
+                    default = dict(base["design"], embed_type=embed_type)
+                elif default_rows:
+                    default = _serialize_embed(default_rows[0])
+                else:
+                    default = _builtin_default(embed_type)
+                # Base types are listed before the types that fall back to them.
+                sent_designs[embed_type] = {
+                    "design": custom or default,
+                    "own": custom is not None,
+                } if (custom or default) else None
+                out.append({"embed_type": embed_type, "custom": custom, "default": default})
             return {"embeds": out}
 
     payload = await asyncio.to_thread(_load)

@@ -51,11 +51,12 @@ CONFIG_CATEGORIES: List[Dict[str, str]] = [
 ]
 
 # type ∈ channel | boolean | int | string | text | csv | bosslist | select
-#        | multiselect
+#        | multiselect | petlist
 # (bosslist stores a comma-separated boss-name list like csv; the frontend
 # renders it as a picker backed by GET /groups/{id}/pb-bosses. multiselect
 # stores comma-separated option values, in option order; its options are
-# {"value", "label"} dicts, where a select's are bare strings.)
+# {"value", "label"} dicts, where a select's are bare strings. petlist stores
+# a JSON array of canonical pet names, picked from the events pet catalog.)
 GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     # --- Channels ---
     # NOTE: notification routing reads the channel_id_to_post_* keys (see
@@ -263,6 +264,28 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "type": "boolean",
         "help": "Post a notification on pet drops.",
         "default": True,
+        "seasonal": True,
+    },
+    # Which duplicate pets are announced (utils/pet_notifications.py). Absent
+    # = "all", what every group did before the setting existed. The pet list
+    # is a JSON array in long_value (LONG_VALUE_KEYS in routes/config.py).
+    {
+        "key": "notify_pet_duplicates",
+        "label": "Duplicate pets",
+        "category": "achievements",
+        "type": "select",
+        "help": "Whether a pet the member already has is announced: every duplicate, none, or only the pets you choose.",
+        "default": "all",
+        "options": ["all", "none", "selected"],
+        "seasonal": True,
+    },
+    {
+        "key": "notify_pet_duplicate_pets",
+        "label": "Announce duplicates of",
+        "category": "achievements",
+        "type": "petlist",
+        "help": "The pets whose duplicates are announced when Duplicate pets is set to Only pets I choose.",
+        "default": "",
         "seasonal": True,
     },
     {
@@ -1340,6 +1363,37 @@ def coerce_multiselect(key: str, field: Dict[str, Any], value: Any) -> str:
     return ",".join(v for v in allowed if v in chosen)
 
 
+def coerce_pet_list(key: str, value: Any) -> str:
+    """Validate a petlist value (a list, a JSON array, or comma-separated
+    names typed into the Discord panel) and return its stored form: a JSON
+    array of canonical pet names, sorted, or "" for none chosen."""
+    from utils.osrs_pets import canonical_pet_name
+    from utils.pet_notifications import parse_pet_list
+
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, (str, list, tuple)):
+        raise ConfigValidationError(key, f"'{key}' must be a list of pet names.")
+    if isinstance(value, str) and len(value) > MESSAGE_LIST_MAX_RAW_LENGTH:
+        raise ConfigValidationError(key, f"'{key}' is too large.")
+    if isinstance(value, str) and value.strip().startswith("["):
+        try:
+            if not isinstance(json.loads(value), list):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ConfigValidationError(key, f"'{key}' must be a list of pet names.")
+    known, unknown = set(), []
+    for name in parse_pet_list(value):
+        canon = canonical_pet_name(name)
+        if canon is None:
+            unknown.append(name)
+        else:
+            known.add(canon)
+    if unknown:
+        raise ConfigValidationError(key, f"'{key}' has unknown pet(s): {', '.join(unknown)}.")
+    return json.dumps(sorted(known), ensure_ascii=False) if known else ""
+
+
 _CHANNEL_LINK_RE = re.compile(
     r"^https?://(?:www\.|ptb\.|canary\.)?discord(?:app)?\.com/channels/(?:\d+|@me)/(\d+)(?:/\d+)?/?$",
     re.IGNORECASE,
@@ -1418,6 +1472,9 @@ def coerce_to_storage(key: str, value: Any) -> str:
 
     if ftype == "multiselect":
         return coerce_multiselect(key, field, value)
+
+    if ftype == "petlist":
+        return coerce_pet_list(key, value)
 
     if key in _SNOWFLAKE_LIST_KEYS:
         return _coerce_snowflake_list(key, value)

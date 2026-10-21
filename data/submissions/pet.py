@@ -62,6 +62,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     killcount = pet_data.get("killcount", None)
     milestone = pet_data.get("milestone", None)
     duplicate = pet_data.get("duplicate", False)
+    replayed = False
     previously_owned = pet_data.get("previously_owned", None)
     game_message = pet_data.get("game_message", None)
     unique_id = pet_data.get("guid", None)
@@ -153,6 +154,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
             debug_print(f"Pet entry for unique_id {unique_id} already exists — replay, ignoring")
             is_new_pet = False
             new_pet = None
+            replayed = True
         except Exception as e:
             debug_print(f"Error creating pet entry: {e}")
             if not use_external_session:
@@ -243,107 +245,159 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
         except Exception:
             pass
 
-    should_notify = is_new_pet or (duplicate and not is_new_pet)
-    if should_notify:
-        debug_print(f"Creating notifications for pet submission")
-        player_groups = get_player_groups_with_global(session, player)
-        # Per-group manual policy (suggestion #45): suppress this group's
-        # notification for a manual submission it doesn't trust. NB pet_data
-        # ["source"] is the pet's NPC — the intake marker is "intake_source".
-        manual_suppressed = set()
-        if pet_data.get("intake_source") == "manual" and not is_seasonal:
-            try:
-                from .manual_policy import manual_notification_suppressed_groups
-                manual_suppressed = manual_notification_suppressed_groups(
-                    session, player, [g.group_id for g in player_groups],
-                    trusted_group_ids=trusted_group_ids(pet_data),
-                )
-            except Exception as e:
-                print(f"[ManualPolicy] pet suppression check failed: {e}")
-        for group in player_groups:
-            debug_print(f"Checking group: {group.group_name}")
-            group_id = group.group_id
-            if group_id in manual_suppressed:
-                continue
-            from utils import group_config as gc
-            pet_notify_val = gc.get_effective(session, group_id, f"{config_prefix}notify_pets")
-            group_points_result = {
-                "receiver_points_awarded": 0,
-                "receiver_current_points": 0,
-                "total_points_awarded": 0,
-                "awarded_members": [],
-            }
-            if is_seasonal:
-                # TODO: award group points for seasonal pets once award_points_in_leagues
-                # config key is supported.
-                pass
-            else:
-                async def perform_point_check():
-                    nonlocal group_points_result
-                    from .common import check_group_point_system_active
-                    if check_group_point_system_active(group_id, session):
-                        from .point_awards import check_and_award_points
-                        pet_entry_id = None
-                        if new_pet is not None:
-                            pet_entry_id = getattr(new_pet, "id", None)
-                        elif existing_pet is not None:
-                            pet_entry_id = getattr(existing_pet, "id", None)
+    # Every pet drop is a notification candidate; whether a DUPLICATE is
+    # announced is each group's call (notify_pet_duplicates, below).
+    if replayed:
+        return SubmissionResponse(success=True, message="Pet already processed.", notice="")
+    from utils.pet_notifications import group_announces_duplicate, is_duplicate
+    pet_is_duplicate = is_duplicate(is_new_pet, pet_data.get("duplicate"))
+    debug_print(f"Creating notifications for pet submission")
+    player_groups = get_player_groups_with_global(session, player)
+    # Per-group manual policy (suggestion #45): suppress this group's
+    # notification for a manual submission it doesn't trust. NB pet_data
+    # ["source"] is the pet's NPC — the intake marker is "intake_source".
+    manual_suppressed = set()
+    if pet_data.get("intake_source") == "manual" and not is_seasonal:
+        try:
+            from .manual_policy import manual_notification_suppressed_groups
+            manual_suppressed = manual_notification_suppressed_groups(
+                session, player, [g.group_id for g in player_groups],
+                trusted_group_ids=trusted_group_ids(pet_data),
+            )
+        except Exception as e:
+            print(f"[ManualPolicy] pet suppression check failed: {e}")
+    for group in player_groups:
+        debug_print(f"Checking group: {group.group_name}")
+        group_id = group.group_id
+        if group_id in manual_suppressed:
+            continue
+        from utils import group_config as gc
+        pet_notify_val = gc.get_effective(session, group_id, f"{config_prefix}notify_pets")
+        group_points_result = {
+            "receiver_points_awarded": 0,
+            "receiver_current_points": 0,
+            "total_points_awarded": 0,
+            "awarded_members": [],
+        }
+        if is_seasonal:
+            # TODO: award group points for seasonal pets once award_points_in_leagues
+            # config key is supported.
+            pass
+        else:
+            async def perform_point_check():
+                nonlocal group_points_result
+                from .common import check_group_point_system_active
+                if check_group_point_system_active(group_id, session):
+                    from .point_awards import check_and_award_points
+                    pet_entry_id = None
+                    if new_pet is not None:
+                        pet_entry_id = getattr(new_pet, "id", None)
+                    elif existing_pet is not None:
+                        pet_entry_id = getattr(existing_pet, "id", None)
 
-                        # A member earns a pet's new-pet points once per
-                        # group; later copies pay only if the group's
-                        # duplicate setting covers this pet (pet_points.py).
-                        from .pet_points import (
-                            DUPLICATE_ENTRY_TYPE, DUPLICATE_REASON, plan_live_pet,
-                        )
-                        plan = plan_live_pet(session, group_id, player_id, pet_name, pet_item_id)
-                        if not plan.award:
-                            debug_print(f"Group {group_id}: duplicate {pet_name} pays no points")
-                            return
-                        dupe_kwargs = {}
-                        if plan.duplicate:
-                            dupe_kwargs = {
-                                "ledger_reason": DUPLICATE_REASON,
-                                "entry_type": DUPLICATE_ENTRY_TYPE,
-                                "fixed_award": plan.duplicate_award,
-                            }
-                        group_points_result = await check_and_award_points(
-                            "pet",
-                            group_id,
-                            player_id,
-                            1,
-                            item_id=pet_item_id,
-                            npc_id=npc_id,
-                            entry_id=pet_entry_id,
-                            submission_timestamp=pet_data.get("timestamp"),
-                            external_session=session,
-                            **dupe_kwargs,
-                        )
-                    else:
-                        pass
-                try:
-                    await perform_point_check()
-                except Exception as e:
-                    print(f"Couldn't perform check against group point awards... e: {e}")
+                    # A member earns a pet's new-pet points once per
+                    # group; later copies pay only if the group's
+                    # duplicate setting covers this pet (pet_points.py).
+                    from .pet_points import (
+                        DUPLICATE_ENTRY_TYPE, DUPLICATE_REASON, plan_live_pet,
+                    )
+                    plan = plan_live_pet(session, group_id, player_id, pet_name, pet_item_id)
+                    if not plan.award:
+                        debug_print(f"Group {group_id}: duplicate {pet_name} pays no points")
+                        return
+                    dupe_kwargs = {}
+                    if plan.duplicate:
+                        dupe_kwargs = {
+                            "ledger_reason": DUPLICATE_REASON,
+                            "entry_type": DUPLICATE_ENTRY_TYPE,
+                            "fixed_award": plan.duplicate_award,
+                        }
+                    group_points_result = await check_and_award_points(
+                        "pet",
+                        group_id,
+                        player_id,
+                        1,
+                        item_id=pet_item_id,
+                        npc_id=npc_id,
+                        entry_id=pet_entry_id,
+                        submission_timestamp=pet_data.get("timestamp"),
+                        external_session=session,
+                        **dupe_kwargs,
+                    )
+                else:
                     pass
-            debug_print(f"Pet notify config for group {group_id}: {pet_notify_val}")
-            if await screenshot_required(session, group_id):
-                # Treat video submissions as satisfying screenshot requirement
-                if not dl_path and not video_key:
-                    notice = screenshot_gate_notice(session, player_id, group.group_name, "pet")
-                    continue
-            notify_reason = "config" if gc.is_truthy(pet_notify_val) else None
-            if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
-                # notify_pets is off but points landed: the notify_points_awarded
-                # toggle (opt-in, default OFF) announces the pet so points are never
-                # awarded silently.
-                from .common import points_notify_enabled
-                if points_notify_enabled(session, group_id):
-                    notify_reason = "points"
-            if notify_reason is not None:
-                debug_print(f"Group {group_id} pet notification firing (reason: {notify_reason})")
-                awarded_members = group_points_result.get("awarded_members", []) or []
-                notification_data = {
-                    "group_id": group_id,
+            try:
+                await perform_point_check()
+            except Exception as e:
+                print(f"Couldn't perform check against group point awards... e: {e}")
+                pass
+        debug_print(f"Pet notify config for group {group_id}: {pet_notify_val}")
+        if await screenshot_required(session, group_id):
+            # Treat video submissions as satisfying screenshot requirement
+            if not dl_path and not video_key:
+                notice = screenshot_gate_notice(session, player_id, group.group_name, "pet")
+                continue
+        notify_reason = "config" if gc.is_truthy(pet_notify_val) else None
+        if (notify_reason is not None and pet_is_duplicate
+                and not group_announces_duplicate(session, group_id, pet_name, config_prefix)):
+            debug_print(f"Group {group_id}: duplicate {pet_name} not announced")
+            notify_reason = None
+        if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
+            # notify_pets is off but points landed: the notify_points_awarded
+            # toggle (opt-in, default OFF) announces the pet so points are never
+            # awarded silently.
+            from .common import points_notify_enabled
+            if points_notify_enabled(session, group_id):
+                notify_reason = "points"
+        if notify_reason is not None:
+            debug_print(f"Group {group_id} pet notification firing (reason: {notify_reason})")
+            awarded_members = group_points_result.get("awarded_members", []) or []
+            notification_data = {
+                "group_id": group_id,
+                "player_name": player_name,
+                "player_id": player_id,
+                "guid": unique_id,
+                "pet_name": pet_name,
+                "source": source,
+                "npc_name": npc_name,
+                "killcount": killcount,
+                "milestone": milestone,
+                "duplicate": duplicate,
+                "previously_owned": previously_owned,
+                "game_message": game_message,
+                "image_url": dl_path,
+                "video_key": video_key,
+                "item_id": pet_item_id,
+                "npc_id": npc_id,
+                "is_new_pet": is_new_pet,
+                "is_duplicate": pet_is_duplicate,
+                "group_points_awarded": int(group_points_result.get("receiver_points_awarded", 0)),
+                "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
+                "group_points_member_count": len(awarded_members),
+                "group_points_members_awarded": awarded_members,
+                "notify_reason": notify_reason,
+                "world_type": world_type,
+                "plugin_version": plugin_version,
+            }
+            await create_notification(
+                "pet",
+                player_id,
+                notification_data,
+                group_id,
+                existing_session=session if use_external_session else None,
+            )
+            debug_print(f"Created pet notification for group {group_id}")
+
+    # Personal submission DM (supporter perk): queued once per pet,
+    # OUTSIDE the group loop — group notify/screenshot criteria must not
+    # gate or duplicate a personal DM (same fix as drops, c258115).
+    # Entitlement + opt-in are re-checked at send time.
+    try:
+        if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_pets"):
+            await create_notification(
+                "dm_pet",
+                player_id,
+                {
                     "player_name": player_name,
                     "player_id": player_id,
                     "guid": unique_id,
@@ -353,58 +407,15 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                     "killcount": killcount,
                     "milestone": milestone,
                     "duplicate": duplicate,
-                    "previously_owned": previously_owned,
-                    "game_message": game_message,
                     "image_url": dl_path,
                     "video_key": video_key,
-                    "item_id": pet_item_id,
-                    "npc_id": npc_id,
-                    "is_new_pet": is_new_pet,
-                    "group_points_awarded": int(group_points_result.get("receiver_points_awarded", 0)),
-                    "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
-                    "group_points_member_count": len(awarded_members),
-                    "group_points_members_awarded": awarded_members,
-                    "notify_reason": notify_reason,
                     "world_type": world_type,
                     "plugin_version": plugin_version,
-                }
-                await create_notification(
-                    "pet",
-                    player_id,
-                    notification_data,
-                    group_id,
-                    existing_session=session if use_external_session else None,
-                )
-                debug_print(f"Created pet notification for group {group_id}")
-
-        # Personal submission DM (supporter perk): queued once per pet,
-        # OUTSIDE the group loop — group notify/screenshot criteria must not
-        # gate or duplicate a personal DM (same fix as drops, c258115).
-        # Entitlement + opt-in are re-checked at send time.
-        try:
-            if player and player.user and is_user_dm_enabled(session, player.user_id, "dm_pets"):
-                await create_notification(
-                    "dm_pet",
-                    player_id,
-                    {
-                        "player_name": player_name,
-                        "player_id": player_id,
-                        "guid": unique_id,
-                        "pet_name": pet_name,
-                        "source": source,
-                        "npc_name": npc_name,
-                        "killcount": killcount,
-                        "milestone": milestone,
-                        "duplicate": duplicate,
-                        "image_url": dl_path,
-                        "video_key": video_key,
-                        "world_type": world_type,
-                        "plugin_version": plugin_version,
-                    },
-                    existing_session=session if use_external_session else None,
-                )
-        except Exception as e:
-            print(f"Couldn't queue personal pet DM notification: {e}")
+                },
+                existing_session=session if use_external_session else None,
+            )
+    except Exception as e:
+        print(f"Couldn't queue personal pet DM notification: {e}")
 
     debug_print(f"=== PET PROCESSOR END ===")
     return SubmissionResponse(success=True,

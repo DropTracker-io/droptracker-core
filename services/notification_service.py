@@ -31,6 +31,7 @@ from utils.redis import redis_client
 from utils.messages import confirm_new_npc, confirm_new_item, name_change_message, new_player_message
 from utils.format import format_number, replace_placeholders, replace_placeholders_in_text, convert_from_ms, normalize_player_display_equivalence
 from utils.site_urls import PREMIUM_URL, WEBSITE_URL, group_link, player_link
+from utils.pet_notifications import DUPE_NOTIFICATION_TYPE as PET_DUPE_TYPE
 from db.app_logger import AppLogger
 import osrs_api
 from services.contribution_notifications import format_money
@@ -4857,6 +4858,47 @@ class NotificationService:
             db_session.commit()
             raise
 
+    @staticmethod
+    def _has_embed_row(db_session, group_id, embed_type) -> bool:
+        from db.models import GroupEmbed
+
+        return (
+            db_session.query(GroupEmbed.embed_id)
+            .filter(GroupEmbed.group_id == group_id, GroupEmbed.embed_type == embed_type)
+            .first()
+            is not None
+        )
+
+    async def _pet_embed_template(self, db_session, group_id, custom_embeds, is_duplicate):
+        """``(embed, own_dupe_embed)`` for a pet notification.
+
+        A new pet uses the pet design. A duplicate uses the first design that
+        exists of: the group's own duplicate design, the group's own pet design
+        (own designs need Custom notification designs), the default duplicate
+        design, the default pet design. So a group that only designed its pet
+        message keeps it for duplicates, and a group that never designed
+        anything gets the site's duplicate default once staff set one.
+        ``own_dupe_embed`` is True when the group's own duplicate design won.
+        """
+        if not is_duplicate:
+            return await self.db_ops.get_group_embed('pet', group_id if custom_embeds else 1), False
+        candidates = []
+        if custom_embeds:
+            candidates += [(PET_DUPE_TYPE, group_id), ('pet', group_id)]
+        candidates += [(PET_DUPE_TYPE, 1), ('pet', 1)]
+        for embed_type, gid in candidates:
+            try:
+                exists = self._has_embed_row(db_session, gid, embed_type)
+            except Exception as e:
+                print(f"Couldn't look up the {embed_type} embed for group {gid}: {e}")
+                exists = False
+            if exists:
+                embed = await self.db_ops.get_group_embed(embed_type, gid)
+                if embed:
+                    return embed, (embed_type == PET_DUPE_TYPE and gid == group_id)
+        # Lookups failed: the pet design is still better than no message.
+        return await self.db_ops.get_group_embed('pet', 1), False
+
     async def send_pet_notification_with_session(self, notification: NotificationQueue, data: dict, db_session):
         """Send a pet notification to Discord with session"""
         from db.models import NotifiedSubmission
@@ -4877,11 +4919,15 @@ class NotificationService:
         is_new_pet = data.get('is_new_pet')
         group_id = data.get('group_id')
         player_name = data.get('player_name')
+        is_duplicate = data.get('is_duplicate')
+        if is_duplicate is None:
+            # Queued before the processor sent the flag.
+            is_duplicate = is_new_pet is False
+        is_duplicate = bool(is_duplicate)
         update_active = has_custom_embeds(group_id)
-        if update_active:
-            embed_template = await self.db_ops.get_group_embed('pet', group_id)
-        else:
-            embed_template = await self.db_ops.get_group_embed('pet', 1)
+        embed_template, own_dupe_embed = await self._pet_embed_template(
+            db_session, group_id, update_active, is_duplicate
+        )
         
         if not embed_template:
             notification.status = 'failed'
@@ -4925,7 +4971,15 @@ class NotificationService:
             channel, channel_error = await self._fetch_sendable_channel(channel_id_config.config_value)
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             if channel:
-                if await self._try_send_component_layout(
+                # A duplicate uses the group's duplicate layout, else its pet
+                # layout, unless the group designed a duplicate embed: that is
+                # the more specific design, so it wins over the pet layout.
+                if is_duplicate and await self._try_send_component_layout(
+                    db_session, notification, channel, group_id, "pet_dupe", value_dict
+                ):
+                    await self._finish_component_send(db_session, notification, data)
+                    return
+                if not own_dupe_embed and await self._try_send_component_layout(
                     db_session, notification, channel, group_id, "pet", value_dict
                 ):
                     await self._finish_component_send(db_session, notification, data)
@@ -4936,7 +4990,10 @@ class NotificationService:
                 if group_id == 2:
                     embed = await self.remove_group_field(embed)
 
-                content = f"{formatted_name} has acquired a new pet!"
+                if is_duplicate:
+                    content = f"{formatted_name} has received a duplicate pet!"
+                else:
+                    content = f"{formatted_name} has acquired a new pet!"
                 video_attachment, video_local_path = (None, None)
                 if video_url:
                     video_attachment, video_local_path = await self._download_video_attachment(video_url, notification.id)

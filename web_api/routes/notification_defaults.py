@@ -11,7 +11,9 @@ is the one staff surface over all three, backing the ACP's Default embeds page:
                      slayer have no row and are sent the embed built in code
                      (``NotificationService._build_default_*_embed``); a row
                      saved here replaces that built-in for every group, and
-                     removing it brings the built-in back.
+                     removing it brings the built-in back. pet_dupe has no
+                     row either and is sent the pet design (embeds.py
+                     FALLBACK_EMBED_TYPES); its "built-in" is that design.
   event layouts      ``web_event_message_layouts`` rows on group 1 (event_id 0).
                      The resolver falls back to the code default
                      (``services/event_message_layouts.DEFAULT_LAYOUTS``) when
@@ -23,7 +25,7 @@ is the one staff surface over all three, backing the ACP's Default embeds page:
 
   GET    /api/v1/admin/notification-defaults/embeds
   PUT    /api/v1/admin/notification-defaults/embeds/{type}
-  DELETE /api/v1/admin/notification-defaults/embeds/{type}             (quest/death/diary/slayer)
+  DELETE /api/v1/admin/notification-defaults/embeds/{type}             (quest/death/diary/slayer/pet_dupe)
   GET    /api/v1/admin/notification-defaults/event-layouts
   PUT    /api/v1/admin/notification-defaults/event-layouts/{type}
   DELETE /api/v1/admin/notification-defaults/event-layouts/{type}
@@ -262,10 +264,15 @@ async def list_embed_defaults():
     out = []
     for embed_type in embed_routes.EMBED_TYPES:
         saved_by = owners.get(embed_type, set())
+        builtin = BUILTIN_EMBEDS.get(embed_type)
+        base_type = embed_routes.FALLBACK_EMBED_TYPES.get(embed_type)
+        if base_type and templates.get(base_type):
+            # Without its own default this type is sent the base type's.
+            builtin = dict(templates[base_type], embed_type=embed_type)
         out.append({
             "embed_type": embed_type,
             "template": templates.get(embed_type),
-            "builtin": BUILTIN_EMBEDS.get(embed_type),
+            "builtin": builtin,
             "custom_count": len(saved_by),
             "override_count": len(saved_by & entitled),
         })
@@ -300,7 +307,7 @@ async def delete_embed_default(embed_type: str):
     def _apply():
         with db_session() as s:
             _load_staff(s, user_id)
-            if embed_type not in BUILTIN_EMBEDS:
+            if embed_type not in BUILTIN_EMBEDS and embed_type not in embed_routes.FALLBACK_EMBED_TYPES:
                 abort_problem(
                     422,
                     "This default can't be removed",

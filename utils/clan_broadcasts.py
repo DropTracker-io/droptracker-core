@@ -317,6 +317,9 @@ def _pet(m) -> ParsedBroadcast:
     extra = {}
     if m["count"] is not None:
         extra = {"milestone_count": _int(m["count"]), "milestone_unit": m["unit"]}
+    # "...would have been followed" is the game's duplicate-pet line.
+    if "would have been followed" in m.group(0):
+        extra["duplicate"] = True
     return ParsedBroadcast(
         kind="pet", player=m["player"], item_name=m["pet"], extra=extra
     )

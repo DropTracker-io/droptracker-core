@@ -1419,10 +1419,16 @@ async def _process_chat_pet(
     from utils.osrs_pets import skilling_pet_source
 
     source = skilling_pet_source(parsed.item_name)
+    from utils.pet_notifications import group_announces_duplicate, is_duplicate
+
+    # The broadcast line itself says whether it is a duplicate.
+    pet_is_duplicate = is_duplicate(is_new_pet, bool(parsed.extra.get("duplicate")))
     enabled = _notify_enabled_groups(session, subject_group_ids, "notify_pets")
     notified = 0
     for gid in sorted(set(subject_group_ids)):
         if gid not in enabled:
+            continue
+        if pet_is_duplicate and not group_announces_duplicate(session, gid, parsed.item_name):
             continue
         if await _images_gate_blocks(session, gid):
             continue
@@ -1436,7 +1442,7 @@ async def _process_chat_pet(
             "npc_name": source,
             "killcount": None,
             "milestone": milestone,
-            "duplicate": not is_new_pet,
+            "duplicate": pet_is_duplicate,
             "previously_owned": None,
             "game_message": message,
             "image_url": "",
@@ -1444,6 +1450,7 @@ async def _process_chat_pet(
             "item_id": pet_item_id,
             "npc_id": None,
             "is_new_pet": is_new_pet,
+            "is_duplicate": pet_is_duplicate,
             "group_points_awarded": 0,
             "group_points_receiver_total": 0,
             "group_points_member_count": 0,
