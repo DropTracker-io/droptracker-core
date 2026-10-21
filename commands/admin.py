@@ -90,16 +90,17 @@ class ClanCommands(Extension):
                 guild_id=str(ctx.guild_id),
                 owner_discord_id=str(ctx.author_id),
                 owner_username=ctx.author.username if ctx.author else None,
+                created_via="command",
             )
             status = result.get("status")
 
             if status == "already_registered":
                 return await ctx.send(f"You have already registered this group with the DropTracker! Please continue to [the website](https://www.droptracker.io/groups/{result.get('group_id')}) to configure your group.")
             if status == "guild_conflict":
-                return await ctx.send(f"This Discord server is already associated with a DropTracker group (using wom id {result.get('wom_id')}).\\n" +
+                return await ctx.send(f"This Discord server is already associated with a DropTracker group (using wom id {result.get('wom_id')}).\n" +
                                     "If this is a mistake, please reach out in Discord", ephemeral=True)
             if status == "wom_conflict":
-                return await ctx.send(f"This WOM group (`{wom_id}`) already exists in our database.\\n" +
+                return await ctx.send(f"This WOM group (`{wom_id}`) already exists in our database.\n" +
                                     "Please reach out in our Discord server if this appears to be a mistake.",
                                     ephemeral=True)
             if status == "invalid_name":
@@ -108,7 +109,7 @@ class ClanCommands(Extension):
             if status == "invalid_wom":
                 return await ctx.send(f"Please enter your WOM group ID with no commas or special characters. It should be only 3-6 digits long.")
             if status != "created":
-                return await ctx.send(f"Unable to create your group due to a database error.\\n" +
+                return await ctx.send(f"Unable to create your group due to a database error.\n" +
                                     f"Please try again later or reach out in the DropTracker Discord server.",
                                     ephemeral=True)
 
@@ -119,10 +120,10 @@ class ClanCommands(Extension):
                             inline=False)
             embed.set_footer(f"https://discord.gg/droptracker")
 
-            await ctx.send(f"Success!\\n", embed=embed, ephemeral=True)
+            await ctx.send(f"Success!\n", embed=embed, ephemeral=True)
 
             if "could not be applied" in (result.get("message") or ""):
-                await ctx.send(f"⚠️ Your group was created successfully, but there was an issue setting up default configurations.\\n" +
+                await ctx.send(f"⚠️ Your group was created successfully, but there was an issue setting up default configurations.\n" +
                               f"Please visit the website to configure your group settings manually: https://www.droptracker.io/login",
                               ephemeral=True)
 
@@ -132,7 +133,7 @@ class ClanCommands(Extension):
                            "for the full dashboard.",
                            ephemeral=True)
         else:
-            await ctx.send(f"You do not have the necessary permissions to use this command inside of this Discord server.\\n" +
+            await ctx.send(f"You do not have the necessary permissions to use this command inside of this Discord server.\n" +
                            "Please ask the server owner to execute this command.",
                            ephemeral=True)
 
@@ -192,13 +193,13 @@ class ClanCommands(Extension):
             description_parts = []
             description_parts.append(f"### :rotating_light: **Your registered group with the DropTracker has been flagged as improperly configured, or not set up at all.**")
             description_parts.append("You will have a total of 7 days from the time this message was sent to set our Discord bot up.")
-            description_parts.append("-# __If you don't act before then__, **all of your group data will be wiped & the bot will leave your guild**!\\n\\n")
+            description_parts.append("-# __If you don't act before then__, **all of your group data will be wiped & the bot will leave your guild**!\n\n")
             description_parts.append("**If you need help:**")
             description_parts.append("- Join our [discord server](https://discord.gg/droptracker)")
             description_parts.append(f"- Try the </help:{await get_command_id(bot, 'help')}> command")
             description_parts.append("You can also optionally remove our bot from your server now, if you decide you don't want to use it.")
-            description_parts.append("**-# We contacted you because you were the owner of the discord guild we were added to.\\nThank you for your time!**")
-            embed.description = "\\n".join(description_parts).strip()
+            description_parts.append("**-# We contacted you because you were the owner of the discord guild we were added to.\nThank you for your time!**")
+            embed.description = "\n".join(description_parts).strip()
             embed.set_footer(text=f"Powered by the DropTracker | https://www.droptracker.io/", icon_url="https://www.droptracker.io/img/droptracker-small.gif")
             return embed
 

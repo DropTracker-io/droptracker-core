@@ -1638,6 +1638,24 @@ async def _bot_in_guild(guild_id: str):
     return present
 
 
+def bot_in_server_list(guild_id: str):
+    """True/False from the core bot's ``bot:guilds`` list (refreshed every 5
+    minutes), or None when that list is unavailable."""
+    import json as _json
+
+    conn = _rc()
+    if conn is None:
+        return None
+    try:
+        raw = conn.get("bot:guilds")
+        if not raw:
+            return None
+        ids = {str(g.get("id")) for g in _json.loads(raw) if isinstance(g, dict)}
+    except Exception:
+        return None
+    return str(guild_id) in ids
+
+
 @group_admin_bp.get("/groups/guild-status/<guild_id>")
 async def guild_status(guild_id: str):
     user_id = current_user_id()
@@ -1667,8 +1685,15 @@ async def guild_status(guild_id: str):
             return guild is not None, owns_group, gid
 
     have_record, owns_group, gid = await asyncio.to_thread(_load)
-    bot_present = have_record
-    if not bot_present:
+    # Presence comes from the bot's own server list, never from our guilds
+    # table: a row survives the bot being kicked, and the welcome card writes
+    # one for servers that never finished setup, so trusting it showed "the
+    # bot is in this server" when it wasn't (web138a).
+    # The list lags a fresh invite by up to 5 minutes, so "not listed" is
+    # confirmed with a live check (cached 5 min, cleared by ?refresh=1).
+    listed = bot_in_server_list(guild_id)
+    bot_present = bool(listed)
+    if not listed:
         verified = await _bot_in_guild(guild_id)
         if verified is not None:
             bot_present = verified
@@ -1736,6 +1761,8 @@ async def create_group():
             guild_id=guild_id,
             owner_discord_id=owner_discord_id,
             owner_username=owner_username,
+            # The site and the Discord Activity share this route; the BFF says which.
+            created_via="activity" if body.get("surface") == "activity" else "web",
         )
     except Exception as e:
         abort_problem(500, "Group creation failed", str(e))

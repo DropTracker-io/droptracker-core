@@ -476,6 +476,16 @@ if "services.channel_cache" not in sys.modules:
     sys.modules["services.channel_cache"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/suggestion_naming.py — forum thread names carrying the suggestion id
+# (stdlib-only). discord_outbox and suggestion_sync import it, so it must
+# resolve here instead of falling through to the ``services`` stub.
+_SUGGESTION_NAMING_PATH = _Path(__file__).resolve().parent.parent / "services" / "suggestion_naming.py"
+if "services.suggestion_naming" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.suggestion_naming", _SUGGESTION_NAMING_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.suggestion_naming"] = _mod
+    _spec.loader.exec_module(_mod)
+
 # services/status_channel.py — the #status card renderers. Module imports are
 # stdlib + the stubbed db.app_logger; interactions is lazy-imported inside the
 # builders, so tests can substitute fake component classes.

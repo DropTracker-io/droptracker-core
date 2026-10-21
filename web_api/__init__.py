@@ -33,6 +33,8 @@ from web_api.routes.dev_tracker import dev_tracker_bp
 from web_api.routes.docs import docs_bp
 from web_api.routes.embeds import embeds_bp
 from web_api.routes.sites import sites_bp
+from web_api.routes.page_layouts import page_layouts_bp
+from web_api.routes.group_setup import group_setup_bp
 from web_api.routes.event_admin import event_admin_bp
 from web_api.routes.event_audit import event_audit_bp
 from web_api.routes.event_board import event_board_bp
@@ -217,6 +219,8 @@ def create_app() -> Quart:
     app.register_blueprint(docs_bp, url_prefix=API_PREFIX)
     app.register_blueprint(embeds_bp, url_prefix=API_PREFIX)
     app.register_blueprint(sites_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(page_layouts_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(group_setup_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_audit_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_board_bp, url_prefix=API_PREFIX)

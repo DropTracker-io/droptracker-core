@@ -1340,6 +1340,44 @@ def coerce_multiselect(key: str, field: Dict[str, Any], value: Any) -> str:
     return ",".join(v for v in allowed if v in chosen)
 
 
+_CHANNEL_LINK_RE = re.compile(
+    r"^https?://(?:www\.|ptb\.|canary\.)?discord(?:app)?\.com/channels/(?:\d+|@me)/(\d+)(?:/\d+)?/?$",
+    re.IGNORECASE,
+)
+
+
+def parse_channel_ref(value: Any) -> Optional[str]:
+    """A Discord channel id from what a person pasted: the bare id, a
+    ``<#id>`` mention, or a channel/message link. "" for empty (and the
+    legacy "0" sentinel); None when it isn't a channel at all (a channel
+    NAME, a webhook URL, ...)."""
+    if value is None or isinstance(value, bool):
+        return "" if value is None else None
+    raw = str(value).strip()
+    if raw in ("", "0"):
+        return ""
+    if raw.startswith("<#") and raw.endswith(">"):
+        raw = raw[2:-1]
+    m = _CHANNEL_LINK_RE.match(raw)
+    if m:
+        raw = m.group(1)
+    return raw if _SNOWFLAKE_RE.match(raw) else None
+
+
+def coerce_channel_id(key: str, value: Any) -> str:
+    """Channel keys store a snowflake or nothing. Before web138a they took any
+    string, which is how channel names and discord.com links ended up stored
+    and failed thousands of sends."""
+    parsed = parse_channel_ref(value)
+    if parsed is None:
+        raise ConfigValidationError(
+            key,
+            f"'{key}' must be a Discord channel: pick it from the list, or paste its ID or link "
+            "(right-click the channel, Copy Link).",
+        )
+    return parsed
+
+
 def coerce_to_storage(key: str, value: Any) -> str:
     """Validate a client value against the registry and return its text form
     for ``group_configurations.config_value``. Raises ConfigValidationError."""
@@ -1392,7 +1430,10 @@ def coerce_to_storage(key: str, value: Any) -> str:
             raise ConfigValidationError(key, f"'{key}' must be a Discord role id.")
         return raw
 
-    # channel / string / text / csv / bosslist
+    if ftype == "channel":
+        return coerce_channel_id(key, value)
+
+    # string / text / csv / bosslist
     if value is None:
         return ""
     if not isinstance(value, (str, int)):
