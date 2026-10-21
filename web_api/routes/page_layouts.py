@@ -140,6 +140,31 @@ def _upsell(scope: str) -> str:
     return "Publishing a custom page needs a Supporter plan for this group. Your draft is saved."
 
 
+ROSTER_CONFIG_KEY = "public_members_list"  # read by GET /groups/{id}/site-roster
+
+
+def _sync_roster_flag(s, group_id: int, layout: Optional[dict]) -> None:
+    """The member list is public exactly while the published group page shows
+    it: putting the Member list block on the page is the opt-in (it used to be
+    a switch in the retired site builder). Members who hide their profile are
+    still left out by the roster endpoint."""
+    from db.models import GroupConfiguration
+
+    shown = bool(layout) and any(b.get("type") == "member_roster" for b in layout.get("blocks", []))
+    value = "1" if shown else "0"
+    row = (
+        s.query(GroupConfiguration)
+        .filter(GroupConfiguration.group_id == group_id, GroupConfiguration.config_key == ROSTER_CONFIG_KEY)
+        .first()
+    )
+    if row is None:
+        if shown:
+            s.add(GroupConfiguration(group_id=group_id, config_key=ROSTER_CONFIG_KEY,
+                                     config_value=value, updated_at=datetime.utcnow()))
+    elif row.config_value != value:
+        row.config_value = value
+
+
 # --- shared builder handlers --------------------------------------------------
 
 
@@ -217,6 +242,8 @@ async def _publish(scope: str, subject_id: int):
             row.published_json = row.draft_json
             row.published_at = datetime.utcnow()
             _audit(s, user_id, group_id, "page_layout.publish", f"{scope}:{subject_id}")
+            if scope == "group":
+                _sync_roster_flag(s, subject_id, _parse(row.published_json))
             s.commit()
             return _builder_state(s, user_id, scope, subject_id)
 
@@ -236,6 +263,8 @@ async def _unpublish(scope: str, subject_id: int):
                 row.published_json = None
                 row.published_at = None
                 _audit(s, user_id, group_id, "page_layout.unpublish", f"{scope}:{subject_id}")
+                if scope == "group":
+                    _sync_roster_flag(s, subject_id, None)
                 s.commit()
             return _builder_state(s, user_id, scope, subject_id)
 
