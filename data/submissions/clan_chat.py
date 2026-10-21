@@ -88,6 +88,7 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
 
     from services.clan_chat_bridge import (
         bridge_bound_groups,
+        canonical_line_digest,
         claim_relayed_line,
         push_mirror_line,
         relayer_within_rate_limit,
@@ -107,6 +108,10 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
         )
 
     digest = hashlib.sha256(f"{sender}|{message}".encode("utf-8")).hexdigest()[:24]
+    # Every client censors profanity for itself ("Bowfa" -> "Bow*a"), so one
+    # line reaches us in several spellings. They must share one digest, or each
+    # mirrors separately and a censored self line looks unheard (muted).
+    digest = canonical_line_digest(slug, sender, message, digest)
     claimed = claim_relayed_line(
         f"chatbridge:seen:{slug}:{digest}", relayer.player_id, CHAT_SEEN_TTL_SECONDS
     )

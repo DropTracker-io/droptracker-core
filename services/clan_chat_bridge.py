@@ -436,6 +436,49 @@ return 0
 """
 
 
+#: Recent spellings of a sender's lines, keyed by clan, sender and length.
+VARIANT_KEY_TEMPLATE = "chatbridge:variants:{clan_slug}:{sender}:{length}"
+VARIANT_TTL_SECONDS = 90
+VARIANT_MAX_PER_KEY = 20
+
+
+def censor_equivalent(a: str, b: str) -> bool:
+    """Whether two spellings of one chat line differ only by the game's
+    profanity filter. Each client censors for itself, letter for letter
+    ("Bowfa" shows as "Bow*a"), so the copies relayed for one line can differ
+    where one side has a ``*``. Same length, and every other character equal."""
+    if len(a) != len(b) or ("*" not in a and "*" not in b):
+        return False
+    return all(x == y or x == "*" or y == "*" for x, y in zip(a.lower(), b.lower()))
+
+
+def canonical_line_digest(clan_slug: str, sender: str, message: str, digest: str) -> str:
+    """The digest every censored/uncensored copy of one line should share.
+
+    The first spelling seen in the window sets it; a later spelling that is
+    :func:`censor_equivalent` to it reuses that digest, so the claim, the
+    mirror dedupe and the muted-member check (services/clan_chat_muted) all see
+    one line instead of one per spelling. Fails open to ``digest``."""
+    try:
+        sender_key = "".join(str(sender).lower().split())
+        key = VARIANT_KEY_TEMPLATE.format(clan_slug=clan_slug, sender=sender_key, length=len(message))
+        client = _redis()
+        known = client.hgetall(key) or {}
+        for field, text in known.items():
+            field = field.decode("utf-8", "replace") if isinstance(field, bytes) else field
+            text = text.decode("utf-8", "replace") if isinstance(text, bytes) else text
+            if field != digest and censor_equivalent(text, message):
+                return field
+        if digest not in known and len(known) < VARIANT_MAX_PER_KEY:
+            pipe = client.pipeline()
+            pipe.hset(key, digest, message)
+            pipe.expire(key, VARIANT_TTL_SECONDS)
+            pipe.execute()
+        return digest
+    except Exception:
+        return digest
+
+
 def claim_relayed_line(key: str, relayer_id, ttl: int) -> bool:
     """Whether this relayer's copy of a line should be staged.
 
