@@ -180,3 +180,48 @@ def test_discord_mirror_marks_a_muted_sender():
              "message": "hello", "muted": "1"}
     (line,) = bridge.batch_lines_by_channel([entry], rank_emojis={})["9"]
     assert line == f"{bridge.MUTED_ICON} **Muted Mike**: hello"
+
+
+def test_censor_equivalent_matches_only_star_substitutions():
+    assert bridge.censor_equivalent("Bowfa", "Bow*a")
+    assert bridge.censor_equivalent("Bow*a", "bowfa")
+    assert bridge.censor_equivalent("shit", "****")
+    assert not bridge.censor_equivalent("Bowfa", "Bowfa")  # exact copies need no help
+    assert not bridge.censor_equivalent("Bowfa", "Bowma")
+    assert not bridge.censor_equivalent("Bowfa", "Bow*")
+
+
+def test_censored_and_clean_copies_share_a_digest(monkeypatch):
+    class R:
+        def __init__(self):
+            self.h = {}
+
+        def hgetall(self, key):
+            return dict(self.h.get(key, {}))
+
+        def pipeline(self):
+            r = self
+
+            class P:
+                def __init__(self):
+                    self.ops = []
+
+                def hset(self, key, f, v):
+                    self.ops.append((key, f, v))
+
+                def expire(self, *a):
+                    pass
+
+                def execute(self):
+                    for key, f, v in self.ops:
+                        r.h.setdefault(key, {})[f] = v
+
+            return P()
+
+    fake = R()
+    monkeypatch.setattr(bridge, "_redis", lambda: fake)
+    first = bridge.canonical_line_digest(SLUG, "UncBTW", "Bow*a", "d-censored")
+    assert first == "d-censored"
+    assert bridge.canonical_line_digest(SLUG, "uncbtw", "Bowfa", "d-clean") == "d-censored"
+    assert bridge.canonical_line_digest(SLUG, "UncBTW", "Bomfa", "d-other") == "d-other"
+    assert bridge.canonical_line_digest(SLUG, "Rob", "Bowfa", "d-rob") == "d-rob"
