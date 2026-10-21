@@ -73,13 +73,13 @@ class TestCreateForumPost(unittest.TestCase):
         asyncio.run(_create_forum_post(bot, _session_returning(sug), row))
 
         name, content = channel.create_post.call_args.args
-        self.assertEqual(name, "\N{BUG} Lootboard skips seasonal drops")
+        self.assertEqual(name, "\N{BUG} #7 \u00b7 Lootboard skips seasonal drops")
         self.assertEqual(content, row.content)
         self.assertEqual(row.discord_message_id, "999888777")
         self.assertEqual(sug.discord_thread_id, "999888777")
         self.assertEqual(sug.status, "posted")
 
-    def test_suggestion_type_gets_bulb_prefix(self):
+    def test_suggestion_type_gets_bulb_and_id_prefix(self):
         sug = _suggestion(type="suggestion", title="Dark theme")
         channel = _forum_channel()
         bot = MagicMock()
@@ -88,7 +88,7 @@ class TestCreateForumPost(unittest.TestCase):
         asyncio.run(_create_forum_post(bot, _session_returning(sug), _outbox_row()))
 
         name, _ = channel.create_post.call_args.args
-        self.assertEqual(name, "\N{ELECTRIC LIGHT BULB} Dark theme")
+        self.assertEqual(name, "\N{ELECTRIC LIGHT BULB} #7 \u00b7 Dark theme")
 
     def test_matching_forum_tag_is_applied(self):
         tag = MagicMock()
@@ -146,6 +146,7 @@ class TestCreateForumPost(unittest.TestCase):
 
         name, _ = channel.create_post.call_args.args
         self.assertEqual(len(name), 100)
+        self.assertTrue(name.startswith("\N{BUG} #7 \u00b7 "))
 
 
 class TestMarkRefFailed(unittest.TestCase):

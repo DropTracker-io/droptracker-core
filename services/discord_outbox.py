@@ -162,15 +162,13 @@ def _build_components(raw: Optional[str]):
     return [ActionRow(*buttons)]
 
 
-_FORUM_NAME_PREFIX = {"suggestion": "\N{ELECTRIC LIGHT BULB} ", "bug": "\N{BUG} "}
-
-
 async def _create_forum_post(bot, session, row):
     """Send a ``kind='forum_post'`` outbox row: create a post (thread +
     starter message) in the target forum channel. For suggestion rows the
     thread name comes from the referenced ``suggestions`` row, whose
     ``discord_thread_id``/``status`` are written back on success."""
     from db.models import Suggestion
+    from services.suggestion_naming import thread_name
 
     suggestion = None
     if row.ref_type == "suggestion" and row.ref_id:
@@ -184,7 +182,7 @@ async def _create_forum_post(bot, session, row):
 
     name = (suggestion.title if suggestion else None) or "New submission"
     if suggestion is not None:
-        name = _FORUM_NAME_PREFIX.get(suggestion.type, "") + name
+        name = thread_name(suggestion.type, suggestion.id, name)
     content = (row.content or "")[:2000]
 
     kwargs = {}
