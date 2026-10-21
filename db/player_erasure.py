@@ -153,7 +153,10 @@ def user_columns(s) -> list[tuple[str, str, bool]]:
 # --------------------------------------------------------------------------- #
 # Plan
 # --------------------------------------------------------------------------- #
-def plan_erasure(s, player_id: int | None, user_id: int | None) -> Plan:
+def plan_erasure(s, player_id: int | None, user_id: int | None,
+                 *, keep_owner: bool = False) -> Plan:
+    """``keep_owner`` erases a claimed player but leaves the owning user (and
+    their other accounts) alone: the self-serve, one-account-at-a-time path."""
     plan = Plan(player_id=player_id, user_id=user_id)
 
     if player_id is not None:
@@ -164,7 +167,7 @@ def plan_erasure(s, player_id: int | None, user_id: int | None) -> Plan:
             plan.refusals.append(f"player {player_id} does not exist")
             return plan
         plan.player_name, plan.wom_id = p.player_name, p.wom_id
-        if p.user_id is not None and p.user_id != user_id:
+        if p.user_id is not None and p.user_id != user_id and not keep_owner:
             plan.refusals.append(
                 f"player is claimed by user {p.user_id}; pass --user {p.user_id} or unclaim first")
 
@@ -297,6 +300,84 @@ def _plan_images(s, plan: Plan) -> None:
         "SELECT proof_url FROM web_event_completions WHERE player_id = :p AND proof_url IS NOT NULL"
     )), {"p": plan.player_id}).scalars().all())
     plan.image_urls = sorted(u for u in urls if u)
+
+
+# --------------------------------------------------------------------------- #
+# Export (before apply): every row the plan deletes or moves, as JSON lines
+# --------------------------------------------------------------------------- #
+def _jsonable(v):
+    import datetime as _dt
+    import decimal
+
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return v.isoformat()
+    if isinstance(v, decimal.Decimal):
+        return str(v)
+    if isinstance(v, (bytes, bytearray)):
+        return v.hex()
+    return v
+
+
+def export_rows(s, plan: Plan, write) -> int:
+    """Call ``write(line)`` with one JSON object per row the plan touches:
+    ``{"table": ..., "action": "delete"|"reassign"|..., "row": {...}}``.
+    Returns the row count. Streams by key so a large player never sits in
+    memory whole."""
+    import json
+
+    n = 0
+
+    def emit(table, action, rows):
+        nonlocal n
+        for r in rows:
+            write(json.dumps({"table": table, "action": action,
+                              "row": {k: _jsonable(v) for k, v in r._mapping.items()}},
+                             separators=(",", ":")) + "\n")
+            n += 1
+
+    def by_value(table, col, value, action):
+        pk = _pk(s, table)
+        if not pk:
+            emit(table, action, s.execute(text(_q(
+                f"SELECT * FROM `{table}` WHERE `{col}` = :v", 120)), {"v": value}).all())
+            return
+        last = None
+        while True:
+            where = f"`{col}` = :v" + (f" AND `{pk}` > :last" if last is not None else "")
+            rows = s.execute(text(_q(
+                f"SELECT * FROM `{table}` WHERE {where} ORDER BY `{pk}` LIMIT 5000", 120)),
+                {"v": value, "last": last}).all()
+            if not rows:
+                return
+            emit(table, action, rows)
+            last = rows[-1]._mapping[pk]
+
+    pid, uid = plan.player_id, plan.user_id
+    if pid is not None:
+        emit("players", "delete", s.execute(text(
+            "SELECT * FROM players WHERE player_id = :p"), {"p": pid}).all())
+        for (table, col) in plan.delete:
+            by_value(table, col, pid, "delete")
+        for (table, col) in plan.reassign:
+            by_value(table, col, pid, "reassign")
+        for (ctable, ccol, ptable) in plan.children:
+            ids = _player_row_ids(s, plan, ptable, _pk(s, ptable))
+            for chunk in _chunks(ids):
+                emit(ctable, "delete", s.execute(text(_q(
+                    f"SELECT * FROM `{ctable}` WHERE `{ccol}` IN :ids", 120))
+                    .bindparams(bindparam("ids", expanding=True)), {"ids": chunk}).all())
+        if plan.wom_id:
+            by_value("wom_group_member_ids", "player_wom_id", plan.wom_id, "delete")
+    if uid is not None:
+        emit("users", "delete", s.execute(text(
+            "SELECT * FROM users WHERE user_id = :u"), {"u": uid}).all())
+        for (table, col) in plan.delete_user:
+            by_value(table, col, uid, "delete")
+        for (table, col) in list(plan.null_user) + list(plan.nullable_event_user):
+            by_value(table, col, uid, "unlink")
+        for (table, col) in plan.ticket_user:
+            by_value(table, col, uid, "unlink")
+    return n
 
 
 # --------------------------------------------------------------------------- #

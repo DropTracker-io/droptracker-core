@@ -1,0 +1,17 @@
+# Hourly trigger for droptracker-data-removal.service.
+#
+# Install:  sudo cp deploy/systemd/droptracker-data-removal.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now droptracker-data-removal.timer
+
+[Unit]
+Description=Hourly DropTracker data-removal purge
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+Unit=droptracker-data-removal.service
+
+[Install]
+WantedBy=timers.target

@@ -143,6 +143,7 @@ from .clan_log import (
     SOURCE_CLOG,
     SOURCE_PET,
 )
+from .data_removal import DataRemovalRequest
 from .subscriptions import (
     SubscriptionTier,
     GroupSubscription,
@@ -257,6 +258,7 @@ def get_current_partition() -> int:
     return now.year * 100 + now.month
 
 __all__ = [
+    "DataRemovalRequest",
     "Base",
     "session",
     "Session",

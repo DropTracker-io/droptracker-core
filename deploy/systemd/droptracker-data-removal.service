@@ -1,0 +1,23 @@
+# Erases approved data-removal requests once their 7-day grace period ends,
+# and deletes their private JSON exports 7 days after that.
+# Triggered by droptracker-data-removal.timer; do not enable the service itself.
+#
+# Runs as `user` because that owns static/assets/img/user-upload (screenshots
+# it deletes) and private/data_removal_exports (exports it writes).
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.process_data_removals
+# Manual real run: sudo systemctl start droptracker-data-removal.service
+# Watch it:        journalctl -u droptracker-data-removal.service -f
+
+[Unit]
+Description=DropTracker data-removal purge (approved requests past their grace period)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.process_data_removals --apply
+TimeoutStartSec=2h
+Nice=10
