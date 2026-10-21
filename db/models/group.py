@@ -64,6 +64,9 @@ class Group(Base):
     guild_id = Column(String(255), default=None, nullable=True)
     invite_url = Column(String(255), default=None, nullable=True)
     icon_url = Column(String(255), default=None, nullable=True)
+    # Which sign-up path created the group (web138a): web | activity |
+    # command | panel | api. Null for groups created before it was recorded.
+    created_via = Column(String(16), nullable=True)
 
     # Relationships
     configurations = relationship("GroupConfiguration", back_populates="group")

@@ -68,6 +68,10 @@ def generate_export_api_key(group_id: int) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+# Sign-up paths recorded on groups.created_via (web138a).
+CREATED_VIA = ("web", "activity", "command", "panel", "api")
+
+
 class GroupCreationResult(TypedDict, total=False):
     """Structured outcome returned by :func:`create_web_group`.
 
@@ -263,6 +267,7 @@ async def create_web_group(
     owner_discord_id,
     owner_username: Optional[str] = None,
     initial_sync: bool = True,
+    created_via: Optional[str] = None,
 ) -> GroupCreationResult:
     """Create a new DropTracker group on behalf of a website user.
 
@@ -381,6 +386,8 @@ async def create_web_group(
 
     # --- Create the group ---
     group = Group(group_name=group_name, wom_id=wom_id, guild_id=guild.guild_id)
+    # Which sign-up path this was (web138a), so the paths can be compared.
+    group.created_via = created_via if created_via in CREATED_VIA else None
     session.add(group)
     user.add_group(group)
     try:

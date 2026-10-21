@@ -1072,6 +1072,7 @@ async def create_tasks():
     # pattern; run once at startup then every 5 minutes.
     await cache_bot_guilds()
     cache_bot_guilds.start()
+    setup_alerts_task.start()
     print("Syncing group member association tables...")
     await start_group_sync()
     start_group_sync.start()
@@ -1597,6 +1598,34 @@ async def cache_bot_guilds():
         print(f"Cached bot:guilds ({len(guilds)} guilds).")
     except Exception as e:
         print(f"Couldn't refresh bot:guilds: {e}")
+        return
+    # Join/leave history (web138a): the only record of the bot losing a
+    # server, since GuildLeft never arrives for this bot.
+    try:
+        from services.setup_alerts import record_bot_presence
+
+        joined, left = await asyncio.to_thread(
+            record_bot_presence, {str(g["id"]) for g in guilds if g.get("id")}
+        )
+        if joined or left:
+            print(f"bot:guilds changed: +{joined} -{left}")
+    except Exception as e:
+        print(f"Couldn't record bot presence: {e}")
+
+
+@Task.create(IntervalTrigger(minutes=15))
+async def setup_alerts_task():
+    """Group setup alerts (web138a, services/setup_alerts.py): DM a group's
+    owner when the bot leaves their server, posts keep failing, or a new
+    setup stalls. Log-only off production."""
+    try:
+        from services.setup_alerts import run_setup_alerts
+
+        result = await run_setup_alerts(bot)
+        if result.get("messaged"):
+            print(f"Setup alerts: {result}")
+    except Exception as e:
+        print(f"Setup alerts pass failed: {e}")
 
 
 @Task.create(IntervalTrigger(seconds=15))

@@ -198,6 +198,7 @@ async def create_group():
             owner_discord_id=owner_discord_id,
             owner_username=owner_username,
             initial_sync=bool(initial_sync),
+            created_via="api",
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[group_create] Unexpected error: {exc}")

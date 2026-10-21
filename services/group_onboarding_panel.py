@@ -514,23 +514,39 @@ def build_essentials_step(group_id: int, saved: str = ""):
 
 
 def build_finish_step(group_id: int):
-    content = (
+    # The drops channel is soft-required (web138a): setup can finish without
+    # one, but then it must say so instead of "your group is live".
+    drops = get_group_config_values(group_id, ["channel_id_to_post_loot"]).get(
+        "channel_id_to_post_loot", "")
+    has_drops = bool(drops) and drops != "0"
+    head = (
         "## 🎉 Your group is live!\n"
-        "**Next steps for your members:**\n"
+        if has_drops else
+        "## ⚠️ Almost there: no drops channel yet\n"
+        "Your group exists and members' loot is tracked, but **nothing will post "
+        "to Discord** until you pick a drops channel.\n\n"
+    )
+    content = (
+        head
+        + "**Next steps for your members:**\n"
         "1. Install the **DropTracker** plugin from the RuneLite plugin hub.\n"
         "2. Claim their RSN with `/claim-rsn` (links their drops to Discord).\n"
-        "3. Watch the drops roll in.\n\n"
+        "3. Be in your Wise Old Man group, so their drops count for the clan.\n\n"
         f"Run `/group-setup` any time to change settings, or use "
         f"[the website]({WEBSITE}/groups/{group_id}/settings) for advanced "
         f"options (events, points, embeds, premium)."
     )
-    rows = [ActionRow(
+    buttons = []
+    if not has_drops:
+        buttons.append(Button(style=ButtonStyle.PRIMARY, label="Pick a drops channel",
+                              custom_id=f"{PREFIX}chs:{group_id}"))
+    buttons += [
         Button(style=ButtonStyle.SECONDARY, label="Open group settings",
                custom_id=f"{PREFIX}home"),
         Button(style=ButtonStyle.LINK, label="Your group page",
                url=f"{WEBSITE}/groups/{group_id}"),
-    )]
-    return content, rows
+    ]
+    return content, [ActionRow(*buttons)]
 
 
 def build_welcome_card(guild_name, setup_cmd_id):
@@ -756,6 +772,9 @@ class GroupOnboardingPanel(Extension):
         elif action.startswith("finish:"):
             content, rows = build_finish_step(int(action.rsplit(":", 1)[1]))
 
+        elif action.startswith("chs:"):
+            content, rows = build_channels_step(int(action.rsplit(":", 1)[1]))
+
         # ── Config panel ────────────────────────────────────────────────────
         elif action.startswith("cfg:cat:"):
             gid = int(action.rsplit(":", 1)[1])
@@ -886,6 +905,7 @@ class GroupOnboardingPanel(Extension):
                 guild_id=str(ctx.guild_id),
                 owner_discord_id=str(ctx.author.id),
                 owner_username=str(ctx.author.username),
+                created_via="panel",
             )
             status = result.get("status")
             if status in ("created", "already_registered"):
