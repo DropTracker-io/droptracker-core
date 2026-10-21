@@ -341,22 +341,39 @@ async def update():
             session.rollback()
             return {"status": "failed", "error": str(e)}
 
-async def _run_periodic_refold(module, label: str) -> None:
+async def _run_periodic_refold(module, label: str, full: bool = True) -> None:
     """Day-chunk ABSOLUTE re-fold of the current partition(s), capped at the
     tailer pointer, to heal drops the additive tailer skipped (auto-increment
     commit-order gaps — see <module>.refold_day).
+
+    ``full`` recomputes every day of the current partition(s); otherwise only
+    the recent days and any day flagged dirty (services/rollup_refold.py says
+    why that split is safe). A dirty mark is cleared just before its day is
+    recomputed and put back if that day fails, so an edit landing mid-pass is
+    never dropped.
 
     Runs in the SAME loop as the tailer (never concurrently with it), so the
     rollup has a single writer and the pointer is stable for the whole pass.
     Drives one day per executor call, sending watchdog heartbeats *while* each
     day's statement runs so a heavy day can't trip WatchdogSec (30s)."""
+    from services import rollup_refold
+
     cap = module.get_pointer()
     if not cap:
         return  # tailer not seeded yet; nothing folded, nothing to re-fold
     loop = asyncio.get_event_loop()
     touched = 0
 
-    for partition, day_start, day_end in module.refold_plan():
+    dirty = rollup_refold.dirty_days(label)
+    plan = module.refold_plan()
+    if not full:
+        plan = rollup_refold.select_plan(plan, datetime.now().date(), dirty)
+
+    for partition, day_start, day_end in plan:
+        day_was_dirty = day_start in dirty
+        if day_was_dirty:
+            rollup_refold.unmark(label, day_start)
+        day_ok = False
         def _do(p=partition, a=day_start, b=day_end):
             with Session() as s:
                 try:
@@ -365,32 +382,39 @@ async def _run_periodic_refold(module, label: str) -> None:
                     s.rollback()
                     raise
 
-        for attempt in range(3):
-            fut = loop.run_in_executor(None, _do)
-            try:
-                # Keep the watchdog fed while the day's INSERT..SELECT runs:
-                # wait returns the instant the day finishes, else every 10s
-                # (well inside WatchdogSec=30) so a heavy day can't trip it.
-                while True:
-                    done, _ = await asyncio.wait({fut}, timeout=10)
-                    await send_watchdog_heartbeat()
-                    if done:
-                        break
-                touched += await fut
-                break
-            except Exception as e:
-                if attempt < 2 and any(tok in str(e) for tok in ("1205", "Lock wait", "Deadlock")):
-                    print(f"{label}: re-fold {day_start} lock contention, retry {attempt + 1}")
-                    await sleep_with_watchdog_heartbeats(10)
-                    continue
-                # Don't abort the whole pass (or the tailer) for one bad day;
-                # the next scheduled re-fold recomputes it anyway (idempotent).
-                print(f"{label}: re-fold {day_start} failed: {e}")
-                break
+        try:
+            for attempt in range(3):
+                fut = loop.run_in_executor(None, _do)
+                try:
+                    # Keep the watchdog fed while the day's INSERT..SELECT runs:
+                    # wait returns the instant the day finishes, else every 10s
+                    # (well inside WatchdogSec=30) so a heavy day can't trip it.
+                    while True:
+                        done, _ = await asyncio.wait({fut}, timeout=10)
+                        await send_watchdog_heartbeat()
+                        if done:
+                            break
+                    touched += await fut
+                    day_ok = True
+                    break
+                except Exception as e:
+                    if attempt < 2 and any(tok in str(e) for tok in ("1205", "Lock wait", "Deadlock")):
+                        print(f"{label}: re-fold {day_start} lock contention, retry {attempt + 1}")
+                        await sleep_with_watchdog_heartbeats(10)
+                        continue
+                    # Don't abort the whole pass (or the tailer) for one bad day;
+                    # the next scheduled re-fold recomputes it anyway (idempotent).
+                    print(f"{label}: re-fold {day_start} failed: {e}")
+                    break
+        finally:
+            # Covers cancellation and anything unexpected mid-day too.
+            if day_was_dirty and not day_ok:
+                rollup_refold.remark(label, day_start)
         await send_watchdog_heartbeat()
         await asyncio.sleep(module.REFOLD_PACE_SEC)
 
-    print(f"{label}: periodic re-fold touched {touched} rollup rows")
+    mode = "full" if full else "recent"
+    print(f"{label}: periodic {mode} re-fold of {len(plan)} days touched {touched} rollup rows")
 
 
 async def npc_totals_loop():
@@ -410,7 +434,10 @@ async def npc_totals_loop():
                 s.rollback()
                 raise
 
+    from services import rollup_refold
+
     last_refold = 0.0  # 0 => re-fold on first pass (heals gaps right after a restart)
+    last_full_refold = 0.0  # 0 => that first pass is a full one
     while not shutdown_event.is_set():
         try:
             await send_watchdog_heartbeat()
@@ -421,7 +448,10 @@ async def npc_totals_loop():
 
             if time.time() - last_refold >= npc_totals.REFOLD_INTERVAL_SEC:
                 last_refold = time.time()  # set before running so a failure can't retry-storm
-                await _run_periodic_refold(npc_totals, "npc_totals")
+                full = time.time() - last_full_refold >= rollup_refold.FULL_INTERVAL_SEC
+                if full:
+                    last_full_refold = last_refold
+                await _run_periodic_refold(npc_totals, "npc_totals", full=full)
         except Exception as e:
             print(f"Error in npc totals loop: {e}")
             app_logger.log(
@@ -449,7 +479,10 @@ async def item_totals_loop():
                 s.rollback()
                 raise
 
+    from services import rollup_refold
+
     last_refold = 0.0  # 0 => re-fold on first pass (heals gaps right after a restart)
+    last_full_refold = 0.0  # 0 => that first pass is a full one
     while not shutdown_event.is_set():
         try:
             await send_watchdog_heartbeat()
@@ -460,7 +493,10 @@ async def item_totals_loop():
 
             if time.time() - last_refold >= item_totals.REFOLD_INTERVAL_SEC:
                 last_refold = time.time()  # set before running so a failure can't retry-storm
-                await _run_periodic_refold(item_totals, "item_totals")
+                full = time.time() - last_full_refold >= rollup_refold.FULL_INTERVAL_SEC
+                if full:
+                    last_full_refold = last_refold
+                await _run_periodic_refold(item_totals, "item_totals", full=full)
         except Exception as e:
             print(f"Error in item totals loop: {e}")
             app_logger.log(

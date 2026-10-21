@@ -966,6 +966,7 @@ class EntryModifier(Extension):
             orig_message_id = notified.message_id
             group_id = notified.group_id
             drop_id = drop.drop_id
+            drop_date = drop.date_added
             note = _deleted_note(
                 *_note_names(data),
                 drop.quantity,
@@ -993,6 +994,12 @@ class EntryModifier(Extension):
             db.query(Drop).filter(Drop.drop_id == drop.drop_id).delete(synchronize_session="fetch")
 
             db.commit()
+
+            # The hourly rollups only recompute older days on the periodic
+            # full pass; flag this one so item/NPC totals catch up within the
+            # hour (services/rollup_refold.py).
+            from services import rollup_refold
+            rollup_refold.mark_dirty(drop_date)
 
             # 5. Force update Redis for receiver and all split participants
             _redis_force_update(player_id, db)
@@ -1252,6 +1259,10 @@ class EntryModifier(Extension):
             drop.value = new_value
             notified.edited_by = None  # We don't have user_id easily; could map later
             db.commit()
+
+            # Same as the delete path: flag the drop's day for the rollups.
+            from services import rollup_refold
+            rollup_refold.mark_dirty(drop.date_added)
 
             # 3. Re-award points for all groups
             from data.submissions.common import get_player_groups_with_global
