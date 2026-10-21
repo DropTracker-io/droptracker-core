@@ -104,9 +104,9 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
     },
     {
         "key": "custom_site",
-        "label": "Custom clan website",
+        "label": "Custom group page",
         "category": "features",
-        "help": "A multi-page mini-site for the group on its own subdomain of the sites domain, built from blocks with live DropTracker data.",
+        "help": "Design the group's public page (and the default profile layout for its members) in the page builder: choose the blocks, their order, size and style, colours and a banner.",
         "default": False,
     },
 ]
@@ -126,6 +126,13 @@ USER_ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "label": "Supporter flair",
         "category": "supporter",
         "help": "A distinct supporter display style on your public profile and site listings.",
+        "default": False,
+    },
+    {
+        "key": "custom_profile",
+        "label": "Custom profile page",
+        "category": "supporter",
+        "help": "Design your own public player profile in the page builder. Overrides the layout your clan sets for its members.",
         "default": False,
     },
     {
