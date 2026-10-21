@@ -256,6 +256,7 @@ _GROUP: dict[str, tuple[str, tuple, str, dict[str, Spec]]] = {
     }),
     "pb_board": ("Personal best board", ("group",), "card", {
         "bosses": _pb_bosses,
+        "rows": int_range(3, 25, 5),
     }),
     "leaderboard": ("Loot leaderboard", ("group",), "card", {
         "limit": int_range(3, 50, 10),
