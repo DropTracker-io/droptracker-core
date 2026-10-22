@@ -283,6 +283,17 @@ if "services.group_bank" not in sys.modules:
     _spec.loader.exec_module(_mod)
     setattr(sys.modules["services"], "group_bank", _mod)
 
+# services/bot_profile.py — custom bot profile rules (validation, diffing, the
+# PATCH payload). stdlib-only at import (Pillow, DB and Discord are lazy), so
+# load the real module: what it sends Discord is the thing worth testing.
+_BOT_PROFILE_PATH = _Path(__file__).resolve().parent.parent / "services" / "bot_profile.py"
+if "services.bot_profile" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.bot_profile", _BOT_PROFILE_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.bot_profile"] = _mod
+    _spec.loader.exec_module(_mod)
+    setattr(sys.modules["services"], "bot_profile", _mod)
+
 # services/activity_launch_core.py — the Discord Activity launcher's pure half
 # (deliberately free of any `interactions` import; db access is lazy). web_api's
 # /events/by-channel deep-link fallback calls pick_channel_event, so the route

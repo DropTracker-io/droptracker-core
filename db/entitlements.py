@@ -109,6 +109,15 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "help": "Design the group's public page (and the default profile layout for its members) in the page builder: choose the blocks, their order, size and style, colours and a banner.",
         "default": False,
     },
+    {
+        # services/bot_profile.py: the core bot's per-server nickname, avatar,
+        # banner and bio. Losing it reverts the bot to its default look.
+        "key": "custom_bot_profile",
+        "label": "Custom bot appearance",
+        "category": "features",
+        "help": "Give the DropTracker bot its own nickname, avatar, banner and bio inside the group's Discord server.",
+        "default": False,
+    },
 ]
 
 # User-scoped ("supporter") entitlements — granted by a user_subscriptions row
@@ -599,6 +608,15 @@ def invalidate_entitlement_cache(group_id: Optional[int] = None) -> None:
         _entitlement_cache.clear()
     else:
         _entitlement_cache.pop(group_id, None)
+    # Every subscription change (PayPal IPN, Stripe, staff grants, tier edits)
+    # lands here, so this is where the bot profile hears about a lapse within
+    # seconds instead of at its next sweep. Redis flag only, never raises.
+    try:
+        from services.bot_profile import request_sync
+
+        request_sync(group_id)
+    except Exception:
+        pass
 
 
 def group_entitlements(group_id: int) -> Dict[str, Any]:

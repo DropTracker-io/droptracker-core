@@ -59,6 +59,7 @@ from .embed import GroupEmbed, Field
 from .site import GroupSite, GroupSitePage
 from .page_layout import PageLayout, LAYOUT_SCOPES
 from .group_setup import GuildBotEvent, GroupSetupAlert
+from .group_bot_profile import GroupBotProfile
 from .guild_meta import Guild, GroupWomAssociation, GroupPersonalBestMessage, LBUpdate
 from .webhooks import Webhook, BackupWebhook, WebhookPendingDeletion, NewWebhook
 from .lootboard import LootboardStyle

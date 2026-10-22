@@ -1063,6 +1063,10 @@ async def create_tasks():
     # first render (fire-and-forget; the task body never raises).
     status_channel_updates.start()
     asyncio.create_task(status_channel_updates())
+    # Custom bot profiles (web139a): cheap, and a lapse must revert promptly,
+    # so these sit with the interval tasks rather than behind the warm-ups.
+    bot_profile_requests.start()
+    bot_profile_sweep.start()
     # Cheap and independent — run this first among the warm-ups so the Web
     # API's channel picker has data within seconds of startup instead of
     # waiting behind the slow WOM-sync pass below.
@@ -1626,6 +1630,30 @@ async def setup_alerts_task():
             print(f"Setup alerts: {result}")
     except Exception as e:
         print(f"Setup alerts pass failed: {e}")
+
+
+@Task.create(IntervalTrigger(seconds=10))
+async def bot_profile_requests():
+    """Custom bot profile (web139a, services/bot_profile.py): apply saves from
+    the Web API and revert lapsed groups within seconds of the request."""
+    try:
+        from services.bot_profile import drain_requests
+
+        await drain_requests(bot)
+    except Exception as e:
+        print(f"Bot profile requests failed: {e}")
+
+
+@Task.create(IntervalTrigger(minutes=5))
+async def bot_profile_sweep():
+    """Every profile row: catches subscriptions that simply expired, retries
+    after backoffs, and puts our nickname back over a hand edit."""
+    try:
+        from services.bot_profile import sweep
+
+        await sweep(bot)
+    except Exception as e:
+        print(f"Bot profile sweep failed: {e}")
 
 
 @Task.create(IntervalTrigger(seconds=15))
