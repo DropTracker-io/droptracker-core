@@ -754,3 +754,49 @@ class TestRosterDigest:
 
     def test_empty_event_still_digests(self):
         assert pn.roster_digest(0, None, [])
+
+
+class TestFanOutDisplay:
+    """Server-composed display (plugin_display): one composition per reader
+    team, attached to that team's copy of the envelope; anything going wrong
+    there still delivers the plain envelope."""
+
+    @pytest.fixture
+    def wired(self, monkeypatch):
+        display = _load("_plugin_display_for_pn_test", "services", "plugin_display.py")
+        monkeypatch.setitem(sys.modules, "services.plugin_display", display)
+        pushed = []
+        monkeypatch.setattr(pn, "_event_player_teams", lambda s, eid: {1: 10, 2: 10, 3: 20})
+        monkeypatch.setattr(pn, "_players_with_type_disabled", lambda s, t, ids: {2})
+        monkeypatch.setattr(pn, "push_to_inbox", lambda pid, env: pushed.append((pid, env)) or True)
+        contexts = {
+            10: {"own": {"id": 10, "name": "Red", "score": 500, "rank": 1, "team_count": 2}},
+            20: {"own": {"id": 20, "name": "Blue", "score": 300, "rank": 2, "team_count": 2}},
+        }
+        monkeypatch.setattr(pn, "team_contexts", lambda s, eid, tids: contexts)
+        return pushed, display
+
+    def test_each_team_reads_from_its_own_side(self, wired):
+        pushed, _ = wired
+        delivered = pn.fan_out_event_notification(
+            object(), "event_lead_change", {"id": 9, "name": "Bingo"},
+            {"team_id": 10, "team_name": "Red", "team_score": 500})
+        assert delivered == 2  # player 2 switched lead changes off
+        by_player = {pid: env for pid, env in pushed}
+        assert set(by_player) == {1, 3}
+        assert by_player[1]["display"]["card"]["leftValue"] == "In the lead!"
+        assert by_player[3]["display"]["card"]["leftValue"] == "2nd of 2"
+        assert by_player[3]["display"]["card"]["left2Value"] == "200 pts"
+        # data is untouched for plugins that render it themselves
+        assert by_player[1]["data"]["team_score"] == 500
+        assert by_player[1]["id"] == by_player[3]["id"]
+
+    def test_a_compose_failure_still_delivers_the_plain_envelope(self, wired, monkeypatch):
+        pushed, display = wired
+
+        def boom(*a, **k):
+            raise RuntimeError("compose bug")
+        monkeypatch.setattr(display, "compose", boom)
+        assert pn.fan_out_event_notification(
+            object(), "event_started", {"id": 9, "name": "Bingo"}, {}) == 2
+        assert all("display" not in env for _, env in pushed)

@@ -10,14 +10,17 @@ Per-player Redis inbox (``plugin:notify:{player_id}``) drained by
 - ``workers/webhook_consumer`` → :func:`push_submission_notice` (restores the
   ``/webhook`` response ``notice`` channel that queue mode silenced).
 
-Safety contract: inbox entries are typed data only —
-``{id, type, ts, priority, event?, data}`` (``priority`` is the display
-importance hint described at :data:`PRIORITY_FOR_TYPE`; a client that does not
-know it treats every entry as ``normal``). The server never sends display
-strings or markup for event types; the plugin owns rendering via a hardcoded
-type→renderer registry and silently drops unknown types. The one exception is
-``submission_notice`` (legacy processor notice text), which the plugin renders
-as sanitized plain chat gated by its existing receiveInGameMessages toggle.
+Safety contract: inbox entries are
+``{id, type, ts, priority, event?, data, display?}`` (``priority`` is the
+display importance hint described at :data:`PRIORITY_FOR_TYPE`; a client that
+does not know it treats every entry as ``normal``). ``data`` is typed fields
+only and is unchanged for older plugins, which render it themselves.
+``display`` (since 2026-10) is the server-composed wording for newer plugins:
+plain text in fixed slots, never markup, colours, format strings or links. See
+services/plugin_display.py for what it may carry and why. Unknown types are
+still dropped silently. ``submission_notice`` (legacy processor notice text)
+is rendered by the plugin as sanitized plain chat gated by its existing
+receiveInGameMessages toggle.
 
 Per-type website prefs (``player_notification_prefs``) are enforced here at
 delivery time: a disabled type never enters the inbox. ``event_task_progress``
@@ -1494,6 +1497,136 @@ def _team_player_ids(session, team_id) -> list:
     return [r[0] for r in rows if r[0] is not None]
 
 
+def _event_player_teams(session, event_id) -> dict:
+    """{player_id: team_id} for everyone rostered in an event."""
+    from db.models.events import EventTeam, EventTeamMember
+
+    rows = (
+        session.query(EventTeamMember.player_id, EventTeamMember.team_id)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeam.event_id == int(event_id))
+        .all()
+    )
+    return {r[0]: r[1] for r in rows if r[0] is not None}
+
+
+# --------------------------------------------------------------------------- #
+# Server-composed display (services/plugin_display.py)
+# --------------------------------------------------------------------------- #
+# The task part of a team's context (labels, points, icons) is the same for
+# every team and costs a tile resolve, so it is cached per event for a few
+# minutes in the worker. Scores, ranks and tasks done are read fresh on every
+# fan-out: they are exactly what changes.
+_TASK_CTX_CACHE: dict = {}
+TASK_CTX_TTL_SECONDS = 300
+
+
+def _event_task_context(session, event, task_rows) -> dict:
+    now = time.time()
+    hit = _TASK_CTX_CACHE.get(event.id)
+    if hit and now - hit[0] < TASK_CTX_TTL_SECONDS:
+        return hit[1]
+    if tasks_kept_to_admins(event):
+        # Members can't see these tasks in game; a card must not name their
+        # worth or picture either.
+        tasks = {}
+    else:
+        tiles = _batch_task_tiles(session, task_rows)
+        tasks = {
+            t.id: {
+                "label": t.label,
+                "points": int(t.points or 0),
+                "icon_item_id": (tiles.get(t.id) or {}).get("icon_item_id"),
+                "icon_path": (tiles.get(t.id) or {}).get("icon_path"),
+            }
+            for t in task_rows
+        }
+    _TASK_CTX_CACHE[event.id] = (now, tasks)
+    return tasks
+
+
+def _tasks_completed(event, task_rows, progress_rows) -> int:
+    """Tasks a team has done, counting a repeatable task with a lap behind it
+    as done: the same count compose_event_state shows on the HUD."""
+    from utils import task_repeat
+
+    by_id = {t.id: t for t in task_rows}
+    done = 0
+    for p in progress_rows:
+        if p.completed:
+            done += 1
+            continue
+        t = by_id.get(p.task_id)
+        if t is None:
+            continue
+        cap = task_repeat.repeat_cap(t.type, t.config, event_kind=event.kind)
+        if not task_repeat.is_repeatable(cap):
+            continue
+        lap = task_repeat.lap_threshold(t.type, t.target_value, t.config)
+        if task_repeat.completion_count(int(p.progress or 0), lap, False, cap):
+            done += 1
+    return done
+
+
+def team_contexts(session, event_id, team_ids) -> dict:
+    """{team_id: ctx} for plugin_display.compose: each team's own standing,
+    the event's task facts and when it ends. Best-effort: {} on any error,
+    which composes context-free cards rather than none."""
+    try:
+        from datetime import datetime
+
+        from db.models import Event, EventProgress, EventTask, EventTeam
+        from services.plugin_display import time_left
+
+        event = session.query(Event).filter(Event.id == int(event_id)).first()
+        if event is None:
+            return {}
+        teams = (session.query(EventTeam)
+                 .filter(EventTeam.event_id == event.id)
+                 .order_by(EventTeam.score.desc(), EventTeam.id.asc())
+                 .all())
+        task_rows = (session.query(EventTask)
+                     .filter(EventTask.event_id == event.id)
+                     .order_by(EventTask.id.asc())
+                     .all())
+        wanted = {int(t) for t in team_ids if t is not None}
+        progress = {}
+        if wanted:
+            for p in (session.query(EventProgress)
+                      .filter(EventProgress.event_id == event.id,
+                              EventProgress.team_id.in_(wanted))
+                      .all()):
+                progress.setdefault(p.team_id, []).append(p)
+        tasks = _event_task_context(session, event, task_rows)
+        ends_at = event.ends_at.isoformat() if event.ends_at else None
+        left = time_left(event.ends_at, datetime.utcnow()) if event.ends_at else None
+        out = {}
+        for rank, team in enumerate(teams, start=1):
+            if team.id not in wanted:
+                continue
+            out[team.id] = {
+                "own": {
+                    "id": team.id,
+                    "name": team.name,
+                    "score": int(team.score or 0),
+                    "rank": rank,
+                    "team_count": len(teams),
+                    "icon_item_id": team.piece_item_id,
+                    "icon_path": _img_relative(team.piece_icon_url),
+                },
+                "tasks_total": len(task_rows),
+                "tasks_completed": _tasks_completed(event, task_rows, progress.get(team.id, [])),
+                "has_bingo": bool(event.has_bingo),
+                "tasks": tasks,
+                "ends_at": ends_at,
+                "time_left": left,
+            }
+        return out
+    except Exception as e:
+        print(f"[plugin_notifications] team context failed for event {event_id}: {e}")
+        return {}
+
+
 def _event_player_ids(session, event_id) -> list:
     from db.models.events import EventTeam, EventTeamMember
 
@@ -1577,8 +1710,10 @@ def fan_out_event_notification(session, notification_type: str, event: dict,
         try:
             if audience == AUDIENCE_TEAM:
                 player_ids = _team_player_ids(read_session, team_id)
+                team_of = {pid: team_id for pid in player_ids}
             else:
-                player_ids = _event_player_ids(read_session, event_id)
+                team_of = _event_player_teams(read_session, event_id)
+                player_ids = list(team_of)
             if not player_ids:
                 return 0
             disabled = _players_with_type_disabled(
@@ -1595,6 +1730,8 @@ def fan_out_event_notification(session, notification_type: str, event: dict,
                 if team_row:
                     data = dict(data)
                     data["team_name"] = team_row[0]
+            contexts = (team_contexts(read_session, event_id, set(team_of.values()))
+                        if event_id is not None else {})
         finally:
             try:
                 read_session.rollback()
@@ -1603,11 +1740,22 @@ def fan_out_event_notification(session, notification_type: str, event: dict,
             read_session.close()
 
         envelope = build_envelope(notification_type, data, event=event)
+        # One display per team: the cards speak from the reader's side ("Your
+        # team: 2nd of 5"), and everyone on a team reads the same thing.
+        by_team = {}
+        try:
+            from services.plugin_display import compose
+
+            for tid in set(team_of.values()):
+                display = compose(notification_type, event, data, contexts.get(tid))
+                by_team[tid] = dict(envelope, display=display) if display else envelope
+        except Exception as e:
+            print(f"[plugin_notifications] display compose failed for {notification_type}: {e}")
         delivered = 0
         for pid in player_ids:
             if pid in disabled:
                 continue
-            if push_to_inbox(pid, envelope):
+            if push_to_inbox(pid, by_team.get(team_of.get(pid), envelope)):
                 delivered += 1
         return delivered
     except Exception as e:
