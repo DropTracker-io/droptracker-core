@@ -61,6 +61,8 @@ def _row_payload(row, *, entitled: bool, group=None) -> dict:
         # The core bot's own look, which applies wherever a field is unset.
         "defaults": bp.load_defaults(),
         "limits": {"nick_max": bp.NICK_MAX, "bio_max": bp.BIO_MAX, "bio_max_lines": bp.BIO_MAX_LINES,
+                   # Always added under a custom bio when the bot applies it.
+                   "bio_signature": bp.BIO_SIGNATURE,
                    "avatar_size": list(bp.AVATAR_SIZE), "banner_size": list(bp.BANNER_SIZE),
                    "image_cooldown_seconds": bp.IMAGE_COOLDOWN_SECONDS},
     }

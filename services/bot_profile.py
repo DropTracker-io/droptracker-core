@@ -43,7 +43,13 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 NICK_MAX = 32
-BIO_MAX = 190
+# Discord's limit for a member bio. A custom bio always ends with
+# BIO_SIGNATURE (added when the bot applies it, see with_signature), so the
+# group gets what is left. The bot's own default bio never gets it.
+DISCORD_BIO_MAX = 190
+BIO_SIGNATURE = "Powered by The DropTracker\nhttps://www.droptracker.io"
+_SIGNATURE_SEP = "\n\n"
+BIO_MAX = DISCORD_BIO_MAX - len(_SIGNATURE_SEP) - len(BIO_SIGNATURE)
 BIO_MAX_LINES = 6
 
 # Sizes the bot's images are stored and sent at. Discord shows member banners
@@ -406,12 +412,28 @@ class Snapshot:
     updated_by_user_id: Optional[int] = None
 
 
+def with_signature(bio: Optional[str]) -> Optional[str]:
+    """A custom bio as Discord shows it: the group's text, then the fixed
+    "Powered by" signature. None stays None (the bot's own bio shows)."""
+    if not bio:
+        return None
+    room = BIO_MAX
+    text = bio.strip()
+    if len(text) > room:  # saved before the signature existed
+        text = text[: room - 3].rstrip() + "..."
+    return f"{text}{_SIGNATURE_SEP}{BIO_SIGNATURE}"
+
+
 def target_state(snap: Snapshot) -> Dict[str, Optional[str]]:
     """What the bot should look like: the group's settings when entitled,
-    otherwise Discord's default (every field None)."""
+    otherwise Discord's default (every field None). The bio carries the
+    signature here, so it is compared with what was applied: a bio applied
+    before the signature existed differs and gets re-sent by the sweep."""
     if not snap.entitled:
         return {f: None for f in ALL_FIELDS}
-    return {f: snap.desired.get(f) for f in ALL_FIELDS}
+    target = {f: snap.desired.get(f) for f in ALL_FIELDS}
+    target["bio"] = with_signature(target["bio"])
+    return target
 
 
 def plan_changes(target: Dict[str, Optional[str]], applied: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:

@@ -64,7 +64,7 @@ class TestBio:
 
     def test_caps(self):
         with pytest.raises(bp.ProfileValidationError):
-            bp.clean_bio("x" * 191)
+            bp.clean_bio("x" * (bp.BIO_MAX + 1))
         with pytest.raises(bp.ProfileValidationError):
             bp.clean_bio("\n".join("a" for _ in range(7)))
 
@@ -138,6 +138,31 @@ class TestPlanning:
     def test_status(self):
         assert bp.status_for({"nick": "G"}) == "applied"
         assert bp.status_for({f: None for f in bp.ALL_FIELDS}) == "default"
+
+
+class TestSignature:
+    def test_custom_bio_always_signed(self):
+        signed = bp.with_signature("Ember Clan's loot bot")
+        assert signed.endswith("Powered by The DropTracker\nhttps://www.droptracker.io")
+        assert signed.startswith("Ember Clan's loot bot\n\n")
+
+    def test_full_length_bio_fits_discord(self):
+        assert bp.clean_bio("x" * bp.BIO_MAX) == "x" * bp.BIO_MAX
+        assert len(bp.with_signature("x" * bp.BIO_MAX)) <= bp.DISCORD_BIO_MAX
+
+    def test_older_long_bio_is_trimmed_not_unsigned(self):
+        signed = bp.with_signature("x" * 190)
+        assert len(signed) <= bp.DISCORD_BIO_MAX and signed.endswith(bp.BIO_SIGNATURE)
+
+    def test_no_custom_bio_means_bots_own(self):
+        assert bp.with_signature(None) is None
+        snap = _snap(desired={"nick": "G", "bio": None, "avatar_url": None, "banner_url": None})
+        assert bp.target_state(snap)["bio"] is None
+
+    def test_target_signs_and_lapse_clears(self):
+        desired = {"nick": None, "bio": "Hi", "avatar_url": None, "banner_url": None}
+        assert bp.target_state(_snap(desired=dict(desired)))["bio"] == bp.with_signature("Hi")
+        assert bp.target_state(_snap(entitled=False, desired=dict(desired)))["bio"] is None
 
 
 class TestErrors:
@@ -224,6 +249,15 @@ def harness(monkeypatch):
 
     state["run"] = run
     return state
+
+
+class TestReconcileSignature:
+    def test_bio_applied_before_signature_is_resent(self, harness):
+        http = FakeHttp()
+        snap = _snap(desired={"nick": None, "bio": "Hi", "avatar_url": None, "banner_url": None},
+                     applied={"nick": None, "bio": "Hi", "avatar_url": None, "banner_url": None})
+        harness["run"](snap, http, check_drift=True)
+        assert [p for _, p in http.patches] == [{"bio": bp.with_signature("Hi")}]
 
 
 class TestReconcile:
