@@ -49,6 +49,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 REPO_URL = "https://github.com/DropTracker-io/wom.py"
@@ -62,6 +63,11 @@ NOTIFIER = "/home/debian/bin/notify_dm.py"
 #: Private work clone for sync_upstream (disc/var is gitignored).
 FORK_CLONE = os.path.join(DISC, "var", "wom-fork")
 FORK_PUSH_URL = "git@github.com:DropTracker-io/wom.py.git"
+#: Consecutive upstream-sync failures. The source (unpkg) has occasional read
+#: timeouts, so one failed run is noise; only a run of them is worth a DM.
+UPSTREAM_FAIL_STATE = os.path.join(DISC, "var", "wom-sync-upstream-failures")
+#: 3 runs at the 30-minute cadence = ~1.5h of failure before anyone is told.
+UPSTREAM_ALERT_AFTER = 3
 
 # Services that hold the wom enum in memory. A running process keeps the old
 # module, so installing without restarting changes nothing for them.
@@ -213,8 +219,12 @@ def sync_upstream(apply: bool) -> str | None:
         # Our own scratch clone: nothing is ever edited here by hand.
         run(git + ["reset", "-q", "--hard", f"origin/{BRANCH}"])
 
-        sync = run([VENV_PY, "tools/sync_metrics.py"] + ([] if apply else ["--check"]),
-                   cwd=clone)
+        cmd = [VENV_PY, "tools/sync_metrics.py"] + ([] if apply else ["--check"])
+        sync = run(cmd, cwd=clone)
+        if sync.returncode == 1 and _looks_transient(sync.stdout + sync.stderr):
+            # unpkg read timeouts / resets: one retry usually clears them.
+            time.sleep(15)
+            sync = run(cmd, cwd=clone)
         if sync.returncode == 0:
             return None
         if sync.returncode != 10:
@@ -245,6 +255,27 @@ def sync_upstream(apply: bool) -> str | None:
         return f"pushed to the fork — {added}"
     except Exception as e:  # pragma: no cover - defensive
         return f"ERROR: upstream sync crashed: {e}"
+
+
+def _looks_transient(output: str) -> bool:
+    """A network error fetching the source, as opposed to a format change."""
+    return any(k in output for k in (
+        "TimeoutError", "timed out", "URLError", "ConnectionResetError",
+        "RemoteDisconnected", "HTTP Error 5"))
+
+
+def _upstream_failures(update: int | None = None) -> int:
+    """Read (or, with ``update``, write) the consecutive-failure count."""
+    try:
+        if update is not None:
+            os.makedirs(os.path.dirname(UPSTREAM_FAIL_STATE), exist_ok=True)
+            with open(UPSTREAM_FAIL_STATE, "w") as f:
+                f.write(str(update))
+            return update
+        with open(UPSTREAM_FAIL_STATE) as f:
+            return int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
 
 
 def update_pin(sha: str) -> str:
@@ -336,11 +367,23 @@ def main() -> int:
     upstream = sync_upstream(args.apply)
     if upstream:
         log(f"upstream: {upstream}")
-        if upstream.startswith("ERROR") and args.apply:
-            notify("wom.py upstream sync FAILED",
-                   f"BLOCKED: {upstream[:700]}",
-                   "New WOM metrics are not reaching the fork; installed code is unaffected.")
-            report_status(False, [], upstream[:300])
+    if args.apply:
+        if upstream and upstream.startswith("ERROR"):
+            # Alert once, when the streak reaches the threshold; a single
+            # unpkg timeout (2026-10-22) is not worth a DM.
+            fails = _upstream_failures(_upstream_failures() + 1)
+            log(f"upstream: consecutive failures = {fails}")
+            if fails == UPSTREAM_ALERT_AFTER:
+                notify("wom.py upstream sync FAILED",
+                       f"BLOCKED: {upstream[:700]} ({fails} runs in a row)",
+                       "New WOM metrics are not reaching the fork; installed code is unaffected.")
+                report_status(False, [], upstream[:300])
+        else:
+            if _upstream_failures() >= UPSTREAM_ALERT_AFTER:
+                notify("wom.py upstream sync recovered",
+                       "The upstream metric check is succeeding again.")
+            if _upstream_failures():
+                _upstream_failures(0)
 
     remote = remote_head()
     if not remote:
