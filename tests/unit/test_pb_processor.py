@@ -437,3 +437,29 @@ class TestPreciseTiming:
         _, notify = _run(self._formatted("14:50", "N/A"), row=None)
         data = notify.call_args.args[2]
         assert data["precise_timing"] is False
+
+
+def test_chat_line_submissions_run_once_per_parsed_kill():
+    """Plugins since 6.2 forward a kill's chat lines (data/submissions/pb_lines);
+    each kill in them is processed as an ordinary kill time, seasonal too."""
+    import json
+
+    import data.submissions.pb as pb
+
+    original = pb.pb_processor
+    calls = []
+
+    async def inner(data, external_session=None, world_type="main"):
+        calls.append((data, world_type))
+        return f"response-{len(calls)}"
+
+    payload = {"player_name": "Ashey", "acc_hash": "1", "guid": "g", "precise_timing": "false",
+               "chat_line_1": json.dumps({"m": "Delve level: 3 duration: 1:23.", "t": 1, "p": [0, 0, 0, 1]}),
+               "chat_line_2": json.dumps({"m": "Delve level: 4 duration: 1:30.", "t": 1, "p": [0, 0, 0, 1]})}
+    with patch.object(pb, "pb_processor", inner), patch("utils.redis.redis_client", MagicMock(
+            client=MagicMock(get=MagicMock(return_value=None)))):
+        result = asyncio.run(original(payload, external_session=None, world_type="seasonal"))
+    assert result == "response-2"
+    assert [(d["boss_name"], d["kill_time"], w) for d, w in calls] == [
+        ("Doom of Mokhaiotl (Level:3)", "01:23", "seasonal"), ("Doom of Mokhaiotl (Level:4)", "01:30", "seasonal")]
+    assert all("chat_line_1" not in d for d, _ in calls)

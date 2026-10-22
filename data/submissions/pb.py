@@ -184,6 +184,15 @@ def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_chang
 
 
 async def pb_processor(pb_data, external_session=None, world_type="main"):
+    from .pb_lines import expand, has_lines
+
+    if has_lines(pb_data):
+        # Plugins since 6.2 forward the kill's chat lines instead of parsing
+        # them; each kill they hold is processed as an ordinary kill time.
+        response = None
+        for kill in expand(pb_data):
+            response = await pb_processor(kill, external_session, world_type)
+        return response
     debug_print(f"=== PB PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw PB data: {pb_data}")
     debug_print(f"External session provided: {external_session is not None}")
