@@ -1513,19 +1513,34 @@ def _event_player_teams(session, event_id) -> dict:
 # --------------------------------------------------------------------------- #
 # Server-composed display (services/plugin_display.py)
 # --------------------------------------------------------------------------- #
-# The task part of a team's context (labels, points, icons) is the same for
-# every team and costs a tile resolve, so it is cached per event for a few
-# minutes in the worker. Scores, ranks and tasks done are read fresh on every
-# fan-out: they are exactly what changes.
+# The task part of a team's context (labels, points, icons, and each task's
+# repeat rule) is the same for every team and costs a full task read plus a
+# tile resolve, so it is cached per event for a few minutes in the worker.
+# Scores, ranks and progress are read fresh on every fan-out: they are exactly
+# what changes. A task added or edited mid-event shows up within the TTL.
 _TASK_CTX_CACHE: dict = {}
 TASK_CTX_TTL_SECONDS = 300
 
 
-def _event_task_context(session, event, task_rows) -> dict:
+def _event_task_context(session, event) -> dict:
+    """{"tasks": {id: card facts}, "laps": {id: lap size, repeatable tasks
+    only}, "total": n}, cached per event."""
     now = time.time()
     hit = _TASK_CTX_CACHE.get(event.id)
     if hit and now - hit[0] < TASK_CTX_TTL_SECONDS:
         return hit[1]
+    from db.models import EventTask
+    from utils import task_repeat
+
+    task_rows = (session.query(EventTask)
+                 .filter(EventTask.event_id == event.id)
+                 .order_by(EventTask.id.asc())
+                 .all())
+    laps = {}
+    for t in task_rows:
+        cap = task_repeat.repeat_cap(t.type, t.config, event_kind=event.kind)
+        if task_repeat.is_repeatable(cap):
+            laps[t.id] = (task_repeat.lap_threshold(t.type, t.target_value, t.config), cap)
     if tasks_kept_to_admins(event):
         # Members can't see these tasks in game; a card must not name their
         # worth or picture either.
@@ -1541,30 +1556,24 @@ def _event_task_context(session, event, task_rows) -> dict:
             }
             for t in task_rows
         }
-    _TASK_CTX_CACHE[event.id] = (now, tasks)
-    return tasks
+    facts = {"tasks": tasks, "laps": laps, "total": len(task_rows)}
+    _TASK_CTX_CACHE[event.id] = (now, facts)
+    return facts
 
 
-def _tasks_completed(event, task_rows, progress_rows) -> int:
+def _tasks_completed(laps, progress_rows) -> int:
     """Tasks a team has done, counting a repeatable task with a lap behind it
     as done: the same count compose_event_state shows on the HUD."""
     from utils import task_repeat
 
-    by_id = {t.id: t for t in task_rows}
     done = 0
     for p in progress_rows:
         if p.completed:
             done += 1
-            continue
-        t = by_id.get(p.task_id)
-        if t is None:
-            continue
-        cap = task_repeat.repeat_cap(t.type, t.config, event_kind=event.kind)
-        if not task_repeat.is_repeatable(cap):
-            continue
-        lap = task_repeat.lap_threshold(t.type, t.target_value, t.config)
-        if task_repeat.completion_count(int(p.progress or 0), lap, False, cap):
-            done += 1
+        elif p.task_id in laps:
+            lap, cap = laps[p.task_id]
+            if task_repeat.completion_count(int(p.progress or 0), lap, False, cap):
+                done += 1
     return done
 
 
@@ -1575,29 +1584,27 @@ def team_contexts(session, event_id, team_ids) -> dict:
     try:
         from datetime import datetime
 
-        from db.models import Event, EventProgress, EventTask, EventTeam
+        from db.models import Event, EventProgress, EventTeam
         from services.plugin_display import time_left
 
         event = session.query(Event).filter(Event.id == int(event_id)).first()
         if event is None:
             return {}
-        teams = (session.query(EventTeam)
+        teams = (session.query(EventTeam.id, EventTeam.name, EventTeam.score,
+                               EventTeam.piece_item_id, EventTeam.piece_icon_url)
                  .filter(EventTeam.event_id == event.id)
                  .order_by(EventTeam.score.desc(), EventTeam.id.asc())
                  .all())
-        task_rows = (session.query(EventTask)
-                     .filter(EventTask.event_id == event.id)
-                     .order_by(EventTask.id.asc())
-                     .all())
         wanted = {int(t) for t in team_ids if t is not None}
         progress = {}
         if wanted:
-            for p in (session.query(EventProgress)
+            for p in (session.query(EventProgress.team_id, EventProgress.task_id,
+                                    EventProgress.completed, EventProgress.progress)
                       .filter(EventProgress.event_id == event.id,
                               EventProgress.team_id.in_(wanted))
                       .all()):
                 progress.setdefault(p.team_id, []).append(p)
-        tasks = _event_task_context(session, event, task_rows)
+        facts = _event_task_context(session, event)
         ends_at = event.ends_at.isoformat() if event.ends_at else None
         left = time_left(event.ends_at, datetime.utcnow()) if event.ends_at else None
         out = {}
@@ -1614,10 +1621,10 @@ def team_contexts(session, event_id, team_ids) -> dict:
                     "icon_item_id": team.piece_item_id,
                     "icon_path": _img_relative(team.piece_icon_url),
                 },
-                "tasks_total": len(task_rows),
-                "tasks_completed": _tasks_completed(event, task_rows, progress.get(team.id, [])),
+                "tasks_total": facts["total"],
+                "tasks_completed": _tasks_completed(facts["laps"], progress.get(team.id, [])),
                 "has_bingo": bool(event.has_bingo),
-                "tasks": tasks,
+                "tasks": facts["tasks"],
                 "ends_at": ends_at,
                 "time_left": left,
             }
