@@ -96,7 +96,7 @@ class FakeEmbed:
         base = dict(
             group_id=1, embed_type="drop", title="{item_name}", url=None,
             description="", color=None, thumbnail=None, image=None,
-            timestamp=False,
+            timestamp=False, content=None,
         )
         base.update(kw)
         self.__dict__.update(base)

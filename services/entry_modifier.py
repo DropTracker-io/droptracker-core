@@ -348,6 +348,10 @@ async def _rebuild_notification_embed(drop, player, item, npc, group_id, db):
     if embed.fields:
         embed.fields = [f for f in embed.fields if "Source:" not in (f.name or "")]
 
+    from services import notification_text
+
+    notification_text.apply_footer(embed, group_id, "drop", values)
+
     return embed
 
 

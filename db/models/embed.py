@@ -25,6 +25,11 @@ class GroupEmbed(Base):
     thumbnail = Column(String(200))
     timestamp = Column(Boolean, nullable=True, default=False)
     image = Column(String(200), nullable=True)
+    # The message text sent above the embed (web140a). NULL keeps the built-in
+    # line for the type (services/notification_text.DEFAULT_CONTENT, or the
+    # template group's text when staff set one); "" sends no text at all.
+    # {player_mention} carries the player's ping, honouring their settings.
+    content = Column(String(2000), nullable=True)
 
     fields = relationship("Field", back_populates="embed", cascade="all, delete-orphan")
     group = relationship("Group", back_populates="group_embeds")

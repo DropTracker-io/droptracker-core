@@ -966,6 +966,8 @@ async def lootboard_updates():
                     }
                     try:
                         embed = replace_placeholders(embed_template, value_dict)
+                        from services import notification_text
+                        notification_text.apply_footer(embed, group_id, "lb", value_dict)
                     except Exception as e:
                         print("Unable to replace placeholders for group", group_obj.group_name, "e:", e)
                         continue

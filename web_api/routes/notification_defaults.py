@@ -48,6 +48,7 @@ from quart import Blueprint, jsonify
 
 from db import AuditLog, EVENT_MESSAGE_LAYOUT_TYPES, GroupEmbed
 from db.models import EventMessageLayout, GroupComponentLayout
+from services import notification_text
 from web_api.common import abort_problem, db_session, private_no_store
 from web_api.deps import assert_superadmin, current_user_id, json_body, load_user
 from web_api.routes import embeds as embed_routes
@@ -273,6 +274,8 @@ async def list_embed_defaults():
             "embed_type": embed_type,
             "template": templates.get(embed_type),
             "builtin": builtin,
+            # The message text a default with no text of its own is sent with.
+            "builtin_content": notification_text.DEFAULT_CONTENT.get(embed_type),
             "custom_count": len(saved_by),
             "override_count": len(saved_by & entitled),
         })
@@ -283,7 +286,7 @@ async def list_embed_defaults():
 async def put_embed_default(embed_type: str):
     user_id = current_user_id()
     embed_routes._validate_embed_type(embed_type)
-    data = embed_routes._validate_body(await json_body())
+    data = embed_routes._validate_body(await json_body(), embed_type)
 
     def _apply():
         with db_session() as s:

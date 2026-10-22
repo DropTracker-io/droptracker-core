@@ -148,6 +148,18 @@ if "db.entitlements" not in sys.modules:
     sys.modules["db.entitlements"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/notification_text.py — message text + footer resolution. Module
+# imports are stdlib-only (DB, entitlement and formatting imports are lazy), so
+# load the real module: the notification senders call it on every send, and a
+# MagicMock there would turn every message text into a mock.
+_NOTIFICATION_TEXT_PATH = _Path(__file__).resolve().parent.parent / "services" / "notification_text.py"
+if "services.notification_text" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location("services.notification_text", _NOTIFICATION_TEXT_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.notification_text"] = _mod
+    _spec.loader.exec_module(_mod)
+    sys.modules["services"].notification_text = _mod
+
 # db/item_sources.py — the item -> source-NPC queries, shared by the item page
 # and the events worker's effort resolver. Module imports are SQLAlchemy-only
 # and the ORM models are lazy-imported inside functions, so load the real

@@ -15,6 +15,12 @@ editor starts from what the group receives rather than from a blank form.
 DELETE reverts a type to the default and intentionally needs no entitlement (a
 downgraded group must be able to clean up).
 
+Each design also carries ``content``, the message text sent above the embed
+(web140a): null keeps the built-in line, "" sends none. Every entry reports
+``default_content``, the text null resolves to (the template group's when
+staff set one, else ``services.notification_text.DEFAULT_CONTENT``), or null
+for a type that sends no text (lb).
+
 The bot only *renders* a group's own rows when ``db.entitlements
 .has_custom_embeds()`` passes, so a row saved here never leaks to Discord
 without an active subscription — but PUT still requires the entitlement so the
@@ -30,6 +36,7 @@ from quart import Blueprint, jsonify
 
 from db import AuditLog, GroupEmbed
 from db.models import Field as EmbedField
+from services import notification_text
 from web_api.common import abort_problem, db_session, private_no_store
 from web_api.deps import (
     assert_group_admin,
@@ -86,6 +93,7 @@ def _serialize_embed(row: GroupEmbed) -> dict:
         "thumbnail": row.thumbnail or None,
         "image": row.image or None,
         "timestamp": bool(row.timestamp),
+        "content": row.content,
         "fields": [
             {
                 "name": f.field_name or "",
@@ -126,7 +134,16 @@ def _optional_url(body: dict, key: str) -> str | None:
     return value
 
 
-def _validate_body(body: dict) -> dict:
+def _validate_content(embed_type: str, body: dict) -> str | None:
+    if embed_type not in notification_text.CONTENT_TYPES:
+        return None
+    try:
+        return notification_text.validate_content(body.get("content"))
+    except ValueError as exc:
+        abort_problem(422, "Invalid message text", str(exc))
+
+
+def _validate_body(body: dict, embed_type: str | None = None) -> dict:
     """Validate + normalize a PUT body into the stored shape."""
     title = body.get("title")
     if title is None:
@@ -204,6 +221,7 @@ def _validate_body(body: dict) -> dict:
         "image": _optional_url(body, "image"),
         "timestamp": timestamp,
         "fields": fields,
+        "content": _validate_content(embed_type, body) if embed_type else None,
     }
 
 
@@ -215,6 +233,15 @@ def _builtin_default(embed_type: str) -> dict | None:
 
     builtin = BUILTIN_EMBEDS.get(embed_type)
     return json.loads(json.dumps(builtin)) if builtin else None
+
+
+def _default_content(default_rows: list[GroupEmbed], embed_type: str) -> str | None:
+    """The message text a design with no text of its own is sent with."""
+    if embed_type not in notification_text.CONTENT_TYPES:
+        return None
+    if default_rows and default_rows[0].content is not None:
+        return default_rows[0].content
+    return notification_text.DEFAULT_CONTENT[embed_type]
 
 
 def _load_rows(s, group_id: int, embed_type: str) -> list[GroupEmbed]:
@@ -253,6 +280,7 @@ def _store_embed(s, group_id: int, embed_type: str, data: dict):
     row.thumbnail = data["thumbnail"]
     row.image = data["image"]
     row.timestamp = data["timestamp"]
+    row.content = data.get("content")
     row.fields.clear()
     for f in data["fields"]:
         row.fields.append(
@@ -308,7 +336,12 @@ async def list_group_embeds(group_id: int):
                     "design": custom or default,
                     "own": custom is not None,
                 } if (custom or default) else None
-                out.append({"embed_type": embed_type, "custom": custom, "default": default})
+                out.append({
+                    "embed_type": embed_type,
+                    "custom": custom,
+                    "default": default,
+                    "default_content": _default_content(default_rows, embed_type),
+                })
             return {"embeds": out}
 
     payload = await asyncio.to_thread(_load)
@@ -320,7 +353,7 @@ async def put_group_embed(group_id: int, embed_type: str):
     user_id = current_user_id()
     _validate_embed_type(embed_type)
     body = await json_body()
-    data = _validate_body(body)
+    data = _validate_body(body, embed_type)
 
     def _apply():
         with db_session() as s:

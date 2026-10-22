@@ -27,6 +27,7 @@ class TestEntitlementsRegistry:
             "ai_task_gen_daily": 5,
             "custom_site": False,
             "custom_bot_profile": False,
+            "custom_footer": False,
         }
 
     def test_resolve_explicit_defaults(self):

@@ -122,9 +122,10 @@ def build_embed(group_id: int, policy, drawn_at: float) -> interactions.Embed:
         color=EMBED_COLOR,
     )
     embed.set_image(url=f"attachment://{FILE_NAME}")
-    footer = os.getenv("DISCORD_MESSAGE_FOOTER")
-    if footer:
-        embed.set_footer(footer)
+    from services import notification_text
+
+    # The group's lootboard footer choice covers both boards.
+    notification_text.apply_footer(embed, group_id, "lb")
     return embed
 
 

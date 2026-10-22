@@ -49,6 +49,7 @@ from services.event_notifications import (
 from utils.wiseoldman import fetch_group_members
 from services.redis_updates import get_player_list_loot_sum, loot_tracker
 from services import event_alerts
+from services import notification_text
 from db.models.video_upload import VideoUpload
 from utils.video_storage import (
     VIDEO_LOCAL_DELETE_AFTER_NOTIFY,
@@ -59,6 +60,14 @@ from utils.video_storage import (
 
 app_logger = AppLogger()
 global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
+
+
+def _notification_mentions():
+    """Who a notification's message text may ping: users and roles only."""
+    try:
+        return interactions.AllowedMentions(parse=["users", "roles"])
+    except Exception:
+        return None
 db = DatabaseOperations()
 
 # Item/NPC/metric icon assets are served from /img and live on this same box,
@@ -862,6 +871,14 @@ class NotificationService:
 
         This is the ONE place allowed to call ``channel.send`` directly.
         """
+        if "allowed_mentions" not in kwargs and (
+            (args and isinstance(args[0], str)) or isinstance(kwargs.get("content"), str)
+        ):
+            # Message text can be group-written: players and roles may be
+            # pinged, @everyone/@here never (the editor refuses them too).
+            mentions = _notification_mentions()
+            if mentions is not None:
+                kwargs["allowed_mentions"] = mentions
         scope = _send_scope.get()
         if scope is not None and "nonce" not in kwargs:
             kwargs["nonce"] = scope.nonce_for(getattr(channel, "id", None))
@@ -892,6 +909,24 @@ class NotificationService:
         except (AttributeError, TypeError, ValueError):
             return False
         return created_ms < started_ms - slack_ms
+
+    def _message_text(self, group_id, embed_type, values, formatted_name, *,
+                      custom_embeds, fallback=None, own_type=None):
+        """The text sent above a notification embed.
+
+        The group's own text (needs ``custom_embeds``) or the template group's,
+        rendered with the type's placeholders plus ``{player_mention}``; else
+        ``fallback``, the sender's built-in line (``DEFAULT_CONTENT`` when not
+        given). None means send no text.
+        """
+        if fallback is None:
+            fallback = notification_text.default_content(embed_type, formatted_name)
+        template = notification_text.content_template(
+            group_id, embed_type, bool(custom_embeds), own_type=own_type
+        )
+        if template is None:
+            return fallback
+        return notification_text.render_content(template, values, formatted_name)
 
     async def _try_send_component_layout(
         self, db_session, notification, channel, group_id, notification_type, replacements
@@ -2003,7 +2038,9 @@ class NotificationService:
             if group_id == 2:
                 embed = await self.remove_group_field(embed)
 
-            content = f"{formatted_name} levelled-up:"
+            content = self._message_text(group_id, "level_up", replacements, formatted_name,
+                                         custom_embeds=upgrade_active)
+            notification_text.apply_footer(embed, group_id, "level_up", replacements)
 
             if image_url:
                 try:
@@ -2125,6 +2162,9 @@ class NotificationService:
                 )
             else:
                 content = f"{formatted_name} reached an XP milestone: {with_skill_icons(skills_text)}"
+            # The level-up design, but not the level-up text: "levelled-up:"
+            # would misdescribe a milestone, so these keep their own line.
+            notification_text.apply_footer(embed, group_id, "xp_milestone", replacements)
 
             if image_url:
                 try:
@@ -2228,6 +2268,7 @@ class NotificationService:
                 )
 
             content = f"{formatted_name} reached {achievement_text}!"
+            notification_text.apply_footer(embed, group_id, "kc", replacements)
 
             if image_url:
                 try:
@@ -2329,6 +2370,7 @@ class NotificationService:
 
             threshold_text = f"top {threshold:,}" if threshold is not None else "a new rank bracket"
             content = f"{formatted_name} entered the {threshold_text} on {metric_label}!"
+            notification_text.apply_footer(embed, group_id, "rank", replacements)
 
             await self._send(channel, content, embed=embed)
 
@@ -2424,7 +2466,9 @@ class NotificationService:
                     video_url=video_url,
                 )
 
-            content = f"{formatted_name} completed a quest!"
+            content = self._message_text(group_id, "quest", replacements, formatted_name,
+                                         custom_embeds=upgrade_active)
+            notification_text.apply_footer(embed, group_id, "quest", replacements)
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.
             video_attachment, video_local_path = (None, None)
@@ -2597,6 +2641,11 @@ class NotificationService:
                     embed.description = embed_line
                 elif not embed_places_line:
                     content = content_line
+            # A group's own text replaces all of the above; the picked line is
+            # still there for it as {death_message}.
+            content = self._message_text(group_id, "death", replacements, formatted_name,
+                                         custom_embeds=upgrade_active, fallback=content)
+            notification_text.apply_footer(embed, group_id, "death", replacements)
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.
             video_attachment, video_local_path = (None, None)
@@ -2717,7 +2766,9 @@ class NotificationService:
                     video_url=video_url,
                 )
 
-            content = f"{formatted_name} completed an achievement diary!"
+            content = self._message_text(group_id, "diary", replacements, formatted_name,
+                                         custom_embeds=upgrade_active)
+            notification_text.apply_footer(embed, group_id, "diary", replacements)
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.
             video_attachment, video_local_path = (None, None)
@@ -2830,7 +2881,9 @@ class NotificationService:
                     video_url=video_url,
                 )
 
-            content = f"{formatted_name} completed a slayer task!"
+            content = self._message_text(group_id, "slayer", replacements, formatted_name,
+                                         custom_embeds=has_custom_embeds(group_id))
+            notification_text.apply_footer(embed, group_id, "slayer", replacements)
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.
             video_attachment, video_local_path = (None, None)
@@ -2947,10 +3000,9 @@ class NotificationService:
                     video_url=video_url,
                 )
 
-            if kind == "pvp_death":
-                content = f"{formatted_name} was killed in PvP!"
-            else:
-                content = f"{formatted_name} got a PvP kill!"
+            content = self._message_text(group_id, kind, replacements, formatted_name,
+                                         custom_embeds=has_custom_embeds(group_id))
+            notification_text.apply_footer(embed, group_id, kind, replacements)
 
             video_attachment, video_local_path = (None, None)
             if video_url:
@@ -4221,7 +4273,6 @@ class NotificationService:
             sorted_groups = sorted(group_totals, key=lambda x: x['total'], reverse=True)
             group_to_group_rank = str(next((i for i, g in enumerate(sorted_groups) if g['id'] == group_id), 0) + 1)
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
-            content = f"{formatted_name} received a drop:"
             # Build rank strings safely
             if global_rank is not None and total_global_players is not None:
                 global_rank_str = "`" + str(global_rank) + "`" + "/" + "`" + str(total_global_players) + "`"
@@ -4310,6 +4361,9 @@ class NotificationService:
                 embed = await self.remove_group_field(embed)
             if kill_count is None or int(kill_count) < 1:
                 embed = await self.remove_kc_field(embed)
+            content = self._message_text(group_id, "drop", values, formatted_name,
+                                         custom_embeds=upgrade_active)
+            notification_text.apply_footer(embed, group_id, "drop", values)
             # (The old second attach pass lived here; _resolve_image_attachment
             # above already covers both hosted and remote URLs.)
             #print("Got the embed...")
@@ -4818,7 +4872,9 @@ class NotificationService:
             embed = self._finalize_group_points_embed(embed)
 
             # Send message
-            content = f"{formatted_name} has achieved a new personal best:"
+            content = self._message_text(group_id, "pb", replacements, formatted_name,
+                                         custom_embeds=upgrade_active)
+            notification_text.apply_footer(embed, group_id, "pb", replacements)
             video_attachment, video_local_path = (None, None)
             if video_url:
                 video_attachment, video_local_path = await self._download_video_attachment(video_url, notification.id)
@@ -4990,10 +5046,15 @@ class NotificationService:
                 if group_id == 2:
                     embed = await self.remove_group_field(embed)
 
-                if is_duplicate:
-                    content = f"{formatted_name} has received a duplicate pet!"
-                else:
-                    content = f"{formatted_name} has acquired a new pet!"
+                # The text follows the design: a duplicate sent with the
+                # group's pet design takes that design's text.
+                pet_type = PET_DUPE_TYPE if is_duplicate else "pet"
+                content = self._message_text(
+                    group_id, pet_type, value_dict, formatted_name,
+                    custom_embeds=update_active,
+                    own_type=pet_type if (own_dupe_embed or not is_duplicate) else "pet",
+                )
+                notification_text.apply_footer(embed, group_id, pet_type, value_dict)
                 video_attachment, video_local_path = (None, None)
                 if video_url:
                     video_attachment, video_local_path = await self._download_video_attachment(video_url, notification.id)
@@ -5148,7 +5209,9 @@ class NotificationService:
 
             # Send message
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
-            content = f"{formatted_name} has completed a combat achievement!"
+            content = self._message_text(group_id, "ca", value_dict, formatted_name,
+                                         custom_embeds=upgrade_active)
+            notification_text.apply_footer(embed, group_id, "ca", value_dict)
             
             if image_url:
                 try:
@@ -5289,7 +5352,9 @@ class NotificationService:
 
             # Send message
             formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
-            content = f"{formatted_name} has added an item to their collection log!"
+            content = self._message_text(group_id, "clog", replacements, formatted_name,
+                                         custom_embeds=upgrade_active)
+            notification_text.apply_footer(embed, group_id, "clog", replacements)
             
             video_attachment, video_local_path = (None, None)
             if video_url:

@@ -297,10 +297,12 @@ async def test_death_message_placeholder_defaults_to_the_bold_headline(monkeypat
 
 
 def _template_embed(description):
-    return SimpleNamespace(
+    embed = SimpleNamespace(
         title="Player Death", description=description, url=None, footer=None,
         fields=[], thumbnail=None, image=None,
     )
+    embed.set_footer = lambda text: setattr(embed, "footer", SimpleNamespace(text=text))
+    return embed
 
 
 @pytest.mark.asyncio

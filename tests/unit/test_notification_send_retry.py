@@ -203,7 +203,28 @@ class TestSendWrapper:
 
         await service._send(SimpleNamespace(send=send), "content", embed="E", files="F")
         assert seen["args"] == ("content",)
-        assert seen["kwargs"] == {"embed": "E", "files": "F"}
+        kwargs = dict(seen["kwargs"])
+        kwargs.pop("allowed_mentions", None)
+        assert kwargs == {"embed": "E", "files": "F"}
+
+    async def test_message_text_may_ping_users_and_roles_only(self, service, monkeypatch):
+        seen = {}
+
+        async def send(*a, **k):
+            seen.update(k)
+            return object()
+
+        monkeypatch.setattr(ns, "_notification_mentions", lambda: "USERS+ROLES")
+        await service._send(SimpleNamespace(send=send), "text", embed="E")
+        assert seen["allowed_mentions"] == "USERS+ROLES"
+
+        seen.clear()
+        await service._send(SimpleNamespace(send=send), embed="E")
+        assert "allowed_mentions" not in seen
+
+        seen.clear()
+        await service._send(SimpleNamespace(send=send), content="@role", allowed_mentions="MINE")
+        assert seen["allowed_mentions"] == "MINE"
 
 
 def _snowflake_at(ms):

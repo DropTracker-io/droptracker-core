@@ -118,6 +118,15 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         "help": "Give the DropTracker bot its own nickname, avatar, banner and bio inside the group's Discord server.",
         "default": False,
     },
+    {
+        # services/notification_text.py: replace or remove the DropTracker
+        # footer on the group's notifications, for every type or per type.
+        "key": "custom_footer",
+        "label": "Custom message footer",
+        "category": "features",
+        "help": "Remove the DropTracker footer from the group's Discord notifications, or replace it with the group's own, for every notification or per notification type.",
+        "default": False,
+    },
 ]
 
 # User-scoped ("supporter") entitlements — granted by a user_subscriptions row
