@@ -14,7 +14,7 @@ Classes:
 Author: joelhalen
 """
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Index
+from sqlalchemy import BigInteger, Column, Integer, String, Boolean, DateTime, ForeignKey, Index
 from sqlalchemy import func
 from sqlalchemy.orm import relationship
 
@@ -78,7 +78,7 @@ class Drop(Base):
     date_added = Column(DateTime, index=True, default=func.now())
     npc_id = Column(Integer, ForeignKey('npc_list.npc_id'), index=True)
     date_updated = Column(DateTime, onupdate=func.now(), default=func.now())
-    value = Column(Integer)
+    value = Column(BigInteger)  # BIGINT since web142a: items can be worth > 2^31 gp
     quantity = Column(Integer)
     image_url = Column(String(300), nullable=True)
     video_url = Column(String(500), nullable=True)

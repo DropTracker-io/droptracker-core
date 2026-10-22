@@ -23,6 +23,7 @@ admin form manages the array as a unit and we never query into it.
 from __future__ import annotations
 
 from sqlalchemy import (
+    BigInteger,
     Column,
     Integer,
     String,
@@ -50,9 +51,9 @@ class ItemValueOverride(Base):
     item_name = Column(String(125), index=True, nullable=False)
     # value = int((flat_bonus + Σ component.quantity × price) / divisor)
     divisor = Column(Integer, nullable=False, default=1)
-    flat_bonus = Column(Integer, nullable=False, default=0)
+    flat_bonus = Column(BigInteger, nullable=False, default=0)
     # Used when a component price is unavailable. 0 ⇒ use the client-provided value.
-    fallback_value = Column(Integer, nullable=False, default=0)
+    fallback_value = Column(BigInteger, nullable=False, default=0)
     # JSON array: [{"item_id": 13280, "item_name": "Abyssal bludgeon", "quantity": 1}, ...]
     components = Column(Text, nullable=True)
     # Human-readable explanation shown on the public docs page (e.g. "1/3 of an

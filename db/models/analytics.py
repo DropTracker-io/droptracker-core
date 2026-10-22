@@ -99,7 +99,7 @@ class GroupRecentDrops(Base):
     player_id = Column(Integer, ForeignKey('players.player_id'), nullable=False)
     item_id = Column(Integer, ForeignKey('items.item_id'), nullable=False)
     quantity = Column(Integer, nullable=False)
-    value = Column(Integer, nullable=False)
+    value = Column(BigInteger, nullable=False)
     date_added = Column(DateTime, nullable=False)
     npc_id = Column(Integer, ForeignKey('npc_list.npc_id'), nullable=True)
     partition = Column(Integer, nullable=False)
