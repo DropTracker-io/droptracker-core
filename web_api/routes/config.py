@@ -115,50 +115,51 @@ def _effective_stored_value(row: GroupConfiguration) -> str | None:
     return row.config_value
 
 
+def load_group_config(user_id: int, group_id: int) -> dict:
+    """GET /groups/{id}/config off the request: every registry key, typed.
+    Also behind the plugin's group admin (api/routes/plugin_admin.py), so
+    both read through one path. Raises ProblemException (403 for non-admins)."""
+    with db_session() as s:
+        user = load_user(s, user_id)
+        assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+
+        rows = (
+            s.query(GroupConfiguration)
+            .filter(GroupConfiguration.group_id == group_id)
+            .all()
+        )
+        stored = {r.config_key: _effective_stored_value(r) for r in rows}
+
+        # `group_name` is an editable view of groups.group_name, not a
+        # setting of its own — read the canonical column so the editor shows
+        # the name the site actually displays. Most groups have no config
+        # row at all (the field rendered blank); those that do may hold a
+        # value from before renaming was wired up (see db/group_rename.py).
+        group_name = s.query(Group.group_name).filter(Group.group_id == group_id).scalar()
+        stored[GROUP_NAME_CONFIG_KEY] = group_name or ""
+
+        out = {}
+        for key in all_config_keys():
+            field = get_config_field(key)
+            if field is None:
+                continue
+            out[key] = coerce_from_storage(field, stored.get(key))
+        return out
+
+
 @config_bp.get("/groups/<int:group_id>/config")
 async def get_group_config(group_id: int):
     user_id = current_user_id()
-
-    def _load():
-        with db_session() as s:
-            user = load_user(s, user_id)
-            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
-
-            rows = (
-                s.query(GroupConfiguration)
-                .filter(GroupConfiguration.group_id == group_id)
-                .all()
-            )
-            stored = {r.config_key: _effective_stored_value(r) for r in rows}
-
-            # `group_name` is an editable view of groups.group_name, not a
-            # setting of its own — read the canonical column so the editor shows
-            # the name the site actually displays. Most groups have no config
-            # row at all (the field rendered blank); those that do may hold a
-            # value from before renaming was wired up (see db/group_rename.py).
-            group_name = s.query(Group.group_name).filter(Group.group_id == group_id).scalar()
-            stored[GROUP_NAME_CONFIG_KEY] = group_name or ""
-
-            out = {}
-            for key in all_config_keys():
-                field = get_config_field(key)
-                if field is None:
-                    continue
-                out[key] = coerce_from_storage(field, stored.get(key))
-            return out
-
-    payload = await asyncio.to_thread(_load)
+    payload = await asyncio.to_thread(load_group_config, user_id, group_id)
     return private_no_store(jsonify(payload))
 
 
-@config_bp.patch("/groups/<int:group_id>/config")
-async def patch_group_config(group_id: int):
-    user_id = current_user_id()
-    body = await json_body()
-
-    if not body:
-        return jsonify({"ok": True})
-
+def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
+    """PATCH /groups/{id}/config off the request: validates every key, then
+    writes, audits and invalidates exactly as the site does. Also behind the
+    plugin's group admin (api/routes/plugin_admin.py), so a setting saved in
+    game goes through the same checks and side effects. Raises
+    ProblemException (403 non-admin or missing entitlement, 422 bad value)."""
     if any(key in HALL_OF_FAME_CONFIG_KEYS for key in body):
         def _check_hof():
             with db_session() as s:
@@ -172,7 +173,7 @@ async def patch_group_config(group_id: int):
                     user=user,
                 )
 
-        await asyncio.to_thread(_check_hof)
+        _check_hof()
 
     # Pre-validate + coerce all provided keys before touching the DB.
     coerced = {}
@@ -199,7 +200,7 @@ async def patch_group_config(group_id: int):
                 with db_session() as s:
                     return s.query(LootboardStyle.id).filter(LootboardStyle.id == sid).first() is not None
 
-            if not await asyncio.to_thread(_style_exists):
+            if not _style_exists():
                 abort_problem(422, "Invalid config value", f"Unknown lootboard style id {style_id}.")
             coerced[key] = str(style_id)
 
@@ -338,7 +339,18 @@ async def patch_group_config(group_id: int):
                 invalidate_group_name_caches(group_id)
             return True
 
-    await asyncio.to_thread(_apply)
+    _apply()
+
+
+@config_bp.patch("/groups/<int:group_id>/config")
+async def patch_group_config(group_id: int):
+    user_id = current_user_id()
+    body = await json_body()
+
+    if not body:
+        return jsonify({"ok": True})
+
+    await asyncio.to_thread(apply_group_config_patch, user_id, group_id, body)
     return jsonify({"ok": True})
 
 

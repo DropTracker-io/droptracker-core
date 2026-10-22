@@ -119,6 +119,7 @@ from .known_issues import KnownIssueCategory, KnownIssue, ISSUE_SEVERITIES, ISSU
 from .knowledgebase import KBDocument, KBChunk, KBIngestState, KB_SOURCE_TYPES
 from .api_key_reveals import ApiKeyReveal
 from .group_verification_code import GroupVerificationCode
+from .plugin_admin_session import PluginAdminSession
 from .api_keys import ApiKey, ApiKeyTier, ApiSubmission
 from .badge import Badge, PlayerBadge
 from .recap import (
@@ -311,6 +312,7 @@ __all__ = [
     "PluginTestDownload",
     "AdminWidgetToken",
     "GroupVerificationCode",
+    "PluginAdminSession",
     "GroupBankEntry",
     "BANK_ENTRY_KINDS",
     "BANK_ENTRY_SOURCES",
