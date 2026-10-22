@@ -1,9 +1,8 @@
 """Custom bot profile (web139a): the core bot's look inside a group's server.
 
   GET    /api/v1/groups/{id}/bot-profile             group admins
-  PUT    /api/v1/groups/{id}/bot-profile             nickname + bio (entitled)
-  POST   /api/v1/groups/{id}/bot-profile/{kind}      avatar|banner upload (entitled)
-  DELETE /api/v1/groups/{id}/bot-profile/{kind}      remove one image (entitled)
+  PUT    /api/v1/groups/{id}/bot-profile             save the whole look (entitled)
+  POST   /api/v1/groups/{id}/bot-profile/uploads/{kind}  stage an avatar|banner (entitled)
   DELETE /api/v1/groups/{id}/bot-profile             back to the default look
   GET    /api/v1/admin/bot-profiles                  developers (view)
   POST   /api/v1/admin/bot-profiles/{id}/reset       superadmins
@@ -59,6 +58,8 @@ def _row_payload(row, *, entitled: bool, group=None) -> dict:
         "last_error": getattr(row, "last_error", None),
         "applied_at": ts(getattr(row, "applied_at", None)),
         "updated_at": ts(getattr(row, "updated_at", None)),
+        # The core bot's own look, which applies wherever a field is unset.
+        "defaults": bp.load_defaults(),
         "limits": {"nick_max": bp.NICK_MAX, "bio_max": bp.BIO_MAX, "bio_max_lines": bp.BIO_MAX_LINES,
                    "avatar_size": list(bp.AVATAR_SIZE), "banner_size": list(bp.BANNER_SIZE),
                    "image_cooldown_seconds": bp.IMAGE_COOLDOWN_SECONDS},
@@ -128,21 +129,50 @@ async def get_bot_profile(group_id: int):
 
 @bot_profile_bp.put("/groups/<int:group_id>/bot-profile")
 async def put_bot_profile(group_id: int):
+    """Save the whole look at once: nickname, bio and both images. Images are
+    URLs from the upload endpoint below (or null for the bot's own). Nothing
+    reaches Discord until this runs."""
     user_id = current_user_id()
     body = await json_body()
+    defaults = bp.load_defaults()
     try:
         changes = {}
         if "nick" in body:
-            changes["nick"] = bp.clean_nick(body.get("nick"))
+            nick = bp.clean_nick(body.get("nick")) if not _is_default(body.get("nick"), defaults.get("name")) else None
+            changes["nick"] = nick
         if "bio" in body:
-            changes["bio"] = bp.clean_bio(body.get("bio"))
+            changes["bio"] = bp.clean_bio(body.get("bio")) if not _is_default(body.get("bio"), defaults.get("bio")) else None
     except bp.ProfileValidationError as e:
         abort_problem(422, "Invalid bot profile", str(e))
+    for kind in _KINDS:
+        key = f"{kind}_url"
+        if key in body:
+            value = body.get(key) or None
+            if value is not None and not isinstance(value, str):
+                abort_problem(422, "Invalid bot profile", f"The {kind} must be an uploaded image.")
+            changes[key] = value
 
     def _run():
+        from db.models import GroupBotProfile
+
         with db_session() as s:
             assert_group_entitlement(s, user_id, group_id, "custom_bot_profile",
                                      manage_guild_ids=manageable_guild_ids(user_id))
+            current = _snapshot(s.get(GroupBotProfile, group_id))
+            changing = [k for k in _KINDS if f"{k}_url" in changes
+                        and (changes[f"{k}_url"] or None) != (current.get(f"{k}_url") or None)]
+            for kind in changing:
+                value = changes[f"{kind}_url"]
+                if value is not None and not bp.staged_url_ok(value, group_id, kind):
+                    abort_problem(422, "Invalid bot profile", f"Upload the {kind} again before saving.")
+            claimed = []
+            for kind in changing:
+                wait = bp.claim_image_slot(group_id, kind)
+                if wait:
+                    for k in claimed:
+                        bp.release_image_slot(group_id, k)
+                    _cooldown_problem(kind, wait)
+                claimed.append(kind)
             row, changed = _save(s, group_id, user_id, changes)
             return _row_payload(row, entitled=True), changed
 
@@ -152,8 +182,25 @@ async def put_bot_profile(group_id: int):
     return private_no_store(jsonify(payload))
 
 
-@bot_profile_bp.post("/groups/<int:group_id>/bot-profile/<kind>")
+def _is_default(value, default) -> bool:
+    """A field left at the bot's own value saves as "use the default"."""
+    if not isinstance(value, str) or not default:
+        return False
+    return value.strip().casefold() == str(default).strip().casefold()
+
+
+def _cooldown_problem(kind: str, wait: int):
+    minutes = max(1, round(wait / 60))
+    abort_problem(429, "Too many changes",
+                  f"Discord limits how often the bot's {kind} can change. Try again in about "
+                  f"{minutes} minute{'s' if minutes != 1 else ''}.",
+                  extra={"code": "bot_profile_cooldown", "retry_after": wait})
+
+
+@bot_profile_bp.post("/groups/<int:group_id>/bot-profile/uploads/<kind>")
 async def upload_bot_image(group_id: int, kind: str):
+    """Store an image for a pending save and return its URL. The bot does not
+    change until the group saves (PUT above)."""
     if kind not in _KINDS:
         abort_problem(404, "Not found", "Unknown image kind.")
     user_id = current_user_id()
@@ -164,6 +211,9 @@ async def upload_bot_image(group_id: int, kind: str):
                                      manage_guild_ids=manageable_guild_ids(user_id))
 
     await asyncio.to_thread(_check)
+    wait = bp.image_cooldown_left(group_id, kind)
+    if wait:
+        _cooldown_problem(kind, wait)
 
     files = await request.files
     upload = files.get("file")
@@ -175,51 +225,14 @@ async def upload_bot_image(group_id: int, kind: str):
     except bp.ProfileValidationError as e:
         abort_problem(422, "Unsupported image", str(e))
 
-    wait = bp.claim_image_slot(group_id, kind)
-    if wait:
-        minutes = max(1, round(wait / 60))
-        abort_problem(429, "Too many changes",
-                      f"Discord limits how often the bot's {kind} can change. Try again in about "
-                      f"{minutes} minute{'s' if minutes != 1 else ''}.",
-                      extra={"code": "bot_profile_cooldown", "retry_after": wait})
-
     key = bp.image_key(group_id, kind)
     try:
         from utils.b2_storage import upload_bytes
 
         await upload_bytes(png, key, "image/png")
     except Exception as e:
-        bp.release_image_slot(group_id, kind)
         abort_problem(502, "Upload service unavailable", str(e))
-    url = bp.public_url(key)
-
-    def _run():
-        with db_session() as s:
-            row, _ = _save(s, group_id, user_id, {f"{kind}_url": url})
-            return _row_payload(row, entitled=True)
-
-    payload = await asyncio.to_thread(_run)
-    bp.request_sync(group_id)
-    return private_no_store(jsonify(payload))
-
-
-@bot_profile_bp.delete("/groups/<int:group_id>/bot-profile/<kind>")
-async def delete_bot_image(group_id: int, kind: str):
-    if kind not in _KINDS:
-        abort_problem(404, "Not found", "Unknown image kind.")
-    user_id = current_user_id()
-
-    def _run():
-        with db_session() as s:
-            assert_group_entitlement(s, user_id, group_id, "custom_bot_profile",
-                                     manage_guild_ids=manageable_guild_ids(user_id))
-            row, changed = _save(s, group_id, user_id, {f"{kind}_url": None})
-            return _row_payload(row, entitled=True), changed
-
-    payload, changed = await asyncio.to_thread(_run)
-    if changed:
-        bp.request_sync(group_id)
-    return private_no_store(jsonify(payload))
+    return private_no_store(jsonify({"url": bp.public_url(key)}))
 
 
 @bot_profile_bp.delete("/groups/<int:group_id>/bot-profile")

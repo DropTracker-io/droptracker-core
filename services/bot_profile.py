@@ -225,6 +225,25 @@ def claim_image_slot(group_id: int, kind: str) -> int:
         return 0
 
 
+def image_cooldown_left(group_id: int, kind: str) -> int:
+    """Seconds until this image can change again, without claiming anything."""
+    conn = _redis()
+    if conn is None:
+        return 0
+    try:
+        ttl = conn.ttl(f"bot_profile:cooldown:{int(group_id)}:{kind}")
+        return int(ttl) if ttl and ttl > 0 else 0
+    except Exception:
+        return 0
+
+
+def staged_url_ok(url: str, group_id: int, kind: str) -> bool:
+    """Whether ``url`` is an image this group uploaded through our endpoint,
+    so a save can't point the bot at an arbitrary address."""
+    prefix = public_url(f"dt_uploads/bot_profiles/{int(group_id)}-{kind}-")
+    return isinstance(url, str) and url.startswith(prefix) and url.endswith(".png") and ".." not in url
+
+
 def release_image_slot(group_id: int, kind: str) -> None:
     """Give the cooldown back after an upload that failed before saving."""
     conn = _redis()
@@ -234,6 +253,99 @@ def release_image_slot(group_id: int, kind: str) -> None:
         conn.delete(f"bot_profile:cooldown:{int(group_id)}:{kind}")
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# The bot's own default look
+# --------------------------------------------------------------------------- #
+# What a server sees with no customization: the core bot's global profile.
+# The core bot reads it from Discord and caches it here; the Web API only
+# reads Redis (it never talks to Discord itself).
+DEFAULTS_KEY = "bot_profile:defaults"
+DEFAULTS_MAX_AGE = 3600
+FALLBACK_DEFAULTS = {"name": "DropTracker", "avatar_url": None, "banner_url": None, "bio": None}
+
+
+def build_defaults(user: Dict[str, Any], app: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Default look from Discord's ``/users/@me`` and ``/applications/@me``.
+    A bot's profile "About me" is its application description."""
+    uid = user.get("id")
+    avatar = user.get("avatar")
+    banner = user.get("banner")
+    cdn = "https://cdn.discordapp.com"
+
+    def asset(path: str, h: Optional[str], size: int) -> Optional[str]:
+        if not (uid and h):
+            return None
+        ext = "gif" if h.startswith("a_") else "png"
+        return f"{cdn}/{path}/{uid}/{h}.{ext}?size={size}"
+
+    return {
+        "name": user.get("global_name") or user.get("username") or FALLBACK_DEFAULTS["name"],
+        "avatar_url": asset("avatars", avatar, 256),
+        "banner_url": asset("banners", banner, 1024),
+        "bio": ((app or {}).get("description") or "").strip() or None,
+    }
+
+
+def load_defaults() -> Dict[str, Any]:
+    conn = _redis()
+    if conn is not None:
+        try:
+            import json
+
+            raw = conn.get(DEFAULTS_KEY)
+            if raw:
+                data = json.loads(raw)
+                return {
+                    "name": data.get("name") or FALLBACK_DEFAULTS["name"],
+                    "avatar_url": data.get("avatar_url"),
+                    "banner_url": data.get("banner_url"),
+                    "bio": data.get("bio"),
+                }
+        except Exception:
+            pass
+    return dict(FALLBACK_DEFAULTS)
+
+
+def _defaults_stale() -> bool:
+    conn = _redis()
+    if conn is None:
+        return False
+    try:
+        import json
+
+        raw = conn.get(DEFAULTS_KEY)
+        if not raw:
+            return True
+        return (datetime.now().timestamp() - float(json.loads(raw).get("fetched_at") or 0)) > DEFAULTS_MAX_AGE
+    except Exception:
+        return True
+
+
+async def refresh_defaults(bot, *, force: bool = False) -> None:
+    """Cache the core bot's global profile for the Web API. Never raises."""
+    if not force and not _defaults_stale():
+        return
+    try:
+        import json
+
+        from interactions.api.http.route import Route
+
+        user = await asyncio.wait_for(bot.http.request(Route("GET", "/users/@me")), timeout=REQUEST_TIMEOUT)
+        try:
+            app = await asyncio.wait_for(bot.http.request(Route("GET", "/applications/@me")), timeout=REQUEST_TIMEOUT)
+        except Exception:
+            app = None
+        if not isinstance(user, dict):
+            return
+        data = build_defaults(user, app if isinstance(app, dict) else None)
+        data["fetched_at"] = datetime.now().timestamp()
+        conn = _redis()
+        if conn is not None:
+            conn.set(DEFAULTS_KEY, json.dumps(data))
+    except Exception as e:
+        print(f"[bot_profile] default profile refresh failed: {e}")
 
 
 # --------------------------------------------------------------------------- #
@@ -578,6 +690,7 @@ async def reconcile_group(bot, group_id: int, *, check_drift: bool = False, forc
 
 
 async def drain_requests(bot) -> None:
+    await refresh_defaults(bot)  # no-op unless the cached default look is missing or an hour old
     everyone, ids = consume_requests()
     if everyone:
         ids = sorted(set(ids) | set(await asyncio.to_thread(sweep_group_ids)))

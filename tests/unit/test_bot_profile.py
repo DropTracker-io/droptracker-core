@@ -318,3 +318,58 @@ class TestStaffFeed:
     def test_lapse_title(self):
         embed = bp.staff_feed_embed(_snap(), {"nick": "G"}, {"nick": None}, lapsed=True)
         assert "subscription ended" in embed["title"]
+
+
+class TestDefaults:
+    def test_builds_from_discord_profile(self):
+        d = bp.build_defaults(
+            {"id": "42", "username": "DropTracker.io", "global_name": None, "avatar": "a_abc", "banner": "def"},
+            {"description": "  Track your drops.  "},
+        )
+        assert d["name"] == "DropTracker.io"
+        assert d["avatar_url"] == "https://cdn.discordapp.com/avatars/42/a_abc.gif?size=256"
+        assert d["banner_url"] == "https://cdn.discordapp.com/banners/42/def.png?size=1024"
+        assert d["bio"] == "Track your drops."
+
+    def test_missing_pieces(self):
+        d = bp.build_defaults({"id": "42", "username": "Bot"}, None)
+        assert d == {"name": "Bot", "avatar_url": None, "banner_url": None, "bio": None}
+
+    def test_fallback_without_redis(self, monkeypatch):
+        monkeypatch.setattr(bp, "_redis", lambda: None)
+        assert bp.load_defaults() == bp.FALLBACK_DEFAULTS
+
+
+class TestStagedUrls:
+    def test_only_this_groups_own_uploads(self, monkeypatch):
+        monkeypatch.setenv("B2_CDN_BASE_URL", "https://cdn.example")
+        ok = "https://cdn.example/dt_uploads/bot_profiles/7-avatar-abc123.png"
+        assert bp.staged_url_ok(ok, 7, "avatar")
+        assert not bp.staged_url_ok(ok, 8, "avatar")      # another group's upload
+        assert not bp.staged_url_ok(ok, 7, "banner")      # wrong slot
+        assert not bp.staged_url_ok("https://evil.example/x.png", 7, "avatar")
+        assert not bp.staged_url_ok("https://cdn.example/dt_uploads/bot_profiles/7-avatar-../../x.png", 7, "avatar")
+        assert not bp.staged_url_ok(None, 7, "avatar")
+
+
+class TestCooldownPeek:
+    def test_peek_does_not_claim(self, monkeypatch):
+        class R:
+            def __init__(self):
+                self.store = {}
+
+            def ttl(self, k):
+                return 120 if k in self.store else -2
+
+            def set(self, k, v, nx=False, ex=None):
+                if nx and k in self.store:
+                    return False
+                self.store[k] = v
+                return True
+
+        r = R()
+        monkeypatch.setattr(bp, "_redis", lambda: r)
+        assert bp.image_cooldown_left(7, "avatar") == 0
+        assert bp.image_cooldown_left(7, "avatar") == 0
+        assert bp.claim_image_slot(7, "avatar") == 0
+        assert bp.image_cooldown_left(7, "avatar") == 120
