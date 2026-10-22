@@ -223,3 +223,115 @@ class TestSafety:
         for t in ("event_completion", "event_task_progress", "event_line", "event_lead_change"):
             pd.compose(t, EVENT, data, ctx())
             pd.compose(t, None, data, {"own": "nonsense"})
+
+
+# --------------------------------------------------------------------------- #
+# Login catch-up digest (moved from the plugin's summarizeEventGroup)
+# --------------------------------------------------------------------------- #
+NOW = 1_800_000_000
+EV = {"id": 19, "name": "Bingo Extravaganza"}
+
+
+def env(kind, ts=NOW - 7200, event=EV, **data):
+    out = {"id": f"{kind}-{ts}", "type": kind, "ts": ts, "data": data}
+    if event is not None:
+        out["event"] = event
+    return out
+
+
+def backlog(ts=NOW - 7200):
+    return [
+        env("event_completion", ts, task_id=218, task_label="Obtain 3 Bandos hilts", points=5),
+        env("event_task_progress", ts, task_id=127, task_label="1,000,000 Magic XP"),
+        env("event_lead_change", ts, task_id=218, team_name="Team Alpha", team_score=120),
+        env("event_line", ts, team_name="Team Alpha", bonus_points=10),
+    ]
+
+
+def test_parse_hidden_tolerates_garbage():
+    assert pd.parse_hidden("60:1,2;61:4") == {60: {1, 2}, 61: {4}}
+    assert pd.parse_hidden("60:0;x:1;62:;63:a,5;") == {63: {5}}
+    assert pd.parse_hidden(None) == {}
+
+
+def test_catch_up_gate_needs_both_size_and_staleness():
+    assert pd.is_catch_up_batch(backlog(), NOW)
+    # A live burst (all fresh) is not a backlog.
+    assert not pd.is_catch_up_batch(backlog(NOW - 5), NOW)
+    # Stale but tiny.
+    assert not pd.is_catch_up_batch(backlog()[:3], NOW)
+    # A missing ts never counts as stale.
+    assert not pd.is_catch_up_batch(backlog(0), NOW)
+    # Bridge chat neither counts toward the size nor the staleness.
+    chat = [env("clan_chat_message", NOW - 7200, event=None, sender="a", message="b")]
+    assert not pd.is_catch_up_batch(backlog(NOW - 5)[:3] + chat * 3, NOW)
+
+
+def test_digest_is_header_tallies_and_one_card():
+    out = pd.digest_batch(backlog(), now=NOW)
+    assert len(out) == 1
+    d = out[0]
+    assert d["type"] == pd.DIGEST_TYPE and d["priority"] == "high"
+    assert d["event"] == {"id": 19, "name": "Bingo Extravaganza"}
+    disp = d["display"]
+    assert disp["title"] == "While you were away"
+    assert [(l["text"], l["tone"]) for l in disp["lines"]] == [
+        ("1 task completed (+5 pts)", "complete"),
+        ("1 bingo line (+10 pts)", "line"),
+        ("Team Alpha now leads (120 pts)", "lead"),
+        ("Progress on 1 task", "muted"),
+    ]
+    assert disp["text"] == ("1 task completed (+5 pts), 1 bingo line (+10 pts), "
+                            "Team Alpha now leads (120 pts), Progress on 1 task.")
+    assert disp["card"]["kind"] == "DIGEST"
+    assert disp["card"]["headline"] == "Bingo Extravaganza"
+
+
+def test_digest_leaves_out_hidden_or_muted_progress():
+    hidden = pd.digest_batch(backlog(), {19: {127}}, now=NOW)[0]["display"]
+    assert not any(l["text"].startswith("Progress") for l in hidden["lines"])
+    other_event = pd.digest_batch(backlog(), {20: {127}}, now=NOW)[0]["display"]
+    assert any(l["text"].startswith("Progress") for l in other_event["lines"])
+    muted = pd.digest_batch(backlog(), progress_on=False, now=NOW)[0]["display"]
+    assert not any(l["text"].startswith("Progress") for l in muted["lines"])
+
+
+def test_digest_closing_line_and_budget():
+    batch = backlog() + [env("event_started"), env("event_board_turn"), env("event_ended")]
+    disp = pd.digest_batch(batch, now=NOW)[0]["display"]
+    texts = [l["text"] for l in disp["lines"]]
+    assert len(texts) == pd.CATCHUP_MAX_DETAIL_LINES
+    assert texts[0] == "The event started."
+    assert texts[-1] == "The event has ended."
+    # The closing line is not part of the pop-up body.
+    assert "ended" not in disp["text"]
+
+
+def test_digest_latest_lead_change_wins():
+    batch = backlog() + [env("event_lead_change", NOW - 60, team_name="Team Beta", team_score=1_250_000)]
+    texts = [l["text"] for l in pd.digest_batch(batch, now=NOW)[0]["display"]["lines"]]
+    assert "Team Beta now leads (1.25M pts)" in texts
+
+
+def test_digest_groups_per_event_and_passes_the_rest_through():
+    other = {"id": 20, "name": "Board"}
+    notice = env("submission_notice", event=None, message="hi")
+    chat = env("clan_chat_message", event=None, sender="a", message="b")
+    batch = [notice] + backlog() + [env("event_board_roll_prompt", event=other), chat,
+                                    env("event_kc_milestone", event={"id": 21, "name": "Quiet"})]
+    out = pd.digest_batch(batch, now=NOW)
+    assert [e["type"] for e in out] == ["submission_notice", "event_digest", "event_digest", "clan_chat_message"]
+    assert out[2]["event"]["id"] == 20
+    assert out[2]["display"]["lines"] == [{"text": "Your team can roll the dice!", "tone": "action"}]
+    assert out[2]["display"]["text"] == "Your team can roll the dice!"
+
+
+def test_digest_leaves_a_live_batch_alone():
+    batch = backlog(NOW - 5)
+    assert pd.digest_batch(batch, now=NOW) is batch
+
+
+def test_digest_never_raises():
+    batch = backlog() + [{"type": "event_line", "ts": "x", "event": "nope", "data": None}]
+    out = pd.digest_batch(batch, now=NOW)
+    assert out and out[0]["type"] == pd.DIGEST_TYPE

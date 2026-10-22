@@ -7,6 +7,9 @@
   until an inbox push wakes it via api/notify_wake or the window expires.
   Responses to wait-requests carry ``long_poll: true`` so the plugin can
   detect servers that predate the param and fall back to fixed-interval polls.
+  ``?catchup=1`` (sent until the session's first non-empty batch) collapses a
+  big, stale backlog into one ``event_digest`` per event; ``hidden`` and
+  ``progress`` carry the plugin's own task mutes (services/plugin_display.py).
 - GET /event_state — the Enhanced Display HUD / Events-tab state (focus task,
   standings, team info, the team's recent scoring submissions) for every
   active event the player is rostered in.
@@ -122,7 +125,7 @@ async def get_notifications():
     wait_seconds = parse_wait_seconds(request.args.get("wait"))
 
     if wait_seconds <= 0:
-        notifications = await asyncio.to_thread(drain_inbox, player_id)
+        notifications = _digest(await asyncio.to_thread(drain_inbox, player_id))
         return jsonify({"notifications": notifications, "active_event": active_event}), 200
 
     from api import notify_wake
@@ -163,10 +166,24 @@ async def get_notifications():
         active_event = await asyncio.to_thread(_recheck)
 
     return jsonify({
-        "notifications": notifications,
+        "notifications": _digest(notifications),
         "active_event": active_event,
         "long_poll": True,
     }), 200
+
+
+def _digest(notifications):
+    """The login catch-up digest, for plugins that ask for it (``catchup=1``)."""
+    if not notifications or request.args.get("catchup") != "1":
+        return notifications
+    try:
+        from services.plugin_display import digest_batch, parse_hidden
+
+        return digest_batch(notifications, parse_hidden(request.args.get("hidden")),
+                            request.args.get("progress") != "0")
+    except Exception as e:
+        print(f"/notifications catch-up digest failed: {e}")
+        return notifications
 
 
 @notifications_bp.get("/event_state")

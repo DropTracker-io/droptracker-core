@@ -503,3 +503,194 @@ def time_left(ends_at, now) -> str:
     if hours > 0:
         return f"{hours}h {minutes}m"
     return f"{max(minutes, 1)}m"
+
+
+# --------------------------------------------------------------------------- #
+# Login catch-up digest (port of EventNotificationService.summarizeEventGroup)
+# --------------------------------------------------------------------------- #
+# A plugin's first batch of a session that is big and provably stale (inbox
+# entries survive 24h offline) is summarized per event instead of replayed
+# line by line. The plugin opts in with ``?catchup=1`` on its first polls and
+# sends what only it knows: the tasks it hid (``hidden``) and whether it shows
+# task progress at all (``progress``).
+CATCHUP_MIN_ENVELOPES = 4
+CATCHUP_MIN_AGE_SECONDS = 600
+CATCHUP_MAX_DETAIL_LINES = 4
+DIGEST_TYPE = "event_digest"
+KIND_DIGEST = "DIGEST"
+DIGEST_TITLE = "While you were away"
+# Bridge chat is conversation, not event state: never counted or digested.
+_CHAT_TYPES = {"clan_chat_message", "clan_chat_muted"}
+_MAX_HIDDEN_EVENTS = 50
+
+
+def parse_hidden(raw) -> dict:
+    """``"60:1,2;61:4"`` → ``{60: {1, 2}, 61: {4}}``. Garbage parses away."""
+    hidden = {}
+    for part in str(raw or "").split(";")[:_MAX_HIDDEN_EVENTS]:
+        event_id, _, ids = part.partition(":")
+        event_id = _pos(event_id.strip())
+        if event_id is None:
+            continue
+        task_ids = {t for t in (_pos(i.strip()) for i in ids.split(",")[:200]) if t}
+        if task_ids:
+            hidden[event_id] = task_ids
+    return hidden
+
+
+def _event_id(envelope) -> int:
+    event = envelope.get("event")
+    return (_int(event.get("id")) or 0) if isinstance(event, dict) else 0
+
+
+def is_catch_up_batch(envelopes, now) -> bool:
+    """Big enough and with at least one envelope older than the age gate."""
+    batch = [e for e in envelopes if e.get("type") not in _CHAT_TYPES]
+    if len(batch) < CATCHUP_MIN_ENVELOPES:
+        return False
+    stale_before = int(now) - CATCHUP_MIN_AGE_SECONDS
+    return any(0 < (_int(e.get("ts")) or 0) < stale_before for e in batch)
+
+
+def summarize(group, hidden_ids=frozenset(), progress_on=True):
+    """One event's backlog as a digest ``display``, or None when empty.
+
+    A "While you were away" header (the plugin writes it from ``title``),
+    then at most :data:`CATCHUP_MAX_DETAIL_LINES` ``lines``: the tallies, the
+    still-true facts and, last, the state the event is in now or the action
+    waiting on the team."""
+    event_name = None
+    for envelope in group:
+        event = envelope.get("event")
+        if isinstance(event, dict) and event.get("name") is not None:
+            event_name = clean(event.get("name"))
+            break
+
+    completions = completion_pts = bingo_lines = bonus_pts = board_turns = 0
+    blackout = started = ended = roll_prompt = False
+    progressed = []
+    lead_team = lead_score = None
+    lead_ts = None
+    icon = None
+    for envelope in group:
+        data = envelope.get("data") if isinstance(envelope.get("data"), dict) else {}
+        kind = envelope.get("type")
+        if kind == "event_completion":
+            completions += 1
+            completion_pts += _int(data.get("points")) or 0
+            if icon is None:
+                icon = _int(data.get("icon_item_id"))
+        elif kind == "event_task_progress":
+            task_id = _pos(data.get("task_id"))
+            if task_id is None or task_id not in hidden_ids:
+                label = data.get("task_label") if data.get("task_label") is not None else "?"
+                if label not in progressed:
+                    progressed.append(label)
+        elif kind == "event_line":
+            bingo_lines += 1
+            bonus_pts += _int(data.get("bonus_points")) or 0
+        elif kind == "event_blackout":
+            blackout = True
+            bonus_pts += _int(data.get("bonus_points")) or 0
+        elif kind == "event_lead_change":
+            ts = _int(envelope.get("ts")) or 0
+            if lead_ts is None or ts >= lead_ts:
+                lead_ts = ts
+                lead_team = clean(data.get("team_name"))
+                lead_score = _int(data.get("team_score"))
+        elif kind == "event_board_turn":
+            board_turns += 1
+        elif kind == "event_board_roll_prompt":
+            roll_prompt = True
+        elif kind == "event_started":
+            started = True
+        elif kind == "event_ended":
+            ended = True
+
+    closing = None
+    if ended:
+        closing = ("The event has ended.", TONE_INFO)
+    elif roll_prompt:
+        closing = ("Your team can roll the dice!", TONE_ACTION)
+    budget = CATCHUP_MAX_DETAIL_LINES - (1 if closing else 0)
+
+    def pts(value):
+        return f" (+{abbrev(value)} pts)" if value > 0 else ""
+
+    details = []
+    if started:
+        details.append(("The event started.", TONE_ACTION))
+    if completions:
+        details.append((plural(completions, "task") + " completed" + pts(completion_pts), TONE_COMPLETE))
+    if bingo_lines:
+        details.append((plural(bingo_lines, "bingo line") + ("" if blackout else pts(bonus_pts)), TONE_LINE))
+    if blackout:
+        details.append(("Board blackout" + pts(bonus_pts), TONE_BLACKOUT))
+    if lead_team is not None:
+        details.append((lead_team + " now leads"
+                        + (f" ({abbrev(lead_score)} pts)" if lead_score is not None else ""), TONE_LEAD))
+    # Fillers: only worth a line while the important tallies leave room.
+    if board_turns and len(details) < budget:
+        details.append((plural(board_turns, "dice roll"), TONE_INFO))
+    if progressed and progress_on and len(details) < budget:
+        details.append(("Progress on " + plural(len(progressed), "task"), TONE_MUTED))
+    details = details[:max(budget, 0)]
+    if not details and closing is None:
+        return None
+
+    body = ", ".join(text for text, _ in details) + "." if details else closing[0]
+    card = _Card(KIND_DIGEST, DIGEST_TITLE, event_name or "Your event").detail(body)
+    lines = details + ([closing] if closing else [])
+    display = _display(DIGEST_TITLE, body, None, TONE_LEAD, card=dict(card), icon_item_id=icon)
+    display["lines"] = [{"text": clean(text, MAX_TEXT * 2), "tone": tone} for text, tone in lines]
+    return display
+
+
+def digest_batch(envelopes, hidden=None, progress_on=True, now=None) -> list:
+    """The drained batch with each event's backlog collapsed into one
+    ``event_digest`` envelope, when the batch is a catch-up; else unchanged.
+
+    Event-less envelopes (submission notices) and bridge chat pass through.
+    An event whose backlog digests to nothing is dropped, like the plugin's
+    own digest did. Never raises: a failure returns the batch untouched."""
+    import time
+
+    now = int(now if now is not None else time.time())
+    try:
+        if not is_catch_up_batch(envelopes, now):
+            return envelopes
+        hidden = hidden or {}
+        groups = {}
+        out = []
+        for envelope in envelopes:
+            event_id = _event_id(envelope)
+            if not event_id or envelope.get("type") in _CHAT_TYPES:
+                out.append(envelope)
+            elif event_id not in groups:
+                groups[event_id] = [envelope]
+                out.append(event_id)
+            else:
+                groups[event_id].append(envelope)
+        result = []
+        for item in out:
+            if not isinstance(item, int):
+                result.append(item)
+                continue
+            group = groups[item]
+            display = summarize(group, hidden.get(item, frozenset()), progress_on)
+            if display is None:
+                continue
+            first_event = next(e["event"] for e in group if isinstance(e.get("event"), dict))
+            result.append({
+                "id": f"{now}-digest-{item}",
+                "type": DIGEST_TYPE,
+                "ts": now,
+                "priority": "high",
+                "event": {"id": item, "name": first_event.get("name")},
+                "data": {},
+                "display": display,
+            })
+        return result
+    except Exception as e:
+        print(f"[plugin_display] catch-up digest failed: {e}")
+        return envelopes
