@@ -218,6 +218,30 @@ class Finding:
     may_open: bool
 
 
+def bot_guild(primary: Optional[str], linked: Iterable[str],
+              present: Optional[set]) -> tuple[Optional[str], Optional[bool]]:
+    """(server to report on, whether the bot is in it) for a group.
+
+    ``groups.guild_id`` can go stale when a group moves servers: the ``guilds``
+    row gets re-pointed and the group column doesn't, so checking it alone
+    reported "the bot isn't in your server" while drops posted fine (group
+    190). Any server linked to the group that has the bot counts. ``present``
+    None (no snapshot) gives None.
+    """
+    candidates = []
+    for gid in (primary, *linked):
+        if gid and str(gid) != "0" and str(gid) not in candidates:
+            candidates.append(str(gid))
+    if not candidates:
+        return None, None
+    if present is None:
+        return candidates[0], None
+    for gid in candidates:
+        if gid in present:
+            return gid, True
+    return candidates[0], False
+
+
 def _present_ids() -> Optional[set]:
     from utils.redis import redis_client
 
@@ -267,15 +291,19 @@ def detect(s, now: datetime) -> tuple[list[Finding], set]:
         for r in s.query(GuildBotEvent.guild_id).filter(GuildBotEvent.event == "leave", GuildBotEvent.at >= since)
     }
 
-    # bot_missing
+    # bot_missing: any server linked to the group counts (see bot_guild).
+    linked_by_group: dict = {}
+    for r in s.query(Guild.guild_id, Guild.group_id).filter(Guild.group_id.isnot(None)):
+        linked_by_group.setdefault(r.group_id, []).append(str(r.guild_id))
     for g in groups:
         if not g.guild_id:
             continue
         subject = f"g{g.group_id}"
         checked.add(("bot_missing", subject))
-        if str(g.guild_id) not in present:
-            findings.append(Finding("bot_missing", subject, g.group_id, str(g.guild_id), g.group_name,
-                                    None, may_open=str(g.guild_id) in left_after))
+        guild_id, has_bot = bot_guild(g.guild_id, linked_by_group.get(g.group_id, ()), present)
+        if has_bot is False:
+            findings.append(Finding("bot_missing", subject, g.group_id, guild_id, g.group_name,
+                                    None, may_open=guild_id in left_after))
 
     # posts_failing: one bounded aggregate over the last day.
     day_ago = now - timedelta(days=1)

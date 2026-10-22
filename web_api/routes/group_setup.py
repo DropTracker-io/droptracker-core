@@ -26,6 +26,9 @@ from web_api.deps import assert_group_admin, current_user_id, manageable_guild_i
 group_setup_bp = Blueprint("v1_group_setup", __name__)
 
 HIGH_THRESHOLD = 5_000_000
+# A group this young is still onboarding: clients show the full checklist
+# even when nothing is failing. Older groups only see it when something breaks.
+ONBOARDING_DAYS = 14
 
 
 def _redis():
@@ -34,10 +37,19 @@ def _redis():
     return getattr(redis_client, "client", None)
 
 
-def _bot_present(guild_id):
-    from web_api.routes.group_admin import bot_in_server_list
+def _bot_guild(s, group):
+    """(server to report on, bot present?) across every server linked to the
+    group, not just ``groups.guild_id`` (which goes stale when a group moves
+    servers). Presence None when the bot's server list is unavailable."""
+    from db import Guild
+    from services.setup_alerts import _present_ids, bot_guild
 
-    return bot_in_server_list(str(guild_id)) if guild_id else None
+    linked = [str(r.guild_id) for r in s.query(Guild.guild_id).filter(Guild.group_id == group.group_id)]
+    try:
+        present = _present_ids()
+    except Exception:
+        present = None
+    return bot_guild(group.guild_id, linked, present)
 
 
 def _channel_cache(conn, guild_id):
@@ -81,8 +93,8 @@ def _status(s, group) -> dict:
         checks.append({"key": key, "status": status, "title": title, "detail": detail, "fix": fix})
 
     # 1. bot in the server
-    present = _bot_present(group.guild_id)
-    if not group.guild_id:
+    guild_id, present = _bot_guild(s, group)
+    if not guild_id:
         add("bot", "fail", "No Discord server linked", "Link your server so drops can post there.", "link_server")
     elif present is None:
         add("bot", "unknown", "Couldn't check the bot right now", None, None)
@@ -102,7 +114,7 @@ def _status(s, group) -> dict:
     }
     drops = (cfg.get("channel_id_to_post_loot") or "").strip()
     parsed = parse_channel_ref(drops)
-    channels = _channel_cache(conn, group.guild_id)
+    channels = _channel_cache(conn, guild_id)
     if not parsed:
         if drops and drops != "0":
             add("drops_channel", "fail", "Your drops channel setting isn't a channel",
@@ -175,9 +187,16 @@ def _status(s, group) -> dict:
                                                  GroupSetupAlert.state.in_(["open", "baseline"]))
     ]
     bad = sum(1 for c in checks if c["status"] == "fail")
+    # Onboarding = young, or never posted to Discord at all.
+    young = bool(group.date_added and group.date_added >= datetime.now() - timedelta(days=ONBOARDING_DAYS))
+    onboarding = young or (
+        not posted_week
+        and s.query(NotifiedSubmission.id).filter(NotifiedSubmission.group_id == gid).first() is None
+    )
     return {
         "group_id": gid,
-        "guild_id": str(group.guild_id) if group.guild_id else None,
+        "guild_id": guild_id,
+        "onboarding": onboarding,
         "checks": checks,
         "alerts": alerts,
         "summary": {

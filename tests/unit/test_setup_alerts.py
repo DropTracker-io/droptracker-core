@@ -21,6 +21,7 @@ sa = _load()
 MAX_SENDS, AlertRow, build_message = sa.MAX_SENDS, sa.AlertRow, sa.build_message
 diff_presence, invite_url, is_channel_error, mode = sa.diff_presence, sa.invite_url, sa.is_channel_error, sa.mode
 recipient_order, should_send, snapshot_trustworthy = sa.recipient_order, sa.should_send, sa.snapshot_trustworthy
+bot_guild = sa.bot_guild
 
 NOW = datetime(2026, 10, 21, 12, 0)
 
@@ -91,3 +92,13 @@ def test_mode_defaults(monkeypatch):
     assert mode() == "send"
     monkeypatch.setenv("SETUP_ALERTS_MODE", "off")
     assert mode() == "off"
+
+
+def test_bot_guild_counts_any_linked_server():
+    # group 190: groups.guild_id stale, the guilds row re-pointed at the new server
+    assert bot_guild("111", ["222"], {"222"}) == ("222", True)
+    assert bot_guild("111", ["222"], {"111"}) == ("111", True)
+    assert bot_guild("111", ["222"], {"333"}) == ("111", False)
+    assert bot_guild("111", ["111"], None) == ("111", None)
+    assert bot_guild(None, [], {"1"}) == (None, None)
+    assert bot_guild("0", ["222"], set()) == ("222", False)
