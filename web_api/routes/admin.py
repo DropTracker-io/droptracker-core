@@ -2004,6 +2004,67 @@ async def admin_subscriptions_overview():
 
 
 # --------------------------------------------------------------------------- #
+# Plugin verification code (web141a). Staff never see a group's code: they can
+# only withdraw it, after which the owner reveals a fresh one on the site. This
+# is the "lost my code, contact us on Discord" path.
+# --------------------------------------------------------------------------- #
+@admin_bp.get("/admin/groups/<int:group_id>/verification-code")
+async def admin_verification_code_status(group_id: int):
+    await _require_superadmin()
+
+    def _load():
+        from db import group_verification_codes as gvc
+        from web_api.deps import group_owner_user_id
+
+        with db_session() as s:
+            if not s.query(Group).filter(Group.group_id == group_id).first():
+                abort_problem(404, "Group not found", f"No group with id {group_id}.")
+            out = gvc.status(s, group_id)
+            out["owner_user_id"] = group_owner_user_id(s, group_id)
+            return out
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@admin_bp.post("/admin/groups/<int:group_id>/verification-code/clear")
+async def admin_clear_verification_code(group_id: int):
+    actor = await _require_superadmin()
+    body = await json_body()
+    note = str(body.get("note") or "").strip()[:200]
+
+    def _apply():
+        from db import group_verification_codes as gvc
+        from web_api.deps import group_owner_user_id
+        from web_api.routes.group_admin import _notify_group
+
+        with db_session() as s:
+            if not s.query(Group).filter(Group.group_id == group_id).first():
+                abort_problem(404, "Group not found", f"No group with id {group_id}.")
+            if not gvc.clear_code(s, group_id, actor, "staff"):
+                abort_problem(
+                    409, "No active code",
+                    "This group has no active code. The owner can reveal one from Roles & access.",
+                )
+            s.add(AuditLog(
+                actor_user_id=actor, group_id=group_id,
+                action="group.verification_code.clear", target=f"group:{group_id}",
+                after=f"reason=staff{(' note=' + note) if note else ''}",
+            ))
+            _notify_group(
+                s,
+                group_id,
+                "🔑 DropTracker staff cleared this group's plugin verification code at "
+                "the owner's request. The owner can reveal a new one under Roles & access.",
+            )
+            s.commit()
+            out = gvc.status(s, group_id)
+            out["owner_user_id"] = group_owner_user_id(s, group_id)
+            return out
+
+    return private_no_store(jsonify(await asyncio.to_thread(_apply)))
+
+
+# --------------------------------------------------------------------------- #
 # Comped subscriptions (reuse group_subscriptions — no new table)
 # --------------------------------------------------------------------------- #
 @admin_bp.post("/admin/groups/<int:group_id>/subscription/grant")

@@ -14,6 +14,10 @@ Roles & access — one owner + N admins (web86a):
   POST   /api/v1/groups/{id}/ownership/transfer { user_id }               OWNER
   POST   /api/v1/groups/{id}/ownership/claim    (any admin, ownerless only)
   PATCH  /api/v1/groups/{id}/admin-policy       { discord_perms_grant_admin } OWNER
+  POST   /api/v1/groups/{id}/verification-code/reveal   (no active code)  OWNER*
+  POST   /api/v1/groups/{id}/verification-code/reset    (active code)     OWNER*
+  (* the grant-holding owner only, no superadmin bypass; staff clear a code
+     via POST /api/v1/admin/groups/{id}/verification-code/clear)
 
 Group icon (session + group admin):
   POST   /api/v1/groups/{id}/icon               multipart 'file' → { icon_url }
@@ -192,7 +196,23 @@ def _roster_payload(s, group_id: int, viewer_user_id: int, user=None) -> dict:
         "owner_user_id": group_owner_user_id(s, group_id),
         "can_manage_admins": is_group_owner(s, viewer_user_id, group_id, user=user),
         "discord_perms_grant_admin": discord_perms_grant_admin(s, group_id),
+        "verification_code": _code_status(s, group_id, viewer_user_id),
     }
+
+
+def _code_status(s, group_id: int, viewer_user_id: int) -> dict:
+    """The plugin verification code as the Roles & access tab shows it.
+
+    Revealing or resetting is for the group's actual owner (the grant holder),
+    with no superadmin bypass: staff never see a group's code. Staff withdraw
+    one from /admin instead, and the owner reveals the replacement.
+    """
+    from db import group_verification_codes as gvc
+
+    out = gvc.status(s, group_id)
+    owner_id = group_owner_user_id(s, group_id)
+    out["can_manage"] = owner_id is not None and viewer_user_id is not None and int(viewer_user_id) == owner_id
+    return out
 
 
 def _notify_group(s, group_id: int, content: str) -> None:
@@ -465,6 +485,16 @@ async def transfer_ownership(group_id: int):
                 action="group.ownership.transfer", target=str(target_user_id),
                 before=f"owner={owner_id}", after=f"owner={target_user_id}",
             ))
+            # The outgoing owner knows the plugin code and the incoming one does
+            # not. Withdraw it so the new owner reveals their own.
+            from db import group_verification_codes as gvc
+
+            if gvc.clear_code(s, group_id, user_id, "ownership_transfer"):
+                s.add(AuditLog(
+                    actor_user_id=user_id, group_id=group_id,
+                    action="group.verification_code.clear", target=f"group:{group_id}",
+                    after="reason=ownership_transfer",
+                ))
             _notify_group(
                 s,
                 group_id,
@@ -551,6 +581,109 @@ async def claim_ownership(group_id: int):
             return _roster_payload(s, group_id, user_id, user=user)
 
     return jsonify(await asyncio.to_thread(_apply))
+
+
+# --------------------------------------------------------------------------- #
+# Plugin verification code (web141a) — the second factor for administering the
+# group from the RuneLite plugin. Shown once; see db/group_verification_codes.
+# --------------------------------------------------------------------------- #
+def _assert_code_owner(s, user_id: int, group_id: int) -> None:
+    owner_id = group_owner_user_id(s, group_id)
+    if owner_id is None:
+        abort_problem(
+            409,
+            "No owner",
+            "This group has no owner yet. Claim ownership first, then reveal the code.",
+            extra={"code": "group_ownerless"},
+        )
+    if user_id is None or int(user_id) != owner_id:
+        abort_problem(
+            403,
+            "Owner only",
+            "Only this group's owner can reveal or reset its verification code.",
+            extra={"code": "group_owner_required"},
+        )
+
+
+def _issue_code_response(group_id: int, via: str):
+    """Shared body of reveal and reset: they differ only in the state they need."""
+    user_id = current_user_id()
+
+    def _apply():
+        from db import group_verification_codes as gvc
+
+        with db_session() as s:
+            user = load_user(s, user_id)
+            _assert_code_owner(s, user_id, group_id)
+            row = gvc.get_row(s, group_id, for_update=True)
+            active = bool(row and row.code_hash)
+            if via == "reveal" and active:
+                abort_problem(
+                    409,
+                    "Already revealed",
+                    "This group's code has already been shown. Reset it to get a new one.",
+                    extra={"code": "code_already_revealed"},
+                )
+            if via == "reset" and not active:
+                abort_problem(
+                    409,
+                    "No code to reset",
+                    "This group has no active code. Reveal one instead.",
+                    extra={"code": "code_not_active"},
+                )
+            try:
+                code = gvc.issue_code(s, group_id, user_id, via, row=row)
+            except gvc.CodeKeyMissing:
+                abort_problem(503, "Unavailable", "Verification codes are not configured on this server.")
+            except IntegrityError:
+                # Two first reveals raced to insert the row; the other one won
+                # and its owner has the code.
+                s.rollback()
+                abort_problem(
+                    409,
+                    "Already revealed",
+                    "This group's code was just revealed. Reset it to get a new one.",
+                    extra={"code": "code_already_revealed"},
+                )
+            s.add(AuditLog(
+                actor_user_id=user_id, group_id=group_id,
+                action=f"group.verification_code.{via}", target=f"group:{group_id}",
+            ))
+            if via == "reset":
+                _notify_group(
+                    s,
+                    group_id,
+                    f"🔑 **{_display_name(user)}** reset this group's DropTracker plugin "
+                    "verification code. Anyone using the old code has been signed out.",
+                )
+            s.commit()
+            payload = _roster_payload(s, group_id, user_id, user=user)
+            payload["code"] = code
+            return payload
+
+    return _apply
+
+
+@group_admin_bp.post("/groups/<int:group_id>/verification-code/reveal")
+async def reveal_verification_code(group_id: int):
+    """Owner only, once: create the group's code and show it.
+
+    Groups get no code until their owner asks for one, so nothing sits in the
+    database waiting to be read. After this the code cannot be seen again.
+    """
+    payload = await asyncio.to_thread(_issue_code_response(group_id, "reveal"))
+    return private_no_store(jsonify(payload))
+
+
+@group_admin_bp.post("/groups/<int:group_id>/verification-code/reset")
+async def reset_verification_code(group_id: int):
+    """Owner only: replace the active code with a new one and show it once.
+
+    The old code stops working at once, and so does every plugin session minted
+    from it (they are bound to the code's generation).
+    """
+    payload = await asyncio.to_thread(_issue_code_response(group_id, "reset"))
+    return private_no_store(jsonify(payload))
 
 
 @group_admin_bp.patch("/groups/<int:group_id>/admin-policy")
@@ -1802,9 +1935,32 @@ async def create_group():
             s.commit()
 
     await asyncio.to_thread(_post_create)
-    return jsonify({
+
+    # The creator is the owner, so they get the plugin code now, on the page
+    # they are already looking at. Best-effort: if it fails they reveal it
+    # from Roles & access later, which is the same operation.
+    def _issue_code():
+        from db import group_verification_codes as gvc
+
+        try:
+            with db_session() as s:
+                if group_owner_user_id(s, new_group_id) != user_id:
+                    return None
+                code = gvc.issue_code(s, new_group_id, user_id, "create")
+                s.add(AuditLog(
+                    actor_user_id=user_id, group_id=new_group_id,
+                    action="group.verification_code.create", target=f"group:{new_group_id}",
+                ))
+                s.commit()
+                return code
+        except Exception:
+            return None
+
+    verification_code = await asyncio.to_thread(_issue_code) if new_group_id is not None else None
+    return private_no_store(jsonify({
         "id": new_group_id,
         "name": result.get("group_name") or name,
         "wom_id": result.get("wom_id"),
         "guild_id": result.get("guild_id"),
-    })
+        "verification_code": verification_code,
+    }))
