@@ -876,7 +876,8 @@ async def process_due_deferred_broadcasts(limit: int = DEFERRED_BATCH) -> int:
 
 
 def _mirror_to_bridge(
-    session, relayer, clan_slug: str, message: str, parsed, deferred_replay: bool
+    session, relayer, clan_slug: str, message: str, parsed, deferred_replay: bool,
+    guid=None,
 ) -> int:
     """Mirror the raw broadcast line into the clan's two-way bridge channels.
 
@@ -892,7 +893,9 @@ def _mirror_to_bridge(
     mirrors, so a Jagex rewording can never silently stop the chat sync.
 
     Deferred replays (the plugin-user grace window) skip it — their first pass
-    already mirrored the line, minutes earlier. Returns channels staged.
+    already mirrored the line, minutes earlier. So do plugin resends of a
+    payload already taken (same ``guid``): the per-group first-sight claim
+    lasts 60s and a resend can land minutes later. Returns channels staged.
     """
     if deferred_replay:
         return 0
@@ -900,8 +903,15 @@ def _mirror_to_bridge(
         _stat("bridge_suppressed_kind")
         return 0
     try:
-        from services.clan_chat_bridge import mirror_broadcast_line, relayer_within_rate_limit
+        from services.clan_chat_bridge import (
+            first_relay_delivery,
+            mirror_broadcast_line,
+            relayer_within_rate_limit,
+        )
 
+        if not first_relay_delivery(relayer.player_id, guid):
+            _stat("bridge_retry_skipped")
+            return 0
         if not relayer_within_rate_limit(relayer.player_id):
             _stat("bridge_rate_limited")
             return 0
@@ -1022,7 +1032,10 @@ async def clan_broadcast_processor(
         return SubmissionResponse(False, "Missing clan name")
 
     parsed = parse_broadcast(message)
-    mirrored = _mirror_to_bridge(session, relayer, clan_slug, message, parsed, _deferred_replay)
+    mirrored = _mirror_to_bridge(
+        session, relayer, clan_slug, message, parsed, _deferred_replay,
+        guid=broadcast_data.get("guid"),
+    )
     mirror_note = f" (mirrored to {mirrored} bridge channel(s))" if mirrored else ""
 
     if _is_bridge_only(broadcast_data):

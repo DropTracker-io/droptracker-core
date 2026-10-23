@@ -685,3 +685,32 @@ def test_level_broadcasts_carry_their_skill_for_the_icon(monkeypatch):
     assert bridge.broadcast_icon({"bkind": "level_up", "skill": "Slayer"}) == "<:skill_slayer:1>"
     # Unseeded skill: the generic stats icon, as before.
     assert bridge.broadcast_icon({"bkind": "level_up", "skill": "Fishing"}) == "<:stats:4>"
+
+
+# ── plugin resends: same payload guid is one line, however late ─────────────
+
+def test_a_resent_payload_is_not_a_second_line(monkeypatch):
+    """The plugin retries a relay it thinks failed with the same embed guid,
+    on a backoff that outlives the 60s line claim. A late resend of a sender's
+    own line used to read as a fresh line nobody else heard, and the muted
+    relay sent it to the whole clan a second time."""
+    fake = _FakeRedis()
+    monkeypatch.setattr(bridge, "_redis", lambda: fake)
+    assert bridge.first_relay_delivery(42, "1729-55-9") is True
+    assert bridge.first_relay_delivery(42, "1729-55-9") is False
+    # A new line from the same client, and another relayer's guid, both pass.
+    assert bridge.first_relay_delivery(42, "1729-55-10") is True
+    assert bridge.first_relay_delivery(99, "1729-55-9") is True
+    assert all(ttl == bridge.RELAY_GUID_TTL_SECONDS for ttl in fake.keys.values())
+
+
+def test_relay_guid_check_fails_open(monkeypatch):
+    def boom():
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(bridge, "_redis", boom)
+    assert bridge.first_relay_delivery(42, "1729-55-9") is True
+    # No guid (old builds, hand-made payloads) is never a duplicate.
+    monkeypatch.setattr(bridge, "_redis", lambda: _FakeRedis())
+    assert bridge.first_relay_delivery(42, None) is True
+    assert bridge.first_relay_delivery(42, "") is True

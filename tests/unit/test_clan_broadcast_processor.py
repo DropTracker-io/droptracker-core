@@ -650,7 +650,8 @@ class _MirrorSpy:
         self.calls = []
         self.staged = staged
 
-    def __call__(self, _session, _relayer, clan_slug, message, _parsed, deferred_replay):
+    def __call__(self, _session, _relayer, clan_slug, message, _parsed, deferred_replay,
+                 guid=None):
         self.calls.append((clan_slug, message, deferred_replay))
         return self.staged
 
@@ -719,11 +720,20 @@ def test_unauthenticated_relayer_never_reaches_the_mirror(mirror_spy, monkeypatc
     assert response.success is False
 
 
-def _fake_bridge_module(monkeypatch, allowed=True, staged=2, boom=False):
+def _fake_bridge_module(monkeypatch, allowed=True, staged=2, boom=False, seen_guids=None):
     import sys
     import types
 
     module = types.ModuleType("services.clan_chat_bridge")
+    seen = set() if seen_guids is None else seen_guids
+
+    def first_delivery(pid, guid):
+        if not guid:
+            return True
+        if (pid, guid) in seen:
+            return False
+        seen.add((pid, guid))
+        return True
 
     def mirror(_session, _pid, _slug, _message, parsed=None):
         if boom:
@@ -732,11 +742,14 @@ def _fake_bridge_module(monkeypatch, allowed=True, staged=2, boom=False):
 
     module.mirror_broadcast_line = mirror
     module.relayer_within_rate_limit = lambda _pid: allowed
+    module.first_relay_delivery = first_delivery
     monkeypatch.setitem(sys.modules, "services.clan_chat_bridge", module)
 
 
-def _mirror(parsed=None, deferred=False):
-    return cb._mirror_to_bridge(object(), _FakePlayer(), "clan", "a line", parsed, deferred)
+def _mirror(parsed=None, deferred=False, guid=None):
+    return cb._mirror_to_bridge(
+        object(), _FakePlayer(), "clan", "a line", parsed, deferred, guid=guid
+    )
 
 
 def test_mirror_to_bridge_stages_and_counts(monkeypatch):
@@ -749,6 +762,16 @@ def test_mirror_to_bridge_skips_deferred_replays(monkeypatch):
     _fake_bridge_module(monkeypatch, staged=2)
     # The first pass mirrored this line minutes ago; the replay must not repeat it.
     assert _mirror(deferred=True) == 0
+
+
+def test_mirror_to_bridge_skips_a_plugin_resend_of_the_same_payload(monkeypatch):
+    """The plugin retries a payload it thinks failed with the same guid, often
+    after the 60s first-sight claim is gone. Only the first copy mirrors."""
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    _fake_bridge_module(monkeypatch, staged=2)
+    assert _mirror(guid="1-2-3") == 2
+    assert _mirror(guid="1-2-3") == 0
+    assert _mirror(guid="1-2-4") == 2
 
 
 def test_mirror_to_bridge_respects_the_bridge_rate_limit(monkeypatch):

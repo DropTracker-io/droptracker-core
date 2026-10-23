@@ -479,6 +479,35 @@ def canonical_line_digest(clan_slug: str, sender: str, message: str, digest: str
         return digest
 
 
+#: How long a relay payload's guid is remembered. The plugin resends a payload
+#: it thinks failed (a timeout after we already took it) with the SAME embed
+#: guid, on a 1s-doubling backoff for up to 10 attempts, so a resend can land
+#: minutes after the original: well past the 60s line claim, where it reads as
+#: a brand-new line. Covers the whole retry ladder.
+RELAY_GUID_TTL_SECONDS = 30 * 60
+
+
+def first_relay_delivery(relayer_id, guid) -> bool:
+    """False when this relayer already sent this exact payload (a plugin
+    retry), so it must not mirror again or feed the muted-member check.
+
+    The line claim cannot catch a late retry: it expires after a minute, and
+    it counts a relayer's repeats as real repeats on purpose. A late retry of
+    a sender's own line then has no other relayer's copy beside it, which
+    ``clan_chat_muted`` reads as "the game never delivered this", and every
+    plugin user in the clan got the line a second time with a muted icon.
+    Keyed per relayer, so one client cannot block another's guid. Fails open,
+    and a payload without a guid always passes."""
+    guid = str(guid or "").strip()
+    if not guid:
+        return True
+    try:
+        key = f"chatbridge:payload:{int(relayer_id)}:{guid[:96]}"
+        return bool(_redis().set(key, "1", nx=True, ex=RELAY_GUID_TTL_SECONDS))
+    except Exception:
+        return True
+
+
 def claim_relayed_line(key: str, relayer_id, ttl: int) -> bool:
     """Whether this relayer's copy of a line should be staged.
 

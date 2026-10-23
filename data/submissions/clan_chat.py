@@ -90,9 +90,15 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
         bridge_bound_groups,
         canonical_line_digest,
         claim_relayed_line,
+        first_relay_delivery,
         push_mirror_line,
         relayer_within_rate_limit,
     )
+
+    # A plugin resend of a payload we already took (same embed guid). Ahead of
+    # the rate limit so retries don't spend the relayer's budget.
+    if not first_relay_delivery(relayer.player_id, chat_data.get("guid")):
+        return SubmissionResponse(True, "Line already received (plugin retry)")
 
     if not relayer_within_rate_limit(relayer.player_id):
         return SubmissionResponse(False, "Clan chat rate limit exceeded")
