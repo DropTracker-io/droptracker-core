@@ -221,7 +221,7 @@ def _mark_ref_failed(session, row) -> None:
         pass
 
 
-async def _delete_message(bot, session, row):
+async def _delete_message(bot, session, row, own_only: bool = False):
     """Send a ``kind='delete_message'`` outbox row: remove a message the bot
     posted earlier. Used when a manual-submission approval is undone and its
     announcement has to come back down (services/drop_moderation.py).
@@ -238,6 +238,12 @@ async def _delete_message(bot, session, row):
         raise RuntimeError(f"channel {row.channel_id} not found")
     try:
         message = await channel.fetch_message(int(row.discord_message_id))
+        if message is not None and own_only and int(message.author.id) != int(bot.user.id):
+            # ``delete_own_message``: the id came from a settings field an
+            # admin could once type into, so it may name anyone's message.
+            # With Manage Messages the bot could delete it; it must not.
+            print(f"[discord_outbox] message {row.discord_message_id} is not the bot's; left alone")
+            return
         if message is not None:
             await message.delete()
     except Exception as e:  # noqa: BLE001 — already-deleted / unfetchable is fine
@@ -384,8 +390,8 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                     sent += 1
                     continue
 
-                if row.kind == "delete_message":
-                    await _delete_message(bot, session, row)
+                if row.kind in ("delete_message", "delete_own_message"):
+                    await _delete_message(bot, session, row, own_only=row.kind == "delete_own_message")
                     row.status = "sent"
                     row.processed_at = datetime.now()
                     sent += 1

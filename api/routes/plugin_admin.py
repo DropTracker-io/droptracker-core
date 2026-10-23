@@ -51,6 +51,7 @@ NO_CODE = ("This group has no verification code yet. Its owner can create one un
 THROTTLED = "Too many tries. Wait a few minutes and try again."
 LOCKED_HOF = "Hall of Fame is part of a paid plan. Upgrade on droptracker.io to change it."
 ON_WEBSITE = "Change this one on droptracker.io."
+MANAGED = "The bot keeps track of this message itself. Use Re-post board on droptracker.io to start it over."
 
 
 class Refusal(Exception):
@@ -237,6 +238,7 @@ def _settings_payload(s, user_id: int, group, errors=None) -> dict:
     from db.entitlements import HALL_OF_FAME_CONFIG_KEYS
     from web_api.config_registry import (
         CONFIG_CATEGORIES,
+        MANAGED_KEYS,
         SEASONAL_PREFIX,
         SENSITIVE_KEYS,
         all_config_keys,
@@ -249,7 +251,8 @@ def _settings_payload(s, user_id: int, group, errors=None) -> dict:
     fields = []
     for key in all_config_keys():
         field = get_config_field(key)
-        if field is None:
+        # Bot-managed message ids are nobody's to edit, so they aren't shown.
+        if field is None or field["key"] in MANAGED_KEYS:
             continue
         seasonal = key.startswith(SEASONAL_PREFIX) and key != field["key"]
         kind = "password" if key in SENSITIVE_KEYS else field.get("type")
@@ -298,7 +301,13 @@ def _problem_error(e):
 def _validate(s, user_id: int, group_id: int, changes: dict) -> dict:
     """{key: sentence} for every change the plugin may not or cannot make."""
     from db.entitlements import HALL_OF_FAME_CONFIG_KEYS
-    from web_api.config_registry import ConfigValidationError, SENSITIVE_KEYS, coerce_to_storage, get_config_field
+    from web_api.config_registry import (
+        MANAGED_KEYS,
+        ConfigValidationError,
+        SENSITIVE_KEYS,
+        coerce_to_storage,
+        get_config_field,
+    )
 
     errors = {}
     hof_locked = None
@@ -306,6 +315,9 @@ def _validate(s, user_id: int, group_id: int, changes: dict) -> dict:
         field = get_config_field(str(key))
         if field is None:
             errors[key] = "That setting doesn't exist any more. Reopen the window."
+            continue
+        if field["key"] in MANAGED_KEYS:
+            errors[key] = MANAGED
             continue
         if key in SENSITIVE_KEYS or field.get("type") not in EDITABLE_TYPES:
             errors[key] = ON_WEBSITE

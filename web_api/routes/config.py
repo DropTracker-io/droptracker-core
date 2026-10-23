@@ -38,6 +38,7 @@ from db.group_rename import (
 from utils import group_config
 from web_api.common import abort_problem, db_session, private_no_store, _rc
 from web_api.config_registry import (
+    MANAGED_KEYS,
     ConfigValidationError,
     SENSITIVE_KEYS,
     all_config_keys,
@@ -181,6 +182,9 @@ def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
         field = get_config_field(key)
         if field is None:
             abort_problem(422, "Unknown config key", f"'{key}' is not a valid config key.")
+        if key in MANAGED_KEYS:
+            abort_problem(422, "Managed setting",
+                          "The bot keeps track of this message itself. Use Re-post board to start it over.")
         try:
             coerced[key] = coerce_to_storage(key, value)
         except ConfigValidationError as e:
@@ -352,6 +356,81 @@ async def patch_group_config(group_id: int):
 
     await asyncio.to_thread(apply_group_config_patch, user_id, group_id, body)
     return jsonify({"ok": True})
+
+
+#: Standing boards an admin can have posted afresh: (channel key, message key,
+#: how the poster remembers what it last posted).
+REPOST_BOARDS = {
+    "lootboard": ("lootboard_channel_id", "lootboard_message_id", "loot"),
+    "pvp_lootboard": ("pvp_lootboard_channel_id", "pvp_lootboard_message_id", "pvp"),
+    "clan_log": ("clan_log_channel_id", "clan_log_message_id", "clan_log"),
+}
+
+
+def repost_board(user_id: int, group_id: int, board: str) -> dict:
+    """Start a standing board over in its channel, the way a reset should
+    happen now that the message id is not editable (MANAGED_KEYS).
+
+    Forgets the stored message id (keeping the row: the lootboard poster only
+    serves groups that have one), asks the bot to delete the old board if, and
+    only if, the bot posted it, and drops the poster's "already posted" marker,
+    so the next posting pass (about a minute) sends a fresh message. Raises
+    ProblemException: 404 unknown board, 409 no channel set."""
+    if board not in REPOST_BOARDS:
+        abort_problem(404, "Unknown board", f"'{board}' is not a board that can be re-posted.")
+    channel_key, message_key, marker = REPOST_BOARDS[board]
+    import re
+
+    from services import discord_outbox
+    from web_api.config_registry import parse_channel_ref
+
+    with db_session() as s:
+        user = load_user(s, user_id)
+        assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
+        rows = {
+            r.config_key: r
+            for r in s.query(GroupConfiguration)
+            .filter(GroupConfiguration.group_id == group_id,
+                    GroupConfiguration.config_key.in_([channel_key, message_key]))
+            .order_by(GroupConfiguration.id)
+            .all()[::-1]  # lowest id wins, as the posters read it
+        }
+        channel = parse_channel_ref(rows[channel_key].config_value) if channel_key in rows else None
+        if not channel:
+            abort_problem(409, "No channel", "Pick a channel for this board first.")
+        message_row = rows.get(message_key)
+        old = (message_row.config_value or "").strip() if message_row else ""
+        if message_row is None:
+            s.add(GroupConfiguration(group_id=group_id, config_key=message_key, config_value=""))
+        else:
+            message_row.config_value = ""
+        if re.fullmatch(r"\d{15,21}", old):
+            discord_outbox.enqueue(s, channel_id=channel, kind="delete_own_message",
+                                   discord_message_id=old, ref_type="board_repost",
+                                   actor_user_id=user_id, commit=False)
+        s.add(AuditLog(actor_user_id=user_id, group_id=group_id, action="board.repost",
+                       target=f"group_configurations.{message_key}", before=old or None, after=""))
+        s.commit()
+
+    group_config.invalidate(group_id)
+    conn = _rc()
+    if conn is not None:
+        try:
+            if marker == "clan_log":
+                conn.delete(f"clan_log:{group_id}:posted_hash")
+            else:
+                from lootboard import schedule
+
+                conn.delete(schedule.posted_key(group_id, marker))
+        except Exception:
+            pass
+    return {"ok": True, "board": board}
+
+
+@config_bp.post("/groups/<int:group_id>/boards/<board>/repost")
+async def post_repost_board(group_id: int, board: str):
+    user_id = current_user_id()
+    return jsonify(await asyncio.to_thread(repost_board, user_id, group_id, board))
 
 
 @config_bp.get("/groups/<int:group_id>/discord-channels")

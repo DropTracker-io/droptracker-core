@@ -77,6 +77,7 @@ HIDDEN_KEYS = {
     "wom_verification_code",
     "lootboard_message_id",
     "clan_log_message_id",
+    "pvp_lootboard_message_id",
     "group_name",
 }
 
@@ -206,7 +207,7 @@ def _fields():
     from web_api.config_registry import GROUP_CONFIG_FIELDS
 
     return [f for f in GROUP_CONFIG_FIELDS
-            if f["key"] not in HIDDEN_KEYS and f.get("type") != "password"]
+            if f["key"] not in HIDDEN_KEYS and not f.get("managed") and f.get("type") != "password"]
 
 
 def _categories():

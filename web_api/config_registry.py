@@ -86,6 +86,8 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "type": "string",
         "help": "Message the bot edits when reposting the board. Managed automatically.",
         "default": None,
+        # Written by the bot; see MANAGED_KEYS.
+        "managed": True,
     },
     {
         "key": "channel_id_to_post_levels",
@@ -1075,6 +1077,8 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "type": "string",
         "help": "Message the bot edits when updating the board. Managed automatically.",
         "default": None,
+        # Written by the bot; see MANAGED_KEYS.
+        "managed": True,
     },
 
     # --- Clan bank ---
@@ -1193,10 +1197,19 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "type": "string",
         "help": "Message the bot edits when updating the PvP board. Managed automatically.",
         "default": None,
+        # Written by the bot; see MANAGED_KEYS.
+        "managed": True,
     },
 ]
 
 _BY_KEY = {f["key"]: f for f in GROUP_CONFIG_FIELDS}
+
+#: Settings the bot writes itself: the id of the standing message it edits in
+#: place. Never shown in a settings form or saved from one. Admins who pasted
+#: an id there pointed the bot at a message it could not edit (often not even
+#: its own), and the board silently stopped updating. To start a board over,
+#: POST /groups/{id}/boards/{board}/repost (web_api/routes/config.py).
+MANAGED_KEYS = frozenset(f["key"] for f in GROUP_CONFIG_FIELDS if f.get("managed"))
 
 # Sensitive keys never returned to non-admins (the endpoint is admin-gated, but
 # guard explicitly per §11 / Task 05).
