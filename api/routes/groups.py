@@ -13,6 +13,7 @@ from sqlalchemy import func, or_, text
 
 from api.core import get_db_session, redis_client
 from api.routes.group_create import require_service_key
+from api.panel_cards import group_card
 from api.routes.helpers import assemble_submission_data
 from lootboard import generator
 from services.redis_updates import get_player_list_loot_sum
@@ -143,8 +144,10 @@ def _build_top_groups_payload(partition):
                 continue
             rank += 1
             top_player_display = player_name_map.get(top_pid_by_gid.get(gid))
-            final_groups.append({
+            row = {
                 "group_name": group_name,
+                # Same key on both top lists, for plugins from 6.2 (one row model).
+                "name": group_name,
                 "total_loot": format_number(group_total),
                 "rank": rank,
                 "group_id": gid,
@@ -152,7 +155,14 @@ def _build_top_groups_payload(partition):
                 "top_player": top_player_display,
                 # The plugin's TopGroupResult deserializes "top_member".
                 "top_member": top_player_display,
-            })
+            }
+            if rank <= PREVIEW_CARD_ROWS:
+                # The instant preview a click shows while the full search
+                # loads (api/panel_cards.py). Only the rows the plugin lists.
+                row["card"] = group_card(
+                    name=group_name, group_id=gid, members=row["member_count"], rank=rank,
+                    loot=row["total_loot"], top_player=top_player_display, partial=True)
+            final_groups.append(row)
         return {"groups": final_groups}
     finally:
         db_session.close()
@@ -169,6 +179,10 @@ async def get_top_groups_payload():
     payload = await asyncio.to_thread(_build_top_groups_payload, partition)
     _groups_cache_set(cache_key, payload)
     return payload
+
+
+#: Top-groups rows the plugin lists, which carry a preview card.
+PREVIEW_CARD_ROWS = 5
 
 
 @groups_bp.get("/top_groups")
@@ -250,7 +264,13 @@ async def group_search():
             schedule_group_icon_mirror,
         )
         schedule_group_icon_mirror(group.group_id, group.icon_url)
+        group_rank_text = f"{group_rank}/{total_groups}"
         return jsonify({
+            "card": group_card(
+                name=group.group_name, group_id=group.group_id, description=group.description,
+                icon_path=icon_relative_path(group.group_id, group.icon_url), members=player_count,
+                rank=group_rank_text, loot=format_number(group_total), top_player=top_player_display,
+                recent=final_submission_data, invite_code=discord_invite_code(group.invite_url)),
             "group_name": group.group_name,
             "group_description": group.description,
             "group_image_url": group.icon_url,

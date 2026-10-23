@@ -12,6 +12,7 @@ from datetime import timedelta
 from sqlalchemy import bindparam, or_, text
 
 from api.core import get_db_session, redis_client, redis_tracker
+from api.panel_cards import player_card
 from api.routes.helpers import assemble_submission_data
 from utils.format import (find_player_by_rsn, format_number,
                           normalize_player_display_equivalence, player_name_search_expr)
@@ -219,6 +220,11 @@ async def player_search():
         player_lifetime_points = get_player_lifetime_points_earned(player_id=player.player_id,session=db_session)
 
         response_data = {
+            "card": player_card(
+                name=player.player_name, player_id=player.player_id,
+                registered=player.user_id is not None, total_loot=format_number(player_loot),
+                rank=player_rank, points=player_lifetime_points, groups=player_groups,
+                recent=final_submission_data),
             "player_name": player.player_name,
             "droptracker_player_id": player.player_id,
             "registered": player.user_id is not None,
@@ -285,6 +291,7 @@ async def get_top_players_payload():
             top_players_data.append({
                 "rank": index,
                 "player_name": player_name,
+                "name": player_name,
                 "total_loot": format_number(total_loot)
             })
         payload = {"players": top_players_data}
