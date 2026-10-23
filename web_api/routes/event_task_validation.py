@@ -15,7 +15,7 @@ import json
 import os
 
 from db import ItemList, NpcList
-from utils import duplicate_pets, task_repeat, vestige_rings
+from utils import duplicate_pets, per_drop, task_repeat, vestige_rings
 from utils.task_progress import DISTINCT_ITEM_KINDS
 from web_api.common import abort_problem
 from web_api.routes.npc_source_aliases import expand_source_names
@@ -461,7 +461,13 @@ def _config_item_name_set(config: dict) -> set[str]:
     references (flat ``items``, ``groups[].items``, ``paths[].groups[].items``,
     or a points path's flat ``paths[].items``).
     Used to keep an ``item_npcs`` map from naming items outside the task."""
-    names: set[str] = set()
+    return set(_config_item_names(config))
+
+
+def _config_item_names(config: dict) -> dict[str, str]:
+    """``{lower-cased name: name as stored}`` for every item a normalized
+    item_collection config references (see :func:`_config_item_name_set`)."""
+    names: dict[str, str] = {}
 
     def _name_of(it):
         if isinstance(it, str):
@@ -474,7 +480,7 @@ def _config_item_name_set(config: dict) -> set[str]:
         for it in (items or []):
             n = _name_of(it)
             if n:
-                names.add(str(n).lower())
+                names.setdefault(str(n).lower(), str(n))
 
     _add(config.get("items"))
     groups = list(config.get("groups") or [])
@@ -952,6 +958,12 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
     # score but must not gate their group's bonus).
     if entry.get("counts_for_group") is False or entry.get("counts_for_set") is False:
         item["counts_for_group"] = False
+    # "Count each drop once" (utils.per_drop): a stack is one receipt. Only
+    # the opt-in is stored; a pet is always one anyway.
+    if entry.get("per_drop") is not None and not isinstance(entry.get("per_drop"), bool):
+        abort_problem(422, "Invalid config", f"'{canonical}': per_drop must be true or false.")
+    if entry.get("per_drop") is True and source != "pet":
+        item["per_drop"] = True
     # "Also counts as": alternate drop names crediting this same entry (the
     # vestige + gold-ring rule, or an "any ancestral piece" pool). Each alias
     # snaps to its canonical DB name and reserves it task-wide, so one receipt
@@ -1773,6 +1785,15 @@ def validate_task_payload(s, body: dict) -> dict:
         # Whether a DT2 Gold ring counts as the vestige it rolls toward
         # (utils.vestige_rings). Default on; only ``false`` is stored.
         vestige_rings_flag = (config or {}).get(vestige_rings.CONFIG_KEY)
+        # Items counted once per drop, whatever the stack (utils.per_drop).
+        per_drop_raw = (config or {}).get(per_drop.CONFIG_KEY)
+        if per_drop_raw is not None and (
+                not isinstance(per_drop_raw, list)
+                or not all(isinstance(n, str) for n in per_drop_raw)
+                or len(per_drop_raw) > MAX_CONFIG_ITEMS):
+            abort_problem(422, "Invalid config",
+                          f"'{per_drop.CONFIG_KEY}' must be a list of item names "
+                          f"(at most {MAX_CONFIG_ITEMS}).")
         if vestige_rings_flag is not None and not isinstance(vestige_rings_flag, bool):
             abort_problem(422, "Invalid config",
                           f"'{vestige_rings.CONFIG_KEY}' must be true or false.")
@@ -1855,6 +1876,16 @@ def validate_task_payload(s, body: dict) -> dict:
         # Kept only where it means something: the task lists a vestige, and
         # not Gold ring itself (a listed ring only ever counts as a ring).
         # Otherwise the switch is dropped rather than stored stale.
+        # Kept only for names the task actually lists (not pets: a pet is
+        # always one), in their canonical spelling; dropped when empty.
+        if per_drop_raw:
+            spelled = {**_config_item_names(config or {}),
+                       **({target.lower(): target} if target else {})}
+            wanted = {str(n).strip().lower() for n in per_drop_raw if str(n).strip()}
+            kept = sorted(spelled[k] for k in wanted
+                          if k in spelled and k not in found_pets)
+            if kept:
+                config = {**(config or {}), per_drop.CONFIG_KEY: kept}
         listed = _config_item_name_set(config or {}) | {target.lower()}
         if (vestige_rings_flag is False
                 and vestige_rings.RING_NAME not in listed

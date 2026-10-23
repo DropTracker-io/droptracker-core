@@ -104,9 +104,11 @@ class TestConfig:
         ]})
         idx = cfg.matcher_index()
         assert idx["dragon 2h"] == {"source": "drop",
-                                    "npcs": frozenset({"vet'ion", "calvar'ion"})}
+                                    "npcs": frozenset({"vet'ion", "calvar'ion"}),
+                                    "per_drop": False}
         # pet items aren't NPC-scoped
-        assert idx["vet'ion jr."] == {"source": "pet", "npcs": frozenset()}
+        assert idx["vet'ion jr."] == {"source": "pet", "npcs": frozenset(),
+                                      "per_drop": False}
 
     def test_item_awards_per_tier_and_max(self):
         cfg = ls.LootSweepConfig({"groups": [{"items": [

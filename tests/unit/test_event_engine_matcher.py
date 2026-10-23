@@ -2037,3 +2037,39 @@ class TestLoadMatcherStateRuns:
         assert list(state.events) == [10]
         assert state.participants == {5: [(10, 77, None)]}
         assert state.team_names == {77: "Reds"}
+
+
+# ── count each drop once (config.per_drop_items) ─────────────────────────────
+
+class TestPerDropItems:
+    def test_single_target_stack_is_one(self):
+        t = _task(target="Hueycoatl hide", target_value=10,
+                  config={"per_drop_items": ["Hueycoatl hide"]})
+        m = engine.match_task(t, _env("drop", {"item_name": "Hueycoatl hide", "quantity": 3}))
+        assert m["quantity"] == 1
+
+    def test_list_item_flagged_others_not(self):
+        t = _task(config={"kind": "any_of", "items": ["Echo crystal", "Sunfire splinters"],
+                          "per_drop_items": ["Echo crystal"]})
+        echo = engine.match_task(t, _env("drop", {"item_name": "Echo crystal", "quantity": 4}))
+        splinters = engine.match_task(
+            t, _env("drop", {"item_name": "Sunfire splinters", "quantity": 4}))
+        assert echo["quantity"] == 1 and splinters["quantity"] == 4
+
+    def test_point_collection_pays_points_once(self):
+        t = _task(config={"kind": "point_collection",
+                          "items": [{"item_name": "Hueycoatl hide", "points": 5}],
+                          "per_drop_items": ["hueycoatl hide"]})
+        m = engine.match_task(t, _env("drop", {"item_name": "Hueycoatl hide", "quantity": 3}))
+        assert m["quantity"] == 5
+
+    def test_precomputed_set_is_used(self):
+        t = _task(target="Hueycoatl hide", config={"per_drop_items": ["Hueycoatl hide"]},
+                  per_drop_set=frozenset())
+        m = engine.match_task(t, _env("drop", {"item_name": "Hueycoatl hide", "quantity": 3}))
+        assert m["quantity"] == 3  # the state-load snapshot wins
+
+    def test_unflagged_task_unchanged(self):
+        t = _task(target="Hueycoatl hide")
+        m = engine.match_task(t, _env("drop", {"item_name": "Hueycoatl hide", "quantity": 3}))
+        assert m["quantity"] == 3

@@ -115,6 +115,7 @@ from utils.event_window import (LATE_START_GRACE_SECONDS,  # noqa: F401 — re-e
                                 effective_window_start)
 from utils import task_progress as _tp
 from utils import task_repeat as _tr
+from utils import per_drop as _per_drop
 from utils import vestige_rings as _vr
 
 # ── Redis keys / channels ─────────────────────────────────────────────────────
@@ -677,6 +678,15 @@ def _task_pet_names(task: dict) -> frozenset:
     return pets
 
 
+def _task_per_drop_names(task: dict) -> frozenset:
+    """The task's "count each drop once" item names (utils.per_drop),
+    precomputed at state load; derived on the fly for hand-built dicts."""
+    names = task.get("per_drop_set")
+    if names is None:
+        names = _per_drop.names(task.get("config") or {})
+    return names
+
+
 def _pet_is_new(data: dict) -> bool:
     """Whether a ``pet`` envelope is a pet the player did not already own.
 
@@ -1163,6 +1173,10 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         if pets and _norm(item_name) in pets:
             return None
         qty = data.get("quantity", 1) if kind == "drop" else 1
+        if _norm(item_name) in _task_per_drop_names(task):
+            # Flagged "count each drop once" (utils.per_drop): a stack of 3
+            # hides is one drop, so one unit toward the goal.
+            qty = 1
         credit = item_match_quantity(task, item_name, qty)
         if credit is None:
             # DT2 pity rolls: a Gold ring DROPPED by a vestige's boss credits
@@ -1223,6 +1237,8 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
                 qty = max(int(data.get("quantity", 1) or 1), 1)
             except (TypeError, ValueError):
                 qty = 1
+            if qty > 1 and entry.get("per_drop"):
+                qty = 1  # "count each drop once": a stack is one receipt
             if qty > 1 and _ls_vestige_sighting(task, data) is not None:
                 # A vestige-chain step is one sighting, not one per ring:
                 # the 2-Gold-ring drop is step 2 of the chain, never 2
@@ -1816,6 +1832,7 @@ def _enrich_matcher_precompute(d: dict) -> dict:
         d["item_source_index"] = _item_source_index(config)
         d["task_source_npcs"] = _norm_npc_set(config.get("source_npcs"))
         d["pet_name_set"] = _config_pet_names(config)
+        d["per_drop_set"] = _per_drop.names(config)
         d["metric_paths"] = list(_metric_paths_from_config(config, resolve_wom=False))
     elif ttype == "ca_target":
         # Normalized once per state load; the matcher compares against it.
@@ -1900,6 +1917,8 @@ def _task_to_dict(task) -> dict:
         # Names in the list flagged as pets (config.pet_items): credited from
         # `pet` submissions, never from drops/clogs.
         d["pet_name_set"] = _config_pet_names(d["config"])
+        # Names counted once per drop, whatever the stack (utils.per_drop).
+        d["per_drop_set"] = _per_drop.names(d["config"])
         # any_path metric paths (KC / loot-value alternatives): normalized
         # once per state load, KC paths with their WOM boss metrics resolved.
         # The merged slug map rides in ``wom_metrics`` so the reconciler can

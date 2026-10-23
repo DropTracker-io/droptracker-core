@@ -249,3 +249,25 @@ class TestVestigeChainEngine:
     def test_non_chain_drop_has_no_note(self):
         assert engine._loot_sweep_vestige_gate(_Session([]), TASK, 5,
                                                _drop("Armadyl helmet", npc="Kree'arra")) == (True, None)
+
+
+HIDE_CONFIG = {
+    "kind": "loot_sweep", "decay_percent": 20,
+    "groups": [{"label": "Hueycoatl", "npcs": ["The Hueycoatl"], "items": [
+        {"item_name": "Hueycoatl hide", "points": 3, "per_drop": True},
+        {"item_name": "Dragon hunter wand", "points": 30}]}],
+}
+HIDE_TASK = {"id": 13, "type": "loot_sweep", "config": HIDE_CONFIG,
+             "loot_sweep_index": _ls.LootSweepConfig(HIDE_CONFIG).matcher_index()}
+
+
+class TestPerDropLootSweep:
+    def _env(self, item, qty):
+        return {"kind": "drop", "data": {"item_name": item, "npc_name": "The Hueycoatl",
+                                         "quantity": qty}}
+
+    def test_stack_is_one_receipt(self):
+        assert engine.match_task(HIDE_TASK, self._env("Hueycoatl hide", 3))["quantity"] == 1
+
+    def test_unflagged_item_keeps_quantity(self):
+        assert engine.match_task(HIDE_TASK, self._env("Dragon hunter wand", 2))["quantity"] == 2

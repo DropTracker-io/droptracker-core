@@ -103,6 +103,7 @@ Per-item keys:
 | `awards_per_tier` | Receipts sharing each decay tier — full points for this many before the first 20% step. | 1 |
 | `max_awards` | Total scoring receipts. | `5 × awards_per_tier` |
 | `counts_for_group` | Whether the item gates its group's bonus. `false` for pets/mega-rares. | `true` |
+| `per_drop` | Count each drop once, whatever the stack: 3 Hueycoatl hides in one drop are one receipt. Bingo/item tasks use `config.per_drop_items` (a list of names) for the same rule; see `utils/per_drop.py`. | `false` |
 
 Per-group keys: `label`, `npcs` (list; validated against `NpcList`), `bonus_points`,
 `bonus_max`. **An item may repeat across groups of one task only when every group

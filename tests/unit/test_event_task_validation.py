@@ -1549,3 +1549,55 @@ def test_duplicates_switch_means_nothing_to_other_task_types():
     out = _validate({"type": "xp_target", "target": "Slayer", "target_value": 1000,
                      "config": {"duplicate_pets": True}})
     assert out["config"] is None
+
+
+# ── count each drop once (config.per_drop_items / loot_sweep per_drop) ───────
+
+def test_per_drop_items_kept_for_listed_items_canonical():
+    out = _validate({"type": "item_collection", "target_value": 5, "config": {
+        "kind": "any_of", "items": ["Boater", "Red boater"],
+        "per_drop_items": ["red BOATER", "Armadyl hilt"]}})  # hilt isn't listed
+    assert _cfg(out)["per_drop_items"] == ["Red boater"]
+
+
+def test_per_drop_items_on_single_item_task():
+    out = _validate({"type": "item_collection", "target": "boater", "target_value": 10,
+                     "config": {"per_drop_items": ["Boater"]}})
+    assert out["target"] == "Boater"
+    assert _cfg(out) == {"per_drop_items": ["Boater"]}
+
+
+def test_per_drop_items_in_requirement_groups():
+    out = _validate({"type": "item_collection", "config": {
+        "kind": "groups", "per_drop_items": ["Bandos hilt"],
+        "groups": [{"mode": "all_of", "items": ["Godsword shard 1"]},
+                   {"mode": "any_of", "items": ["Bandos hilt", "Armadyl hilt"]}]}})
+    assert _cfg(out)["per_drop_items"] == ["Bandos hilt"]
+
+
+def test_per_drop_items_dropped_when_nothing_matches():
+    out = _validate({"type": "item_collection", "target": "Boater",
+                     "config": {"per_drop_items": ["Armadyl hilt"]}})
+    assert out["config"] is None
+
+
+def test_per_drop_items_must_be_a_list():
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "item_collection", "target": "Boater",
+                   "config": {"per_drop_items": "Boater"}})
+    assert exc.value.status == 422
+
+
+def test_loot_sweep_per_drop_flag(_stub_ls):
+    out = _validate({"type": "loot_sweep", "config": {"groups": [
+        {"npcs": ["Kree'arra"], "items": [
+            {"item_name": "Armadyl helmet", "per_drop": True},
+            {"item_name": "Armadyl hilt", "per_drop": False}]}]}})
+    items = _cfg(out)["groups"][0]["items"]
+    assert items[0]["per_drop"] is True and "per_drop" not in items[1]
+
+
+def test_loot_sweep_per_drop_must_be_bool(_stub_ls):
+    with pytest.raises(ProblemException):
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"npcs": ["Kree'arra"], "items": [{"item_name": "Armadyl helmet", "per_drop": "yes"}]}]}})

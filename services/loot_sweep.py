@@ -153,7 +153,7 @@ ITEM_SOURCES = ("drop", "pet")
 class LootSweepItem:
     __slots__ = ("key", "name", "item_id", "points", "awards_per_tier",
                  "max_awards", "counts_for_group", "source",
-                 "match_names", "match_keys", "required", "virtual")
+                 "match_names", "match_keys", "required", "virtual", "per_drop")
 
     def __init__(self, raw, cfg: "LootSweepConfig"):
         if isinstance(raw, str):
@@ -182,6 +182,9 @@ class LootSweepItem:
         # "pet" (a `pet` submission matched by name — a pet only comes from its
         # boss, so no NPC scoping is needed).
         self.source = entry.get("source") if entry.get("source") in ITEM_SOURCES else "drop"
+        # "Count each drop once": a stack (3 Hueycoatl hides, a pile of echo
+        # crystals) is one receipt instead of one per unit (utils.per_drop).
+        self.per_drop = entry.get("per_drop") is True
         # "Also counts as": alternate drop names that credit THIS entry's
         # counter/decay/cap — the vestige + gold-ring case, or an "any
         # ancestral piece" pool where one entry lists every piece. For a
@@ -328,7 +331,10 @@ class LootSweepConfig:
         entry registers under its own name AND each of its ``match_names``
         aliases, so any listed name credits the entry. ``source`` is "drop"
         (NPC-scoped: ``npcs`` = allowed NPC keys, empty = any) or "pet"
-        (matched from a pet submission by name; ``npcs`` unused). A key in two
+        (matched from a pet submission by name; ``npcs`` unused). ``per_drop``
+        is set when an entry holding the key counts each drop once (a stack is
+        one receipt); if several entries hold the key, any one flagging it
+        applies to the drop. A key in two
         groups merges their NPC allowances: the drop qualifies if ANY of its
         groups takes that NPC, and :meth:`route` then picks the group. (The
         validator only lets a name repeat across groups that all name NPCs, so
@@ -340,9 +346,11 @@ class LootSweepConfig:
                     cur = out.get(key)
                     if cur is None:
                         out[key] = {"source": it.source,
-                                    "npcs": g.npc_keys if it.source == "drop" else frozenset()}
+                                    "npcs": g.npc_keys if it.source == "drop" else frozenset(),
+                                    "per_drop": it.per_drop}
                     else:
                         cur["npcs"] = cur["npcs"] | g.npc_keys
+                        cur["per_drop"] = cur["per_drop"] or it.per_drop
         return out
 
 
@@ -428,7 +436,7 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
                 "max_awards": it.max_awards, "awards_per_tier": it.awards_per_tier,
                 "counts_for_group": it.counts_for_group, "source": it.source,
                 "required": it.required, "match_names": it.match_names,
-                "virtual": it.virtual,
+                "virtual": it.virtual, "per_drop": it.per_drop,
             })
         completions = min(item_completions, default=0)
         has_gating = bool(item_completions)
