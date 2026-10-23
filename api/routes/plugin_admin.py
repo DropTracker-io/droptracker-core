@@ -36,7 +36,15 @@ plugin_admin_bp = Blueprint("plugin_admin", __name__)
 
 #: Field types the plugin draws itself (GroupAdmin.KNOWN_TYPES). Anything else
 #: is listed with a link to the website and cannot be changed from here.
-EDITABLE_TYPES = {"boolean", "int", "string", "text", "select", "channel", "role", "csv"}
+EDITABLE_TYPES = {"boolean", "int", "string", "text", "select", "channel", "role", "csv", "multi"}
+#: Types the website draws with a picker of its own (a style gallery, boss and
+#: pet pickers, a message-list editor). The plugin gets each as a type it
+#: already draws: "multi" is a checklist of options. Values are converted both
+#: ways here, so the stored form is always the registry's.
+_AS_TYPE = {"boardstyle": "select", "messagelist": "text",
+            "multiselect": "multi", "bosslist": "multi", "petlist": "multi"}
+_PET_GROUPS = {"boss": "Boss pets", "skilling": "Skilling pets", "raids": "Raid pets",
+               "clue": "Clue pets", "minigame": "Minigame pets", "misc": "Other pets"}
 #: Channel kinds a setting can point at (categories are not messageable).
 _CHANNEL_KINDS = {"text": "Channels", "forum": "Forums", "voice": "Voice channels", "thread": "Threads"}
 
@@ -233,6 +241,74 @@ def _hof_locked(s, user_id: int, group_id: int) -> bool:
         return True
 
 
+def _picker_options(s, stored_type: str, field: dict, cache: dict) -> list:
+    """The choices for a field the website draws with a picker. Each list is
+    built once per payload: seasonal copies share it."""
+    if stored_type in cache:
+        return cache[stored_type]
+    if stored_type == "boardstyle":
+        from web_api.routes.lootboard import selectable_styles
+
+        out = [{"value": str(st["id"]), "label": st["name"], "group": st["category"]}
+               for st in selectable_styles(s)]
+    elif stored_type == "bosslist":
+        from web_api.routes.config import pb_boss_names
+
+        out = [{"value": n, "label": n, "group": None} for n in pb_boss_names()[0]]
+    elif stored_type == "petlist":
+        from utils.osrs_pets import PET_DISPLAY_BY_NORM, pet_categories, pets_in_category
+
+        out, seen = [], set()
+        for cat in pet_categories():
+            for norm in sorted(pets_in_category(cat)):
+                name = PET_DISPLAY_BY_NORM.get(norm)
+                if name and name not in seen:
+                    seen.add(name)
+                    out.append({"value": name, "label": name, "group": _PET_GROUPS.get(cat, "Pets")})
+    elif stored_type == "multiselect":
+        out = [{"value": str(o["value"]), "label": o.get("label"), "group": None}
+               for o in field.get("options") or []]
+    else:
+        out = []
+    cache[stored_type] = out
+    return out
+
+
+def _to_client(stored_type, value):
+    """A stored value in the shape the plugin's control edits."""
+    import json
+
+    if stored_type == "messagelist":
+        try:
+            entries = json.loads(value) if isinstance(value, str) and value.strip() else (value or [])
+        except ValueError:
+            entries = []
+        return "\n".join(str(e) for e in entries) if isinstance(entries, list) else ""
+    if stored_type == "petlist":
+        try:
+            parsed = json.loads(value) if isinstance(value, str) and value.strip().startswith("[") else None
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(p) for p in parsed]
+    if stored_type in ("multiselect", "bosslist", "petlist"):
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        return [p.strip() for p in str(value or "").split(",") if p.strip()]
+    return value
+
+
+def _from_client(stored_type, value):
+    """What the plugin sent, in the form the registry's writer accepts."""
+    if stored_type == "messagelist":
+        lines = value.splitlines() if isinstance(value, str) else []
+        return [line.strip() for line in lines if line.strip()]
+    if stored_type in ("multiselect", "bosslist", "petlist") and isinstance(value, list):
+        picked = [str(v).strip() for v in value if str(v).strip()]
+        return ",".join(picked) if stored_type == "bosslist" else picked
+    return value
+
+
 def _settings_payload(s, user_id: int, group, errors=None) -> dict:
     """The schema the plugin draws: every registry setting as a typed field."""
     from db.entitlements import HALL_OF_FAME_CONFIG_KEYS
@@ -248,6 +324,7 @@ def _settings_payload(s, user_id: int, group, errors=None) -> dict:
 
     values = load_group_config(user_id, group.group_id)
     hof_locked = _hof_locked(s, user_id, group.group_id)
+    cache = {}
     fields = []
     for key in all_config_keys():
         field = get_config_field(key)
@@ -255,13 +332,16 @@ def _settings_payload(s, user_id: int, group, errors=None) -> dict:
         if field is None or field["key"] in MANAGED_KEYS:
             continue
         seasonal = key.startswith(SEASONAL_PREFIX) and key != field["key"]
-        kind = "password" if key in SENSITIVE_KEYS else field.get("type")
+        stored_type = field.get("type")
+        kind = "password" if key in SENSITIVE_KEYS else _AS_TYPE.get(stored_type, stored_type)
         editable = kind in EDITABLE_TYPES
         locked_reason = None
         if field["key"] in HALL_OF_FAME_CONFIG_KEYS and hof_locked:
             locked_reason = LOCKED_HOF
         options = []
-        if kind == "select":
+        if stored_type in _AS_TYPE and editable:
+            options = _picker_options(s, stored_type, field, cache)
+        elif kind == "select":
             for opt in field.get("options") or []:
                 if isinstance(opt, dict):
                     options.append({"value": str(opt.get("value")), "label": opt.get("label"), "group": None})
@@ -270,11 +350,11 @@ def _settings_payload(s, user_id: int, group, errors=None) -> dict:
         fields.append({
             "key": key,
             "label": field.get("label"),
-            "help": field.get("help"),
+            "help": (field.get("help") or "") + (" One message per line." if stored_type == "messagelist" else ""),
             "category": "seasonal" if seasonal else field.get("category"),
             "type": kind,
             # Never sent for sensitive keys or types drawn on the website only.
-            "value": values.get(key) if editable else None,
+            "value": _to_client(stored_type, values.get(key)) if editable else None,
             "options": options,
             "min": field.get("min"),
             "max": field.get("max"),
@@ -319,7 +399,7 @@ def _validate(s, user_id: int, group_id: int, changes: dict) -> dict:
         if field["key"] in MANAGED_KEYS:
             errors[key] = MANAGED
             continue
-        if key in SENSITIVE_KEYS or field.get("type") not in EDITABLE_TYPES:
+        if key in SENSITIVE_KEYS or _AS_TYPE.get(field.get("type"), field.get("type")) not in EDITABLE_TYPES:
             errors[key] = ON_WEBSITE
             continue
         if field["key"] in HALL_OF_FAME_CONFIG_KEYS:
@@ -329,7 +409,7 @@ def _validate(s, user_id: int, group_id: int, changes: dict) -> dict:
                 errors[key] = LOCKED_HOF
                 continue
         try:
-            coerce_to_storage(key, value)
+            coerce_to_storage(key, _from_client(field.get("type"), value))
         except ConfigValidationError as e:
             errors[key] = _sentence(key, e.detail)
     return errors
@@ -515,16 +595,20 @@ async def admin_save_settings(group_id: int):
 
         user_id, _ = _authorize(s, group_id, player_name, acc_hash)
         group = s.query(Group).filter(Group.group_id == group_id).first()
+        from web_api.config_registry import get_config_field
+
         errors = _validate(s, user_id, group_id, changes)
         if not errors and changes:
+            stored = {k: _from_client((get_config_field(k) or {}).get("type"), v) for k, v in changes.items()}
             try:
-                apply_group_config_patch(user_id, group_id, changes)
+                apply_group_config_patch(user_id, group_id, stored)
             except ProblemException as e:
                 if e.status == 403:
                     raise Refusal(403, "not_admin", NOT_ADMIN)
                 # Checks only the website's writer makes (a lootboard style
                 # that no longer exists, a taken group name) land on their key.
-                culprits = [k for k in changes if k in ("loot_board_type", "seasonal_loot_board_type", "group_name")]
+                culprits = [k for k in changes if k == "group_name"
+                            or (get_config_field(k) or {}).get("type") == "boardstyle"]
                 errors = {k: _problem_error(e) for k in (culprits or list(changes))}
         s.expire_all()
         return _settings_payload(s, user_id, group, errors), (422 if errors else 200)
@@ -534,3 +618,234 @@ async def admin_save_settings(group_id: int):
         return jsonify(payload), status
     except Refusal as e:
         return _refuse(e)
+
+
+# --------------------------------------------------------------------------- #
+# Members
+# --------------------------------------------------------------------------- #
+MEMBERS_PER_PAGE = 100
+HIDDEN_HELP = ("Hidden members still track their drops, but are left off your lootboard "
+               "and leaderboards.")
+
+
+def _ago(when) -> str:
+    seconds = max(0, int((datetime.now() - when).total_seconds()))
+    for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
+        if seconds >= size:
+            n = seconds // size
+            return f"{n} {unit}{'s' if n != 1 else ''} ago"
+    return "just now"
+
+
+def _wom_note(s, group) -> dict:
+    """What the Sync from WOM button says about the last sync."""
+    from db import GroupConfiguration
+
+    if not group.wom_id:
+        return {"can_sync": False, "note": "Add your WiseOldMan group under WiseOldMan & API to sync members."}
+    row = (s.query(GroupConfiguration.config_value)
+           .filter(GroupConfiguration.group_id == group.group_id,
+                   GroupConfiguration.config_key == "last_wom_sync").first())
+    try:
+        note = f"Last synced from WiseOldMan {_ago(datetime.fromisoformat(row[0]))}." if row and row[0] else None
+    except ValueError:
+        note = None
+    return {"can_sync": True, "note": note or "Members come from your WiseOldMan group, synced every hour."}
+
+
+def _member_page(rows, loot: dict, hidden: set, q: str, page: int) -> dict:
+    """One page of ``rows`` [(player_id, name)], most loot first. ``rank`` is
+    the place in the whole group, so a search keeps each member's position."""
+    from utils.format import rsn_contains
+
+    ranked = sorted(rows, key=lambda r: (-loot.get(r[0], 0), (r[1] or "").lower()))
+    needle = q.strip().lower()
+    matches = [(i + 1, pid, name) for i, (pid, name) in enumerate(ranked)
+               if not needle or rsn_contains(name or "", needle)]
+    pages = max(1, -(-len(matches) // MEMBERS_PER_PAGE))
+    page = min(max(1, page), pages)
+    start = (page - 1) * MEMBERS_PER_PAGE
+    total, hidden_count = len(rows), len(hidden & {pid for pid, _ in rows})
+    summary = f"{total:,} member{'s' if total != 1 else ''}"
+    if hidden_count:
+        summary += f", {hidden_count:,} hidden"
+    return {
+        "summary": summary,
+        "help": HIDDEN_HELP,
+        "rows": [{"player_id": pid, "name": name, "rank": rank,
+                  "detail": f"{_gp(loot[pid])} gp this month" if loot.get(pid) else "No loot this month",
+                  "hidden": pid in hidden}
+                 for rank, pid, name in matches[start:start + MEMBERS_PER_PAGE]],
+        "page": page,
+        "pages": pages,
+        "matches": len(matches),
+        # Plugin 6.1.15 shows one page; this says when there's more to find.
+        "footer": (f"Showing {MEMBERS_PER_PAGE} of {len(matches):,}. Search to find anyone else."
+                   if len(matches) > MEMBERS_PER_PAGE else None),
+    }
+
+
+def _members_payload(s, group, q: str, page: int) -> dict:
+    from db import IgnoredPlayer, Player
+    from db.models import user_group_association
+    from web_api.common import period_to_partition, player_month_totals
+
+    hidden = {pid for (pid,) in s.query(IgnoredPlayer.player_id)
+              .filter(IgnoredPlayer.group_id == group.group_id)}
+    rows = (s.query(Player.player_id, Player.player_name)
+            .join(user_group_association, user_group_association.c.player_id == Player.player_id)
+            .filter(user_group_association.c.group_id == group.group_id)
+            .distinct().all())
+    totals = player_month_totals([pid for pid, _ in rows], period_to_partition(None)) if rows else {}
+    payload = _member_page(rows, {pid: int(totals.get(pid) or 0) for pid, _ in rows}, hidden, q, page)
+    payload["wom"] = _wom_note(s, group)
+    return payload
+
+
+def _page_arg() -> int:
+    try:
+        return int(request.args.get("page") or 1)
+    except ValueError:
+        return 1
+
+
+@plugin_admin_bp.get("/plugin/admin/groups/<int:group_id>/members")
+@rate_limit(limit=40, period=timedelta(seconds=60))
+async def admin_members(group_id: int):
+    player_name, acc_hash, _ = await _identity_args()
+    q, page = (request.args.get("q") or "")[:40], _page_arg()
+
+    def work(s):
+        from db import Group
+
+        _authorize(s, group_id, player_name, acc_hash)
+        group = s.query(Group).filter(Group.group_id == group_id).first()
+        return _members_payload(s, group, q, page)
+
+    try:
+        return jsonify(await _run(work)), 200
+    except Refusal as e:
+        return _refuse(e)
+
+
+@plugin_admin_bp.post("/plugin/admin/groups/<int:group_id>/members/<int:player_id>/hidden")
+@rate_limit(limit=40, period=timedelta(seconds=60))
+async def admin_member_hidden(group_id: int, player_id: int):
+    player_name, acc_hash, body = await _identity_args()
+    hidden = body.get("hidden") is True
+
+    def work(s):
+        from db import AuditLog, IgnoredPlayer
+        from db.models import user_group_association
+
+        user_id, _ = _authorize(s, group_id, player_name, acc_hash)
+        member = (s.query(user_group_association.c.player_id)
+                  .filter(user_group_association.c.group_id == group_id,
+                          user_group_association.c.player_id == player_id).first())
+        if member is None:
+            raise Refusal(409, "not_member", "That player isn't in this group any more. Refresh the list.")
+        row = (s.query(IgnoredPlayer)
+               .filter(IgnoredPlayer.group_id == group_id, IgnoredPlayer.player_id == player_id).first())
+        if hidden and row is None:
+            s.add(IgnoredPlayer(group_id=group_id, player_id=player_id))
+        elif not hidden and row is not None:
+            s.delete(row)
+        s.add(AuditLog(actor_user_id=user_id, group_id=group_id,
+                       action="group.member.hide" if hidden else "group.member.show",
+                       target=f"player:{player_id}", before=None, after="plugin"))
+        s.commit()
+        return {"player_id": player_id, "hidden": hidden}
+
+    try:
+        return jsonify(await _run(work)), 200
+    except Refusal as e:
+        return _refuse(e)
+
+
+@plugin_admin_bp.post("/plugin/admin/groups/<int:group_id>/wom-sync")
+@rate_limit(limit=6, period=timedelta(seconds=60))
+async def admin_wom_sync(group_id: int):
+    player_name, acc_hash, _ = await _identity_args()
+
+    def work(s):
+        from db import Group
+
+        _authorize(s, group_id, player_name, acc_hash)
+        group = s.query(Group).filter(Group.group_id == group_id).first()
+        if not group.wom_id:
+            raise Refusal(409, "no_wom", _wom_note(s, group)["note"])
+        return int(group.wom_id)
+
+    try:
+        wom_id = await _run(work)
+    except Refusal as e:
+        return _refuse(e)
+    try:
+        from db.ops import sync_group_from_wom_with_stats
+
+        result = await sync_group_from_wom_with_stats(wom_id=wom_id)
+    except Exception:
+        return jsonify({"message": "WiseOldMan didn't answer. Try again in a minute.", "tone": "warn"}), 200
+    if result.get("on_cooldown"):
+        minutes = max(1, -(-int(result.get("cooldown_remaining_seconds") or 0) // 60))
+        return jsonify({"message": f"Synced recently. You can sync again in {minutes} minute"
+                        f"{'s' if minutes != 1 else ''}.", "tone": "warn"}), 200
+    added, removed = len(result.get("added") or []), len(result.get("removed") or [])
+    message = f"Synced: {added} joined, {removed} left, {int(result.get('total_members') or 0):,} members."
+    if result.get("skipped_removals"):
+        message += " WiseOldMan sent a partial list, so nobody was removed."
+    return jsonify({"message": message, "tone": "good"}), 200
+
+
+# --------------------------------------------------------------------------- #
+# Registering a group (services/plugin_registration.py)
+# --------------------------------------------------------------------------- #
+def _redis():
+    from utils.redis import redis_client
+
+    return redis_client.client
+
+
+@plugin_admin_bp.post("/plugin/register")
+@rate_limit(limit=6, period=timedelta(seconds=60))
+async def register_start():
+    player_name, acc_hash, body = await _identity_args()
+    if not player_name or not acc_hash:
+        return jsonify({"error": NOT_REGISTERED, "code": "bad_request"}), 400
+    wom_id = body.get("wom_id")
+
+    def check(s):
+        from db import Group
+
+        if wom_id is not None and s.query(Group.group_id).filter(Group.wom_id == wom_id).first():
+            raise Refusal(409, "wom_conflict", "That WiseOldMan group is already on the DropTracker.")
+
+    from services import plugin_registration as reg
+
+    try:
+        if isinstance(wom_id, int):
+            await _run(check)
+            from utils.wiseoldman import check_group_by_id
+
+            name, count, _ = await check_group_by_id(wom_id)
+            if not name:
+                raise reg.RegistrationError("WiseOldMan doesn't know that group. Check the id or link.", "wom")
+            note = f"WiseOldMan group: {name} ({count or 0:,} members)."
+        else:
+            note = None
+        out = reg.start(_redis(), acc_hash=str(acc_hash), player_name=player_name, name=body.get("name"),
+                        wom_id=wom_id, roster=body.get("roster"))
+    except Refusal as e:
+        return jsonify({"error": e.message, "code": e.code, "field": "wom"}), e.status
+    except reg.RegistrationError as e:
+        return jsonify({"error": e.message, "code": "invalid", "field": e.field}), 422
+    out["note"] = note
+    return jsonify(out), 200
+
+
+@plugin_admin_bp.get("/plugin/register/status")
+@rate_limit(limit=40, period=timedelta(seconds=60))
+async def register_status():
+    from services import plugin_registration as reg
+
+    return jsonify(reg.status(_redis(), request.args.get("id") or "", request.args.get("acc_hash") or "")), 200

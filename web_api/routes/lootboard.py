@@ -63,6 +63,32 @@ _DEFAULT_THEME_URL = f"{IMG_BASE}/lootboard/bank-new-clean-dark.png"
 _STYLE_PREVIEW_DIR = "/store/droptracker/disc/static/assets/img/lootboards"
 
 
+def selectable_styles(s) -> list:
+    """The lootboard styles a group may pick, by category. Also what the
+    plugin's group settings offer (api/routes/plugin_admin.py)."""
+    rows = (
+        s.query(LootboardStyle)
+        .order_by(LootboardStyle.category, LootboardStyle.id)
+        .all()
+    )
+    styles = []
+    for r in rows:
+        if not os.path.exists(os.path.join(_STYLE_PREVIEW_DIR, f"{r.id}.png")):
+            continue
+        # Never offer a style whose theme background is missing on
+        # disk — the PNG generator would fail for any group using it.
+        if r.local_url and not os.path.exists(r.local_url):
+            continue
+        styles.append({
+            "id": int(r.id),
+            "name": r.name or f"Style {r.id}",
+            "category": r.category or "Other",
+            "description": r.description or "",
+            "preview_url": f"{IMG_BASE}/lootboards/{r.id}.png",
+        })
+    return styles
+
+
 @lootboard_bp.get("/lootboard-styles")
 async def lootboard_styles():
     """Catalog of selectable lootboard styles (public, cached).
@@ -74,27 +100,7 @@ async def lootboard_styles():
     """
     def _load():
         with db_session() as s:
-            rows = (
-                s.query(LootboardStyle)
-                .order_by(LootboardStyle.category, LootboardStyle.id)
-                .all()
-            )
-            styles = []
-            for r in rows:
-                if not os.path.exists(os.path.join(_STYLE_PREVIEW_DIR, f"{r.id}.png")):
-                    continue
-                # Never offer a style whose theme background is missing on
-                # disk — the PNG generator would fail for any group using it.
-                if r.local_url and not os.path.exists(r.local_url):
-                    continue
-                styles.append({
-                    "id": int(r.id),
-                    "name": r.name or f"Style {r.id}",
-                    "category": r.category or "Other",
-                    "description": r.description or "",
-                    "preview_url": f"{IMG_BASE}/lootboards/{r.id}.png",
-                })
-            return styles
+            return selectable_styles(s)
 
     styles = await asyncio.to_thread(_load)
     return with_cache_headers(jsonify({"styles": styles}), max_age=300)

@@ -193,7 +193,7 @@ def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
     # boardstyle keys reference lootboards-table rows; the catalog lives in
     # the DB (GET /lootboard-styles), so existence is checked here rather
     # than against the static registry.
-    for key in ("loot_board_type", "seasonal_loot_board_type"):
+    for key in [k for k in coerced if (get_config_field(k) or {}).get("type") == "boardstyle"]:
         if key in coerced:
             try:
                 style_id = int(str(coerced[key]).strip())
@@ -475,6 +475,37 @@ _PB_BOSSES_CACHE_KEY = "web:pb-boss-names"
 _PB_BOSSES_CACHE_TTL = 600
 
 
+def pb_boss_names():
+    """``(names, cached)``: the boss names `personal_best_embed_boss_list` may
+    hold (every NPC with a personal best stored), from Redis when it can.
+    Also what the plugin's group settings offer (api/routes/plugin_admin.py)."""
+    conn = _rc()
+    if conn is not None:
+        try:
+            raw = conn.get(_PB_BOSSES_CACHE_KEY)
+            if raw:
+                return json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw), True
+        except Exception:
+            pass
+
+    with db_session() as s:
+        rows = (
+            s.query(NpcList.npc_name)
+            .join(PersonalBestEntry, PersonalBestEntry.npc_id == NpcList.npc_id)
+            .distinct()
+            .order_by(NpcList.npc_name)
+            .all()
+        )
+        names = [r[0] for r in rows]
+
+    if conn is not None:
+        try:
+            conn.set(_PB_BOSSES_CACHE_KEY, json.dumps(names), ex=_PB_BOSSES_CACHE_TTL)
+        except Exception:
+            pass
+    return names, False
+
+
 @config_bp.get("/groups/<int:group_id>/pb-bosses")
 async def get_group_pb_bosses(group_id: int):
     """Boss names eligible for `personal_best_embed_boss_list` — the distinct
@@ -491,33 +522,5 @@ async def get_group_pb_bosses(group_id: int):
 
     await asyncio.to_thread(_authorize)
 
-    conn = _rc()
-    if conn is not None:
-        try:
-            raw = conn.get(_PB_BOSSES_CACHE_KEY)
-            if raw:
-                names = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
-                return private_no_store(jsonify({"bosses": names, "cached": True}))
-        except Exception:
-            pass
-
-    def _load():
-        with db_session() as s:
-            rows = (
-                s.query(NpcList.npc_name)
-                .join(PersonalBestEntry, PersonalBestEntry.npc_id == NpcList.npc_id)
-                .distinct()
-                .order_by(NpcList.npc_name)
-                .all()
-            )
-            return [r[0] for r in rows]
-
-    names = await asyncio.to_thread(_load)
-
-    if conn is not None:
-        try:
-            conn.set(_PB_BOSSES_CACHE_KEY, json.dumps(names), ex=_PB_BOSSES_CACHE_TTL)
-        except Exception:
-            pass
-
-    return private_no_store(jsonify({"bosses": names, "cached": False}))
+    names, cached = await asyncio.to_thread(pb_boss_names)
+    return private_no_store(jsonify({"bosses": names, "cached": cached}))
