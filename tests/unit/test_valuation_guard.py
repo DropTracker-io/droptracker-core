@@ -26,12 +26,18 @@ def test_large_but_realistic_stack_is_within_limit():
 
 
 def test_top_tier_single_item_within_limit():
-    # 3rd age-tier item (GE integer ceiling) at quantity 1.
+    # The old 32-bit GE ceiling at quantity 1.
     assert exceeds_value_sanity_limit(unit_value=2_147_483_647, quantity=1) is False
 
 
-def test_total_above_top_tier_single_item_is_flagged():
-    assert exceeds_value_sanity_limit(unit_value=5_000_000_000, quantity=1) is True
+def test_items_priced_above_32_bit_are_accepted():
+    # Obligator (uncharged) drops rejected on 2026-10-21/22 at these GE prices.
+    for price in (3_750_000_000, 4_440_000_003, 5_000_000_015):
+        assert exceeds_value_sanity_limit(unit_value=price, quantity=1) is False
+
+
+def test_spoofed_quantity_of_a_top_item_is_flagged():
+    assert exceeds_value_sanity_limit(unit_value=5_000_000_000, quantity=10) is True
 
 
 def test_absurd_total_is_flagged():

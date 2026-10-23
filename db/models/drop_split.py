@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, ForeignKey, DateTime, event
+from sqlalchemy import BigInteger, Column, Integer, ForeignKey, DateTime, event
 from sqlalchemy import func
 from sqlalchemy.orm import relationship
 
@@ -21,7 +21,7 @@ class DropSplit(Base):
     drop_id     = Column(Integer, ForeignKey('drops.drop_id'), nullable=False, index=True)
     player_id   = Column(Integer, ForeignKey('players.player_id'), nullable=False, index=True)
     group_id    = Column(Integer, ForeignKey('groups.group_id'), nullable=False, index=True)
-    split_value = Column(Integer, nullable=False)
+    split_value = Column(BigInteger, nullable=False)
     date_added  = Column(DateTime, default=func.now())
 
     player = relationship("Player")
