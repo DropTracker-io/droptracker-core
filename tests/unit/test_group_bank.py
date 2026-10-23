@@ -136,6 +136,40 @@ class TestMergeDonors:
         assert top[0]["player_id"] == 19
 
 
+class TestCofferRules:
+    def test_status_defaults_to_review(self):
+        assert gbs.coffer_status("confirmed") == "confirmed"
+        assert gbs.coffer_status(" Confirmed ") == "confirmed"
+        assert gbs.coffer_status("pending") == "pending"
+        for raw in (None, "", "yes", "1"):
+            assert gbs.coffer_status(raw) == "pending"
+
+    def test_kinds_map_to_bank_kinds(self):
+        assert gbs.COFFER_KINDS == {"coffer_donation": "donation", "coffer_withdrawal": "withdrawal"}
+
+    def test_ref_is_deterministic_and_fits_the_column(self):
+        a = gbs.coffer_ref("clan", "X has deposited 5 coins into the coffer.", 100, 1)
+        assert a == gbs.coffer_ref("clan", "X has deposited 5 coins into the coffer.", 100, 1)
+        assert a.startswith("coffer:") and len(a) <= 80
+
+    def test_ref_differs_by_clan_line_bucket_and_occurrence(self):
+        base = gbs.coffer_ref("clan", "m", 100, 1)
+        assert gbs.coffer_ref("other", "m", 100, 1) != base
+        assert gbs.coffer_ref("clan", "n", 100, 1) != base
+        assert gbs.coffer_ref("clan", "m", 101, 1) != base
+        # One relayer seeing the same line twice: a second, real deposit.
+        assert gbs.coffer_ref("clan", "m", 100, 2) != base
+
+    def test_relays_straddling_a_bucket_edge_collapse(self):
+        edge = 100 * gbs.COFFER_BUCKET_SECONDS
+        first, _ = gbs.coffer_refs("clan", "m", edge - 1, 1)
+        _, seen = gbs.coffer_refs("clan", "m", edge + 2, 1)
+        assert first in seen
+
+    def test_occurrence_outlives_the_match_window(self):
+        assert gbs.COFFER_OCCURRENCE_TTL_SECONDS >= 2 * gbs.COFFER_BUCKET_SECONDS
+
+
 # --------------------------------------------------------------------------- #
 # Route harness
 # --------------------------------------------------------------------------- #

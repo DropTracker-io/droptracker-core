@@ -57,6 +57,12 @@ first only so ``MIRROR_SUPPRESSED_KINDS`` can drop channel-presence churn and
 the client's own channel notices; anything else, including a line that fails to
 parse at all, still mirrors.
 
+Coffer lines ("X has deposited 5,000,000 coins into the coffer.") take a
+separate path into the clan bank (``_process_coffer``, web144a): bound through
+the group's ``bank_coffer_sync`` opt-in rather than ``clan_broadcast_tracking``
+and deduped by ``group_bank_entries.external_ref`` rather than the layers
+below, because two real deposits can print identical lines.
+
 Dedupe is three-layered, because N clanmates may relay the same line and
 queue redelivery must be a no-op:
 1. Redis ``SET NX EX`` on (clan, message) — collapses concurrent relayers
@@ -117,6 +123,18 @@ CLAN_NAME_KEY = "clan_chat_name"
 #: (opting into tracking is opting into imageless notifications from it); a
 #: group that would rather have silence than an imageless embed turns it off.
 NOTIFY_WITHOUT_IMAGES_KEY = "clan_broadcast_notify_without_images"
+#: Clan bank coffer sync (web144a): a separate opt-in from drop tracking.
+COFFER_SYNC_KEY = "bank_coffer_sync"
+COFFER_STATUS_KEY = "bank_coffer_status"
+
+#: Parsed kinds that feed the clan bank rather than drop tracking. Re-declared
+#: from services.group_bank.COFFER_KINDS, which is imported lazily (the
+#: unit-test conftest stubs the services package).
+COFFER_BROADCAST_KINDS = frozenset({"coffer_donation", "coffer_withdrawal"})
+
+#: How long a relayer's payload guid is remembered for coffer lines, so a
+#: queue redelivery or a late replay of the same payload never books twice.
+COFFER_GUID_TTL_SECONDS = 7 * 86400
 
 #: Broadcast kinds NOT worth mirroring into the bridge channel. Clan-channel
 #: presence churn ("X has joined." / "X has left.") is the overwhelming majority
@@ -223,16 +241,21 @@ def _deterministic_guid(clan_slug: str, message: str, stamp: datetime) -> str:
     return f"cc:{digest}"
 
 
-def _bound_group_ids(session, relayer_player, clan_slug):
-    """Group ids of the relayer bound to this clan and opted in, with their
-    configured min-value floors: ``{group_id: min_value_int}``."""
+def _relayer_group_ids(session, relayer_player) -> list:
+    """The relayer's own groups, minus the template (1) and Global (2)."""
     from sqlalchemy import text as sql_text
 
     rows = session.execute(
         sql_text("SELECT DISTINCT group_id FROM user_group_association WHERE player_id = :pid"),
         {"pid": relayer_player.player_id},
     ).all()
-    candidate_ids = [gid for (gid,) in rows if gid and gid > 2]
+    return [gid for (gid,) in rows if gid and gid > 2]
+
+
+def _bound_group_ids(session, relayer_player, clan_slug):
+    """Group ids of the relayer bound to this clan and opted in, with their
+    configured min-value floors: ``{group_id: min_value_int}``."""
+    candidate_ids = _relayer_group_ids(session, relayer_player)
     if not candidate_ids:
         return {}
 
@@ -252,6 +275,199 @@ def _bound_group_ids(session, relayer_player, clan_slug):
             floor = 0
         bound[gid] = floor
     return bound
+
+
+def _coffer_group_ids(session, relayer_player, clan_slug):
+    """Groups of the relayer that sync this clan's coffer into their bank,
+    with the status new rows get: ``{group_id: "pending" | "confirmed"}``.
+    Independent of drop tracking: a clan may want either without the other."""
+    from services.group_bank import coffer_status
+
+    candidate_ids = _relayer_group_ids(session, relayer_player)
+    if not candidate_ids:
+        return {}
+
+    from utils import group_config as gc
+
+    values = gc.get_bulk(
+        session, candidate_ids, [COFFER_SYNC_KEY, COFFER_STATUS_KEY, CLAN_NAME_KEY]
+    )
+    bound = {}
+    for gid in candidate_ids:
+        if not gc.is_truthy(values.get((gid, COFFER_SYNC_KEY))):
+            continue
+        configured = _clan_slug(values.get((gid, CLAN_NAME_KEY)) or "")
+        if not configured or configured != clan_slug:
+            continue
+        bound[gid] = coffer_status(values.get((gid, COFFER_STATUS_KEY)))
+    return bound
+
+
+def _coffer_payload_is_new(guid) -> bool:
+    """Claim a relayer payload guid for the coffer path. False = this exact
+    payload was handled before (queue redelivery, late replay). Fails open:
+    without Redis the external_ref match still collapses near-time repeats."""
+    if not guid:
+        return True
+    try:
+        return bool(redis_client.client.set(
+            f"clanchat:coffer:guid:{guid}", "1", nx=True, ex=COFFER_GUID_TTL_SECONDS
+        ))
+    except Exception:
+        return True
+
+
+def _forget_coffer_payload(guid) -> None:
+    """Release a claimed guid after a failed write, so a retry is not read as
+    a duplicate (a guid that produced no row must never block one)."""
+    if not guid:
+        return
+    try:
+        redis_client.client.delete(f"clanchat:coffer:guid:{guid}")
+    except Exception:
+        pass
+
+
+def _coffer_occurrence(clan_slug, message, relayer_player_id) -> int:
+    """How many times this relayer has sent this exact coffer line lately,
+    this one included (see services/group_bank.coffer_ref). 1 without Redis."""
+    from services.group_bank import COFFER_OCCURRENCE_TTL_SECONDS
+
+    digest = hashlib.sha256(message.encode("utf-8")).hexdigest()[:24]
+    key = f"clanchat:coffer:occ:{clan_slug}:{digest}:{relayer_player_id}"
+    try:
+        client = redis_client.client
+        count = client.incr(key)
+        client.expire(key, COFFER_OCCURRENCE_TTL_SECONDS)
+        return max(1, int(count))
+    except Exception:
+        return 1
+
+
+def _coffer_counterparty(session, name):
+    """``(player_id, rsn)`` for the coffer line's player: a tracked account
+    when the name is one (so donor totals follow name changes), else the name
+    as printed. Unlike chat drops, no roster requirement: the bank takes
+    free-text names for anyone."""
+    name = (name or "").strip()[:24]
+    try:
+        from db import Player
+        from utils.rsn import find_player_by_rsn
+
+        player = find_player_by_rsn(session, Player, name)
+    except Exception:
+        player = None
+    if player is not None:
+        return player.player_id, player.player_name
+    return None, name
+
+
+def _process_coffer(session, use_external_session, broadcast_data, relayer, clan_slug,
+                    message, parsed, mirror_note=""):
+    """Book a relayed coffer deposit or withdrawal into the clan bank of every
+    relayer group syncing this clan's coffer (``bank_coffer_sync``).
+
+    Not a drop: no roster binding, no plugin reconciliation (the plugin has no
+    coffer submission of its own) and no notification. Idempotent three ways:
+    the payload guid catches redelivery, and the deterministic
+    ``external_ref`` (matched against this time bucket and the last, and held
+    unique per group by the DB) collapses N relayers onto one row while still
+    booking a real repeat deposit — see services/group_bank.coffer_ref."""
+    from services.group_bank import COFFER_KINDS, BankRuleError, coffer_refs, signed_amount
+
+    if not parsed.player or not parsed.value_gp:
+        return SubmissionResponse(True, f"Coffer line without a name or amount; skipped{mirror_note}")
+    if not _relayer_within_rate_limit(relayer.player_id):
+        _stat("rate_limited")
+        return SubmissionResponse(False, f"Clan broadcast rate limit exceeded{mirror_note}")
+    groups = _coffer_group_ids(session, relayer, clan_slug)
+    if not groups:
+        _stat("coffer_no_bound_group")
+        return SubmissionResponse(
+            True, f"No group of yours syncs this clan's coffer into its bank{mirror_note}"
+        )
+    kind = COFFER_KINDS[parsed.kind]
+    try:
+        amount = signed_amount(kind, parsed.value_gp)
+    except BankRuleError:
+        _stat("coffer_out_of_range")
+        return SubmissionResponse(True, "Coffer amount out of range; skipped")
+
+    guid = broadcast_data.get("guid")
+    if not _coffer_payload_is_new(guid):
+        _stat("coffer_redelivery")
+        return SubmissionResponse(True, "Coffer line already handled")
+    occurrence = _coffer_occurrence(clan_slug, message, relayer.player_id)
+    stamp = received_at(broadcast_data)
+    ref, seen_refs = coffer_refs(clan_slug, message, stamp.timestamp(), occurrence)
+    player_id, rsn = _coffer_counterparty(session, parsed.player)
+
+    from sqlalchemy.exc import IntegrityError
+
+    from db import AuditLog, GroupBankEntry
+
+    booked = 0
+    try:
+        for gid, status in groups.items():
+            already = (
+                session.query(GroupBankEntry.id)
+                .filter(GroupBankEntry.group_id == gid, GroupBankEntry.external_ref.in_(seen_refs))
+                .first()
+            )
+            if already:
+                continue
+            try:
+                with session.begin_nested():
+                    row = GroupBankEntry(
+                        group_id=gid,
+                        kind=kind,
+                        amount=amount,
+                        status=status,
+                        source="coffer",
+                        player_id=player_id,
+                        rsn=rsn,
+                        external_ref=ref,
+                        created_at=stamp,
+                        confirmed_at=stamp if status == "confirmed" else None,
+                    )
+                    session.add(row)
+                    session.flush()
+                    session.add(AuditLog(
+                        actor_user_id=None,
+                        group_id=gid,
+                        action="group.bank.coffer",
+                        target=f"group_bank_entries.{row.id}",
+                        before=None,
+                        after=json.dumps({
+                            "kind": kind, "amount": amount, "status": status,
+                            "source": "coffer", "player_id": player_id, "rsn": rsn,
+                            "relayed_by": relayer.player_id,
+                        }),
+                    ))
+                    session.flush()
+            except IntegrityError:
+                # Another relayer's copy booked it between the lookup and the
+                # insert; the unique index is the backstop for exactly this.
+                continue
+            booked += 1
+        if use_external_session:
+            session.flush()
+        else:
+            session.commit()
+    except Exception as e:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        _forget_coffer_payload(guid)
+        return SubmissionResponse(False, f"Coffer sync failed: {e}")
+
+    _stat("coffer_booked" if booked else "coffer_duplicate")
+    if not booked:
+        return SubmissionResponse(True, "Coffer line already in the bank")
+    return SubmissionResponse(
+        True, f"Coffer {kind} of {abs(amount):,} gp booked for {booked} group(s){mirror_note}"
+    )
 
 
 def _find_subject_in_groups(session, subject_name: str, group_ids):
@@ -826,6 +1042,13 @@ async def clan_broadcast_processor(
             _log_unknown_broadcast(message)
         return SubmissionResponse(mirrored > 0, f"Unrecognized clan broadcast{mirror_note}")
     _stat(f"kind:{parsed.kind}")
+    if parsed.kind in COFFER_BROADCAST_KINDS:
+        # Clan bank, not drop tracking: its own opt-in and its own dedupe
+        # (the layer-1 "seen" key below would eat a real repeat deposit).
+        return _process_coffer(
+            session, use_external_session, broadcast_data, relayer, clan_slug,
+            message, parsed, mirror_note,
+        )
     if parsed.kind not in TRACKED_KINDS or not parsed.player:
         # Recognized-but-untracked (quests, PKs, roster churn, ...): a clean
         # no-op, not a rejection — the relayer did nothing wrong, and the line

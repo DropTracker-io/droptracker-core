@@ -1100,6 +1100,27 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "List top donors and recent bank activity by name on your group page. Turn off to show only the totals.",
         "default": True,
     },
+    # In-game coffer sync (web144a): relayed "X has deposited N coins into the
+    # coffer." broadcasts become bank rows (data/submissions/clan_broadcast.py).
+    # Opting in also opts the clan into broadcast relaying (utils/
+    # clan_relay_gate), so plugin users start sending the lines.
+    {
+        "key": "bank_coffer_sync",
+        "label": "Sync the in-game clan coffer",
+        "category": "bank",
+        "type": "boolean",
+        "help": "Record coffer deposits and withdrawals from your in-game clan broadcasts automatically. Requires the clan chat name to be set and coffer broadcasts to be shown in game. Only lines seen while a clanmate with the DropTracker plugin is online are recorded, so record anything missed by hand.",
+        "default": False,
+    },
+    {
+        "key": "bank_coffer_status",
+        "label": "Synced coffer entries",
+        "category": "bank",
+        "type": "select",
+        "help": "Whether synced coffer entries wait in the review queue or count straight away. Review is safer: the lines are relayed by clanmates' clients, not read from Jagex directly.",
+        "default": "pending",
+        "options": ["pending", "confirmed"],
+    },
 
     # --- PvP ---
     # Player kills are tracked apart from drops (data/submissions/pvp.py,

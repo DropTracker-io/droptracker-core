@@ -4,8 +4,9 @@ Clan chat relaying is on by default in the plugin (6.0.18+), so the privacy
 line is drawn on the server's side of the wire: a clan's chat, and the
 broadcasts in its chat box, are only taken in when at least one group has
 opted that clan in, through ``clan_chat_bridge_enabled`` plus a bridge channel
-(the two-way bridge) or through ``clan_broadcast_tracking``. Both need
-``clan_chat_name`` to name the clan.
+(the two-way bridge) or through ``clan_broadcast_tracking`` or the clan bank's
+``bank_coffer_sync`` (both read broadcasts, so both count as "tracking"
+below). All need ``clan_chat_name`` to name the clan.
 
 Three layers enforce it, so no single bug stores a stranger's chat:
 
@@ -31,6 +32,7 @@ import time
 BRIDGE_ENABLED_KEY = "clan_chat_bridge_enabled"
 BRIDGE_CHANNEL_KEY = "channel_id_clan_chat_bridge"
 TRACKING_KEY = "clan_broadcast_tracking"
+COFFER_SYNC_KEY = "bank_coffer_sync"
 CLAN_NAME_KEY = "clan_chat_name"
 
 #: Submission types carrying raw clan chat text.
@@ -65,7 +67,10 @@ def relay_flags(values: dict) -> tuple:
     bridge = _truthy(values.get(BRIDGE_ENABLED_KEY)) and _channel_set(
         values.get(BRIDGE_CHANNEL_KEY)
     )
-    tracking = _truthy(values.get(TRACKING_KEY))
+    # Coffer sync reads the same broadcast lines as drop tracking, so to the
+    # plugin (and the published list) it is broadcast tracking too; which
+    # group gets which record is decided in data/submissions/clan_broadcast.
+    tracking = _truthy(values.get(TRACKING_KEY)) or _truthy(values.get(COFFER_SYNC_KEY))
     return bridge, tracking, slug
 
 
@@ -113,7 +118,8 @@ def opted_in_clan_flags(session=None) -> dict:
             )
             .filter(
                 GroupConfiguration.config_key.in_(
-                    [BRIDGE_ENABLED_KEY, BRIDGE_CHANNEL_KEY, TRACKING_KEY, CLAN_NAME_KEY]
+                    [BRIDGE_ENABLED_KEY, BRIDGE_CHANNEL_KEY, TRACKING_KEY, COFFER_SYNC_KEY,
+                     CLAN_NAME_KEY]
                 )
             )
             .all()

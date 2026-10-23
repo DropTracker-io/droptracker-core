@@ -944,3 +944,271 @@ def test_chat_clog_uses_the_items_only_source(monkeypatch):
 def test_chat_clog_without_a_sole_source_says_clan_broadcast(monkeypatch):
     sent = _run_chat_clog(monkeypatch, None)
     assert [d["npc_name"] for d in sent] == [cb.SENTINEL_NPC_NAME] == ["Clan Broadcast"]
+
+
+# ── clan bank coffer sync (web144a) ─────────────────────────────────────────
+
+import sys
+from contextlib import contextmanager
+
+from sqlalchemy.exc import IntegrityError
+
+import services.group_bank as gbs
+
+
+class _Col:
+    """A column stand-in whose comparisons the scripted query can read."""
+
+    def __eq__(self, other):
+        return ("eq", other)
+
+    def in_(self, values):
+        return ("in", tuple(values))
+
+    __hash__ = object.__hash__
+
+
+class _CofferRow:
+    id = None
+    group_id = _Col()
+    external_ref = _Col()
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _CofferAudit:
+    id = None
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _CofferQuery:
+    def __init__(self, session):
+        self.session = session
+        self.args = ()
+
+    def filter(self, *args):
+        self.args = args
+        return self
+
+    def first(self):
+        gid = next(a[1] for a in self.args if a[0] == "eq")
+        refs = next(a[1] for a in self.args if a[0] == "in")
+        self.session.lookups.append((gid, refs))
+        return (1,) if any((gid, r) in self.session.booked for r in refs) else None
+
+
+class _CofferSession:
+    """Scripted session: ``booked`` holds (group_id, external_ref) pairs that
+    already exist; ``race_groups`` makes the insert for a group hit the unique
+    index, as when another relayer's copy wins between lookup and insert."""
+
+    def __init__(self, booked=(), race_groups=(), fail_commit=False):
+        self.booked = set(booked)
+        self.race_groups = set(race_groups)
+        self.fail_commit = fail_commit
+        self.added = []
+        self.lookups = []
+        self.committed = False
+
+    def query(self, *_a):
+        return _CofferQuery(self)
+
+    @contextmanager
+    def begin_nested(self):
+        mark = len(self.added)
+        try:
+            yield
+        except Exception:
+            del self.added[mark:]
+            raise
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    def flush(self):
+        for i, obj in enumerate(self.added):
+            if obj.id is None:
+                obj.id = 500 + i
+            if isinstance(obj, _CofferRow) and obj.group_id in self.race_groups:
+                raise IntegrityError("INSERT", {}, Exception("Duplicate entry"))
+
+    def commit(self):
+        if self.fail_commit:
+            raise RuntimeError("db went away")
+        self.committed = True
+
+    def rollback(self):
+        pass
+
+    @property
+    def rows(self):
+        return [o for o in self.added if isinstance(o, _CofferRow)]
+
+    @property
+    def audits(self):
+        return [o for o in self.added if isinstance(o, _CofferAudit)]
+
+
+_STAMP = datetime(2026, 10, 23, 12, 0, 30)
+_DEPOSIT = "Generous One has deposited 5,000,000 coins into the coffer."
+_WITHDRAWAL = "Treasurer has withdrawn 2,000,000 coins from the coffer."
+_SLUG = "the best clan"
+
+
+@pytest.fixture
+def coffer(monkeypatch):
+    db_stub = sys.modules["db"]
+    monkeypatch.setattr(db_stub, "GroupBankEntry", _CofferRow, raising=False)
+    monkeypatch.setattr(db_stub, "AuditLog", _CofferAudit, raising=False)
+    state = {"groups": {10: "pending"}, "occurrence": 1, "new_guid": True, "forgotten": []}
+    monkeypatch.setattr(cb, "_coffer_group_ids", lambda _s, _r, _slug: state["groups"])
+    monkeypatch.setattr(cb, "_coffer_occurrence", lambda _slug, _m, _pid: state["occurrence"])
+    monkeypatch.setattr(cb, "_coffer_payload_is_new", lambda _g: state["new_guid"])
+    monkeypatch.setattr(cb, "_forget_coffer_payload", lambda g: state["forgotten"].append(g))
+    monkeypatch.setattr(cb, "_coffer_counterparty", lambda _s, name: (None, name))
+    monkeypatch.setattr(cb, "_relayer_within_rate_limit", lambda _pid: True)
+    monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
+    monkeypatch.setattr(cb, "received_at", lambda _data: _STAMP)
+    return state
+
+
+def _run_coffer(session, line=_DEPOSIT, guid="g1"):
+    from utils.clan_broadcasts import parse_broadcast
+
+    return cb._process_coffer(
+        session, False, {"guid": guid}, _FakePlayer(), _SLUG, line, parse_broadcast(line)
+    )
+
+
+def _ref(line=_DEPOSIT, occurrence=1, stamp=_STAMP):
+    return gbs.coffer_refs(_SLUG, line, stamp.timestamp(), occurrence)[0]
+
+
+def test_coffer_deposit_books_a_pending_donation(coffer):
+    s = _CofferSession()
+    response = _run_coffer(s)
+    assert response.success is True and "booked for 1 group" in response.message
+    (row,) = s.rows
+    assert (row.group_id, row.kind, row.amount, row.status, row.source) == (
+        10, "donation", 5_000_000, "pending", "coffer",
+    )
+    assert row.rsn == "Generous One" and row.player_id is None
+    assert row.external_ref == _ref() and row.confirmed_at is None
+    assert row.created_at == _STAMP
+    (audit,) = s.audits
+    assert audit.action == "group.bank.coffer" and audit.actor_user_id is None
+    assert json.loads(audit.after)["relayed_by"] == _FakePlayer.player_id
+    assert s.committed
+
+
+def test_coffer_withdrawal_is_negative_and_auto_confirm_stamps_it(coffer):
+    coffer["groups"] = {10: "confirmed"}
+    s = _CofferSession()
+    _run_coffer(s, _WITHDRAWAL)
+    (row,) = s.rows
+    assert row.kind == "withdrawal" and row.amount == -2_000_000
+    assert row.status == "confirmed" and row.confirmed_at == _STAMP
+
+
+def test_coffer_line_another_relayer_booked_is_skipped(coffer):
+    s = _CofferSession(booked={(10, _ref())})
+    response = _run_coffer(s)
+    assert response.success is True and "already in the bank" in response.message
+    assert s.rows == []
+
+
+def test_coffer_relay_from_the_previous_bucket_is_matched(coffer):
+    earlier = datetime.fromtimestamp(_STAMP.timestamp() - gbs.COFFER_BUCKET_SECONDS)
+    s = _CofferSession(booked={(10, _ref(stamp=earlier))})
+    _run_coffer(s)
+    assert s.rows == []
+
+
+def test_coffer_repeat_deposit_by_the_same_relayer_books_again(coffer):
+    # Same line, but this relayer has now seen it twice: a second deposit.
+    coffer["occurrence"] = 2
+    s = _CofferSession(booked={(10, _ref(occurrence=1))})
+    _run_coffer(s)
+    (row,) = s.rows
+    assert row.external_ref == _ref(occurrence=2)
+
+
+def test_coffer_redelivered_payload_is_a_no_op(coffer):
+    coffer["new_guid"] = False
+    s = _CofferSession()
+    response = _run_coffer(s)
+    assert response.success is True and s.rows == [] and s.lookups == []
+
+
+def test_coffer_insert_race_is_absorbed_by_the_unique_index(coffer):
+    s = _CofferSession(race_groups={10})
+    response = _run_coffer(s)
+    assert response.success is True and s.rows == []
+    assert s.committed and coffer["forgotten"] == []
+
+
+def test_coffer_books_once_per_syncing_group_with_its_own_status(coffer):
+    coffer["groups"] = {10: "pending", 11: "confirmed"}
+    s = _CofferSession(booked={(11, _ref())})
+    _run_coffer(s)
+    assert [(r.group_id, r.status) for r in s.rows] == [(10, "pending")]
+
+
+def test_coffer_without_a_syncing_group_writes_nothing(coffer):
+    coffer["groups"] = {}
+    s = _CofferSession()
+    response = _run_coffer(s)
+    assert response.success is True and "syncs this clan's coffer" in response.message
+    assert s.rows == [] and not s.committed
+
+
+def test_coffer_failed_write_releases_the_guid(coffer):
+    s = _CofferSession(fail_commit=True)
+    response = _run_coffer(s)
+    assert response.success is False
+    assert coffer["forgotten"] == ["g1"]
+
+
+def test_coffer_lines_take_the_bank_path_not_drop_tracking(mirror_spy, monkeypatch):
+    calls = []
+
+    def _fake_coffer(*args):
+        calls.append(args[5])
+        return cb.SubmissionResponse(True, "ok")
+
+    def _no_tracking(*_a, **_k):
+        raise AssertionError("coffer lines must not reach drop-tracking binding")
+
+    monkeypatch.setattr(cb, "_process_coffer", _fake_coffer)
+    monkeypatch.setattr(cb, "_bound_group_ids", _no_tracking)
+    response = asyncio.run(cb.clan_broadcast_processor(_payload(_DEPOSIT)))
+    assert response.success is True and calls == [_DEPOSIT]
+    # The bridge mirror still sees the line, as for every other kind.
+    assert [call[1] for call in mirror_spy.calls] == [_DEPOSIT]
+
+
+def test_coffer_groups_need_the_sync_flag_and_a_matching_clan(monkeypatch):
+    from utils import group_config as gc
+
+    config = {
+        (10, "bank_coffer_sync"): "1",
+        (10, "clan_chat_name"): "The Best Clan",
+        (10, "bank_coffer_status"): "confirmed",
+        (11, "bank_coffer_sync"): "1",
+        (11, "clan_chat_name"): "The_Best_Clan",   # status unset -> review
+        (12, "bank_coffer_sync"): "0",
+        (12, "clan_chat_name"): "The Best Clan",
+        (13, "bank_coffer_sync"): "1",
+        (13, "clan_chat_name"): "Some Other Clan",
+        # Drop tracking alone does not sync the coffer.
+        (14, "clan_broadcast_tracking"): "1",
+        (14, "clan_chat_name"): "The Best Clan",
+    }
+    monkeypatch.setattr(gc, "get_bulk", lambda _s, _g, _k: config)
+    bound = cb._coffer_group_ids(
+        _FakeSession([10, 11, 12, 13, 14]), _FakePlayer(), _clan_slug("The Best Clan")
+    )
+    assert bound == {10: "confirmed", 11: "pending"}

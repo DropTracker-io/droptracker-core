@@ -12,6 +12,7 @@ the ``services`` package, so tests load this file by path.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Iterable, Optional
 
 # Re-declared locally (not imported from db.models) so this module stays
@@ -43,6 +44,58 @@ _TRANSITIONS = {
 }
 
 TOP_DONORS_LIMIT = 10
+
+# --- In-game coffer sync (web144a) ------------------------------------------
+# Relayed "X has deposited N coins into the coffer." lines become bank rows
+# (data/submissions/clan_broadcast.py). Parsed kind -> bank kind.
+COFFER_KINDS = {"coffer_donation": "donation", "coffer_withdrawal": "withdrawal"}
+
+# bank_coffer_status values. Anything else reads as "pending": a relayed line
+# is only as trustworthy as the clanmate who sent it, so the safe reading wins.
+COFFER_STATUSES = ("pending", "confirmed")
+
+# Dedupe window. Every relayer of one line is accepted by the server within
+# seconds of the others, so a line is matched against its own bucket and the
+# one before (a relay straddling the boundary still collapses). 60s keeps the
+# window short enough that two real, identical deposits a few minutes apart
+# are never merged.
+COFFER_BUCKET_SECONDS = 60
+
+# How long one relayer's count of an identical line lives. Must outlast the
+# two-bucket match window, so a real repeat inside it is still told apart.
+COFFER_OCCURRENCE_TTL_SECONDS = 180
+
+
+def coffer_status(raw) -> str:
+    """The status new coffer rows get from the ``bank_coffer_status`` config."""
+    value = str(raw or "").strip().lower()
+    return value if value in COFFER_STATUSES else "pending"
+
+
+def coffer_bucket(timestamp: float) -> int:
+    return int(timestamp // COFFER_BUCKET_SECONDS)
+
+
+def coffer_ref(clan_slug: str, message: str, bucket: int, occurrence: int) -> str:
+    """Deterministic ``group_bank_entries.external_ref`` for one coffer line.
+
+    ``occurrence`` is how many times THIS relayer has sent the identical line
+    lately (1 for the first). N relayers seeing one deposit all send
+    occurrence 1 and collapse onto one row; one relayer seeing the same
+    deposit twice sends 1 then 2, which is how two real, identical deposits
+    in a row both book. 71 chars, inside the String(80) column."""
+    digest = hashlib.sha256(
+        f"{clan_slug}|{message}|{bucket}|{occurrence}".encode("utf-8")
+    ).hexdigest()
+    return f"coffer:{digest}"
+
+
+def coffer_refs(clan_slug: str, message: str, timestamp: float, occurrence: int) -> tuple:
+    """``(ref to write, refs that mean "already booked")`` for a line accepted
+    at ``timestamp``: this bucket's ref, plus the previous bucket's."""
+    bucket = coffer_bucket(timestamp)
+    current = coffer_ref(clan_slug, message, bucket, occurrence)
+    return current, (current, coffer_ref(clan_slug, message, bucket - 1, occurrence))
 
 
 class BankRuleError(ValueError):

@@ -36,8 +36,9 @@ BANK_OUTFLOW_KINDS = ("withdrawal", "payout", "event_transfer")
 # had counted (kept for audit).
 BANK_ENTRY_STATUSES = ("pending", "confirmed", "rejected", "void")
 # Where the row came from: recorded by staff, self-reported by a member on the
-# website, or self-reported through the Discord /bank command.
-BANK_ENTRY_SOURCES = ("staff", "member", "discord")
+# website, self-reported through the Discord /bank command, or synced from an
+# in-game clan coffer broadcast (web144a, data/submissions/clan_broadcast.py).
+BANK_ENTRY_SOURCES = ("staff", "member", "discord", "coffer")
 
 
 class GroupBankEntry(Base):
@@ -45,6 +46,7 @@ class GroupBankEntry(Base):
     __table_args__ = (
         Index("idx_gbank_group_status", "group_id", "status"),
         Index("idx_gbank_group_created", "group_id", "created_at"),
+        Index("uq_gbank_group_external_ref", "group_id", "external_ref", unique=True),
         {"extend_existing": True},
     )
 
@@ -73,6 +75,10 @@ class GroupBankEntry(Base):
     event_id = Column(Integer, nullable=True)
     # The prize-pot row a transfer created, so voiding one voids the other.
     event_buyin_id = Column(Integer, nullable=True)
+    # Coffer-synced rows only: the deterministic reference of the broadcast
+    # that wrote it (services/group_bank.coffer_ref). Unique per group, so a
+    # line relayed by several clanmates books once. NULL everywhere else.
+    external_ref = Column(String(80), nullable=True)
     created_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     # Staff member who last confirmed / rejected / edited the row.
     acted_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)

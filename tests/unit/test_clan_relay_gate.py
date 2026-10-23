@@ -37,6 +37,18 @@ def test_group_fields_need_a_clan_name_and_a_live_feature():
     assert gate.group_relay_fields({"clan_broadcast_tracking": "1"})["clan_broadcast_tracking"] is False
 
 
+def test_coffer_sync_alone_opts_the_clan_into_broadcast_relaying():
+    # The plugin only relays broadcasts for a "tracking" clan, so a group that
+    # syncs its coffer without tracking drops must still read as tracking.
+    fields = gate.group_relay_fields({"bank_coffer_sync": "1", "clan_chat_name": "The Best Clan"})
+    assert fields == {"clan_chat_bridge": False, "clan_broadcast_tracking": True,
+                      "clan_chat_slug": "the best clan"}
+    assert gate.group_relay_fields({"bank_coffer_sync": "1"})["clan_chat_slug"] == ""
+    assert gate.group_relay_fields(
+        {"bank_coffer_sync": "0", "clan_chat_name": "X"}
+    )["clan_broadcast_tracking"] is False
+
+
 def test_relay_for_a_clan_nobody_opted_in_is_dropped():
     p = _payload({"type": "clan_chat", "clan_name": "Strangers", "message": "hi"})
     assert gate.relay_payload_unwanted(p, OPTED) is True
