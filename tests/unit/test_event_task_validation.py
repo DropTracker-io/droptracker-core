@@ -665,7 +665,8 @@ def test_pb_bad_mode_or_need_rejected(_stub_kc_npcs):
 # ── loot_sweep v2 (nested groups + NPC scoping + batched decay) ───────────────
 
 KNOWN_NPCS = {"Kree'arra", "Ahrim the Blighted", "Dharok the Wretched",
-              "Alchemical Hydra", "Vet'ion", "Calvar'ion"}
+              "Alchemical Hydra", "Vet'ion", "Calvar'ion", "Chaos Elemental",
+              "Venenatis", "Spindel"}
 _NPC_BY_NORM = {n.lower(): n for n in KNOWN_NPCS}
 KNOWN_LS_ITEMS = {
     "Armadyl helmet": 11826, "Armadyl chestplate": 11828, "Armadyl hilt": 11810,
@@ -713,12 +714,65 @@ def test_loot_sweep_unknown_item_rejected(_stub_ls):
     assert exc.value.status == 422 and "item" in exc.value.title.lower()
 
 
-def test_loot_sweep_item_in_two_groups_rejected(_stub_ls):
+def test_loot_sweep_item_in_two_npc_disjoint_groups_allowed(_stub_ls):
+    # "Wilderness Bosses": Dragon 2h under each boss, each at its own value.
+    out = _validate({"type": "loot_sweep", "config": {"groups": [
+        {"label": "Chaos Elemental", "npcs": ["Chaos Elemental"],
+         "items": [{"item_name": "Dragon 2h sword", "points": 2}]},
+        {"label": "Venenatis", "npcs": ["Venenatis", "Spindel"],
+         "items": [{"item_name": "dragon 2h sword", "points": 5}]}]}})
+    groups = _cfg(out)["groups"]
+    assert [g["items"][0]["item_name"] for g in groups] == ["Dragon 2h sword"] * 2
+    assert [g["items"][0]["points"] for g in groups] == [2, 5]
+
+
+def test_loot_sweep_item_in_groups_sharing_an_npc_rejected(_stub_ls):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"label": "A", "npcs": ["Vet'ion"], "items": [{"item_name": "Dragon 2h sword"}]},
+            {"label": "B", "npcs": ["Calvar'ion", "Vet'ion"],
+             "items": [{"item_name": "Dragon 2h sword"}]}]}})
+    assert exc.value.status == 422
+    assert "Vet'ion" in exc.value.detail and "'A'" in exc.value.detail
+
+
+def test_loot_sweep_item_repeated_with_any_npc_group_rejected(_stub_ls):
+    # A group with no NPCs takes the drop from anywhere: it can't share a name.
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"label": "Vet'ion", "npcs": ["Vet'ion"], "items": [{"item_name": "Dragon 2h sword"}]},
+            {"label": "Anywhere", "items": [{"item_name": "Dragon 2h sword"}]}]}})
+    assert exc.value.status == 422 and "'Anywhere' has no NPCs" in exc.value.detail
+
+
+def test_loot_sweep_alias_repeated_across_groups_follows_npc_rule(_stub_ls):
+    groups = [
+        {"label": "A", "npcs": ["Kree'arra"], "items": [{"item_name": "Armadyl helmet"}]},
+        {"label": "B", "npcs": ["Vet'ion"], "items": [
+            {"item_name": "Dragon 2h sword", "match_names": ["Armadyl helmet"]}]}]
+    _validate({"type": "loot_sweep", "config": {"groups": groups}})  # disjoint: fine
+    groups[1]["npcs"] = ["Kree'arra"]
+    with pytest.raises(ProblemException):
+        _validate({"type": "loot_sweep", "config": {"groups": groups}})
+
+
+def test_loot_sweep_pet_in_two_groups_rejected(_stub_ls):
+    with pytest.raises(ProblemException) as exc:
+        _validate({"type": "loot_sweep", "config": {"groups": [
+            {"label": "A", "npcs": ["Kree'arra"],
+             "items": [{"item_name": "Nexling", "source": "pet"}]},
+            {"label": "B", "npcs": ["Vet'ion"],
+             "items": [{"item_name": "Nexling", "source": "pet"}]}]}})
+    assert exc.value.status == 422 and "pet" in exc.value.detail
+
+
+def test_loot_sweep_shared_name_unknown_npc_reported_as_unknown(_stub_ls):
+    # The typo is the real problem, not the sharing rule it trips.
     with pytest.raises(ProblemException) as exc:
         _validate({"type": "loot_sweep", "config": {"groups": [
             {"npcs": ["Vet'ion"], "items": [{"item_name": "Dragon 2h sword"}]},
-            {"npcs": ["Calvar'ion"], "items": [{"item_name": "Dragon 2h sword"}]}]}})
-    assert exc.value.status == 422
+            {"npcs": ["Venenatiss"], "items": [{"item_name": "Dragon 2h sword"}]}]}})
+    assert "NPC" in exc.value.title
 
 
 def test_loot_sweep_awards_per_tier(_stub_ls):

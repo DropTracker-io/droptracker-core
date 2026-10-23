@@ -1215,11 +1215,16 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
             if allowed and _norm(data.get("npc_name")) not in allowed:
                 return None
             raw_name = data.get("item_name")
+            # The drop's NPC rides to the ledger row: a name may repeat across
+            # NPC-disjoint groups, and the NPC picks which one it credits
+            # (services/loot_sweep.LootSweepConfig.route).
+            npc_raw = str(data.get("npc_name") or "").strip()[:64] or None
             try:
                 qty = max(int(data.get("quantity", 1) or 1), 1)
             except (TypeError, ValueError):
                 qty = 1
         elif kind == "pet":
+            npc_raw = None
             if not _pet_counts(task, data):
                 # A duplicate: off unless the sweep says duplicate_pets: true.
                 # Off is the status quo from before the switch existed, so a
@@ -1234,7 +1239,8 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
         else:
             return None
         return {"mode": "count", "quantity": qty,
-                "matched_target": str(raw_name or "").strip()[:120] or None}
+                "matched_target": str(raw_name or "").strip()[:120] or None,
+                "matched_npc": npc_raw}
 
     if task_type == "kc_target":
         if kind == "wom_kc":
@@ -4576,7 +4582,8 @@ def _apply_loot_sweep(session, redis_conn, event: dict, task: dict, completion,
             except Exception:
                 return False
 
-        detail = receipt_detail(curr, prev, config, completion.matched_target)
+        detail = receipt_detail(curr, prev, config, completion.matched_target,
+                                getattr(completion, "matched_npc", None))
         team_rank, team_count = _loot_sweep_rank(session, event["id"], team_id)
         # Fields shared by every sweep message for this receipt.
         base = {
@@ -6002,7 +6009,8 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                  cells: Optional[list] = None,
                  matched_target: Optional[str] = None,
                  path_idx: Optional[int] = None,
-                 bonus: Optional[dict] = None) -> Optional[dict]:
+                 bonus: Optional[dict] = None,
+                 matched_npc: Optional[str] = None) -> Optional[dict]:
     """Insert the ledger row for a match (idempotent on
     (task, team, submission_guid)); apply effects unless it needs
     confirmation. Returns a result dict, or None on duplicate replay.
@@ -6079,6 +6087,7 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
         submission_guid=str(guid)[:64] if guid else None,
         proof_url=str(proof)[:255] if proof else None,
         matched_target=matched_target,
+        matched_npc=matched_npc,
         note=note,
     )
     if not _row_advances_progress(session, task, team_id, completion):
@@ -6357,7 +6366,8 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                     quantity, envelope, cells=state.cells_by_task.get(task["id"]),
                     matched_target=match.get("matched_target"),
                     path_idx=match.get("path"),
-                    bonus=match.get("bonus"))
+                    bonus=match.get("bonus"),
+                    matched_npc=match.get("matched_npc"))
                 if outcome is not None:
                     results.append(outcome)
                     if (party_info is not None and match.get("bonus") is None

@@ -165,3 +165,38 @@ class TestRowAdvances:
         s = _Session([_row("Armadyl helmet", rid=1), _row("Armadyl helmet", rid=2),
                       _row("Armadyl chestplate", rid=3)])
         assert engine._row_advances_progress(s, TASK, 4, _row("Armadyl hilt", rid=None)) is True
+
+
+WILDY_CONFIG = {
+    "kind": "loot_sweep", "decay_percent": 20,
+    "groups": [
+        {"label": "Chaos Elemental", "npcs": ["Chaos Elemental"],
+         "items": [{"item_name": "Dragon 2h sword", "points": 2}]},
+        {"label": "Venenatis", "npcs": ["Venenatis", "Spindel"],
+         "items": [{"item_name": "Dragon 2h sword", "points": 5}]},
+    ],
+}
+WILDY_TASK = {"id": 9, "type": "loot_sweep", "config": WILDY_CONFIG,
+              "loot_sweep_index": _ls.LootSweepConfig(WILDY_CONFIG).matcher_index()}
+
+
+class TestSharedItemAcrossGroups:
+    def _env(self, npc):
+        return {"kind": "drop", "data": {"item_name": "Dragon 2h sword",
+                                         "npc_name": npc, "quantity": 1}}
+
+    def test_match_carries_the_npc(self):
+        m = engine.match_task(WILDY_TASK, self._env("Spindel"))
+        assert m and m["matched_target"] == "Dragon 2h sword"
+        assert m["matched_npc"] == "Spindel"
+        assert engine.match_task(WILDY_TASK, self._env("Chaos Elemental"))["matched_npc"] \
+            == "Chaos Elemental"
+
+    def test_other_npcs_still_rejected(self):
+        assert engine.match_task(WILDY_TASK, self._env("Vet'ion")) is None
+
+    def test_score_routes_by_row_npc(self):
+        row = SimpleNamespace(id=1, matched_target="Dragon 2h sword", matched_npc="Venenatis",
+                              quantity=1, source_type="drop")
+        b = engine._loot_sweep_score(_Session([row]), WILDY_TASK, 1)
+        assert [g["item_total"] for g in b["groups"]] == [0, 5]

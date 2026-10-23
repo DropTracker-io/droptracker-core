@@ -303,7 +303,7 @@ def harness(monkeypatch):
 
     def fake_record(session, redis_conn, event, task, team_id, player_id,
                     quantity, envelope, cells=None, matched_target=None,
-                    path_idx=None, bonus=None):
+                    path_idx=None, bonus=None, matched_npc=None):
         recorded.append((envelope["kind"], quantity, (bonus or {}).get("type")))
         return {"kind": "competition"}
 

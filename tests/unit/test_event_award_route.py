@@ -219,3 +219,65 @@ class TestBoardAward:
         r = await client.post(URL, json={"task_id": 88, "team_id": 3})
         assert r.status_code == 200, await r.get_json()
         assert applied[0].task_id == 88
+
+
+# Loot Sweep: an item listed under two bosses must name which one it came from.
+def _real_loot_sweep():
+    import importlib.util
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "services", "loot_sweep.py")
+    spec = importlib.util.spec_from_file_location("_loot_sweep_award_ut", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+WILDY = SimpleNamespace(id=30, event_id=1, type="loot_sweep", config=json.dumps({
+    "kind": "loot_sweep", "groups": [
+        {"label": "Chaos Elemental", "npcs": ["Chaos Elemental"],
+         "items": [{"item_name": "Dragon 2h sword", "points": 2},
+                   {"item_name": "Dragon pickaxe", "points": 5}]},
+        {"label": "Venenatis", "npcs": ["Venenatis", "Spindel"],
+         "items": [{"item_name": "Dragon 2h sword", "points": 5}]},
+    ]}))
+
+
+class TestLootSweepSharedItemAward:
+    def _wire_sweep(self, monkeypatch, s):
+        applied = _wire(monkeypatch, s)
+        monkeypatch.setitem(sys.modules, "services.loot_sweep", _real_loot_sweep())
+        engine = ea._engine()
+        monkeypatch.setattr(engine, "item_match_quantity",
+                            lambda task, target, qty: qty)
+        return applied
+
+    async def test_shared_item_needs_a_boss(self, client, monkeypatch):
+        s = _session(WILDY)
+        applied = self._wire_sweep(monkeypatch, s)
+        r = await client.post(URL, json={
+            "task_id": 30, "team_id": 3, "matched_target": "Dragon 2h sword"})
+        assert r.status_code == 422
+        body = await r.get_json()
+        assert body["title"] == "Choose the boss" and "Spindel" in body["detail"]
+        assert not applied
+
+    async def test_shared_item_stores_the_named_boss(self, client, monkeypatch):
+        s = _session(WILDY)
+        applied = self._wire_sweep(monkeypatch, s)
+        r = await client.post(URL, json={
+            "task_id": 30, "team_id": 3, "matched_target": "Dragon 2h sword",
+            "matched_npc": "spindel"})
+        assert r.status_code == 200, await r.get_json()
+        assert (applied[0].matched_target, applied[0].matched_npc) == \
+            ("Dragon 2h sword", "Spindel")
+
+    async def test_unshared_item_needs_no_boss(self, client, monkeypatch):
+        s = _session(WILDY)
+        applied = self._wire_sweep(monkeypatch, s)
+        r = await client.post(URL, json={
+            "task_id": 30, "team_id": 3, "matched_target": "Dragon pickaxe",
+            "matched_npc": "Venenatis"})
+        assert r.status_code == 200, await r.get_json()
+        assert applied[0].matched_npc is None

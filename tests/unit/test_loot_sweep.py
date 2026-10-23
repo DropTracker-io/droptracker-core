@@ -454,3 +454,90 @@ class TestMatchNamesAndRequired:
         # Repeat completions keep stepping every `required` receipts.
         six = ls.score_counts({"ancestral robe top": 6}, cfg)
         assert six["groups"][0]["completions"] == 2
+
+
+# --- a name repeated across NPC-disjoint groups ----------------------------- #
+def _wildy():
+    """The co-dev's "Wilderness Bosses" set: Dragon 2h under each boss, each at
+    its own value, each group gated on 2h + its own unique."""
+    return ls.LootSweepConfig({
+        "decay_percent": 20, "set_bonus_points": 40,
+        "groups": [
+            {"label": "Chaos Elemental", "npcs": ["Chaos Elemental"], "bonus_points": 4,
+             "items": [{"item_name": "Dragon 2h sword", "points": 2},
+                       {"item_name": "Dragon pickaxe", "points": 5}]},
+            {"label": "Venenatis", "npcs": ["Venenatis", "Spindel"], "bonus_points": 4,
+             "items": [{"item_name": "Dragon 2h sword", "points": 5},
+                       {"item_name": "Fangs of venenatis", "points": 4}]},
+        ]})
+
+
+def _nrow(item, npc, qty=1, rid=None, team_id=1, source_type="drop"):
+    return SimpleNamespace(id=rid, matched_target=item, matched_npc=npc, quantity=qty,
+                           team_id=team_id, source_type=source_type)
+
+
+class TestSharedItemAcrossGroups:
+    def test_route_by_npc(self):
+        cfg = _wildy()
+        assert cfg.is_shared("dragon 2h sword") and not cfg.is_shared("Dragon pickaxe")
+        assert cfg.route("Dragon 2h sword", "Chaos Elemental") == 0
+        assert cfg.route("Dragon 2h sword", "spindel") == 1
+        # No NPC (legacy row / manual award without a boss): first group.
+        assert cfg.route("Dragon 2h sword", None) == 0
+        assert cfg.route("Fangs of venenatis", None) == 1
+        assert cfg.route("Twisted bow", "Venenatis") is None
+
+    def test_drop_credits_only_its_own_group(self):
+        cfg = _wildy()
+        b = ls.score_rows([_nrow("Dragon 2h sword", "Venenatis")], cfg)
+        chaos, ven = b["groups"]
+        assert chaos["items"][0]["count"] == 0 and chaos["item_total"] == 0
+        assert ven["items"][0]["count"] == 1 and ven["item_total"] == 5
+        assert b["total"] == 5
+
+    def test_group_bonuses_progress_independently(self):
+        cfg = _wildy()
+        rows = [_nrow("Dragon 2h sword", "Chaos Elemental"),
+                _nrow("Dragon pickaxe", "Chaos Elemental"),
+                _nrow("Fangs of venenatis", "Venenatis")]
+        b = ls.score_rows(rows, cfg)
+        assert [g["completions"] for g in b["groups"]] == [1, 0]
+        assert b["set_completions"] == 0
+        b = ls.score_rows(rows + [_nrow("Dragon 2h sword", "Spindel")], cfg)
+        assert [g["completions"] for g in b["groups"]] == [1, 1]
+        assert b["set_completions"] == 1
+        assert b["total"] == 2 + 5 + 4 + 5 + 4 + 4 + 40
+
+    def test_decay_is_per_group(self):
+        cfg = _wildy()
+        rows = [_nrow("Dragon 2h sword", "Chaos Elemental"),
+                _nrow("Dragon 2h sword", "Venenatis")]
+        b = ls.score_rows(rows, cfg)
+        # Each group's FIRST copy: full value in both.
+        assert [g["items"][0]["points"] for g in b["groups"]] == [2, 5]
+
+    def test_receipt_points_by_row_routes(self):
+        cfg = _wildy()
+        rows = [_nrow("Dragon 2h sword", "Chaos Elemental", rid=1),
+                _nrow("Dragon 2h sword", "Venenatis", rid=2),
+                _nrow("Dragon 2h sword", "Venenatis", rid=3)]
+        assert ls.receipt_points_by_row(rows, cfg) == {1: 2, 2: 5, 3: 4}
+
+    def test_receipt_detail_names_the_npcs_group(self):
+        cfg = _wildy()
+        prev = ls.score_rows([], cfg)
+        curr = ls.score_rows([_nrow("Dragon 2h sword", "Venenatis")], cfg)
+        d = ls.receipt_detail(curr, prev, cfg, "Dragon 2h sword", "Venenatis")
+        assert d["group_label"] == "Venenatis" and d["received_points"] == 5
+
+    def test_unshared_config_scores_as_before(self):
+        # Routing an old config (each name in one group) changes nothing:
+        # NPC-less rows score the same as the plain name-keyed counts.
+        cfg = ls.LootSweepConfig({"groups": [
+            {"npcs": ["Kree'arra"], "bonus_points": 40, "items": [
+                {"item_name": "Armadyl helmet", "points": 9},
+                {"item_name": "Armadyl hilt", "points": 13}]}]})
+        rows = [_row("Armadyl helmet"), _row("Armadyl helmet"), _row("Armadyl hilt")]
+        assert (ls.score_counts(ls.counts_from_rows(rows, cfg), cfg)
+                == ls.score_counts(ls.counts_from_rows(rows), cfg))

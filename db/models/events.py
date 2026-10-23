@@ -841,6 +841,10 @@ class EventCompletion(Base):
     # distinct-item progress for all_of/assembly tasks — a 1,338-coins drop is
     # still just "Coins". NULL on non-item rows and manual wildcard awards.
     matched_target = Column(String(120), nullable=True)
+    # loot_sweep only (web147a): the NPC the receipt dropped from. A name may
+    # repeat across NPC-disjoint groups of one set, and this picks the group
+    # (services/loot_sweep.LootSweepConfig.route). NULL elsewhere.
+    matched_npc = Column(String(64), nullable=True)
     acted_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     note = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)

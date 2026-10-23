@@ -2864,7 +2864,7 @@ async def get_loot_sweep_board(event_id: int):
                 teams_out = []
                 for t in teams:
                     b = score_counts(
-                        counts_from_rows(rows_by.get((task.id, t.id), [])), cfg)
+                        counts_from_rows(rows_by.get((task.id, t.id), []), cfg), cfg)
                     teams_out.append({
                         "team_id": t.id,
                         "total": score_num(b["total"]),
@@ -2975,7 +2975,7 @@ async def get_loot_sweep_summary(event_id: int):
                 completed = 0
                 contribs = []  # (points, label, npc_id)
                 for task, cfg in cfgs:
-                    b = score_counts(counts_from_rows(rows_by.get((task.id, t.id), [])), cfg)
+                    b = score_counts(counts_from_rows(rows_by.get((task.id, t.id), []), cfg), cfg)
                     if b["set_completions"] >= 1:
                         completed += 1
                     if b["total"] > 0:
@@ -3005,7 +3005,10 @@ async def get_loot_sweep_receipts(event_id: int):
     screenshot proof when the ledger row carries one.
 
     Query: ``task_id`` (the loot_sweep set task) + ``item`` (item name,
-    normalized server-side to the config key). Receipts come back in credit
+    normalized server-side to the config key) + optional ``group`` (the
+    group's index in the set — needed when the item repeats across groups,
+    e.g. Dragon 2h under two wilderness bosses; without it the first group
+    listing the item answers). Receipts come back in credit
     order per team; ``n`` is the 1-based ordinal of the row's FIRST receipt
     (a quantity-3 stack consumes ordinals n..n+2), and ``points`` is exactly
     what that row added under the decay schedule (0 once past the cap) — the
@@ -3022,6 +3025,13 @@ async def get_loot_sweep_receipts(event_id: int):
     item_q = (request.args.get("item") or "").strip()
     if not item_q:
         abort_problem(400, "Bad request", "item is required.")
+    group_q = request.args.get("group")
+    group_idx = None
+    if group_q not in (None, ""):
+        try:
+            group_idx = int(group_q)
+        except ValueError:
+            abort_problem(400, "Bad request", "group must be an integer.")
 
     def _load():
         with db_session() as s:
@@ -3047,7 +3057,11 @@ async def get_loot_sweep_receipts(event_id: int):
             key = _norm(item_q)
             # An entry answers for its own name or any of its match_names
             # aliases (the vestige + gold-ring case).
-            item = next((i for g in cfg.groups for i in g.items if key in i.match_keys), None)
+            if group_idx is None:
+                group_idx = cfg.route(key)
+            if group_idx is None or not 0 <= group_idx < len(cfg.groups):
+                return None
+            item = next((i for i in cfg.groups[group_idx].items if key in i.match_keys), None)
             if item is None:
                 return None
             # Batch 2: this endpoint used to hydrate the task's ENTIRE ledger
@@ -3092,6 +3106,9 @@ async def get_loot_sweep_receipts(event_id: int):
                     continue
                 if r.team_id is None or _norm(r.matched_target) not in item.match_keys:
                     continue
+                # A name shared across groups: only this group's receipts.
+                if cfg.route(r.matched_target, r.matched_npc) != group_idx:
+                    continue
                 qty = max(int(r.quantity or 1), 1)
                 before = cum.get(r.team_id, 0)
                 after = before + qty
@@ -3127,6 +3144,7 @@ async def get_loot_sweep_receipts(event_id: int):
             return {
                 "event_id": event_id,
                 "task_id": task_id,
+                "group": group_idx,
                 "item_name": item.name,
                 "item_id": item.item_id,
                 "virtual": item.virtual,

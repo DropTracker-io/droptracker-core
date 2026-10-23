@@ -492,6 +492,33 @@ async def reject_completion(event_id: int, completion_id: int):
 # Manual award / revoke (event admins — PRD D3/D10; awards stop once the
 # event has ended, revoke stays available for post-event corrections)
 # --------------------------------------------------------------------------- #
+
+
+def _loot_sweep_award_npc(task, matched_target: str, matched_npc):
+    """The NPC a manual loot_sweep item award is stored with.
+
+    Only an item listed in several groups of the set needs one: there the
+    organizer must name a boss from one of those groups, or the award would
+    land on whichever group happens to come first. Otherwise the NPC is
+    optional and dropped when it isn't one of the item's bosses."""
+    from services.loot_sweep import LootSweepConfig, _norm
+
+    cfg = LootSweepConfig(task.config)
+    if not cfg.is_shared(matched_target):
+        return None
+    key = _norm(matched_target)
+    options = []
+    for g in cfg.groups:
+        if any(key in it.match_keys for it in g.items):
+            options.extend(g.npcs)
+    if matched_npc is None or _norm(matched_npc) not in {_norm(n) for n in options}:
+        abort_problem(
+            422, "Choose the boss",
+            f"'{matched_target}' is listed under more than one boss in this set. "
+            f"Pick which one it came from: {', '.join(options)}.")
+    return next(n for n in options if _norm(n) == _norm(matched_npc))
+
+
 @event_admin_bp.post("/events/<int:event_id>/award")
 async def award_completion(event_id: int):
     """Insert a ``manual`` ledger row and apply it immediately — the escape
@@ -535,6 +562,15 @@ async def award_completion(event_id: int):
         if len(matched_target) > 120:
             abort_problem(422, "Invalid matched_target",
                           "'matched_target' must be at most 120 characters.")
+    # Loot Sweep: the boss the awarded item came from. Only needed when the
+    # item repeats across groups of the set (Dragon 2h under Chaos Elemental
+    # AND Venenatis) — the NPC picks which group's entry the award credits.
+    matched_npc = body.get("matched_npc")
+    if matched_npc is not None:
+        if not isinstance(matched_npc, str) or not matched_npc.strip():
+            abort_problem(422, "Invalid matched_npc",
+                          "'matched_npc' must be a non-empty string.")
+        matched_npc = matched_npc.strip()[:64]
     path_idx = body.get("path")
     if path_idx is not None and (not isinstance(path_idx, int)
                                  or isinstance(path_idx, bool) or path_idx < 0):
@@ -558,7 +594,7 @@ async def award_completion(event_id: int):
         # rebinding one that isn't makes it local to the whole closure, and
         # the reads above the assignment raise UnboundLocalError (every award
         # 500'd that way from 2026-09-24). ``credit`` is read-only in here.
-        nonlocal quantity, note, matched_target, task_id
+        nonlocal quantity, note, matched_target, matched_npc, task_id
         # P0-10: manual rows have no submission_guid, so the ledger's unique
         # (task, team, guid) index can't dedupe them — an organizer's double
         # click would insert and apply two identical awards. A short one-shot
@@ -651,6 +687,11 @@ async def award_completion(event_id: int):
                         f"'{matched_target}' is not one of this task's "
                         "configured items or its target.")
                 quantity = part_quantity
+                if task.type == "loot_sweep":
+                    matched_npc = _loot_sweep_award_npc(task, matched_target, matched_npc)
+            if matched_npc is not None and (task.type != "loot_sweep"
+                                            or matched_target is None):
+                matched_npc = None  # only meaningful on a loot_sweep item award
             if path_idx is not None:
                 config = eng.parse_task_config(task.config)
                 paths = (config.get("paths") or []) if config.get("kind") == "any_path" else []
@@ -722,6 +763,7 @@ async def award_completion(event_id: int):
                 acted_by_user_id=user_id,
                 note=note,
                 matched_target=matched_target,
+                matched_npc=matched_npc,
             )
             s.add(comp)
             try:

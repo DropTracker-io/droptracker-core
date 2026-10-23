@@ -248,7 +248,7 @@ class LootSweepConfig:
     """Normalized view of a loot_sweep task config (defaults resolved)."""
 
     __slots__ = ("decay_percent", "decay_mode", "set_bonus_points",
-                 "set_bonus_max", "groups")
+                 "set_bonus_max", "groups", "_groups_by_key")
 
     def __init__(self, config):
         if isinstance(config, str):
@@ -281,10 +281,47 @@ class LootSweepConfig:
             grp = LootSweepGroup(g, self)
             if grp.items:
                 self.groups.append(grp)
+        # match key -> indices of the groups holding an entry for it. Usually
+        # one; several when an item repeats across NPC-disjoint groups (Dragon
+        # 2h under Chaos Elemental AND Venenatis), where the receipt's NPC
+        # picks the group — see :meth:`route`.
+        self._groups_by_key: dict[str, list[int]] = {}
+        for gi, grp in enumerate(self.groups):
+            for it in grp.items:
+                for k in it.match_keys:
+                    lst = self._groups_by_key.setdefault(k, [])
+                    if gi not in lst:
+                        lst.append(gi)
 
     def all_items(self) -> Iterable[LootSweepItem]:
         for g in self.groups:
             yield from g.items
+
+    def route(self, matched_target, matched_npc=None) -> Optional[int]:
+        """Index of the group a receipt of ``matched_target`` credits, or
+        ``None`` when the name isn't part of this task.
+
+        An item may repeat across groups only when their NPC lists are
+        disjoint (the write validator enforces it), so the NPC that dropped it
+        (``matched_npc``, stored on the ledger row) names exactly one group.
+        A row without a usable NPC — older rows from before the column
+        existed, pets, manual awards that didn't pick a boss — falls back to
+        the first group listing the name. Older rows are always unambiguous:
+        their configs could never repeat a name across groups."""
+        cands = self._groups_by_key.get(_norm(matched_target))
+        if not cands:
+            return None
+        if len(cands) > 1:
+            npc = _norm(matched_npc)
+            if npc:
+                for gi in cands:
+                    if npc in self.groups[gi].npc_keys:
+                        return gi
+        return cands[0]
+
+    def is_shared(self, matched_target) -> bool:
+        """Does this name credit entries in more than one group?"""
+        return len(self._groups_by_key.get(_norm(matched_target)) or ()) > 1
 
     def matcher_index(self) -> dict[str, dict]:
         """``{match key: {"source", "npcs"}}`` for the engine matcher — every
@@ -292,7 +329,10 @@ class LootSweepConfig:
         aliases, so any listed name credits the entry. ``source`` is "drop"
         (NPC-scoped: ``npcs`` = allowed NPC keys, empty = any) or "pet"
         (matched from a pet submission by name; ``npcs`` unused). A key in two
-        groups merges their NPC allowances (validation forbids that)."""
+        groups merges their NPC allowances: the drop qualifies if ANY of its
+        groups takes that NPC, and :meth:`route` then picks the group. (The
+        validator only lets a name repeat across groups that all name NPCs, so
+        the union never widens into "any NPC".)"""
         out: dict[str, dict] = {}
         for g in self.groups:
             for it in g.items:
@@ -309,22 +349,44 @@ class LootSweepConfig:
 # --------------------------------------------------------------------------- #
 # Team scoring (from ledger receipt counts)
 # --------------------------------------------------------------------------- #
-def counts_from_rows(rows: Iterable) -> dict[str, int]:
-    """``{normalized item name: total receipts}`` from applied ledger rows.
+def counts_from_rows(rows: Iterable,
+                     config: Optional["LootSweepConfig"] = None) -> dict:
+    """Receipt counts from applied ledger rows.
+
+    Without ``config``: ``{normalized item name: total receipts}``. With it,
+    each row is routed to its group (:meth:`LootSweepConfig.route`, by the
+    row's ``matched_npc``) and the result is ``{(group index, name): total}``
+    — needed once a name repeats across groups, so a Chaos Elemental Dragon 2h
+    never counts toward Venenatis. :func:`score_counts` reads either shape.
 
     Each unit of ``quantity`` is one receipt. Bonus rows and rows without a
     ``matched_target`` are ignored. NPC scoping is enforced upstream (the
     matcher only records receipts from a valid NPC), so counts here are already
     clean."""
-    counts: dict[str, int] = {}
+    counts: dict = {}
     for r in rows:
         if (getattr(r, "source_type", None) or "") == "bonus":
             continue
         key = _norm(getattr(r, "matched_target", None))
         if not key:
             continue
-        counts[key] = counts.get(key, 0) + max(_int(getattr(r, "quantity", 1), 1), 1)
+        if config is not None:
+            gi = config.route(key, getattr(r, "matched_npc", None))
+            if gi is None:
+                continue
+            ck = (gi, key)
+        else:
+            ck = key
+        counts[ck] = counts.get(ck, 0) + max(_int(getattr(r, "quantity", 1), 1), 1)
     return counts
+
+
+def _count(counts: dict, gi: int, key: str) -> int:
+    """One entry name's receipts in group ``gi`` — group-routed counts first
+    (``(gi, key)``), else the plain name-keyed shape."""
+    if (gi, key) in counts:
+        return max(_int(counts.get((gi, key)), 0), 0)
+    return max(_int(counts.get(key), 0), 0)
 
 
 def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
@@ -345,13 +407,13 @@ def score_counts(counts: dict[str, int], config: LootSweepConfig) -> dict:
     group_bonus_all = 0.0
     gating_completions: list[int] = []
 
-    for g in config.groups:
+    for gi, g in enumerate(config.groups):
         item_rows = []
         g_item_total = 0.0
         item_completions: list[int] = []
         for it in g.items:
             # An entry's receipts pool across ALL of its match names (aliases).
-            count = sum(max(_int(counts.get(k), 0), 0) for k in it.match_keys)
+            count = sum(_count(counts, gi, k) for k in it.match_keys)
             pts = item_points(it.points, count, it.max_awards, config.decay_percent,
                               it.awards_per_tier, config.decay_mode)
             g_item_total = _round2(g_item_total + pts)
@@ -436,7 +498,7 @@ def icon_ids_for(item: "LootSweepItem", alias_id_by_key: dict) -> list:
 
 def score_rows(rows: Iterable, config: LootSweepConfig) -> dict:
     """Convenience: :func:`score_counts` straight from ledger rows."""
-    return score_counts(counts_from_rows(rows), config)
+    return score_counts(counts_from_rows(rows, config), config)
 
 
 def team_total(rows: Iterable, config: LootSweepConfig) -> float:
@@ -449,15 +511,18 @@ def receipt_points_by_row(rows: Iterable, config: LootSweepConfig) -> dict:
     credit order — the same incremental ``item_points`` fold the board scores
     with and the per-item receipts card shows, generalized across every item.
 
-    Cumulative counts are tracked per ``(team_id, item)`` and pool across an
-    item's aliases (``match_keys``), so the n-th receipt decays correctly no
-    matter which alias dropped. Only per-item receipt points are attributed —
+    Cumulative counts are tracked per ``(team_id, group, item)`` and pool
+    across an item's aliases (``match_keys``), so the n-th receipt decays
+    correctly no matter which alias dropped; a name repeated across groups is
+    routed by the row's NPC (:meth:`LootSweepConfig.route`). Only per-item
+    receipt points are attributed —
     group/set bonuses arise from combinations across rows and can't be credited
     to a single receipt. ``rows`` MUST be ordered oldest-first."""
     item_by_key: dict = {}
-    for it in config.all_items():
-        for k in it.match_keys:
-            item_by_key[k] = it
+    for gi, g in enumerate(config.groups):
+        for it in g.items:
+            for k in it.match_keys:
+                item_by_key[(gi, k)] = it
     cum: dict = {}
     out: dict = {}
     for r in rows:
@@ -466,13 +531,14 @@ def receipt_points_by_row(rows: Iterable, config: LootSweepConfig) -> dict:
             out[rid] = 0.0
             continue
         key = _norm(getattr(r, "matched_target", None))
-        it = item_by_key.get(key)
+        gi = config.route(key, getattr(r, "matched_npc", None))
+        it = item_by_key.get((gi, key)) if gi is not None else None
         team_id = getattr(r, "team_id", None)
         if it is None or team_id is None:
             out[rid] = 0.0
             continue
         qty = max(_int(getattr(r, "quantity", 1), 1), 1)
-        ck = (team_id, it.key)
+        ck = (team_id, gi, it.key)
         before = cum.get(ck, 0)
         after = before + qty
         cum[ck] = after
@@ -485,25 +551,30 @@ def receipt_points_by_row(rows: Iterable, config: LootSweepConfig) -> dict:
     return out
 
 
-def _locate_entry(config: LootSweepConfig, matched_target) -> Optional[tuple]:
+def _locate_entry(config: LootSweepConfig, matched_target,
+                  matched_npc=None) -> Optional[tuple]:
     """``(group_index, item_index, LootSweepItem, LootSweepGroup)`` for the
     config entry a receipt of ``matched_target`` credits (matching the entry's
     own name OR any of its ``match_names`` aliases), or ``None`` when the drop
-    isn't part of this task. Indices line up with the config-ordered
+    isn't part of this task. A name in several groups is routed by
+    ``matched_npc``. Indices line up with the config-ordered
     :func:`score_counts` ``groups``/``items`` so a caller can read the matching
     breakdown rows by position."""
     mk = _norm(matched_target)
     if not mk:
         return None
-    for gi, g in enumerate(config.groups):
-        for ii, it in enumerate(g.items):
-            if mk in it.match_keys:
-                return gi, ii, it, g
+    gi = config.route(mk, matched_npc)
+    if gi is None:
+        return None
+    g = config.groups[gi]
+    for ii, it in enumerate(g.items):
+        if mk in it.match_keys:
+            return gi, ii, it, g
     return None
 
 
 def receipt_detail(curr: dict, prev: dict, config: LootSweepConfig,
-                   matched_target) -> Optional[dict]:
+                   matched_target, matched_npc=None) -> Optional[dict]:
     """Per-receipt enrichment for a Loot Sweep Discord message — everything a
     reader needs about a single scoring drop without leaving Discord:
 
@@ -523,7 +594,7 @@ def receipt_detail(curr: dict, prev: dict, config: LootSweepConfig,
     count gating entries collected vs. required. Pure (reads only the breakdown +
     config), so it stays unit-testable under the conftest stubs. ``None`` when the
     drop isn't a config item (caller drops the enrichment)."""
-    located = _locate_entry(config, matched_target)
+    located = _locate_entry(config, matched_target, matched_npc)
     if located is None:
         return None
     gi, ii, item, group = located

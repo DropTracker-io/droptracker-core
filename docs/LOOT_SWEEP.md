@@ -105,8 +105,16 @@ Per-item keys:
 | `counts_for_group` | Whether the item gates its group's bonus. `false` for pets/mega-rares. | `true` |
 
 Per-group keys: `label`, `npcs` (list; validated against `NpcList`), `bonus_points`,
-`bonus_max`. **An item may appear in only one group per task** (so a receipt maps
-to one group) — enforced `422`.
+`bonus_max`. **An item may repeat across groups of one task only when every group
+involved names its NPCs and no two of them share one** (e.g. Dragon 2h under both
+Chaos Elemental and Venenatis in a "Wilderness Bosses" set). Each receipt stores
+the NPC it dropped from (`web_event_completions.matched_npc`, web147a) and
+`LootSweepConfig.route` credits the group listing that NPC, so the copies keep
+separate counts, decay and group bonuses. Pets (matched by name, not NPC) and
+groups with no NPCs can't share a name. Violations are `422`. A manual award of a
+shared item must name the boss (`matched_npc`); older rows with no NPC fall back
+to the first group listing the name, which is exact because older configs could
+never repeat one.
 
 **Validation bounds**: ≤ 40 groups, ≤ 400 items/task, `points` 1–1,000,000,
 `awards_per_tier` 1–20, `max_awards` 1–200, bonuses 0–10,000,000 / max 1–100.

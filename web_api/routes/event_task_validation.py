@@ -835,11 +835,59 @@ def _validated_paths(s, paths, *, pet_names: set[str] | None = None,
     return out, ANY_PATH_THRESHOLD
 
 
+def _claim_ls_name(seen: dict, key: str, display: str, group_index: int,
+                   group_label: str, pet: bool) -> None:
+    """Record that ``key`` credits an entry in group ``group_index``. The
+    cross-group rules are checked once every group is read
+    (:func:`_check_ls_shared_names`), so a typo'd NPC is reported as unknown
+    rather than as a sharing conflict."""
+    slot = seen.setdefault(key, {}).setdefault(
+        group_index, {"label": group_label, "name": display, "pet": False})
+    slot["pet"] = slot["pet"] or pet
+
+
+def _check_ls_shared_names(seen: dict, group_npcs: dict) -> None:
+    """A name may credit entries in several groups of one set only when the
+    drop's NPC can say which group it belongs to: every group involved names
+    its NPCs (none takes drops from anywhere) and no two of them share one.
+    Pets match by name with no NPC, so a pet stays in one group. Same-group
+    reuse is always fine (additive scoring)."""
+    for _key, by_group in seen.items():
+        if len(by_group) < 2:
+            continue
+        slots = sorted(by_group.items())
+        name = slots[0][1]["name"]
+        labels = [f"'{v['label']}'" for _gi, v in slots]
+        where = " and ".join(labels) if len(labels) == 2 else ", ".join(labels)
+        if any(v["pet"] for _gi, v in slots):
+            abort_problem(422, "Invalid config",
+                          f"'{name}' is a pet, so it can only be listed in one group "
+                          f"(it's in {where}). Pets are matched by name, not by boss.")
+        for gi, v in slots:
+            if not group_npcs.get(gi):
+                abort_problem(422, "Invalid config",
+                              f"'{name}' is listed in {where}. An item can repeat across "
+                              f"groups only when each group names its boss, and "
+                              f"'{v['label']}' has no NPCs.")
+        owner: dict = {}
+        for gi, v in slots:
+            for npc in group_npcs[gi]:
+                other = owner.get(npc.lower())
+                if other is not None:
+                    abort_problem(422, "Invalid config",
+                                  f"'{name}' is listed in '{other}' and '{v['label']}', "
+                                  f"which both include {npc}. Repeat an item only across "
+                                  f"groups with different bosses, so each drop counts "
+                                  f"for one group.")
+                owner[npc.lower()] = v["label"]
+
+
 def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
-                       group_label: str) -> dict | None:
+                       group_index: int, group_label: str) -> dict | None:
     """Validate one loot_sweep item; None if its name is unknown (collected in
-    ``unknown``). ``seen`` maps item key -> group label to enforce that an item
-    appears in only ONE group per task (so a receipt maps to one group)."""
+    ``unknown``). ``seen`` records which groups each name credits; a name may
+    repeat across groups only on the terms :func:`_check_ls_shared_names`
+    enforces (so the drop's NPC maps a receipt to exactly one group)."""
     if isinstance(raw, str):
         name, entry = raw, {}
     elif isinstance(raw, dict):
@@ -877,14 +925,11 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
                 return None
     key = canonical.lower()
     # A name may credit SEVERAL entries in the SAME group (additive: e.g. an
-    # ancestral piece scores its own row AND feeds an "any 3 ancestral" pool),
-    # but not across DIFFERENT groups — that would merge the two bosses' NPC
-    # scopes and cross-credit their receipts.
-    if key in seen and seen[key] != group_label:
-        abort_problem(422, "Invalid config",
-                      f"'{canonical}' is listed in more than one group "
-                      f"('{seen[key]}' and '{group_label}') — an item belongs to one group.")
-    seen.setdefault(key, group_label)
+    # ancestral piece scores its own row AND feeds an "any 3 ancestral" pool).
+    # Across DIFFERENT groups it may repeat only when their NPCs are disjoint
+    # (Dragon 2h under Chaos Elemental AND Venenatis): the receipt's NPC then
+    # routes it to one group. Checked after every group is read.
+    _claim_ls_name(seen, key, canonical, group_index, group_label, source == "pet")
     try:
         pts = int(round(float(entry.get("points", 1) or 1)))
     except (TypeError, ValueError):
@@ -928,12 +973,9 @@ def _validated_ls_item(s, raw, *, default_apt: int, unknown: list, seen: dict,
         akey = acanon.lower()
         if akey == key or any(x.lower() == akey for x in aliases):
             continue
-        # Same-group reuse is allowed (additive scoring); cross-group is not.
-        if akey in seen and seen[akey] != group_label:
-            abort_problem(422, "Invalid config",
-                          f"'{acanon}' already appears under a different group "
-                          f"('{seen[akey]}') — a name can't credit entries in two groups.")
-        seen.setdefault(akey, group_label)
+        # Same-group reuse is allowed (additive scoring); cross-group only
+        # between NPC-disjoint groups (checked once every group is read).
+        _claim_ls_name(seen, akey, acanon, group_index, group_label, False)
         aliases.append(acanon)
     if aliases:
         item["match_names"] = aliases
@@ -997,6 +1039,7 @@ def _validated_loot_sweep(s, config: dict | None) -> dict:
                                hi=LOOT_SWEEP_MAX_BONUS_MAX)
 
     out_groups, unknown_items, unknown_npcs, seen_items = [], [], [], {}
+    group_npcs: dict[int, list[str]] = {}
     total_items = 0
     for gi, graw in enumerate(groups_raw, start=1):
         if not isinstance(graw, dict):
@@ -1018,6 +1061,7 @@ def _validated_loot_sweep(s, config: dict | None) -> dict:
             elif canon not in npcs:
                 npcs.append(canon)
 
+        group_npcs[gi] = npcs
         items_raw = graw.get("items")
         if not isinstance(items_raw, list) or not items_raw:
             abort_problem(422, "Invalid config", f"Group {gl} requires a non-empty 'items' array.")
@@ -1027,7 +1071,7 @@ def _validated_loot_sweep(s, config: dict | None) -> dict:
         items = []
         for it in items_raw:
             v = _validated_ls_item(s, it, default_apt=default_apt, unknown=unknown_items,
-                                   seen=seen_items, group_label=gl)
+                                   seen=seen_items, group_index=gi, group_label=gl)
             if v is not None:
                 items.append(v)
         total_items += len(items_raw)
@@ -1057,6 +1101,7 @@ def _validated_loot_sweep(s, config: dict | None) -> dict:
         abort_problem(422, "Unknown NPC(s)",
                       "Not found in the NPC database (exact in-game names required): "
                       + ", ".join(sorted(set(unknown_npcs))[:10]))
+    _check_ls_shared_names(seen_items, group_npcs)
 
     return {
         "kind": "loot_sweep",
