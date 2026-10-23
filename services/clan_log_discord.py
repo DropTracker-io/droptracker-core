@@ -223,6 +223,10 @@ async def refresh_standing_messages(bot, session, *, limit: int = MAX_RENDERS_PE
                     message = await channel.fetch_message(message_id=message_id)
                 except Exception:
                     message = None  # deleted / inaccessible — repost below
+                if message is not None and int(message.author.id) != int(bot.user.id):
+                    # Not the bot's (an id pasted into the old settings
+                    # field): it can't be edited, so post a fresh board.
+                    message = None
 
             if message is not None:
                 if file is not None:

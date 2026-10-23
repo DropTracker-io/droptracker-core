@@ -714,6 +714,15 @@ async def event_signup_prompt_retire():
 _LOOTBOARD_KEYS = ("lootboard_channel_id", "lootboard_message_id", "repost_lootboard")
 
 
+def _is_bot_message(message) -> bool:
+    """Whether the bot itself wrote ``message``: the only kind it can edit,
+    and the only kind a board poster may delete."""
+    try:
+        return int(message.author.id) == int(bot.user.id)
+    except Exception:
+        return False
+
+
 def _lootboard_targets() -> dict:
     """Which groups have a lootboard to post, as plain values. Runs off the loop.
 
@@ -881,8 +890,12 @@ async def lootboard_updates():
                         if group['message'] and group['message'] != '' and group['message'] != "0" and group['message'] != 0:
                             try:
                                 old_message = await channel.fetch_message(message_id=group['message'])
-                                await old_message.delete()
-                                print(f"Deleted previous lootboard message for group {group_id} ({group_obj.group_name})")
+                                # Only ever the bot's own board: the stored id
+                                # was once hand-editable and may name anyone's
+                                # message, which Manage Messages would delete.
+                                if old_message is not None and _is_bot_message(old_message):
+                                    await old_message.delete()
+                                    print(f"Deleted previous lootboard message for group {group_id} ({group_obj.group_name})")
                             except Exception as e:
                                 print(f"Couldn't delete previous message for group {group_id} ({group_obj.group_name}): {e}")
                                 # Continue anyway, we'll try to post a new message
@@ -904,8 +917,18 @@ async def lootboard_updates():
                             try:
                                 message = await channel.fetch_message(message_id=group['message'])
                             except Exception as e:
-                                #print("Couldn't fetch the message for this lootboard...:", e)
+                                # Not "gone" (that returns None and is handled
+                                # below) but a transient or permission error:
+                                # try again next pass rather than post a
+                                # duplicate board.
                                 continue
+                            if message is not None and not _is_bot_message(message):
+                                # A message the bot can't edit (an id pasted
+                                # into the old settings field): every edit
+                                # would fail forever. Leave it alone and post
+                                # a fresh board below.
+                                print(f"Lootboard message for group {group_id} isn't the bot's; posting a new one")
+                                message = None
 
                         else:
                             print(f"No message ID found for group {group_id} ({group_obj.group_name}). We would have sent a new one right now...")

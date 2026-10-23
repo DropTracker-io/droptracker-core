@@ -226,3 +226,77 @@ def test_delete_own_message_never_touches_another_authors_message(kind_own_only,
     row = SimpleNamespace(channel_id="1", discord_message_id="2")
     asyncio.run(outbox._delete_message(bot, None, row, own_only=kind_own_only))
     assert bool(deleted) is expect_deleted
+
+
+# --------------------------------------------------------------------------- #
+# Posters recover from a board message that isn't the bot's
+# --------------------------------------------------------------------------- #
+def _poster(monkeypatch):
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "services" / "pvp_lootboard_poster.py"
+    spec = importlib.util.spec_from_file_location("_real_pvp_poster", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    saved = []
+    monkeypatch.setattr(module.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(module, "build_embed", lambda *a: "embed")
+    monkeypatch.setattr(module.interactions, "File", lambda *a, **k: "file")
+    monkeypatch.setattr(module, "_save_message_id", lambda gid, mid: saved.append(mid))
+
+    async def thread_ok(*a, **k):
+        return "ok"
+
+    threads = SimpleNamespace(PROBLEM_STATES=set(), ensure_thread_open=thread_ok)
+    monkeypatch.setitem(sys.modules, "utils.discord_threads", threads)
+    return module, saved
+
+
+def _channel(author_id):
+    log = {"edited": 0, "deleted": 0, "sent": 0}
+
+    class Message:
+        id = 555
+        author = SimpleNamespace(id=author_id)
+        attachments = []
+
+        async def edit(self, **k):
+            log["edited"] += 1
+
+        async def delete(self):
+            log["deleted"] += 1
+
+    class Channel:
+        async def fetch_message(self, message_id):
+            return Message()
+
+        async def send(self, **k):
+            log["sent"] += 1
+            return SimpleNamespace(id=777)
+
+    class Bot:
+        user = SimpleNamespace(id=111)
+        http = None
+
+        async def fetch_channel(self, channel_id):
+            return Channel()
+
+    return Bot(), log
+
+
+@pytest.mark.parametrize("repost", [False, True])
+def test_pvp_board_posts_fresh_when_the_stored_message_is_someone_elses(monkeypatch, repost):
+    module, saved = _poster(monkeypatch)
+    bot, log = _channel(author_id=222)
+    target = {"channel": "1", "message": "555", "repost": repost}
+    assert asyncio.run(module.post_one(bot, 42, target, 0.0, None)) is True
+    assert log == {"edited": 0, "deleted": 0, "sent": 1} and saved == [777]
+
+
+def test_pvp_board_still_edits_its_own_message(monkeypatch):
+    module, saved = _poster(monkeypatch)
+    bot, log = _channel(author_id=111)
+    asyncio.run(module.post_one(bot, 42, {"channel": "1", "message": "555", "repost": False}, 0.0, None))
+    assert log == {"edited": 1, "deleted": 0, "sent": 0} and saved == []

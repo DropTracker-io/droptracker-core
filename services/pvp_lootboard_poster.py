@@ -150,6 +150,10 @@ async def post_one(bot, group_id: int, target: dict, drawn_at: float, policy) ->
             message = await channel.fetch_message(message_id=target["message"])
         except Exception:
             message = None
+    if message is not None and int(message.author.id) != int(bot.user.id):
+        # Not the bot's (an id pasted into the old settings field): it can be
+        # neither edited nor deleted by us. Post a fresh board instead.
+        message = None
     if message is not None and target["repost"]:
         try:
             await message.delete()
