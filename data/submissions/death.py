@@ -48,6 +48,34 @@ def _safe_str(value, limit):
     return text[:limit]
 
 
+def expand_death_facts(death_data):
+    """``is_safe_death`` and the value fields, computed here for a client that
+    sent the raw facts (plugin 6.2+; utils/death_regions.classify_safe and
+    utils/death_valuation port its DeathRegions and DeathValuation). Strings,
+    as the older plugin sent them. A submission that already carries the
+    verdict, or has none of the facts, is returned unchanged."""
+    if not isinstance(death_data, dict) or "is_safe_death" in death_data:
+        return death_data
+    if "carried_inv" not in death_data and "carried_worn" not in death_data:
+        return death_data
+    from utils import death_valuation
+    from utils.death_regions import classify_safe
+
+    out = dict(death_data)
+    region_id = death_data.get("region_id")
+    # An unknown location is treated as dangerous, as the plugin did.
+    safe = region_id not in (None, "", "N/A") and classify_safe(
+        region_id, death_data.get("account_type_id"), parse_flag(death_data.get("pest_control")) is True)
+    out["is_safe_death"] = "true" if safe else "false"
+    items = death_valuation.parse_items(death_data.get("carried_inv"), death_data.get("carried_worn"))
+    keep = death_valuation.keep_count(death_data.get("account_type_id"),
+                                      parse_flag(death_data.get("skulled")) is True,
+                                      parse_flag(death_data.get("protect_item")) is True)
+    lost, kept, stacks = death_valuation.value(items, safe, keep)
+    out["value_lost"], out["value_kept"], out["items_lost"] = str(lost), str(kept), str(stacks)
+    return out
+
+
 async def death_processor(death_data, external_session=None, world_type="main"):
     """
     Process player death submissions.
@@ -70,7 +98,13 @@ async def death_processor(death_data, external_session=None, world_type="main"):
       - player_name, acc_hash, auth_key, guid
       - image_url / image_path (optional)
       - video_key / video_url (optional; supported for consistency)
+
+    From plugin 6.2 the client sends the facts instead of its verdicts
+    (``carried_inv`` / ``carried_worn``, ``account_type_id``, ``skulled``,
+    ``protect_item``, ``pest_control``); :func:`expand_death_facts` turns
+    them into the fields above before anything reads them.
     """
+    death_data = expand_death_facts(death_data)
     debug_print(f"=== DEATH PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"[DEATH] Raw death data: {death_data}")
 

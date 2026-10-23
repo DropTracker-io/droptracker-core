@@ -98,6 +98,35 @@ SAFE_REGIONS: frozenset[int] = frozenset().union(
 )
 
 
+#: Safe for every account except a hardcore one, which loses its status there.
+_SAFE_INSTANCES: frozenset[int] = frozenset().union(
+    _GAUNTLET, _CHAMBERS_OF_XERIC, _THEATRE_OF_BLOOD, _TOMBS_OF_AMASCUT)
+
+#: Account-type varbit values (VarbitID.IRONMAN) of the hardcore modes.
+_HARDCORE_ACCOUNT_TYPES = frozenset({3, 5})
+
+
+def classify_safe(region_id, account_type=None, pest_control=False) -> bool:
+    """The plugin's full ``DeathRegions.isSafe``, for clients from 6.2 that
+    send the facts instead of the verdict: the account type
+    (VarbitID.IRONMAN) and whether a Pest Control game is on screen.
+
+    Minigames cost nobody anything, hardcore included; a raid or Gauntlet
+    death costs a hardcore account its status, so it is dangerous for them.
+    """
+    try:
+        region = int(region_id)
+    except (TypeError, ValueError):
+        return False
+    if pest_control or (region in SAFE_REGIONS and region not in _SAFE_INSTANCES):
+        return True
+    try:
+        hardcore = int(account_type) in _HARDCORE_ACCOUNT_TYPES
+    except (TypeError, ValueError):
+        hardcore = False
+    return region in _SAFE_INSTANCES and not hardcore
+
+
 def is_safe_region(region_id) -> bool:
     """Whether a non-hardcore death in this region costs no items.
 
