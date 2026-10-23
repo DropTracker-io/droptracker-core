@@ -1,4 +1,4 @@
-"""Plugin group-admin device sessions (web142a).
+"""Plugin group-admin device sessions (web143a).
 
 What the RuneLite plugin holds after a group's verification code was entered
 in game: a bearer token for administering that one group from that one game

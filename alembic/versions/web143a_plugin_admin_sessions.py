@@ -1,4 +1,4 @@
-"""plugin_admin_sessions (web142a).
+"""plugin_admin_sessions (web143a).
 
 Device sessions for administering a group from the RuneLite plugin, minted in
 exchange for the group's verification code (web141a). Holds a SHA-256 of each
@@ -6,14 +6,14 @@ token, never the token. Read and written by db/plugin_admin_sessions.py.
 
 New table only, so it is safe to apply live. Guarded, so a re-run is harmless.
 
-Revision ID: web142a_plugin_admin_sessions
-Revises: web141a_group_verification_codes
+Revision ID: web143a_plugin_admin_sessions
+Revises: web142a_drop_value_bigint
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "web142a_plugin_admin_sessions"
-down_revision = "web141a_group_verification_codes"
+revision = "web143a_plugin_admin_sessions"
+down_revision = "web142a_drop_value_bigint"
 branch_labels = None
 depends_on = None
 

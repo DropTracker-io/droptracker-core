@@ -10,7 +10,7 @@ Two factors stand behind every group call:
 2. The request must carry a device session for that group
    (``Authorization: Bearer dtp_...``), which ``POST /plugin/admin/link``
    issues only in exchange for the group's verification code (web141a).
-   Resetting or clearing the code revokes every session (web142a).
+   Resetting or clearing the code revokes every session (web143a).
 
 Settings are read and written through the website's own config functions
 (``web_api.routes.config``), so a change made in game passes the same

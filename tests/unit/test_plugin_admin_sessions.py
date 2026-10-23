@@ -1,4 +1,4 @@
-"""Plugin group-admin device sessions (db/plugin_admin_sessions.py, web142a).
+"""Plugin group-admin device sessions (db/plugin_admin_sessions.py, web143a).
 
 What these pin:
 
