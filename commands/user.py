@@ -710,10 +710,10 @@ class UserCommands(Extension):
     @slash_command(name="clan-log",
                    description="See which boss uniques your clan has obtained, and what's still missing")
     @slash_option(name="period",
-                  description="all (default), a year like 2026, or a month like 2026-08",
+                  description="all, a year like 2026, or a month like 2026-08 (default: your clan's setting)",
                   required=False,
                   opt_type=OptionType.STRING)
-    async def clan_log_cmd(self, ctx: SlashContext, period: str = "all"):
+    async def clan_log_cmd(self, ctx: SlashContext, period: str = ""):
         """Post the clan's unique-completion card.
 
         Public rather than ephemeral: a completion board is something a clan
@@ -726,10 +726,12 @@ class UserCommands(Extension):
 
         from interactions import ActionRow, Button, ButtonStyle
         from services.clan_log import is_valid_period
-        from services.clan_log_discord import board_url, build_card_payload
+        from services.clan_log_discord import (
+            board_url, build_card_payload, standing_period_for,
+        )
 
-        period = (period or "all").strip() or "all"
-        if not is_valid_period(period):
+        period = (period or "").strip()
+        if period and not is_valid_period(period):
             return await ctx.send(
                 "That period doesn't look right — use `all`, a year like `2026`, "
                 "or a month like `2026-08`.",
@@ -742,6 +744,11 @@ class UserCommands(Extension):
                 "This Discord server isn't linked to a DropTracker clan yet.",
                 ephemeral=True,
             )
+
+        # No period asked for: show the window the clan picked for its
+        # standing message (clan_log_period), all-time unless they changed it.
+        if not period:
+            period = standing_period_for(session, group.group_id)
 
         # Rendering the card is a headless screenshot; Discord's 3s window is
         # not enough on a cold cache.
@@ -757,7 +764,7 @@ class UserCommands(Extension):
 
         components = ActionRow(
             Button(label="Open the full board", style=ButtonStyle.URL,
-                   url=board_url(group.group_id))
+                   url=board_url(group.group_id, period))
         )
         if file is not None:
             return await ctx.send(content=text, files=file, components=components)

@@ -130,6 +130,25 @@ def test_current_periods_are_all_year_month():
     assert periods == ["all", "2026", "2026-08"]
 
 
+@pytest.mark.parametrize(
+    "setting,expected",
+    [
+        ("all", "all"), ("year", "2026"), ("month", "2026-08"),
+        (" Month ", "2026-08"),
+        # Unset or unknown reads as all-time: what every clan had before.
+        (None, "all"), ("", "all"), ("2025", "all"), ("weekly", "all"),
+    ],
+)
+def test_standing_period_is_relative_to_now(setting, expected):
+    assert clan_log.standing_period(setting, datetime(2026, 8, 13)) == expected
+
+
+def test_standing_period_rolls_over_with_the_calendar():
+    assert clan_log.standing_period("month", datetime(2026, 12, 31)) == "2026-12"
+    assert clan_log.standing_period("month", datetime(2027, 1, 1)) == "2027-01"
+    assert clan_log.standing_period("year", datetime(2027, 1, 1)) == "2027"
+
+
 # --------------------------------------------------------------------------- #
 # Folding claims into the monthly ledger
 # --------------------------------------------------------------------------- #

@@ -107,6 +107,22 @@ def current_periods(now: Optional[datetime] = None) -> list[str]:
     return [PERIOD_ALL, f"{now.year:04d}", f"{now.year:04d}-{now.month:02d}"]
 
 
+#: ``clan_log_period`` (the standing Discord message's window) → which of
+#: :func:`current_periods` it means. Relative, so the board follows the
+#: calendar instead of freezing on the year it was configured in.
+STANDING_PERIOD_CHOICES = ("all", "year", "month")
+
+
+def standing_period(setting: Optional[str], now: Optional[datetime] = None) -> str:
+    """The concrete period for a ``clan_log_period`` setting. Anything unknown
+    (unset, a legacy or hand-typed value) reads as all-time, which is what
+    every clan got before the setting existed."""
+    choice = (setting or "").strip().lower()
+    if choice not in STANDING_PERIOD_CHOICES:
+        choice = "all"
+    return current_periods(now)[STANDING_PERIOD_CHOICES.index(choice)]
+
+
 def month_of(when: datetime) -> str:
     return f"{when.year:04d}-{when.month:02d}"
 

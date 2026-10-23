@@ -9,6 +9,10 @@ Two surfaces over one artifact:
 * **``/clan-log``.** The same card on demand, for clans who would rather ask
   than dedicate a channel.
 
+Both show the window the clan picked in ``clan_log_period`` (all time, this
+year or this month; :func:`services.clan_log.standing_period`). ``/clan-log``
+can still ask for any other period explicitly.
+
 The refresher only touches Discord when the picture actually changed. The board
 image is cached in Redis against a state hash (:mod:`services.clan_log_image`),
 and the last hash posted is kept in Redis too, so a quiet clan costs one
@@ -38,8 +42,20 @@ _POSTED_HASH_KEY = "clan_log:{group_id}:posted_hash"
 _POSTED_HASH_TTL = 30 * 24 * 3600
 
 
-def board_url(group_id: int) -> str:
-    return f"https://www.droptracker.io/groups/{int(group_id)}/log"
+def board_url(group_id: int, period: str = "all") -> str:
+    url = f"https://www.droptracker.io/groups/{int(group_id)}/log"
+    return url if period == "all" else f"{url}?period={period}"
+
+
+def period_label(period: str) -> str:
+    """'all time', '2026' or 'October 2026' for the line under the card."""
+    if period == "all":
+        return "all time"
+    if len(period) == 7:
+        import calendar
+
+        return f"{calendar.month_name[int(period[5:])]} {period[:4]}"
+    return period
 
 
 def build_message_text(payload: dict) -> str:
@@ -53,12 +69,11 @@ def build_message_text(payload: dict) -> str:
     total = summary.get("total", 0)
     pct = summary.get("pct", 0)
     name = payload.get("group_name") or "The clan"
-    period = payload.get("period", "all")
-    window = "all time" if period == "all" else period
+    window = period_label(payload.get("period", "all"))
     return (
         f"**{name} — Clan Log** ({window})\n"
         f"{obtained} of {total} tracked uniques obtained ({pct}%). "
-        f"Full board: {board_url(payload.get('group_id') or 0)}"
+        f"Full board: {board_url(payload.get('group_id') or 0, payload.get('period', 'all'))}"
     )
 
 
@@ -93,6 +108,40 @@ def _has_message(config, group_id: int) -> bool:
     return bool(message_id) and message_id not in {"0", "None"}
 
 
+def _standing_board(session, group_id: int, setting) -> tuple[str, Optional[dict]]:
+    """``(period, payload)`` for a clan's standing message.
+
+    The sweep stores this year's and this month's boards alongside all-time,
+    but it visits groups in turn, so in the first minutes of a new month (or
+    year) the new board may not exist yet. Build it from the ledger rather than
+    skip: a fresh month is an honest 0%, and leaving last month's board up
+    would show the wrong window. Only for a group the sweep has already
+    ledgered, the same gate the board route uses, and only ever for a current
+    period, so nothing here mints snapshots for arbitrary periods.
+    """
+    from services.clan_log import (
+        PERIOD_ALL, build_payload, ledger_periods, load_board, save_board,
+        standing_period,
+    )
+
+    period = standing_period(setting)
+    payload = load_board(session, group_id, period)
+    if payload is None and period != PERIOD_ALL and ledger_periods(session, group_id):
+        payload = build_payload(session, group_id, period)
+        save_board(session, group_id, period, payload)
+        session.commit()
+    return period, payload
+
+
+def standing_period_for(session, group_id: int) -> str:
+    """The period a clan's ``clan_log_period`` setting means right now."""
+    from services.clan_log import standing_period
+    from utils import group_config
+
+    config = group_config.get_bulk(session, [group_id], ["clan_log_period"])
+    return standing_period(config.get((group_id, "clan_log_period")))
+
+
 def _skip(stats: dict, group_id: int, reason: str) -> None:
     """Count and log a candidate the cycle passed over. These paths used to
     ``continue`` silently, which is what made ticket #476 invisible."""
@@ -107,7 +156,7 @@ def _scan_standing_candidates() -> Optional[tuple]:
     """Which clans' standing boards actually moved. MUST run off the event loop.
 
     Returns ``(checked, skipped, config, candidates)`` where candidates is
-    ``[(group_id, channel_id, current_hash), ...]``.
+    ``[(group_id, channel_id, period, current_hash), ...]``.
 
     The module docstring's claim that a quiet clan "costs one in-memory
     comparison" is only true of the *comparison* — reaching it needs a full
@@ -121,7 +170,7 @@ def _scan_standing_candidates() -> Optional[tuple]:
     """
     from db.models import GroupConfiguration
     from db.models.base import Session
-    from services.clan_log import load_board
+    from services.clan_log import standing_period
     from services.clan_log_image import board_state_hash
     from utils import group_config
     from utils.redis import redis_client
@@ -141,7 +190,8 @@ def _scan_standing_candidates() -> Optional[tuple]:
             return None
 
         config = group_config.get_bulk(
-            session, group_ids, ["clan_log_channel_id", "clan_log_message_id"]
+            session, group_ids,
+            ["clan_log_channel_id", "clan_log_message_id", "clan_log_period"],
         )
 
         checked = 0
@@ -154,8 +204,12 @@ def _scan_standing_candidates() -> Optional[tuple]:
                 continue
 
             posted_key = _POSTED_HASH_KEY.format(group_id=group_id)
+            # The hash covers the period, so switching the setting (or the
+            # month rolling over) reads as a change and edits the message.
+            setting = config.get((group_id, "clan_log_period"))
+            period = standing_period(setting)
             try:
-                payload = load_board(session, group_id, "all")
+                period, payload = _standing_board(session, group_id, setting)
                 if not payload:
                     continue
                 current_hash = board_state_hash(payload)
@@ -163,8 +217,9 @@ def _scan_standing_candidates() -> Optional[tuple]:
                     skipped += 1
                     continue
             except Exception:
+                session.rollback()
                 current_hash = None
-            candidates.append((group_id, channel_id, current_hash))
+            candidates.append((group_id, channel_id, period, current_hash))
         # A clan that has never had its message posted goes first: it has
         # nothing on Discord at all, while everyone else only has a stale one.
         candidates.sort(key=lambda c: 1 if _has_message(config, c[0]) else 0)
@@ -196,10 +251,10 @@ async def refresh_standing_messages(bot, session, *, limit: int = MAX_RENDERS_PE
 
     # Budget spent past this point; the rest keep their stale message until the
     # next cycle.
-    for group_id, channel_id, current_hash in candidates[:limit]:
+    for group_id, channel_id, period, current_hash in candidates[:limit]:
         posted_key = _POSTED_HASH_KEY.format(group_id=group_id)
         try:
-            text, file, state_hash = await build_card_payload(session, group_id, "all")
+            text, file, state_hash = await build_card_payload(session, group_id, period)
             if text is None:
                 _skip(stats, group_id, "no board")
                 continue

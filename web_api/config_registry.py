@@ -1069,6 +1069,18 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Where the standing Clan Log message lives. Pick a channel of its own: the bot edits this message continuously, so it will bury conversation in a busy channel.",
         "default": None,
     },
+    # Which window the standing message shows. Relative on purpose: "year" is
+    # whatever year it is now, so the board rolls over by itself on the 1st
+    # rather than freezing on a stale period (services/clan_log_discord).
+    {
+        "key": "clan_log_period",
+        "label": "Clan Log period",
+        "category": "clan_log",
+        "type": "select",
+        "help": "Which time window the Discord message shows: everything your clan has ever obtained, this year only, or this month only. Year and month boards start over on the 1st (UTC).",
+        "default": "all",
+        "options": ["all", "year", "month"],
+    },
     # The message the bot edits. Written by the bot, not by an admin.
     {
         "key": "clan_log_message_id",
