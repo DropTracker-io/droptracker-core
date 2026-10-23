@@ -1,7 +1,8 @@
 """``POST /player/model`` — accept the plugin's character model upload, and
 ``POST /player/model/check`` — answer whether we already hold one.
 
-Stores one binary glTF per outfit fingerprint. Repeat uploads of an outfit we
+Stores one binary glTF per outfit fingerprint (written here from the plugin's
+mesh by services/player_model_mesh.py since plugin 6.1.15). Repeat uploads of an outfit we
 already hold are answered without touching the disk, which used to be the
 common case: the plugin remembered a single fingerprint, so a player
 alternating between two outfits re-sent one of them on every switch.
@@ -63,13 +64,26 @@ async def upload_player_model():
     # for their profile, so record it as pinned rather than merely current.
     pin = (form.get("pin") or "").strip() in ("1", "true")
 
-    model_file = files.get("model")
-    if model_file is None:
+    # 6.1.15+ sends the mesh ("mesh"/"pet_mesh") and the glTF is written here;
+    # older plugins send the finished glTF ("model"/"pet_model").
+    mesh_file, model_file = files.get("mesh"), files.get("model")
+    if mesh_file is None and model_file is None:
         return jsonify({"error": "model file is required"}), 422
+    pet_mesh, pet_file = files.get("pet_mesh"), files.get("pet_model")
+    if mesh_file is not None:
+        from services.player_model_mesh import MeshError, convert
 
-    model_bytes = model_file.read()
-    pet_file = files.get("pet_model")
-    pet_bytes = pet_file.read() if pet_file is not None else None
+        try:
+            model_bytes = await asyncio.to_thread(convert, mesh_file.read())
+        except MeshError:
+            return jsonify({"accepted": False, "reason": "invalid_model"}), 422
+        try:
+            pet_bytes = await asyncio.to_thread(convert, pet_mesh.read()) if pet_mesh is not None else None
+        except MeshError:
+            pet_bytes = None  # the pet is optional; never lose the player's model over it
+    else:
+        model_bytes = model_file.read()
+        pet_bytes = pet_file.read() if pet_file is not None else None
 
     try:
         result = await asyncio.to_thread(

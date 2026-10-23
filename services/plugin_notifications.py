@@ -1173,6 +1173,8 @@ def compose_event_state(session, player_id) -> dict:
             except Exception:
                 pass
             tile = tiles.get(task_row.id) or {}
+            for requirement in requirements:
+                requirement["label"] = requirement_label(requirement)
             tasks_payload.append({
                 "id": task_row.id,
                 "label": task_row.label,
@@ -1189,6 +1191,7 @@ def compose_event_state(session, player_id) -> dict:
                 "description": description,
                 "requirements": requirements,
             })
+            tasks_payload[-1]["tip"] = task_tip(tasks_payload[-1])
 
         # Own-team roster for the Events tab (names only; capped, with the
         # real total so the client can render "… and N more").
@@ -1768,3 +1771,69 @@ def fan_out_event_notification(session, notification_type: str, event: dict,
     except Exception as e:
         print(f"[plugin_notifications] fan-out failed for {notification_type}: {e}")
         return 0
+
+
+# --------------------------------------------------------------------------- #
+# Task tooltips for the plugin's Events tab
+# --------------------------------------------------------------------------- #
+# Plugin 6.1.15 draws these lines instead of assembling the tooltip itself.
+# Plain text in a closed set of styles: "title" (bold), "note" (italic),
+# "done" (struck through, a banked requirement); "" is a blank line.
+def _commas(n: int) -> str:
+    return f"{int(n):,}"
+
+
+def _trim(value: float, decimals: int) -> str:
+    return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+
+
+def _abbrev(n: int) -> str:
+    """The plugin's ValueFormat.abbrev: 10M, 1.25M, 813.6K, 500."""
+    a = abs(n)
+    if a >= 1_000_000_000:
+        return _trim(n / 1_000_000_000, 2) + "B"
+    if a >= 1_000_000:
+        return _trim(n / 1_000_000, 2) + "M"
+    if a >= 10_000:
+        return _trim(n / 1_000, 1) + "K"
+    return _commas(n)
+
+
+def _progress(have: int, need: int) -> str:
+    if need >= 100_000 or have >= 100_000:
+        return f"{_abbrev(have)} / {_abbrev(need)}"
+    return f"{_commas(have)} / {_commas(need)}"
+
+
+def requirement_label(req: dict) -> str:
+    """"Dragon claws ×2 (5 pts)": one requirement as the plugin shows it."""
+    text = str(req.get("name") or "")
+    if (req.get("quantity") or 0) > 1:
+        text += f" ×{req['quantity']}"
+    if req.get("points") is not None:
+        text += f" ({req['points']} pts)"
+    return text
+
+
+def task_tip(task: dict) -> list:
+    """The lines of a task's tooltip: what it is, what it needs, how far along."""
+    lines = [{"text": str(task.get("label") or ""), "style": "title"}]
+    if task.get("badge"):
+        badge = str(task["badge"]) + (f" · {task['value']}" if task.get("value") else "")
+        lines.append({"text": f"[{badge}]", "style": "note"})
+    if task.get("description"):
+        lines.append({"text": str(task["description"]), "style": None})
+    if task.get("requirements"):
+        lines.append({"text": "", "style": None})
+        for req in task["requirements"]:
+            done = req.get("obtained") is True
+            lines.append({"text": "- " + req.get("label", requirement_label(req)) + (" (done)" if done else ""),
+                          "style": "done" if done else None})
+    have, need = int(task.get("have") or 0), int(task.get("need") or 1)
+    if not task.get("completed") and (need > 1 or have > 0):
+        lines += [{"text": "", "style": None}, {"text": "Progress: " + _progress(have, need), "style": None}]
+    if task.get("completed"):
+        lines += [{"text": "", "style": None}, {"text": "Completed", "style": None}]
+    if int(task.get("points") or 0) > 0:
+        lines.append({"text": f"Worth {int(task['points'])} points", "style": None})
+    return lines
