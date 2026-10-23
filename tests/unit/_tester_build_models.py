@@ -38,3 +38,4 @@ _models = _load()
 
 PluginTestDownload = _models.PluginTestDownload
 PlayerPluginVersion = _models.PlayerPluginVersion
+TesterUpdateKey = _models.TesterUpdateKey

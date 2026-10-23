@@ -43,7 +43,7 @@ from .notification_queue import NotificationQueue
 from .player_npc_kc import PlayerNpcKc
 from .player_deepest_delve import PlayerDeepestDelve
 from .player_plugin_config import PlayerPluginConfig
-from .tester_builds import PluginTestDownload, PlayerPluginVersion
+from .tester_builds import PluginTestDownload, PlayerPluginVersion, TesterUpdateKey
 from .admin_widget_token import AdminWidgetToken
 from .group_bank import (
     GroupBankEntry,
@@ -310,6 +310,7 @@ __all__ = [
     "PlayerDeepestDelve",
     "PlayerPluginConfig",
     "PluginTestDownload",
+    "TesterUpdateKey",
     "AdminWidgetToken",
     "GroupVerificationCode",
     "PluginAdminSession",

@@ -19,6 +19,8 @@ the two tables this feature adds built from the application's own models
 from __future__ import annotations
 
 import json
+import os
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -33,6 +35,7 @@ import web_api.routes.tester_builds as tbr
 
 from tests.unit import _tester_db as tdb
 from tests.unit._tester_build_models import PlayerPluginVersion, PluginTestDownload
+from tests.unit._tester_build_models import TesterUpdateKey as UpdateKey
 
 COMMIT = "2cd73be4f0a1b2c3d4e5f60718293a4b5c6d7e8f"
 RELEASE_COMMIT = "577fa89000000000000000000000000000000000"
@@ -71,6 +74,23 @@ def _manifest(build_id=CURRENT, built_at="2026-10-03T15:28:07Z", version="6.0.19
     return manifest
 
 
+def _write_zip(path, build_id):
+    """A zip laid out like a real build: everything in one top folder."""
+    top = f"droptracker-dev-{build_id}/"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(top + "run-droptracker-dev.sh", "#!/bin/sh\n")
+        zf.writestr(top + "plugins/droptracker-plugin.jar", b"jar bytes")
+
+
+def _properties(builds_root, file_name):
+    """The tester.properties inside a served zip, as a dict."""
+    with zipfile.ZipFile(builds_root / "builds" / file_name) as zf:
+        (name,) = [n for n in zf.namelist() if n.endswith("tester.properties")]
+        assert name.count("/") == 1   # beside the launch scripts
+        lines = zf.read(name).decode().splitlines()
+    return dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
+
+
 @pytest.fixture()
 def builds(tmp_path, monkeypatch):
     """An empty publish directory, and a way to publish into it."""
@@ -81,7 +101,7 @@ def builds(tmp_path, monkeypatch):
         if listed:
             (tmp_path / "builds" / f"{manifest['build_id']}.json").write_text(json.dumps(manifest))
         if with_zip:
-            (tmp_path / "builds" / manifest["file"]).write_bytes(b"PK zip bytes")
+            _write_zip(tmp_path / "builds" / manifest["file"], manifest["build_id"])
         if current:
             (tmp_path / "current.json").write_text(json.dumps(manifest))
         return manifest
@@ -101,6 +121,7 @@ def db(monkeypatch):
     tdb.install_models(monkeypatch, factory)
     monkeypatch.setattr(tbr, "PluginTestDownload", PluginTestDownload)
     monkeypatch.setattr(tbr, "PlayerPluginVersion", PlayerPluginVersion)
+    monkeypatch.setattr(tbr, "TesterUpdateKey", UpdateKey)
     monkeypatch.setattr(tbr, "User", tdb.User)
 
     @contextmanager
@@ -319,11 +340,14 @@ class TestDownload:
         assert resp.status_code == 200
         assert resp.headers["Cache-Control"] == "private, no-store"
         body = await resp.get_json()
+        # A personal copy is served; the browser saves it under the build's name.
+        personal = body.pop("file")
+        assert tbr.tb.PERSONAL_ZIP_RE.fullmatch(personal)
+        assert tbr.tb.SAFE_ZIP_RE.fullmatch(personal)
         assert body == {
-            "file": manifest["file"], "filename": manifest["file"], "build_id": CURRENT,
-            "version": "6.0.19", "size_bytes": 28563998,
+            "filename": manifest["file"], "build_id": CURRENT, "version": "6.0.19",
+            "size_bytes": (builds.root / "builds" / personal).stat().st_size, "sha256": None,
         }
-        assert tbr.tb.SAFE_ZIP_RE.fullmatch(body["file"])
 
         (row,) = _downloads(db)
         assert (row.user_id, row.build_id, row.plugin_version) == (TESTER, CURRENT, "6.0.19")
@@ -404,7 +428,151 @@ class TestDownload:
         builds.publish(_manifest(size_bytes=None))
         sign_in(TESTER)
         body = await (await client.post("/api/v1/tester-builds/download")).get_json()
-        assert body["size_bytes"] == len(b"PK zip bytes")
+        assert body["size_bytes"] == (builds.root / "builds" / body["file"]).stat().st_size
+
+
+# ── Self-updating builds ──────────────────────────────────────────────────────
+
+async def _site_download(client):
+    return await (await client.post("/api/v1/tester-builds/download")).get_json()
+
+
+def _age(factory, minutes):
+    """Move every key and download ``minutes`` into the past."""
+    with factory() as s:
+        for row in s.query(UpdateKey).all() + s.query(PluginTestDownload).all():
+            row.created_at -= timedelta(minutes=minutes)
+        s.commit()
+
+
+def _bearer(key):
+    return {"Authorization": f"Bearer {key}"}
+
+
+class TestUpdater:
+    async def test_a_site_download_carries_a_new_key_for_its_build(
+            self, client, db, builds, sign_in):
+        manifest = builds.publish(_manifest())
+        sign_in(TESTER)
+        body = await _site_download(client)
+        props = _properties(builds.root, body["file"])
+        assert props["build"] == CURRENT and props["key"].startswith("dtu_")
+        with zipfile.ZipFile(builds.root / "builds" / body["file"]) as zf:
+            # Everything the build had is still there.
+            assert f"droptracker-dev-{CURRENT}/plugins/droptracker-plugin.jar" in zf.namelist()
+        with db() as s:
+            (row,) = s.query(UpdateKey).all()
+            assert row.user_id == TESTER and row.build_id == CURRENT
+            assert row.key_hash == tbr._hash_key(props["key"]) and props["key"] not in row.key_hash
+        # The shared zip itself is never changed.
+        assert "tester.properties" not in str(
+            zipfile.ZipFile(builds.root / "builds" / manifest["file"]).namelist())
+
+    async def test_a_resumed_download_gets_the_same_bytes(self, client, db, builds, sign_in):
+        builds.publish(_manifest())
+        sign_in(TESTER)
+        files = {(await _site_download(client))["file"] for _ in range(3)}
+        assert len(files) == 1
+        with db() as s:
+            assert s.query(UpdateKey).count() == 1
+
+    async def test_check_says_whether_there_is_a_newer_build(self, client, db, builds, sign_in):
+        builds.publish(_manifest())
+        sign_in(TESTER)
+        key = _properties(builds.root, (await _site_download(client))["file"])["key"]
+        sign_in(None)   # the launch script has no session, only the key
+
+        resp = await client.get(f"/api/v1/tester-builds/update?have={CURRENT}", headers=_bearer(key))
+        assert resp.status_code == 200 and resp.headers["Cache-Control"] == "private, no-store"
+        assert (await resp.get_json())["update"] is False
+
+        body = await (await client.get(f"/api/v1/tester-builds/update?have={OLDER}",
+                                       headers=_bearer(key))).get_json()
+        assert body == {"update": True, "current": {
+            "build_id": CURRENT, "version": "6.0.19", "runelite_version": "1.13.1",
+            "size_bytes": 28563998, "sha256": "ab" * 32}}
+
+    @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer nope"},
+                                         {"Authorization": "Bearer dtu_unknown"},
+                                         {"Authorization": "Basic dtu_unknown"}])
+    async def test_no_good_key_is_401(self, client, db, builds, headers):
+        builds.publish(_manifest())
+        for method, path in (("get", "/api/v1/tester-builds/update"),
+                             ("post", "/api/v1/tester-builds/update/download")):
+            resp = await getattr(client, method)(path, headers=headers)
+            assert resp.status_code == 401, path
+            assert (await resp.get_json())["code"] == "update_key_invalid"
+        assert _downloads(db) == []
+
+    async def test_a_key_stops_working_with_the_badge(self, client, db, builds, sign_in):
+        builds.publish(_manifest())
+        sign_in(TESTER)
+        key = _properties(builds.root, (await _site_download(client))["file"])["key"]
+        with db() as s:
+            s.query(tdb.PlayerBadge).update({"status": "revoked", "active_key": None})
+            s.commit()
+        resp = await client.get("/api/v1/tester-builds/update", headers=_bearer(key))
+        assert resp.status_code == 403
+        assert (await resp.get_json())["code"] == "bug_tester_required"
+
+    async def test_an_update_is_recorded_as_a_download(self, client, db, builds, sign_in):
+        older = builds.publish(_manifest(OLDER, "2026-10-01T10:00:00Z", version="6.0.18"))
+        sign_in(TESTER)
+        key = _properties(builds.root, (await _site_download(client))["file"])["key"]
+        current = builds.publish(_manifest())
+
+        resp = await client.post("/api/v1/tester-builds/update/download", headers=_bearer(key))
+        assert resp.status_code == 200
+        body = await resp.get_json()
+        # The shared zip: the folder it unpacks into already has its key.
+        assert body["file"] == body["filename"] == current["file"]
+        assert body["sha256"] == "ab" * 32
+        assert [(d.user_id, d.build_id) for d in _downloads(db)] == [
+            (TESTER, older["build_id"]), (TESTER, CURRENT)]
+        # The page now shows the build as the tester's latest.
+        page = await (await client.get("/api/v1/tester-builds")).get_json()
+        assert page["has_current"] is True and page["my_downloads"][0]["build_id"] == CURRENT
+
+        # A retry inside the window is the same download.
+        await client.post("/api/v1/tester-builds/update/download", headers=_bearer(key))
+        assert len(_downloads(db)) == 2
+
+    async def test_a_user_keeps_their_newest_five_keys(self, client, db, builds, sign_in):
+        builds.publish(_manifest())
+        sign_in(TESTER)
+        keys = []
+        for n in range(6):
+            keys.append(_properties(builds.root, (await _site_download(client))["file"])["key"])
+            _age(db, minutes=11 * (6 - n))   # step past the re-download window
+        codes = [(await client.get("/api/v1/tester-builds/update", headers=_bearer(k))).status_code
+                 for k in keys]
+        assert codes == [401, 200, 200, 200, 200, 200]
+
+    async def test_the_shared_zip_is_served_if_a_copy_cannot_be_made(
+            self, client, db, builds, sign_in, monkeypatch):
+        manifest = builds.publish(_manifest())
+        monkeypatch.setattr(tbr.tb, "write_personal_zip", lambda *a, **k: None)
+        sign_in(TESTER)
+        body = await _site_download(client)
+        assert body["file"] == manifest["file"] and body["sha256"] == "ab" * 32
+        assert len(_downloads(db)) == 1
+        with db() as s:
+            assert s.query(UpdateKey).count() == 0
+
+    async def test_old_personal_copies_are_swept(self, client, db, builds, sign_in):
+        builds.publish(_manifest())
+        sign_in(TESTER)
+        first = (await _site_download(client))["file"]
+        stale = builds.root / "builds" / first
+        old = stale.stat().st_mtime - tbr.tb.PERSONAL_ZIP_TTL_SECONDS - 5
+        os.utime(stale, (old, old))
+        half = builds.root / "builds" / "tester-0123456789abcdef01234567.zip.part"
+        half.write_bytes(b"")
+        os.utime(half, (old, old))
+        _age(db, minutes=11)
+        second = (await _site_download(client))["file"]
+        assert second != first and not stale.exists() and not half.exists()
+        assert (builds.root / "builds" / second).exists()
 
 
 # ── GET /admin/tester-builds ──────────────────────────────────────────────────

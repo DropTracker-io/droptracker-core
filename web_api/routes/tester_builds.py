@@ -2,6 +2,8 @@
 
   GET  /api/v1/tester-builds           -> the current build, older ones, my downloads
   POST /api/v1/tester-builds/download  -> record a download, name the file to serve
+  GET  /api/v1/tester-builds/update    -> (updater key) is there a newer build?
+  POST /api/v1/tester-builds/update/download -> (updater key) record, name the file
   GET  /api/v1/admin/tester-builds     -> pipeline status, builds, tester activity
 
 The builds are files a private build job publishes to disk; everything read
@@ -23,14 +25,16 @@ Downloads are not audit-logged: ``plugin_test_downloads`` is the record.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
-from quart import Blueprint, jsonify
+from quart import Blueprint, jsonify, request
 from sqlalchemy import func
 
-from db.models import PlayerPluginVersion, PluginTestDownload, User
+from db.models import PlayerPluginVersion, PluginTestDownload, TesterUpdateKey, User
 from utils import tester_builds as tb
 from utils.plugin_versions import version_tuple
 from web_api.common import abort_problem, db_session, private_no_store
@@ -136,6 +140,172 @@ async def tester_builds():
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
 
+def _no_build():
+    # No manifest, a file name that is not safe to serve, or a zip that is no
+    # longer on disk. All three mean nothing to send.
+    abort_problem(
+        404,
+        "Not found",
+        "There is no tester build to download right now.",
+        extra={"code": "no_build"},
+    )
+
+
+def _record_download(s, user_id: int):
+    """Record that ``user_id`` is downloading the current build, once per
+    re-download window. Returns ``(build payload, zip path, now)``; the caller
+    commits."""
+    current = tb.load_current()
+    path = tb.zip_path(current)
+    if path is None:
+        _no_build()
+    build = tb.build_payload(current, include_since_release=False)
+
+    # A download manager sends several ranged requests at once. Taking the
+    # user's row first makes them queue, and the engine is READ COMMITTED, so
+    # each one's check sees the row the one before it just committed instead
+    # of all of them inserting.
+    s.query(User.user_id).filter(User.user_id == user_id).with_for_update().first()
+    now = datetime.now()
+    repeat = (
+        s.query(PluginTestDownload.id)
+        .filter(
+            PluginTestDownload.user_id == user_id,
+            PluginTestDownload.build_id == build["build_id"],
+            PluginTestDownload.created_at >= now - _REDOWNLOAD_WINDOW,
+        )
+        .first()
+    )
+    if repeat is None:
+        s.add(
+            PluginTestDownload(
+                user_id=user_id,
+                build_id=build["build_id"],
+                plugin_version=build["version"][:32] or None,
+                commit_sha=build["commit"][:40] or None,
+                runelite_version=build["runelite_version"][:32] or None,
+                file_name=os.path.basename(path),
+                # Stamped here, not by the column default, so the window
+                # above is measured on one clock.
+                created_at=now,
+            )
+        )
+    return build, path, now
+
+
+def _download_answer(build: dict, path: str, serve: Optional[str] = None) -> dict:
+    """What a download endpoint answers: ``file`` is the zip nginx serves,
+    ``filename`` the name the tester's browser saves it as."""
+    file_name = os.path.basename(path)
+    size = build["size_bytes"]
+    if not size or serve:
+        try:
+            size = os.path.getsize(os.path.join(os.path.dirname(path), serve or file_name))
+        except OSError:
+            size = size or 0
+    return {
+        "file": serve or file_name,
+        "filename": file_name,
+        "build_id": build["build_id"],
+        "version": build["version"],
+        "size_bytes": int(size),
+        "sha256": None if serve else build["sha256"],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Updater keys
+# --------------------------------------------------------------------------- #
+# Each website download is served a personal copy of the zip with a new key in
+# its tester.properties. The launch script sends that key to the two
+# /tester-builds/update endpoints to fetch newer builds, and those downloads
+# are recorded like any other, so "last downloaded" stays true for testers who
+# never visit the page again.
+_KEY_PREFIX = "dtu_"
+_KEY_MAX_LENGTH = 100
+#: Newest live keys a user keeps. A new download revokes anything older, so a
+#: handful of folders (another computer, a re-download) keep updating.
+_KEYS_KEPT = 5
+#: ``last_used_at`` is rewritten at most this often.
+_KEY_TOUCH_EVERY = timedelta(minutes=5)
+
+
+def _hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _bad_key():
+    abort_problem(
+        401,
+        "Unauthorized",
+        "This test client's update key does not work any more. Download the "
+        "build again from the Bug Testing page.",
+        extra={"code": "update_key_invalid"},
+    )
+
+
+def _update_key_user(s) -> int:
+    """The user behind the request's updater key, or abort 401."""
+    parts = (request.headers.get("Authorization") or "").split()
+    key = parts[1] if len(parts) == 2 and parts[0].lower() == "bearer" else ""
+    if not key.startswith(_KEY_PREFIX) or len(key) > _KEY_MAX_LENGTH:
+        _bad_key()
+    row = (
+        s.query(TesterUpdateKey)
+        .filter(TesterUpdateKey.key_hash == _hash_key(key), TesterUpdateKey.revoked_at.is_(None))
+        .first()
+    )
+    if row is None:
+        _bad_key()
+    now = datetime.now()
+    if row.last_used_at is None or now - row.last_used_at >= _KEY_TOUCH_EVERY:
+        row.last_used_at = now
+    return int(row.user_id)
+
+
+def _personal_copy(s, user_id: int, build: dict, path: str, now: datetime) -> Optional[str]:
+    """The personal zip to serve this download, minting its key; None to
+    serve the shared zip (the copy could not be made)."""
+    tb.sweep_personal()
+    folder = os.path.dirname(path)
+    recent = (
+        s.query(TesterUpdateKey)
+        .filter(
+            TesterUpdateKey.user_id == user_id,
+            TesterUpdateKey.build_id == build["build_id"],
+            TesterUpdateKey.created_at >= now - _REDOWNLOAD_WINDOW,
+            TesterUpdateKey.revoked_at.is_(None),
+            TesterUpdateKey.file_name.isnot(None),
+        )
+        .order_by(TesterUpdateKey.id.desc())
+        .first()
+    )
+    # A resumed or ranged download must get the very same bytes.
+    if recent is not None and os.path.isfile(os.path.join(folder, recent.file_name)):
+        return recent.file_name
+
+    key = _KEY_PREFIX + secrets.token_urlsafe(32)
+    name = tb.new_personal_name()
+    if tb.write_personal_zip(path, name, tb.update_properties(key, build["build_id"])) is None:
+        return None
+    live = (
+        s.query(TesterUpdateKey)
+        .filter(TesterUpdateKey.user_id == user_id, TesterUpdateKey.revoked_at.is_(None))
+        .order_by(TesterUpdateKey.created_at.desc(), TesterUpdateKey.id.desc())
+        .all()
+    )
+    for old in live[_KEYS_KEPT - 1:]:
+        old.revoked_at = now
+    s.add(TesterUpdateKey(
+        user_id=user_id,
+        key_hash=_hash_key(key),
+        file_name=name,
+        build_id=build["build_id"][:96],
+        created_at=now,
+    ))
+    return name
+
+
 @tester_builds_bp.post("/tester-builds/download")
 async def tester_build_download():
     user_id = current_user_id()
@@ -143,63 +313,55 @@ async def tester_build_download():
     def _apply():
         with db_session() as s:
             _assert_tester(s, user_id)
-            current = tb.load_current()
-            path = tb.zip_path(current)
-            if path is None:
-                # No manifest, a file name that is not safe to serve, or a zip
-                # that is no longer on disk. All three mean nothing to send.
-                abort_problem(
-                    404,
-                    "Not found",
-                    "There is no tester build to download right now.",
-                    extra={"code": "no_build"},
-                )
-            build = tb.build_payload(current, include_since_release=False)
-            file_name = os.path.basename(path)
-
-            # A download manager sends several ranged requests at once. Taking
-            # the user's row first makes them queue, and the engine is READ
-            # COMMITTED, so each one's check sees the row the one before it
-            # just committed instead of all of them inserting.
-            s.query(User.user_id).filter(User.user_id == user_id).with_for_update().first()
-            now = datetime.now()
-            repeat = (
-                s.query(PluginTestDownload.id)
-                .filter(
-                    PluginTestDownload.user_id == user_id,
-                    PluginTestDownload.build_id == build["build_id"],
-                    PluginTestDownload.created_at >= now - _REDOWNLOAD_WINDOW,
-                )
-                .first()
-            )
-            if repeat is None:
-                s.add(
-                    PluginTestDownload(
-                        user_id=user_id,
-                        build_id=build["build_id"],
-                        plugin_version=build["version"][:32] or None,
-                        commit_sha=build["commit"][:40] or None,
-                        runelite_version=build["runelite_version"][:32] or None,
-                        file_name=file_name,
-                        # Stamped here, not by the column default, so the
-                        # window above is measured on one clock.
-                        created_at=now,
-                    )
-                )
+            build, path, now = _record_download(s, user_id)
+            personal = _personal_copy(s, user_id, build, path, now)
             s.commit()
-            size = build["size_bytes"]
-            if not size:
-                try:
-                    size = os.path.getsize(path)
-                except OSError:
-                    size = 0
+            return _download_answer(build, path, personal)
+
+    return private_no_store(jsonify(await asyncio.to_thread(_apply)))
+
+
+@tester_builds_bp.get("/tester-builds/update")
+async def tester_build_update_check():
+    """The launch script's question: is there a newer build than mine?"""
+    have = (request.args.get("have") or "").strip()
+
+    def _load():
+        with db_session() as s:
+            user_id = _update_key_user(s)
+            _assert_tester(s, user_id)
+            s.commit()
+            current = tb.load_current()
+            if tb.zip_path(current) is None:
+                return {"update": False, "current": None}
+            build = tb.build_payload(current, include_since_release=False)
             return {
-                "file": file_name,
-                "filename": file_name,
-                "build_id": build["build_id"],
-                "version": build["version"],
-                "size_bytes": int(size),
+                "update": build["build_id"] != have,
+                "current": {
+                    "build_id": build["build_id"],
+                    "version": build["version"],
+                    "runelite_version": build["runelite_version"],
+                    "size_bytes": build["size_bytes"],
+                    "sha256": build["sha256"],
+                },
             }
+
+    return private_no_store(jsonify(await asyncio.to_thread(_load)))
+
+
+@tester_builds_bp.post("/tester-builds/update/download")
+async def tester_build_update_download():
+    """The launch script fetching the current build. Recorded as a download,
+    the same as one from the page; served the shared zip, since the folder it
+    unpacks into already has its key."""
+
+    def _apply():
+        with db_session() as s:
+            user_id = _update_key_user(s)
+            _assert_tester(s, user_id)
+            build, path, _ = _record_download(s, user_id)
+            s.commit()
+            return _download_answer(build, path)
 
     return private_no_store(jsonify(await asyncio.to_thread(_apply)))
 

@@ -64,3 +64,32 @@ class PlayerPluginVersion(Base):
     # Set on first sight and never updated: the version was ahead of the
     # Plugin Hub release when this account first ran it.
     prerelease = Column(Boolean, nullable=False, default=False)
+
+
+class TesterUpdateKey(Base):
+    """The key a downloaded tester build updates itself with (web145a).
+
+    Each download from the website gets its own copy of the build zip with a
+    new key written into it (``tester.properties``), so the launch script can
+    fetch the next build without the tester signing in again. Only a SHA-256
+    of the key is stored. A key works only while its user is still a Bug
+    Tester or developer; a user keeps their newest few keys, so an older
+    folder on another computer keeps updating.
+    """
+
+    __tablename__ = "tester_update_keys"
+    __table_args__ = (
+        Index("idx_tuk_user_created", "user_id", "created_at"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
+    key_hash = Column(String(64), nullable=False, unique=True)
+    # The personal zip this key was written into, while it is still on disk.
+    # A resumed download within the re-download window is served the same file.
+    file_name = Column(String(160), nullable=True)
+    build_id = Column(String(96), nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)

@@ -32,6 +32,10 @@ import json
 import math
 import os
 import re
+import secrets
+import shutil
+import time
+import zipfile
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -399,3 +403,81 @@ def release_version(manifest: Any) -> Optional[str]:
     """The plugin version on the Plugin Hub when this build was made, if known."""
     release = manifest.get("release") if isinstance(manifest, dict) else None
     return _str(release.get("version")) if isinstance(release, dict) else None
+
+
+# --------------------------------------------------------------------------- #
+# Personal copies
+# --------------------------------------------------------------------------- #
+#: A personal copy of the current zip, made for one website download: the
+#: build with that download's updater key added (``tester.properties``). Named
+#: apart from the build job's ``droptracker-dev-*`` zips, which its pruning
+#: counts, and served from the same directory, so nginx needs nothing new.
+PERSONAL_ZIP_RE = re.compile(r"^tester-[0-9a-f]{24}\.zip$")
+#: A personal copy only has to outlive the download (and a resume of it).
+PERSONAL_ZIP_TTL_SECONDS = 30 * 60
+#: Where the launch scripts look for the key, in the build's top folder.
+UPDATE_PROPERTIES = "tester.properties"
+
+
+def new_personal_name() -> str:
+    return f"tester-{secrets.token_hex(12)}.zip"
+
+
+def update_properties(key: str, build_id: str) -> str:
+    """The ``tester.properties`` a personal copy carries."""
+    return ("# DropTracker test client. The launch script uses this key to download new\n"
+            "# test builds for you. It is yours: do not share this file or this folder.\n"
+            f"key={key}\n"
+            f"build={build_id}\n")
+
+
+def write_personal_zip(source: str, name: str, properties: str,
+                       root: Optional[str] = None) -> Optional[str]:
+    """Copy ``source`` to ``builds/<name>`` with ``tester.properties`` added
+    beside the launch scripts. Returns the new path, or None when it could not
+    be made (the caller then serves the shared zip)."""
+    if PERSONAL_ZIP_RE.fullmatch(name or "") is None:
+        return None
+    final = os.path.join(os.path.abspath(root or builds_dir()), "builds", name)
+    # Not a .zip until it is complete: nothing serves or prunes a .part.
+    part = final + ".part"
+    try:
+        shutil.copyfile(source, part)
+        with zipfile.ZipFile(part, "a") as zf:
+            tops = {n.split("/", 1)[0] for n in zf.namelist() if "/" in n}
+            top = tops.pop() + "/" if len(tops) == 1 else ""
+            info = zipfile.ZipInfo(top + UPDATE_PROPERTIES, time.gmtime()[:6])
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, properties)
+        os.replace(part, final)
+        return final
+    except (OSError, zipfile.BadZipFile):
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        return None
+
+
+def sweep_personal(root: Optional[str] = None, now: Optional[float] = None) -> int:
+    """Remove personal copies (and half-made ones) past their time. Returns how many."""
+    folder = os.path.join(root or builds_dir(), "builds")
+    cutoff = (now if now is not None else time.time()) - PERSONAL_ZIP_TTL_SECONDS
+    removed = 0
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    for name in names:
+        stem = name[:-len(".part")] if name.endswith(".part") else name
+        if PERSONAL_ZIP_RE.fullmatch(stem) is None:
+            continue
+        path = os.path.join(folder, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
