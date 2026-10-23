@@ -368,6 +368,45 @@ class TestUpdateEntry:
         assert r.status_code == 200
         assert row.amount == -250
 
+    async def test_adjustment_edit_can_flip_sign(self, client, monkeypatch):
+        row = _entry(kind="adjustment", amount=5_000, status="confirmed", rsn=None)
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"amount": -2_000})
+        assert r.status_code == 200
+        assert row.amount == -2_000
+
+    async def test_rsn_edit_to_free_text_unlinks_the_old_account(self, client, monkeypatch):
+        row = _entry(status="confirmed", player_id=5, rsn="Zez", user_id=11)
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"rsn": "  Bob  "})
+        assert r.status_code == 200
+        assert row.player_id is None and row.rsn == "Bob"
+        # The submitter is who sent the row in, not the donor; it stays.
+        assert row.user_id == 11
+        assert s.committed and len(s.added) == 1  # the audit row
+
+    async def test_rsn_edit_links_a_tracked_account(self, client, monkeypatch):
+        row = _entry(status="confirmed", player_id=None, rsn="zez typo")
+        s = _S([row])
+        _wire(monkeypatch, s)
+        monkeypatch.setattr(
+            gb, "_match_player",
+            lambda s, rsn: SimpleNamespace(player_id=5, player_name="Zez", user_id=None),
+        )
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"rsn": "zez"})
+        assert r.status_code == 200
+        assert row.player_id == 5 and row.rsn == "Zez"
+
+    async def test_donation_rsn_cannot_be_cleared(self, client, monkeypatch):
+        row = _entry(status="confirmed")
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"rsn": ""})
+        assert r.status_code == 422
+        assert row.rsn == "Zez" and not s.committed
+
     async def test_transfer_amount_is_fixed(self, client, monkeypatch):
         row = _entry(kind="event_transfer", amount=-100, status="confirmed", event_buyin_id=3)
         s = _S([row])
