@@ -661,3 +661,87 @@ def receipt_detail(curr: dict, prev: dict, config: LootSweepConfig,
         "set_awarded": _int(curr.get("set_awarded"), 0),
         "set_bonus_points": config.set_bonus_points,
     }
+
+
+# --------------------------------------------------------------------------- #
+# DT2 vestige chains
+# --------------------------------------------------------------------------- #
+# Each ancient vestige takes three successful rolls at its boss: the first
+# drops 1 Gold ring, the second 2 Gold rings, the third the vestige. An entry
+# that lists a vestige AND names Gold ring under "also counts as" treats the
+# three drops as one acquisition: rings from that vestige's boss belong to its
+# chain, and the whole chain is ONE receipt. The drop says where it sits in
+# the chain (1 ring = step 1, 2 rings = step 2, vestige = step 3), so a step
+# credits only when it starts a new chain: the player's last credited step for
+# that vestige is the same step or a later one (or there is none). A second
+# full chain by the same player credits again.
+VESTIGE_CHAIN_STEPS = 3
+_CHAIN_NOTE_PREFIX = "vestige:"
+
+
+def _vestige_rings():
+    # Lazy: utils.vestige_rings is stdlib-only, but this module must stay
+    # importable on its own (tests load it straight from the file).
+    from utils import vestige_rings
+    return vestige_rings
+
+
+def vestige_chain_sighting(config: "LootSweepConfig", item_name, npc_name,
+                           quantity=1) -> Optional[tuple]:
+    """``(vestige name, step)`` when this drop is a step of a vestige chain
+    for this task, else ``None`` (an ordinary receipt).
+
+    Only applies to an entry that holds both the vestige and Gold ring among
+    its names, in the group the drop routes to, and only for the vestige's
+    own boss: a Gold ring from anywhere else stays an ordinary alias receipt.
+    """
+    vr = _vestige_rings()
+    key = _norm(item_name)
+    is_ring = key == vr.RING_NAME
+    if not is_ring and not vr.is_vestige(key):
+        return None
+    gi = config.route(key, npc_name)
+    if gi is None:
+        return None
+    npc = _norm(npc_name)
+    for it in config.groups[gi].items:
+        if key not in it.match_keys or vr.RING_NAME not in it.match_keys:
+            continue
+        for vname, bosses in vr.VESTIGE_BOSSES.items():
+            vkey = _norm(vname)
+            if vkey not in it.match_keys or npc not in bosses:
+                continue
+            if not is_ring and vkey != key:
+                continue
+            if not is_ring:
+                return vname, VESTIGE_CHAIN_STEPS
+            return vname, (1 if max(_int(quantity, 1), 1) == 1 else 2)
+    return None
+
+
+def vestige_chain_note(vestige: str, step: int) -> str:
+    """Ledger note for a credited chain step: a parseable tag plus a human
+    half for the admin ledger (``vestige:2:ultor vestige | step 2 of 3``)."""
+    return (f"{_CHAIN_NOTE_PREFIX}{int(step)}:{_norm(vestige)} | "
+            f"{vestige} chain, step {int(step)} of {VESTIGE_CHAIN_STEPS}")
+
+
+def parse_vestige_chain_note(note) -> Optional[tuple]:
+    """``(normalized vestige, step)`` from a chain note, else ``None``."""
+    s = str(note or "")
+    if not s.startswith(_CHAIN_NOTE_PREFIX):
+        return None
+    tag = s.split("|", 1)[0].strip()[len(_CHAIN_NOTE_PREFIX):]
+    step, _, vestige = tag.partition(":")
+    try:
+        step_n = int(step)
+    except ValueError:
+        return None
+    return (vestige.strip(), step_n) if vestige.strip() else None
+
+
+def chain_step_credits(last_step: Optional[int], step: int) -> bool:
+    """Does this step start a new chain? Yes when the player has no credited
+    step for the vestige, or the last one was this step or later (that chain
+    is over). An earlier last step means this drop continues that chain."""
+    return last_step is None or last_step >= step

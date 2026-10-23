@@ -1223,6 +1223,11 @@ def match_task(task: dict, envelope: dict) -> Optional[dict]:
                 qty = max(int(data.get("quantity", 1) or 1), 1)
             except (TypeError, ValueError):
                 qty = 1
+            if qty > 1 and _ls_vestige_sighting(task, data) is not None:
+                # A vestige-chain step is one sighting, not one per ring:
+                # the 2-Gold-ring drop is step 2 of the chain, never 2
+                # receipts. record_match decides whether it credits at all.
+                qty = 1
         elif kind == "pet":
             npc_raw = None
             if not _pet_counts(task, data):
@@ -5983,6 +5988,60 @@ def _dedupe_vestige_chain(session, task: dict, team_id, player_id, kind,
     )
 
 
+def _ls_vestige_sighting(task: dict, data: dict) -> Optional[tuple]:
+    """``(vestige, step)`` when a loot_sweep drop is a step of a DT2 vestige
+    chain (services.loot_sweep.vestige_chain_sighting), else None. Cheap
+    name check first: only Gold rings and vestiges parse the config."""
+    name = _norm(data.get("item_name"))
+    if name != VESTIGE_RING_NAME and name not in _VESTIGE_NORMS:
+        return None
+    from services.loot_sweep import LootSweepConfig, vestige_chain_sighting
+    return vestige_chain_sighting(LootSweepConfig(task.get("config") or {}),
+                                  data.get("item_name"), data.get("npc_name"),
+                                  data.get("quantity", 1))
+
+
+def _loot_sweep_vestige_gate(session, task: dict, player_id,
+                             envelope: dict) -> tuple:
+    """``(may record, note)`` for a loot_sweep drop. A DT2 vestige-chain step
+    (1 Gold ring, 2 Gold rings, the vestige) records only when it starts a
+    new chain for this player, so ring, rings and vestige are one receipt;
+    the credited row is tagged with its step so the next sighting can tell.
+    Everything else records as normal with no note.
+
+    Per player across the task (not per team): a player who moves team
+    mid-chain must not credit the same vestige twice. Rejected and revoked
+    rows don't count as the last step, so revoking a step lets the next
+    sighting credit."""
+    if envelope.get("kind") != "drop" or player_id is None:
+        return True, None
+    sighting = _ls_vestige_sighting(task, envelope.get("data") or {})
+    if sighting is None:
+        return True, None
+    vestige, step = sighting
+    from db.models import EventCompletion
+    from services.loot_sweep import (chain_step_credits, parse_vestige_chain_note,
+                                     vestige_chain_note)
+
+    vkey = _norm(vestige)
+    last_step = None
+    rows = (session.query(EventCompletion)
+            .filter(EventCompletion.task_id == task["id"],
+                    EventCompletion.player_id == player_id,
+                    EventCompletion.note.like("vestige:%"),
+                    EventCompletion.status.in_(("auto", "confirmed", "manual", "pending")))
+            .order_by(EventCompletion.created_at.desc(), EventCompletion.id.desc())
+            .all())
+    for r in rows:
+        parsed = parse_vestige_chain_note(r.note)
+        if parsed is not None and parsed[0] == vkey:
+            last_step = parsed[1]
+            break
+    if not chain_step_credits(last_step, step):
+        return False, None
+    return True, vestige_chain_note(vestige, step)
+
+
 def _ring_chain_applies(task: dict) -> bool:
     """Whether a Gold ring can credit this task AS a vestige, which is what
     makes one player's ring/ring/vestige a single chain: rings aren't switched
@@ -6047,6 +6106,11 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
                                  envelope.get("kind"), matched_target,
                                  bonus=bonus):
         return None
+    chain_note = None
+    if task.get("type") == "loot_sweep" and bonus is None:
+        chain_ok, chain_note = _loot_sweep_vestige_gate(session, task, player_id, envelope)
+        if not chain_ok:
+            return None
     quantity = _dedupe_clog_echo(session, task, team_id, player_id,
                                  envelope.get("kind"), matched_target, quantity,
                                  bonus=bonus)
@@ -6063,7 +6127,7 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
     elif guid and bonus is not None:
         # Same truncate-before-suffix rule for bonus awards.
         guid = f"{str(guid)[:60]}#b{int(bonus.get('rule_id') or 0)}"
-    note = None
+    note = chain_note
     if path_idx is not None:
         note = _path_note(path_idx)
     elif bonus is not None:

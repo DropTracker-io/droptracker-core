@@ -541,3 +541,54 @@ class TestSharedItemAcrossGroups:
         rows = [_row("Armadyl helmet"), _row("Armadyl helmet"), _row("Armadyl hilt")]
         assert (ls.score_counts(ls.counts_from_rows(rows, cfg), cfg)
                 == ls.score_counts(ls.counts_from_rows(rows), cfg))
+
+
+# --- DT2 vestige chains ------------------------------------------------------ #
+def _dt2(rings=True):
+    names = ["Gold ring"] if rings else []
+    return ls.LootSweepConfig({"groups": [
+        {"label": "Vardorvis", "npcs": ["Vardorvis", "Vardorvis (Awakened)"], "items": [
+            {"item_name": "Ultor vestige", "points": 36, "match_names": names},
+            {"item_name": "Executioner's axe head", "points": 20}]},
+        {"label": "Duke", "npcs": ["Duke Sucellus"], "items": [
+            {"item_name": "Magus vestige", "points": 30, "match_names": names}]},
+    ]})
+
+
+class TestVestigeChain:
+    def test_steps_from_the_drop(self):
+        cfg = _dt2()
+        assert ls.vestige_chain_sighting(cfg, "Gold ring", "Vardorvis", 1) == ("Ultor vestige", 1)
+        assert ls.vestige_chain_sighting(cfg, "Gold ring", "Vardorvis", 2) == ("Ultor vestige", 2)
+        assert ls.vestige_chain_sighting(cfg, "Ultor vestige", "Vardorvis (Awakened)", 1) \
+            == ("Ultor vestige", 3)
+        # The ring routes to its own boss's vestige.
+        assert ls.vestige_chain_sighting(cfg, "Gold ring", "Duke Sucellus", 2) == ("Magus vestige", 2)
+
+    def test_not_a_chain(self):
+        # No Gold ring listed: the vestige is an ordinary item.
+        assert ls.vestige_chain_sighting(_dt2(rings=False), "Ultor vestige", "Vardorvis") is None
+        # Other items and wrong bosses.
+        assert ls.vestige_chain_sighting(_dt2(), "Executioner's axe head", "Vardorvis") is None
+        assert ls.vestige_chain_sighting(_dt2(), "Gold ring", "Zulrah", 1) is None
+
+    def test_ring_from_another_npc_in_the_group_is_ordinary(self):
+        cfg = ls.LootSweepConfig({"groups": [
+            {"npcs": ["Vardorvis", "Zulrah"], "items": [
+                {"item_name": "Ultor vestige", "match_names": ["Gold ring"]}]}]})
+        assert ls.vestige_chain_sighting(cfg, "Gold ring", "Zulrah", 2) is None
+
+    def test_note_round_trip(self):
+        note = ls.vestige_chain_note("Ultor vestige", 2)
+        assert ls.parse_vestige_chain_note(note) == ("ultor vestige", 2)
+        assert ls.parse_vestige_chain_note("bonus:task:3") is None
+        assert ls.parse_vestige_chain_note(None) is None
+
+    @pytest.mark.parametrize("last,step,credits", [
+        (None, 1, True), (None, 2, True), (None, 3, True),  # first sighting
+        (1, 2, False), (1, 3, False), (2, 3, False),        # same chain continues
+        (3, 1, True), (3, 2, True), (3, 3, True),            # previous chain ended
+        (1, 1, True), (2, 2, True), (2, 1, True),            # missed the end: new chain
+    ])
+    def test_chain_step_credits(self, last, step, credits):
+        assert ls.chain_step_credits(last, step) is credits

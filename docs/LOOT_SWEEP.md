@@ -116,6 +116,19 @@ shared item must name the boss (`matched_npc`); older rows with no NPC fall back
 to the first group listing the name, which is exact because older configs could
 never repeat one.
 
+**DT2 vestige chains.** Each vestige takes three successful rolls at its boss:
+1 Gold ring, then 2 Gold rings, then the vestige. An entry that lists a vestige
+and has Gold ring under "also counts as" treats that chain as ONE receipt: the
+step comes from the drop itself (1 ring = 1, 2 rings = 2, vestige = 3), a step
+credits only when it starts a new chain for that player (their last credited
+step for that vestige is the same or later), and the credited row's `note` holds
+the step (`vestige:<step>:<vestige> | …`). The 2-ring drop is never 2 receipts. A
+second full chain by the same player credits again. Rings from any other NPC in
+the group stay ordinary receipts. Without Gold ring listed, rings score nothing
+and the vestige is an ordinary item. Code: `vestige_chain_sighting` /
+`chain_step_credits` in services/loot_sweep.py, `_loot_sweep_vestige_gate` in
+services/event_engine.py.
+
 **Validation bounds**: ≤ 40 groups, ≤ 400 items/task, `points` 1–1,000,000,
 `awards_per_tier` 1–20, `max_awards` 1–200, bonuses 0–10,000,000 / max 1–100.
 Unknown item/NPC names are rejected `422`. `target`/`target_value` are unused.

@@ -200,3 +200,52 @@ class TestSharedItemAcrossGroups:
                               quantity=1, source_type="drop")
         b = engine._loot_sweep_score(_Session([row]), WILDY_TASK, 1)
         assert [g["item_total"] for g in b["groups"]] == [0, 5]
+
+
+DT2_CONFIG = {
+    "kind": "loot_sweep", "decay_percent": 20,
+    "groups": [{"label": "Vardorvis", "npcs": ["Vardorvis"], "items": [
+        {"item_name": "Ultor vestige", "points": 36, "match_names": ["Gold ring"]}]}],
+}
+DT2_TASK = {"id": 11, "type": "loot_sweep", "config": DT2_CONFIG,
+            "loot_sweep_index": _ls.LootSweepConfig(DT2_CONFIG).matcher_index()}
+
+
+def _drop(item, qty=1, npc="Vardorvis"):
+    return {"kind": "drop", "data": {"item_name": item, "npc_name": npc, "quantity": qty}}
+
+
+def _chain_row(step, rid=1, status="auto"):
+    return SimpleNamespace(id=rid, note=_ls.vestige_chain_note("Ultor vestige", step),
+                           status=status)
+
+
+class TestVestigeChainEngine:
+    def test_two_ring_drop_is_one_receipt(self):
+        m = engine.match_task(DT2_TASK, _drop("Gold ring", 2))
+        assert m and m["quantity"] == 1 and m["matched_target"] == "Gold ring"
+
+    def test_ordinary_quantity_untouched(self):
+        cfg = {"kind": "loot_sweep", "groups": [{"npcs": ["Vardorvis"], "items": [
+            {"item_name": "Gold ring"}]}]}
+        task = {"id": 12, "type": "loot_sweep", "config": cfg,
+                "loot_sweep_index": _ls.LootSweepConfig(cfg).matcher_index()}
+        assert engine.match_task(task, _drop("Gold ring", 2))["quantity"] == 2
+
+    def test_first_step_credits_and_is_tagged(self):
+        ok, note = engine._loot_sweep_vestige_gate(_Session([]), DT2_TASK, 5, _drop("Gold ring"))
+        assert ok and _ls.parse_vestige_chain_note(note) == ("ultor vestige", 1)
+
+    def test_rest_of_the_chain_is_blocked(self):
+        s = _Session([_chain_row(1)])
+        assert engine._loot_sweep_vestige_gate(s, DT2_TASK, 5, _drop("Gold ring", 2)) == (False, None)
+        assert engine._loot_sweep_vestige_gate(s, DT2_TASK, 5, _drop("Ultor vestige")) == (False, None)
+
+    def test_next_chain_credits_again(self):
+        ok, note = engine._loot_sweep_vestige_gate(_Session([_chain_row(1)]), DT2_TASK, 5,
+                                                   _drop("Gold ring", 1))
+        assert ok and note
+
+    def test_non_chain_drop_has_no_note(self):
+        assert engine._loot_sweep_vestige_gate(_Session([]), TASK, 5,
+                                               _drop("Armadyl helmet", npc="Kree'arra")) == (True, None)
