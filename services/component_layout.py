@@ -1048,7 +1048,7 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
         "blocks": [
             {"type": "text", "content": "**{player_name}** has acquired a new pet!"},
             {"type": "separator", "divider": True},
-            {"type": "text", "content": "## {pet_name}\nReceived at `{killcount}`"},
+            {"type": "text", "content": "## {pet_emoji} {pet_name}\nReceived at `{killcount}`"},
             {"type": "text", "content": _POINTS_LINES},
             {"type": "media", "urls": ["{image_url}"]},
         ],
@@ -1058,7 +1058,7 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
         "blocks": [
             {"type": "text", "content": "**{player_name}** has received a duplicate pet!"},
             {"type": "separator", "divider": True},
-            {"type": "text", "content": "## {pet_name}\nReceived at `{killcount}`"},
+            {"type": "text", "content": "## {pet_emoji} {pet_name}\nReceived at `{killcount}`"},
             {"type": "text", "content": _POINTS_LINES},
             {"type": "media", "urls": ["{image_url}"]},
         ],
