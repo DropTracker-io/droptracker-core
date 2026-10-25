@@ -453,3 +453,252 @@ class TestMessages:
             for token in re.findall(r"\{([a-z_]+)\}", text + layout):
                 assert token in documented, (kind, token)
             assert set(documented) - set(cl.TOKEN_DOCS) == set()
+
+
+# ── Loot keys (ticket 498) ───────────────────────────────────────────────────
+
+def _key_item(name, item_id, qty, value, guid, **extra):
+    """One item of an opened loot key, as the plugin forwards it today: an
+    ordinary drop whose source is RuneLite's "Loot Chest"."""
+    return _item(name, item_id, qty, value, guid, victim="Loot Chest",
+                 source_type="other", **extra)
+
+
+class TestLootKeyCollapse:
+    def test_an_opened_key_becomes_one_loot_key_kill(self):
+        out = pvp.collapse_pvp_bundle([
+            _key_item("Abyssal whip", 4151, 1, 1_400_000, "g1"),
+            _key_item("Shark", 385, 10, 900, "g2"),
+        ])
+        assert len(out) == 1
+        kill = out[0]
+        assert kill["type"] == pvp.PVP_KILL_TYPE
+        assert kill["loot_key"] is True
+        assert kill["victim_name"] == pvp.UNKNOWN_VICTIM
+        assert kill["_bundle_guids"] == ["g1", "g2"]
+        assert kill["guid"] == "g1"
+
+    def test_the_chest_name_matches_in_any_case(self):
+        assert pvp.is_loot_chest_embed({"type": "drop", "source": "loot chest"})
+        assert pvp.is_loot_chest_embed({"type": "other", "npc_name": "Loot Chest"})
+
+    def test_other_chests_and_other_types_are_left_alone(self):
+        assert not pvp.is_loot_chest_embed({"type": "drop", "source": "Lunar Chest"})
+        assert not pvp.is_loot_chest_embed({"type": "pb", "source": "Loot Chest"})
+        out = pvp.collapse_pvp_bundle([_item("Moon helm", 1, 1, 1, "g", victim="Lunar Chest",
+                                             source_type="npc")])
+        assert out[0]["type"] == "drop"
+
+    def test_a_kill_and_a_key_in_one_payload_stay_apart(self):
+        out = pvp.collapse_pvp_bundle([
+            _item("Bones", 526, 1, 33, "k1"),
+            _key_item("Abyssal whip", 4151, 1, 1_400_000, "g1"),
+        ])
+        assert len(out) == 2
+        assert {k.get("loot_key", False) for k in out} == {True, False}
+        assert next(k for k in out if not k.get("loot_key"))["victim_name"] == "Zezima"
+
+    def test_a_key_routes_to_the_pvp_processor(self):
+        kill = pvp.collapse_pvp_bundle([_key_item("Abyssal whip", 4151, 1, 1, "g1")])[0]
+        assert normalize_submission_type(kill["type"]) == "pvp_kill"
+
+
+class TestKeyedKillShape:
+    @staticmethod
+    def _items(*names):
+        return [SimpleNamespace(item_name=n) for n in names]
+
+    def test_bones_only_and_bones_with_the_key_qualify(self):
+        assert pvp.is_keyed_kill_shape(self._items("Bones"))
+        assert pvp.is_keyed_kill_shape(self._items("Loot key", "Bones"))
+
+    def test_a_kill_with_real_loot_on_the_floor_does_not(self):
+        assert not pvp.is_keyed_kill_shape(self._items("Bones", "Abyssal whip"))
+        assert not pvp.is_keyed_kill_shape([])
+
+
+class TestLootKeyMatching:
+    """process_loot_key_burst: match only when it is certain."""
+
+    @pytest.fixture
+    def harness(self, monkeypatch):
+        calls = {"merged": [], "recorded": [], "candidates": []}
+        session = MagicMock()
+        player = SimpleNamespace(player_id=5773933)
+
+        async def auth(*_a, **_k):
+            return player, True, True
+
+        async def resolve(_s, raw, _name):
+            return [{"item_id": 1, "item_name": "x", "quantity": 1, "value": 10, "total": 10}]
+
+        async def merge(_s, kill, kill_data, *_a):
+            calls["merged"].append((kill, kill_data["guid"]))
+
+        async def record(_s, kill_data, *_a):
+            calls["recorded"].append(kill_data["guid"])
+
+        monkeypatch.setattr(pvp, "select_session_and_flag", lambda _e: (session, False))
+        monkeypatch.setattr(pvp, "ensure_player_and_auth", auth)
+        monkeypatch.setattr(pvp, "_resolve_items", resolve)
+        monkeypatch.setattr(pvp, "_loot_key_seen", lambda _s, guid: guid == "seen")
+        monkeypatch.setattr(pvp, "received_at", lambda _d: datetime(2026, 10, 23, 22, 30))
+        monkeypatch.setattr(pvp, "loot_key_candidates", lambda *_a: calls["candidates"])
+        monkeypatch.setattr(pvp, "_merge_loot_key", merge)
+        monkeypatch.setattr(pvp, "_record_loot_key", record)
+        calls["session"] = session
+        return calls
+
+    @staticmethod
+    def _key(guid):
+        return {"player_name": "sits pure 1", "acc_hash": "1", "guid": guid,
+                "pvp_items": [{"item_id": 1}]}
+
+    @pytest.mark.asyncio
+    async def test_one_key_and_one_candidate_is_matched(self, harness):
+        harness["candidates"].append("kill-1247")
+        assert await pvp.process_loot_key_burst([self._key("g1")]) == 1
+        assert harness["merged"] == [("kill-1247", "g1")]
+        assert harness["recorded"] == []
+        harness["session"].commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_two_candidates_is_ambiguous(self, harness):
+        harness["candidates"].extend(["kill-1", "kill-2"])
+        await pvp.process_loot_key_burst([self._key("g1")])
+        assert harness["merged"] == [] and harness["recorded"] == ["g1"]
+
+    @pytest.mark.asyncio
+    async def test_no_candidate_is_recorded_on_its_own(self, harness):
+        await pvp.process_loot_key_burst([self._key("g1")])
+        assert harness["merged"] == [] and harness["recorded"] == ["g1"]
+
+    @pytest.mark.asyncio
+    async def test_several_keys_opened_together_are_never_matched(self, harness):
+        harness["candidates"].append("kill-1")
+        await pvp.process_loot_key_burst([self._key("g1"), self._key("g2")])
+        assert harness["merged"] == [] and harness["recorded"] == ["g1", "g2"]
+
+    @pytest.mark.asyncio
+    async def test_unmatchable_mode_records_even_with_one_candidate(self, harness):
+        harness["candidates"].append("kill-1")
+        await pvp.process_loot_key_burst([self._key("g1")], matchable=False)
+        assert harness["merged"] == [] and harness["recorded"] == ["g1"]
+
+    @pytest.mark.asyncio
+    async def test_a_replayed_key_is_skipped(self, harness):
+        harness["candidates"].append("kill-1")
+        assert await pvp.process_loot_key_burst([self._key("seen")]) == 0
+        assert harness["merged"] == [] and harness["recorded"] == []
+
+
+class FakeZRedis:
+    """Just the sorted-set calls the loot key sweep makes."""
+
+    def __init__(self):
+        self.z = {}
+
+    def zadd(self, key, mapping):
+        self.z.setdefault(key, {}).update(mapping)
+
+    def zrangebyscore(self, key, lo, hi, start=0, num=None):
+        rows = sorted((s, m) for m, s in self.z.get(key, {}).items() if s <= hi)
+        return [m.encode() for _, m in rows][start:(start + num) if num else None]
+
+    def zrange(self, key, start, end):
+        rows = sorted((s, m) for m, s in self.z.get(key, {}).items())
+        return [m.encode() for _, m in rows]
+
+    def zrem(self, key, member):
+        member = member.decode() if isinstance(member, bytes) else member
+        return 1 if self.z.get(key, {}).pop(member, None) is not None else 0
+
+
+class TestLootKeySweep:
+    @pytest.fixture
+    def env(self, monkeypatch):
+        import json
+        r = FakeZRedis()
+        bursts = []
+
+        async def burst(keys, matchable=True):
+            bursts.append(sorted(k["guid"] for k in keys))
+            return len(keys)
+
+        monkeypatch.setattr(pvp, "_redis", lambda: r)
+        monkeypatch.setattr(pvp, "process_loot_key_burst", burst)
+
+        def park(guid, player, arrived, due):
+            entry = {"kill_data": {"player_name": player, "acc_hash": "1", "guid": guid},
+                     "arrived": arrived, "attempts": 0}
+            r.zadd(pvp.LOOT_KEY_DEFERRED_KEY, {json.dumps(entry): due})
+
+        return r, bursts, park
+
+    @pytest.mark.asyncio
+    async def test_keys_of_one_opening_replay_together(self, env):
+        r, bursts, park = env
+        park("a", "sits", 100.0, 145.0)
+        park("b", "sits", 101.0, 1e12)  # not due yet, same opening
+        park("c", "sits", 500.0, 1e12)  # a later opening
+        park("d", "other", 100.0, 1e12)  # someone else, not due
+        assert await pvp.process_due_loot_keys() == 2
+        assert bursts == [["a", "b"]]
+        assert len(r.z[pvp.LOOT_KEY_DEFERRED_KEY]) == 2
+
+    @pytest.mark.asyncio
+    async def test_nothing_due_does_nothing(self, env):
+        r, bursts, park = env
+        park("a", "sits", 100.0, 1e12)
+        assert await pvp.process_due_loot_keys() == 0
+        assert bursts == []
+
+    @pytest.mark.asyncio
+    async def test_an_opening_is_parked_not_processed_on_arrival(self, env, monkeypatch):
+        r, bursts, _park = env
+        kill = pvp.collapse_pvp_bundle([_key_item("Abyssal whip", 4151, 1, 1, "g1")])[0]
+        resp = await pvp.pvp_kill_processor(kill)
+        assert resp.success
+        assert bursts == []
+        assert len(r.z[pvp.LOOT_KEY_DEFERRED_KEY]) == 1
+
+
+class TestLootKeyStandings:
+    def test_an_unmatched_key_adds_loot_but_no_kill(self):
+        r = FakeRedis()
+        key = _kill(value=2_791_529)
+        key.kind = "loot_key"
+        assert standings.record_kill(key, [7], client=r)
+        assert r.z["pvp:loot:202610:group:7"]["1"] == 2_791_529
+        assert "pvp:kills:202610:group:7" not in r.z
+
+    def test_a_matched_key_adds_loot_on_the_kills_own_date(self):
+        r = FakeRedis()
+        kill = _kill(value=33)
+        standings.record_kill(kill, [2, 7], client=r)
+        assert standings.add_loot(kill, 2_791_496, [2, 7], client=r)
+        assert r.z["pvp:loot:20261019"]["1"] == 2_791_529
+        assert r.z["pvp:kills:20261019:group:7"]["1"] == 1
+        assert r.z["pvp:gloot:202610"]["7"] == 2_791_529
+
+    def test_removing_an_unmatched_key_takes_no_kill_off(self):
+        r = FakeRedis()
+        standings.record_kill(_kill(), [7], client=r)
+        key = _kill(value=500, kill_id=6)
+        key.kind = "loot_key"
+        standings.record_kill(key, [7], client=r)
+        standings.remove_kill(key, [7], client=r)
+        assert r.z["pvp:kills:202610:group:7"]["1"] == 1
+        assert r.z["pvp:loot:202610:group:7"]["1"] == 1_000_000
+
+
+class TestLootKeyMessages:
+    def test_an_unmatched_key_names_the_key_not_a_victim(self, ns):
+        values = ns.NotificationService._pvp_placeholder_map(
+            {"victim_name": "", "loot_key": True, "total_value": 2_791_529})
+        assert values["{victim_name}"] == "a loot key"
+
+    def test_a_matched_key_keeps_its_victim(self, ns):
+        values = ns.NotificationService._pvp_placeholder_map(
+            {"victim_name": "master chefy", "loot_key": True})
+        assert values["{victim_name}"] == "master chefy"

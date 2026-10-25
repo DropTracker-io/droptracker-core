@@ -40,6 +40,12 @@ _LONG_TTL = 400 * 24 * 3600
 RECENT_LIMIT = 50
 
 
+def counts_as_kill(kill) -> bool:
+    """A ``loot_key`` row (a loot key matched to no kill) adds loot, never a
+    kill: the kill it came from is already on the boards."""
+    return (getattr(kill, "kind", None) or "kill") != "loot_key"
+
+
 def _client():
     from utils.redis import redis_client
 
@@ -103,6 +109,7 @@ def recent_entry(kill, player_name: str = "") -> dict:
         "wilderness_level": kill.wilderness_level,
         "world": kill.world,
         "date": int(kill.date_added.timestamp()) if getattr(kill, "date_added", None) else None,
+        "kind": getattr(kill, "kind", None) or "kill",
     }
 
 
@@ -134,7 +141,8 @@ def record_kill(kill, counted_group_ids: Iterable[int], *, player_name: str = ""
         value = int(kill.total_value or 0)
         pipe = r.pipeline(transaction=False)
         _increment(pipe, "loot", value, kill.player_id, scopes, when)
-        _increment(pipe, "kills", 1, kill.player_id, scopes, when)
+        if counts_as_kill(kill):
+            _increment(pipe, "kills", 1, kill.player_id, scopes, when)
         for token in all_tokens(when):
             ttl = _ttl_for(token)
             for scope in scopes:
@@ -154,6 +162,33 @@ def record_kill(kill, counted_group_ids: Iterable[int], *, player_name: str = ""
         return False
 
 
+def add_loot(kill, amount: int, counted_group_ids: Iterable[int], *, client=None) -> bool:
+    """Add loot to a kill already on the boards (a loot key matched to it),
+    under the kill's own date. The kill count and recent lists are untouched;
+    ``rebuild()`` reads the kill's new total either way."""
+    scopes = _scopes(counted_group_ids)
+    if not scopes or not amount:
+        return True
+    try:
+        r = client or _client()
+        when = kill.date_added or datetime.now()
+        pipe = r.pipeline(transaction=False)
+        _increment(pipe, "loot", int(amount), kill.player_id, scopes, when)
+        for token in all_tokens(when):
+            ttl = _ttl_for(token)
+            for scope in scopes:
+                if scope is None:
+                    continue
+                pipe.zincrby(group_total_key(token), int(amount), scope)
+                if ttl:
+                    pipe.expire(group_total_key(token), ttl)
+        pipe.execute()
+        return True
+    except Exception as e:
+        print(f"[PvpStandings] Couldn't add loot to kill {getattr(kill, 'id', '?')}: {e}")
+        return False
+
+
 def remove_kill(kill, counted_group_ids: Iterable[int], *, client=None) -> bool:
     """Take a kill back off its boards (hidden by staff, or deleted).
 
@@ -169,7 +204,8 @@ def remove_kill(kill, counted_group_ids: Iterable[int], *, client=None) -> bool:
         value = int(kill.total_value or 0)
         pipe = r.pipeline(transaction=False)
         _increment(pipe, "loot", -value, kill.player_id, scopes, when)
-        _increment(pipe, "kills", -1, kill.player_id, scopes, when)
+        if counts_as_kill(kill):
+            _increment(pipe, "kills", -1, kill.player_id, scopes, when)
         for token in all_tokens(when):
             for scope in scopes:
                 if scope is not None:
@@ -352,12 +388,14 @@ def rebuild(session, *, client=None, chunk: int = 5000, log=print) -> Dict[str, 
             scopes = _scopes(counted.get(int(kill.id), []))
             if not scopes:
                 continue
-            stats["kills"] += 1
+            is_kill = counts_as_kill(kill)
+            stats["kills"] += 1 if is_kill else 0
             value = int(kill.total_value or 0)
             for token in all_tokens(kill.date_added):
                 for scope in scopes:
                     add(board_key("loot", token, scope), int(kill.player_id), value)
-                    add(board_key("kills", token, scope), int(kill.player_id), 1)
+                    if is_kill:
+                        add(board_key("kills", token, scope), int(kill.player_id), 1)
                     if scope is not None:
                         totals.setdefault(group_total_key(token), {})
                         bucket = totals[group_total_key(token)]

@@ -604,6 +604,16 @@ async def _maintenance(r, stop: asyncio.Event) -> None:
                     log.info("Replayed %d deferred clan broadcast(s)", replayed)
             except Exception:
                 log.debug("deferred clan-broadcast sweep failed:\n%s", traceback.format_exc())
+            # Opened PvP loot keys whose chest opening is complete: match each
+            # to its kill, or record it on its own (data/submissions/pvp.py).
+            try:
+                from data.submissions.pvp import process_due_loot_keys
+
+                keys = await process_due_loot_keys()
+                if keys:
+                    log.info("Recorded %d PvP loot key(s)", keys)
+            except Exception:
+                log.warning("loot key sweep failed:\n%s", traceback.format_exc())
             if _in_flight == 0:
                 from api.core import reset_db_connections
                 reset_db_connections()

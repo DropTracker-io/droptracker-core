@@ -119,6 +119,11 @@ def _kill_row(kill, items, names: dict, hidden: set) -> dict:
         "location": kill.location,
         "image_url": kill.image_url,
         "date": int(kill.date_added.timestamp()) if kill.date_added else None,
+        # "loot_key": a loot key matched to no kill (victim unknown). A kill
+        # whose key was matched to it keeps kind "kill" with loot_key true.
+        "kind": getattr(kill, "kind", None) or "kill",
+        "loot_key": (getattr(kill, "kind", None) == "loot_key"
+                     or getattr(kill, "loot_key_at", None) is not None),
     }
 
 

@@ -624,6 +624,10 @@ class NotificationService:
             return format_number(value) if value is not None else ""
 
         victim = str(data.get("victim_name") or "").strip()
+        if not victim and data.get("loot_key"):
+            # A loot key matched to no kill (data/submissions/pvp.py): say
+            # where the loot came from rather than leave a blank.
+            victim = "a loot key"
         victim_id = cls._coerce_int(data.get("victim_player_id"))
         top_item_id = cls._coerce_int(data.get("top_item_id"))
         rank = cls._coerce_int(data.get("pvp_rank"))
@@ -671,12 +675,15 @@ class NotificationService:
             )
         else:
             victim = values["{victim_name}"] or "a player"
+            if data.get("loot_key") and not str(data.get("victim_name") or "").strip():
+                description = (f"{player_link(player_name, player_id)} opened a loot key worth "
+                               f"**{values['{pvp_value}'] or '0'}**.")
+            else:
+                description = (f"{player_link(player_name, player_id)} killed {victim} and took "
+                               f"**{values['{pvp_value}'] or '0'}** in loot.")
             embed = interactions.Embed(
                 title="PvP Kill",
-                description=(
-                    f"{player_link(player_name, player_id)} killed {victim} and took "
-                    f"**{values['{pvp_value}'] or '0'}** in loot."
-                ),
+                description=description,
                 color=PVP_KILL_COLOR,
             )
             if values["{item_icon}"]:

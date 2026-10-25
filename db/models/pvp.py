@@ -86,6 +86,13 @@ class PvpKill(Base):
     # "own_account"); NULL when it counts.
     excluded_reason = Column(String(48), nullable=True)
     plugin_version = Column(String(20), nullable=True)
+    # "kill", or "loot_key": a loot key's loot that could not be matched to one
+    # kill (web148a). A loot_key row adds loot to the boards, never a kill.
+    kind = Column(String(12), nullable=False, default="kill", server_default="kill")
+    # Set on a kill when a loot key's loot was matched to it and added to its
+    # items; the key's GUID, so a replay is a no-op.
+    loot_key_guid = Column(String(255), nullable=True, unique=True)
+    loot_key_at = Column(DateTime, nullable=True)
 
     player = relationship("Player", foreign_keys=[player_id])
     items = relationship(
