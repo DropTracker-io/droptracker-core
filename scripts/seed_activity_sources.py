@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Seed npc_list rows for plugin "activity" loot sources.
+"""Seed npc_list rows for loot sources that are not monsters.
+
+Two kinds: plugin "activity" sources (below) and RuneLite loot-tracker events
+(``RUNELITE_EVENT_SOURCES``).
 
 The plugin (>= 5.5.0) submits synthetic type=drop events for activities that
 never fire a RuneLite loot event — MTA reward-shop purchases, Agility Pyramid
@@ -46,6 +49,39 @@ ACTIVITY_SOURCES = [
     ("Fractured Archive", 900006),
 ]
 
+# RuneLite's own loot-tracker event names (LootTrackerPlugin, checked against
+# runelite master on 2026-10-25) that had no npc_list row. The plugin forwards
+# every EVENT loot it sees, so each of these was rejected as an unknown NPC,
+# one new_npc row per item: about 18k items in the week to 2026-10-25 (t382).
+# They are chests, reward containers and skilling payouts, not monsters, so
+# the wiki lookup can never mint them. "Loot Chest" (opened PvP loot keys) is
+# deliberately absent: data/submissions/pvp.py takes it before this lookup.
+# Ids come from list position: APPEND new names only, never insert or reorder.
+RUNELITE_EVENT_SOURCES = [
+    (name, 900007 + i) for i, name in enumerate([
+        # Region- and object-based chests.
+        "Rusty chest", "Tarnished chest", "Reinforced chest",
+        "Chest (Alchemist's signet)", "Chest (Moon key)", "Chest (Ancient Vault)",
+        "Dark Chest", "Larran's small chest",
+        "H.A.M. chest (bronze)", "H.A.M. chest (iron)", "H.A.M. chest (steel)",
+        "H.A.M. chest (silver)",
+        # Taverley/Lumbridge key chests the existing rows do not cover.
+        "Silver key black", "Black key red", "Black key brown", "Steel key black",
+        # Activities and reward containers.
+        "Golem Crafting", "Courier tasks", "Hallowed Sack", "Ore Pack (Volcanic Mine)",
+        "Bag full of gems (Belona)",
+        "Simple lockbox", "Elaborate lockbox", "Ornate lockbox",
+        "Bounty crate (tier 1)", "Bounty crate (tier 2)", "Bounty crate (tier 3)",
+        "Bounty crate (tier 4)", "Bounty crate (tier 5)", "Bounty crate (tier 6)",
+        "Bounty crate (tier 7)", "Bounty crate (tier 8)", "Bounty crate (tier 9)",
+        # Items cleaned or cracked open (named after the item's members name).
+        "Tarnished 2h sword", "Tarnished amulet", "Tarnished battleaxe",
+        "Tarnished halberd", "Tarnished longsword", "Tarnished necklace",
+        "Tarnished ring", "Tarnished spear", "Tarnished bracelet",
+        "Rubium geode", "Dirty arrowtips",
+    ])
+]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Seed npc_list rows for plugin activity sources.")
@@ -53,7 +89,7 @@ def main() -> int:
     args = parser.parse_args()
 
     to_create = []
-    for name, npc_id in ACTIVITY_SOURCES:
+    for name, npc_id in ACTIVITY_SOURCES + RUNELITE_EVENT_SOURCES:
         existing = session.query(NpcList).filter(NpcList.npc_name == name).first()
         if existing:
             print(f"SKIP  {name!r}: already exists as npc_id={existing.npc_id}")
