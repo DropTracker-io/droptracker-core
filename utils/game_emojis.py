@@ -310,7 +310,8 @@ def emoji_for_npc_id(npc_id, profile=None) -> Optional[str]:
 
 
 # Tokens with_derived_tokens fills, so no sender has to.
-DERIVED_TOKENS = ("item_emoji", "item_link", "npc_link", "skill_emoji", "skills_text_emoji")
+DERIVED_TOKENS = ("item_emoji", "item_link", "npc_link", "pet_emoji", "skill_emoji",
+                  "skills_text_emoji")
 
 
 def with_derived_tokens(values: dict, profile=None) -> dict:
@@ -323,6 +324,7 @@ def with_derived_tokens(values: dict, profile=None) -> dict:
     those templates saw the raw ``{item_emoji}`` text. A value the sender did
     supply is left alone. Returns a new dict; the caller's is not mutated.
 
+    ``{pet_emoji}`` is the same thing for ``{pet_name}``.
     ``{item_link}``/``{npc_link}`` (the name as a markdown wiki link) are
     derived here for the same reason, though they are not glyphs.
     """
@@ -337,6 +339,14 @@ def with_derived_tokens(values: dict, profile=None) -> dict:
         except Exception:
             glyph = ""
         derived["{item_emoji}"] = glyph
+    # A pet is an item, so {pet_emoji} is that item's glyph. Every known pet
+    # is in the set, but a name the plugin spells some new way still renders
+    # bare rather than as the raw token.
+    if "{pet_emoji}" not in values and values.get("{pet_name}"):
+        try:
+            derived["{pet_emoji}"] = emoji_for_item(values["{pet_name}"], profile) or ""
+        except Exception:
+            derived["{pet_emoji}"] = ""
     # {item_name}/{npc_name} are plain text. An embed links them through the
     # title url, which a component layout has no equivalent of, so the linked
     # form is its own token rather than a change to what the name means.

@@ -603,6 +603,8 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     "progress": {"help": "Percent toward the next tier, unsuffixed", "sample": "19.81"},
     # Pets
     "pet_name": {"help": "The pet's name", "sample": "Olmlet"},
+    # Blank sample and optional for the reason {item_emoji} is.
+    "pet_emoji": {"help": "The pet's own icon", "sample": "", "optional": True},
     "source": {"help": "Where it came from", "sample": "Chambers of Xeric"},
     "killcount": {"help": "Kill count at the pet", "sample": "1432"},
     "milestone": {"help": "Milestone text (same as the kill count)", "sample": "1432"},
@@ -793,8 +795,8 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Pet",
         "group": "Achievements",
         "description": "Posted when a member receives a pet.",
-        "tokens": ("pet_name", "source", "npc_name", "killcount", "milestone", "duplicate",
-                   "previously_owned") + _POINTS_TOKENS + _MEDIA_TOKENS,
+        "tokens": ("pet_name", "pet_emoji", "source", "npc_name", "killcount", "milestone",
+                   "duplicate", "previously_owned") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
     "pet_dupe": {
         "label": "Duplicate pet",
@@ -803,8 +805,8 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
             "Posted when a member receives a pet they already have, if your "
             "settings announce it. Without this layout, duplicates use the Pet layout."
         ),
-        "tokens": ("pet_name", "source", "npc_name", "killcount", "milestone", "duplicate",
-                   "previously_owned") + _POINTS_TOKENS + _MEDIA_TOKENS,
+        "tokens": ("pet_name", "pet_emoji", "source", "npc_name", "killcount", "milestone",
+                   "duplicate", "previously_owned") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
     "level_up": {
         "label": "Level up",

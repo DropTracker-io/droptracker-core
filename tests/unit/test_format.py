@@ -657,6 +657,36 @@ class TestDerivedItemEmoji:
         assert text == "## <:item_elidinis_ward:1> Elidinis' ward"
 
 
+class TestDerivedPetEmoji:
+    """{pet_emoji} follows from {pet_name}: a pet is an item in the glyph set."""
+
+    @pytest.fixture(autouse=True)
+    def _glyphs(self, monkeypatch):
+        import utils.game_emojis as ge
+        monkeypatch.setattr(ge, "emoji_for_item",
+                            lambda name, profile=None: "<:item_olmlet:1>" if name == "Olmlet" else None)
+
+    def test_filled_from_pet_name(self):
+        out = replace_placeholders(_embed("{pet_emoji} {pet_name}"), {"{pet_name}": "Olmlet"})
+        assert out.title == "<:item_olmlet:1> Olmlet"
+
+    def test_pet_outside_the_set_renders_bare(self):
+        out = replace_placeholders(_embed("{pet_emoji} {pet_name}"), {"{pet_name}": "Pet rock"})
+        assert out.title == "Pet rock"
+
+    def test_component_layouts_fill_it_too(self):
+        from services.component_layout import render_layout
+
+        layout = {"blocks": [{"type": "text", "content": "## {pet_emoji} {pet_name}"}]}
+        payload = render_layout(layout, {"{pet_name}": "Olmlet"})
+        assert payload["components"][0]["components"][0]["content"] == "## <:item_olmlet:1> Olmlet"
+
+    def test_not_derived_for_other_notification_types(self):
+        from utils.game_emojis import with_derived_tokens
+
+        assert "{pet_emoji}" not in with_derived_tokens({"{item_name}": "Olmlet"})
+
+
 class TestDerivedSkillEmoji:
     """{skill_emoji} and {skills_text_emoji} follow from the level-up values
     every level sender already supplies."""
