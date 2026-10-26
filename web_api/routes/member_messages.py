@@ -1,10 +1,14 @@
-"""Members' own death messages — the member's editor and the leader's review.
+"""Members' own messages — the member's editor and the leader's review.
 
-  GET    /api/v1/me/death-messages                                      (session)
-  PUT    /api/v1/me/players/{playerId}/death-messages                   { messages: [...] }
-  GET    /api/v1/groups/{id}/member-death-messages                      (session + group admin)
-  PUT    /api/v1/groups/{id}/member-death-messages/{playerId}/block
-  DELETE /api/v1/groups/{id}/member-death-messages/{playerId}/block
+  GET    /api/v1/me/member-messages?type=                               (session)
+  PUT    /api/v1/me/players/{playerId}/member-messages?type=            { messages: [...] }
+  GET    /api/v1/groups/{id}/member-messages?type=                      (session + group admin)
+  PUT    /api/v1/groups/{id}/member-messages/{playerId}/block
+  DELETE /api/v1/groups/{id}/member-messages/{playerId}/block
+
+``type`` is a message type from ``db.member_messages.MESSAGE_KINDS`` (death,
+clog, drop, pb); absent means death. The original ``death-messages`` /
+``member-death-messages`` paths are the same handlers. Blocks cover every type.
 
 A member writes up to five lines for each of their accounts; one is picked per
 death in every group that opted in with ``allow_member_death_messages``. The
@@ -26,19 +30,19 @@ from __future__ import annotations
 
 import asyncio
 
-from quart import Blueprint, jsonify
+from quart import Blueprint, jsonify, request
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from db import AuditLog, Player
 from db.member_messages import (
-    MESSAGE_TYPE_DEATH,
     VIA_WEB,
     MemberMessageError,
-    death_message_group_status,
-    group_allows_member_death_messages,
+    group_allows_member_messages,
     limits_payload,
     load_member_message_row,
+    member_message_group_status,
+    message_kind,
     parse_stored_messages,
     store_member_messages,
 )
@@ -58,10 +62,21 @@ def _iso(value):
     return value.isoformat() if value is not None else None
 
 
+def _message_type(body=None) -> str:
+    """The requested message type (query, else body), validated. 422 if unknown."""
+    raw = request.args.get("type")
+    if raw is None and isinstance(body, dict):
+        raw = body.get("type")
+    try:
+        return message_kind(raw).key
+    except MemberMessageError as exc:
+        abort_problem(422, "Invalid value", str(exc))
+
+
 # --------------------------------------------------------------------------- #
 # The member's own editor
 # --------------------------------------------------------------------------- #
-def _my_payload(s, user) -> dict:
+def _my_payload(s, user, message_type) -> dict:
     players = (
         s.query(Player)
         .filter(Player.user_id == user.user_id)
@@ -70,25 +85,29 @@ def _my_payload(s, user) -> dict:
     )
     accounts = []
     for player in players:
-        row = load_member_message_row(s, player.player_id, MESSAGE_TYPE_DEATH)
+        row = load_member_message_row(s, player.player_id, message_type)
         accounts.append({
             "id": int(player.player_id),
             "name": player.player_name,
-            "messages": parse_stored_messages(row.messages) if row is not None else [],
+            "messages": (
+                parse_stored_messages(row.messages, message_type) if row is not None else []
+            ),
             "updated_at": _iso(row.updated_at) if row is not None else None,
-            "groups": death_message_group_status(s, player.player_id),
+            "groups": member_message_group_status(s, player.player_id, message_type),
         })
-    return {**limits_payload(), "players": accounts}
+    return {**limits_payload(message_type), "players": accounts}
 
 
+@member_messages_bp.get("/me/member-messages")
 @member_messages_bp.get("/me/death-messages")
 async def get_my_death_messages():
     user_id = current_user_id()
+    message_type = _message_type()
 
     def _load():
         with db_session() as s:
             user = load_user(s, user_id)
-            return _my_payload(s, user) if user else None
+            return _my_payload(s, user, message_type) if user else None
 
     payload = await asyncio.to_thread(_load)
     if payload is None:
@@ -96,11 +115,13 @@ async def get_my_death_messages():
     return private_no_store(jsonify(payload))
 
 
+@member_messages_bp.put("/me/players/<int:player_id>/member-messages")
 @member_messages_bp.put("/me/players/<int:player_id>/death-messages")
 async def put_my_death_messages(player_id: int):
-    """Replace one linked account's death messages. An empty list clears them."""
+    """Replace one linked account's messages of one type. An empty list clears them."""
     user_id = current_user_id()
     body = await json_body()
+    message_type = _message_type(body)
     messages = body.get("messages")
     if not isinstance(messages, list):
         abort_problem(422, "Invalid value", "'messages' must be a list of text lines.")
@@ -119,13 +140,14 @@ async def put_my_death_messages(player_id: int):
                 abort_problem(404, "Player not found", "That account is not linked to you.")
             try:
                 store_member_messages(
-                    s, player_id, messages, via=VIA_WEB, user_id=user.user_id
+                    s, player_id, messages, via=VIA_WEB, user_id=user.user_id,
+                    message_type=message_type,
                 )
             except MemberMessageError as exc:
                 s.rollback()
-                abort_problem(422, "Invalid death message", str(exc))
+                abort_problem(422, f"Invalid {message_kind(message_type).noun} message", str(exc))
             s.commit()
-            return _my_payload(s, user)
+            return _my_payload(s, user, message_type)
 
     payload = await asyncio.to_thread(_apply)
     if payload is None:
@@ -157,13 +179,13 @@ _BLOCKED_SQL = text(
 )
 
 
-def _group_payload(s, group_id: int) -> dict:
+def _group_payload(s, group_id: int, message_type: str) -> dict:
     members: dict[int, dict] = {}
     rows = s.execute(
-        _MEMBER_MESSAGES_SQL, {"group_id": group_id, "message_type": MESSAGE_TYPE_DEATH}
+        _MEMBER_MESSAGES_SQL, {"group_id": group_id, "message_type": message_type}
     ).all()
     for player_id, name, raw, updated_at in rows:
-        messages = parse_stored_messages(raw)
+        messages = parse_stored_messages(raw, message_type)
         if not messages:
             continue
         members[int(player_id)] = {
@@ -184,7 +206,8 @@ def _group_payload(s, group_id: int) -> dict:
         entry["blocked"] = True
         entry["blocked_at"] = _iso(created_at)
     return {
-        "enabled": group_allows_member_death_messages(s, group_id),
+        "type": message_type,
+        "enabled": group_allows_member_messages(s, group_id, message_type),
         "members": sorted(members.values(), key=lambda m: (m["name"] or "").lower()),
     }
 
@@ -194,14 +217,16 @@ def _assert_admin(s, user_id: int, group_id: int):
     assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
 
 
+@member_messages_bp.get("/groups/<int:group_id>/member-messages")
 @member_messages_bp.get("/groups/<int:group_id>/member-death-messages")
 async def get_group_member_death_messages(group_id: int):
     user_id = current_user_id()
+    message_type = _message_type()
 
     def _load():
         with db_session() as s:
             _assert_admin(s, user_id, group_id)
-            return _group_payload(s, group_id)
+            return _group_payload(s, group_id, message_type)
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
@@ -219,9 +244,11 @@ def _member_name(s, group_id: int, player_id: int):
     return row[0] if row is not None else None
 
 
+@member_messages_bp.put("/groups/<int:group_id>/member-messages/<int:player_id>/block")
 @member_messages_bp.put("/groups/<int:group_id>/member-death-messages/<int:player_id>/block")
 async def block_member_death_messages(group_id: int, player_id: int):
     user_id = current_user_id()
+    message_type = _message_type()
 
     def _apply():
         from db.models import GroupMemberMessageBlock
@@ -257,14 +284,16 @@ async def block_member_death_messages(group_id: int, player_id: int):
                     # A concurrent block of the same member won; the member is
                     # blocked either way, which is what the caller asked for.
                     s.rollback()
-            return _group_payload(s, group_id)
+            return _group_payload(s, group_id, message_type)
 
     return private_no_store(jsonify(await asyncio.to_thread(_apply)))
 
 
+@member_messages_bp.delete("/groups/<int:group_id>/member-messages/<int:player_id>/block")
 @member_messages_bp.delete("/groups/<int:group_id>/member-death-messages/<int:player_id>/block")
 async def unblock_member_death_messages(group_id: int, player_id: int):
     user_id = current_user_id()
+    message_type = _message_type()
 
     def _apply():
         from db.models import GroupMemberMessageBlock
@@ -293,6 +322,6 @@ async def unblock_member_death_messages(group_id: int, player_id: int):
                     after=None,
                 ))
                 s.commit()
-            return _group_payload(s, group_id)
+            return _group_payload(s, group_id, message_type)
 
     return private_no_store(jsonify(await asyncio.to_thread(_apply)))

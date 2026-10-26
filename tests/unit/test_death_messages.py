@@ -117,11 +117,12 @@ def _send_fixture(monkeypatch, death_rows, member_templates=None):
 
     seen_lookups = []
 
-    def _member_templates(session, group_id, player_id):
+    def _member_templates(session, group_id, player_id, message_type="death"):
+        assert message_type == "death"
         seen_lookups.append((group_id, player_id))
         return list(member_templates or [])
 
-    monkeypatch.setattr(member_messages, "member_death_templates_for_group", _member_templates)
+    monkeypatch.setattr(member_messages, "member_templates_for_group", _member_templates)
     monkeypatch.setattr(ns, "has_custom_embeds", lambda gid: False)
     monkeypatch.setattr(ns, "get_formatted_name", lambda name, gid, s, player_id=None: "**Alice**")
     monkeypatch.setattr(ns, "global_footer", "footer")

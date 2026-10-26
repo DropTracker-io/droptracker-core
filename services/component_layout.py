@@ -650,6 +650,20 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     # Resolved by the sender (db/member_messages.py): the member's own message
     # when the group allows those, else one of the group's death messages, else
     # "{player_name} has died!" — so it is never blank.
+    # Drops, collection logs and personal bests have the same picked line
+    # (db/member_messages.py), else the built-in sentence, so never blank.
+    "drop_message": {
+        "help": "The drop message: the member's own if your group allows those, else one of your drop messages, else a sentence naming the drop",
+        "sample": "**RuneLite Ron** received **Twisted bow** (`1.2B`) from **Great Olm**",
+    },
+    "clog_message": {
+        "help": "The collection log message: the member's own if your group allows those, else one of your collection log messages, else a sentence naming the item",
+        "sample": "**RuneLite Ron** added **Tanzanite fang** to their collection log",
+    },
+    "pb_message": {
+        "help": "The personal best message: the member's own if your group allows those, else one of your personal best messages, else a sentence naming the time",
+        "sample": "**RuneLite Ron** set a new personal best at **Vorkath**: **1:02.40**",
+    },
     "death_message": {
         "help": "The death message: the member's own if your group allows those, else one of your death messages, else \"… has died!\"",
         "sample": "**RuneLite Ron** has died!",
@@ -762,7 +776,7 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Drop",
         "group": "Loot",
         "description": "Posted when a member receives a drop worth announcing.",
-        "tokens": ("item_name", "item_link", "item_emoji", "item_id", "item_value", "quantity",
+        "tokens": ("drop_message", "item_name", "item_link", "item_emoji", "item_id", "item_value", "quantity",
                    "total_value", "npc_name", "npc_link", "npc_id", "kill_count", "month_name", "player_total_month",
                    "group_total_month", "group_total", "global_rank", "group_rank",
                    "group_to_group_rank", "user_count") + _POINTS_TOKENS + _MEDIA_TOKENS,
@@ -771,7 +785,7 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Collection log",
         "group": "Loot",
         "description": "Posted when a member fills a collection log slot.",
-        "tokens": ("item_name", "item_link", "item_emoji", "item_id", "collection_name", "npc_name",
+        "tokens": ("clog_message", "item_name", "item_link", "item_emoji", "item_id", "collection_name", "npc_name",
                    "npc_link", "kc_received", "slots_unlocked", "slots_total",
                    "player_loot_month", "total_tracked") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
@@ -779,7 +793,7 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Personal best",
         "group": "Achievements",
         "description": "Posted when a member sets a new personal best time.",
-        "tokens": ("npc_name", "npc_link", "npc_id", "personal_best", "team_size", "kill_count",
+        "tokens": ("pb_message", "npc_name", "npc_link", "npc_id", "personal_best", "team_size", "kill_count",
                    "global_rank", "total_ranked_global", "group_rank",
                    "total_ranked_group", "gear_image_url") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },

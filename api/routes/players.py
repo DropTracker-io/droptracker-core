@@ -481,6 +481,12 @@ def _group_configs_for(player_name, acc_hash, db_session):
                             # "" an unset key above would give.
                             "allow_member_death_messages": get_config_value(
                                 current_group_configs, "allow_member_death_messages") is True,
+                            "allow_member_clog_messages": get_config_value(
+                                current_group_configs, "allow_member_clog_messages") is True,
+                            "allow_member_drop_messages": get_config_value(
+                                current_group_configs, "allow_member_drop_messages") is True,
+                            "allow_member_pb_messages": get_config_value(
+                                current_group_configs, "allow_member_pb_messages") is True,
                             "send_diaries": get_config_value(current_group_configs, "notify_diaries"),
                             # Whether this group announces slayer tasks. The plugin
                             # submits every completion regardless (events count

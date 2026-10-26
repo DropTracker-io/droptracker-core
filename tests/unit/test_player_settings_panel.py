@@ -96,7 +96,7 @@ def test_group_line_stays_short_for_members_of_many_clans():
 
 def test_panel_lists_messages_and_groups(monkeypatch):
     monkeypatch.setattr(panel, "_players", lambda uid: [{"id": 9, "name": "Iron Ron"}])
-    monkeypatch.setattr(panel, "_death_message_state", lambda uid, pid: {
+    monkeypatch.setattr(panel, "_death_message_state", lambda uid, pid, message_type="death": {
         "name": "Iron Ron",
         "messages": ["{player_name} forgot to pray against {killer}", "{player_name} planked"],
         "groups": [{"id": 5, "name": "Clan", "allowed": True, "blocked": False}],
@@ -107,12 +107,13 @@ def test_panel_lists_messages_and_groups(monkeypatch):
     assert "2. `{player_name} planked`" in content
     assert "**Posted in:** **Clan**" in content
     assert len(content) < 2000
-    assert len(components) == 1
+    # Message-type picker, then the buttons.
+    assert len(components) == 2
 
 
 def test_panel_with_nothing_written_says_the_clans_use_their_own(monkeypatch):
     monkeypatch.setattr(panel, "_players", lambda uid: [{"id": 9, "name": "Iron Ron"}])
-    monkeypatch.setattr(panel, "_death_message_state", lambda uid, pid: {
+    monkeypatch.setattr(panel, "_death_message_state", lambda uid, pid, message_type="death": {
         "name": "Iron Ron", "messages": [], "groups": [],
     })
     content, _ = panel.build_death_message_panel(7)
@@ -126,7 +127,8 @@ def test_panel_asks_which_account_first(monkeypatch):
     ])
     content, components = panel.build_death_message_panel(7)
     assert "Which account" in content
-    assert len(components) == 2
+    # Account picker, message-type picker, back.
+    assert len(components) == 3
 
 
 def test_panel_without_accounts_points_at_claiming(monkeypatch):
@@ -181,7 +183,7 @@ async def test_modal_save_shows_the_updated_panel(monkeypatch):
     monkeypatch.setattr(panel, "_resolve_user_id", lambda discord_id: 7)
     monkeypatch.setattr(panel, "_save_death_messages", lambda uid, pid, m: (["{player_name} planked"], None))
     monkeypatch.setattr(panel, "_players", lambda uid: [{"id": 9, "name": "Iron Ron"}])
-    monkeypatch.setattr(panel, "_death_message_state", lambda uid, pid: {
+    monkeypatch.setattr(panel, "_death_message_state", lambda uid, pid, message_type="death": {
         "name": "Iron Ron", "messages": ["{player_name} planked"], "groups": [],
     })
     ctx = _modal_ctx({"m1": "{player_name} planked"})
@@ -217,3 +219,51 @@ def test_real_storage_refuses_an_account_that_is_not_yours(monkeypatch):
     assert saved is None and error == "That account isn't linked to you."
     session.commit.assert_not_called()
     session.close.assert_called_once()
+
+
+# ── Other message types (collection logs, drops, personal bests) ─────────────
+
+def test_message_actions_keep_the_death_ids_and_name_other_types():
+    assert panel.parse_msg_action("dmsg") == ("death", "")
+    assert panel.parse_msg_action("dmsg:edit:9") == ("death", "edit:9")
+    assert panel.parse_msg_action("dmsg@clog:clear:9") == ("clog", "clear:9")
+    assert panel.parse_msg_action("dmsg@bogus:edit:9") is None
+    assert panel.parse_msg_action("dms:set") is None
+
+
+def test_modal_ids_round_trip_per_type():
+    assert panel._modal_id("death", 9) == "pset:dmsgsave:9"
+    for message_type in ("death", "clog", "drop", "pb"):
+        assert panel.parse_modal_id(panel._modal_id(message_type, 9)) == (message_type, 9)
+    assert panel.parse_modal_id("pset:dmsgsave:bogus:9") is None
+
+
+def test_panel_for_another_type_lists_its_placeholders(monkeypatch):
+    monkeypatch.setattr(panel, "_players", lambda uid: [{"id": 9, "name": "Iron Ron"}])
+    seen = []
+
+    def _state(uid, pid, message_type="death"):
+        seen.append(message_type)
+        return {"name": "Iron Ron", "messages": [], "groups": []}
+
+    monkeypatch.setattr(panel, "_death_message_state", _state)
+    content, _ = panel.build_death_message_panel(7, message_type="pb")
+    assert seen == ["pb"]
+    assert "Personal best message" in content and "`{time}`" in content
+    assert "`{killer}`" not in content
+
+
+async def test_modal_save_for_another_type_saves_that_type(monkeypatch):
+    monkeypatch.setattr(panel, "_resolve_user_id", lambda did: 7)
+    saved_types = []
+
+    def _save(uid, pid, messages, message_type="death"):
+        saved_types.append(message_type)
+        return ["{player_name} logged {item_name}"], None
+
+    monkeypatch.setattr(panel, "_save_death_messages", _save)
+    monkeypatch.setattr(panel, "build_death_message_panel",
+                        lambda *a, **k: ("panel", []))
+    ctx = _modal_ctx({"m1": "{player_name} logged {item_name}"}, custom_id="pset:dmsgsave:clog:9")
+    await panel.handle_death_message_modal(ctx)
+    assert saved_types == ["clog"]

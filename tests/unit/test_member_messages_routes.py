@@ -135,8 +135,8 @@ class TestMyDeathMessages:
         rows = {9: SimpleNamespace(messages='["{player_name} planked"]', updated_at=NOW)}
         monkeypatch.setattr(routes, "load_member_message_row", lambda s, pid, t: rows.get(pid))
         monkeypatch.setattr(
-            routes, "death_message_group_status",
-            lambda s, pid: [{"id": 5, "name": "Clan", "allowed": pid == 9, "blocked": False}],
+            routes, "member_message_group_status",
+            lambda s, pid, t="death": [{"id": 5, "name": "Clan", "allowed": pid == 9, "blocked": False}],
         )
         r = await client.get("/api/v1/me/death-messages")
         assert r.status_code == 200
@@ -166,7 +166,7 @@ class TestMyDeathMessages:
             routes, "load_member_message_row",
             lambda s, pid, t: SimpleNamespace(messages=json.dumps(saved["messages"]), updated_at=NOW),
         )
-        monkeypatch.setattr(routes, "death_message_group_status", lambda s, pid: [])
+        monkeypatch.setattr(routes, "member_message_group_status", lambda s, pid, t="death": [])
         r = await client.put(
             "/api/v1/me/players/9/death-messages",
             json={"messages": ["  {player_name} forgot to eat ", ""]},
@@ -225,7 +225,7 @@ class TestGroupReview:
     async def test_lists_members_with_messages_and_blocked_members(self, client, monkeypatch):
         session = FakeSession(executes=_group_rows())
         _wire(monkeypatch, session)
-        monkeypatch.setattr(routes, "group_allows_member_death_messages", lambda s, gid: True)
+        monkeypatch.setattr(routes, "group_allows_member_messages", lambda s, gid, t="death": True)
         r = await client.get("/api/v1/groups/42/member-death-messages")
         assert r.status_code == 200
         body = await r.get_json()
@@ -248,7 +248,7 @@ class TestGroupReview:
             executes=[[("Alice",)]] + _group_rows(),
         )
         _wire(monkeypatch, session)
-        monkeypatch.setattr(routes, "group_allows_member_death_messages", lambda s, gid: False)
+        monkeypatch.setattr(routes, "group_allows_member_messages", lambda s, gid, t="death": False)
         r = await client.put("/api/v1/groups/42/member-death-messages/9/block")
         assert r.status_code == 200
         assert session.committed
@@ -262,7 +262,7 @@ class TestGroupReview:
     async def test_blocking_twice_is_a_no_op(self, client, monkeypatch):
         session = FakeSession(queries=[[1]], executes=[[("Alice",)]] + _group_rows())
         _wire(monkeypatch, session)
-        monkeypatch.setattr(routes, "group_allows_member_death_messages", lambda s, gid: True)
+        monkeypatch.setattr(routes, "group_allows_member_messages", lambda s, gid, t="death": True)
         r = await client.put("/api/v1/groups/42/member-death-messages/9/block")
         assert r.status_code == 200
         assert session.added == [] and not session.committed
@@ -278,7 +278,7 @@ class TestGroupReview:
         block = SimpleNamespace(id=3, group_id=42, player_id=9)
         session = FakeSession(queries=[[block], ["Alice"]], executes=_group_rows())
         _wire(monkeypatch, session)
-        monkeypatch.setattr(routes, "group_allows_member_death_messages", lambda s, gid: True)
+        monkeypatch.setattr(routes, "group_allows_member_messages", lambda s, gid, t="death": True)
         r = await client.delete("/api/v1/groups/42/member-death-messages/9/block")
         assert r.status_code == 200
         assert session.deleted == [block]
@@ -289,7 +289,7 @@ class TestGroupReview:
     async def test_unblocking_someone_not_blocked_changes_nothing(self, client, monkeypatch):
         session = FakeSession(queries=[[]], executes=_group_rows())
         _wire(monkeypatch, session)
-        monkeypatch.setattr(routes, "group_allows_member_death_messages", lambda s, gid: True)
+        monkeypatch.setattr(routes, "group_allows_member_messages", lambda s, gid, t="death": True)
         r = await client.delete("/api/v1/groups/42/member-death-messages/9/block")
         assert r.status_code == 200
         assert session.deleted == [] and not session.committed
@@ -316,7 +316,7 @@ def plugin_client():
 
 def _wire_plugin(monkeypatch, session):
     monkeypatch.setattr(plugin_routes, "get_db_session", lambda: session)
-    monkeypatch.setattr(plugin_routes, "death_message_group_status", lambda s, pid: [
+    monkeypatch.setattr(plugin_routes, "member_message_group_status", lambda s, pid, t="death": [
         {"id": 5, "name": "Clan", "allowed": True, "blocked": False},
     ])
 

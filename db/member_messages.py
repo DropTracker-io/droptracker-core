@@ -1,25 +1,28 @@
-"""Members' own death messages — the rules every surface shares.
+"""Members' own notification messages — the rules every surface shares.
 
 A member writes the line their clan sees when they die ("{player_name} forgot
-to pray against {killer}"). Four places read or write those messages, and all
-of them import from here so they cannot disagree about what a valid message is
-or which line gets posted:
+to pray against {killer}"), log a collection log slot, get a drop or set a
+personal best. Each is a *message type* (:data:`MESSAGE_KINDS`): its own
+placeholders and its own group switches, with every rule below shared. Four
+places read or write those messages, and all of them import from here so they
+cannot disagree about what a valid message is or which line gets posted:
 
   * ``web_api/routes/member_messages.py`` — the website editor for members and
     the moderation card for group leaders;
   * ``api/routes/member_messages.py`` — the RuneLite plugin's editor;
   * ``services/player_settings_panel.py`` — ``/settings`` in Discord;
-  * ``services/notification_service.py`` — the death sender, which picks the line.
+  * ``services/notification_service.py`` — the senders, which pick the line.
 
-**Groups opt in.** Nothing a member writes reaches a channel unless the group
-set ``allow_member_death_messages``, and a leader can still block individual
-members (``group_member_message_blocks``). It is off by default because turning
+**Groups opt in, per type.** Nothing a member writes reaches a channel unless
+the group set that type's switch (``allow_member_death_messages``,
+``allow_member_clog_messages``, ...), and a leader can still block individual
+members (``group_member_message_blocks``, which covers every type). It is off by default because turning
 it on gives every member a line in the clan's channel, and that is the group's
 decision to make, not the member's.
 
-**Which line wins**, per group and per death: the member's own message when the
-group allows it and has not blocked them, else the group's randomized messages,
-else "{player_name} has died!". A message whose placeholders come out blank for
+**Which line wins**, per group and per notification: the member's own message
+when the group allows it and has not blocked them, else the group's randomized
+messages (``<type>_message_variants``), else the sender's own line. A message whose placeholders come out blank for
 this death is skipped rather than posted half-empty ("was killed by ."), so a
 member whose every message names the killer falls through to the next source
 when the killer is unknown.
@@ -39,9 +42,13 @@ from __future__ import annotations
 import json
 import random
 import re
+from dataclasses import dataclass
 
-#: ``player_custom_messages.message_type`` for death messages.
+#: ``player_custom_messages.message_type`` values.
 MESSAGE_TYPE_DEATH = "death"
+MESSAGE_TYPE_CLOG = "clog"
+MESSAGE_TYPE_DROP = "drop"
+MESSAGE_TYPE_PB = "pb"
 
 #: Group config key. Truthy means members' own death messages are posted.
 ALLOW_DEATH_CONFIG_KEY = "allow_member_death_messages"
@@ -93,6 +100,128 @@ _CLIENT_VALUE_TOKENS = frozenset({
 
 _CLIENT_VALUE_MAX_LENGTH = 100
 
+
+@dataclass(frozen=True)
+class MessageKind:
+    """One type of member message: what it may say and where groups switch it on.
+
+    ``tokens`` are documented to members (with editor samples); ``aliases`` are
+    also accepted so a line copied from the group's own messages still works.
+    ``data_tokens`` describe the event itself: a template using one that is
+    blank for this notification is skipped. ``client_tokens`` carry
+    client-sent text and are cleaned before they go into a line. The group's
+    config keys are ``allow_key`` (members' messages on), ``variants_key``
+    (the group's own randomized list) and ``as_embed_key`` (line replaces the
+    embed description). ``line_token`` places the picked line in a custom
+    embed or a Components layout.
+    """
+
+    key: str
+    noun: str
+    tokens: tuple
+    aliases: dict
+    data_tokens: frozenset
+    client_tokens: frozenset
+    example: str
+
+    @property
+    def allow_key(self) -> str:
+        return f"allow_member_{self.key}_messages"
+
+    @property
+    def variants_key(self) -> str:
+        return f"{self.key}_message_variants"
+
+    @property
+    def as_embed_key(self) -> str:
+        return f"{self.key}_message_as_embed_description"
+
+    @property
+    def line_token(self) -> str:
+        return "{" + self.key + "_message}"
+
+    @property
+    def allowed_tokens(self) -> frozenset:
+        return frozenset([doc["token"] for doc in self.tokens] + list(self.aliases))
+
+
+_PLAYER_TOKEN = {"token": "{player_name}", "help": "Your name", "sample": "Zezima"}
+
+MESSAGE_KINDS: dict = {
+    MESSAGE_TYPE_DEATH: MessageKind(
+        key=MESSAGE_TYPE_DEATH,
+        noun="death",
+        tokens=DEATH_TOKENS,
+        aliases=DEATH_TOKEN_ALIASES,
+        data_tokens=DEATH_DATA_TOKENS,
+        client_tokens=_CLIENT_VALUE_TOKENS,
+        example="{player_name} forgot to pray against {killer}",
+    ),
+    MESSAGE_TYPE_CLOG: MessageKind(
+        key=MESSAGE_TYPE_CLOG,
+        noun="collection log",
+        tokens=(
+            _PLAYER_TOKEN,
+            {"token": "{item_name}", "help": "The item you logged", "sample": "Tanzanite fang"},
+            {"token": "{source}", "help": "Where it came from", "sample": "Zulrah"},
+            {"token": "{kill_count}", "help": "Your kill count there", "sample": "412"},
+            {"token": "{slots_unlocked}", "help": "Your collection log slots", "sample": "1,024"},
+            {"token": "{slots_total}", "help": "Collection log slots in the game", "sample": "1,692"},
+        ),
+        aliases={"{npc_name}": "{source}", "{kc_received}": "{kill_count}"},
+        data_tokens=frozenset({
+            "{source}", "{npc_name}", "{kill_count}", "{kc_received}",
+            "{slots_unlocked}", "{slots_total}",
+        }),
+        client_tokens=frozenset({"{item_name}", "{source}", "{npc_name}", "{player_name_plain}"}),
+        example="{player_name} finally saw a {item_name} after {kill_count} kills",
+    ),
+    MESSAGE_TYPE_DROP: MessageKind(
+        key=MESSAGE_TYPE_DROP,
+        noun="drop",
+        tokens=(
+            _PLAYER_TOKEN,
+            {"token": "{item_name}", "help": "The item you got", "sample": "Twisted bow"},
+            {"token": "{source}", "help": "What dropped it", "sample": "Great Olm"},
+            {"token": "{value}", "help": "What it's worth", "sample": "1.2B"},
+            {"token": "{quantity}", "help": "How many", "sample": "1"},
+            {"token": "{kill_count}", "help": "Your kill count there", "sample": "57"},
+        ),
+        aliases={"{npc_name}": "{source}"},
+        data_tokens=frozenset({"{source}", "{npc_name}", "{value}", "{quantity}", "{kill_count}"}),
+        client_tokens=frozenset({"{item_name}", "{source}", "{npc_name}", "{player_name_plain}"}),
+        example="{player_name} just made {value} off {source}",
+    ),
+    MESSAGE_TYPE_PB: MessageKind(
+        key=MESSAGE_TYPE_PB,
+        noun="personal best",
+        tokens=(
+            _PLAYER_TOKEN,
+            {"token": "{boss}", "help": "The boss or activity", "sample": "Vorkath"},
+            {"token": "{time}", "help": "Your new best time", "sample": "1:02.40"},
+            {"token": "{team_size}", "help": "Team size", "sample": "Solo"},
+            {"token": "{kill_count}", "help": "Your kill count there", "sample": "1,204"},
+        ),
+        aliases={"{npc_name}": "{boss}", "{personal_best}": "{time}"},
+        data_tokens=frozenset({
+            "{boss}", "{npc_name}", "{time}", "{personal_best}", "{team_size}", "{kill_count}",
+        }),
+        client_tokens=frozenset({"{boss}", "{npc_name}", "{team_size}", "{player_name_plain}"}),
+        example="{player_name} shaved {boss} down to {time}",
+    ),
+}
+
+#: Message types in the order editors list them.
+MESSAGE_TYPES = (MESSAGE_TYPE_DEATH, MESSAGE_TYPE_CLOG, MESSAGE_TYPE_DROP, MESSAGE_TYPE_PB)
+
+
+def message_kind(message_type) -> MessageKind:
+    """The kind for a stored or requested type. Raises ``MemberMessageError``."""
+    kind = MESSAGE_KINDS.get(str(message_type or MESSAGE_TYPE_DEATH))
+    if kind is None:
+        raise MemberMessageError("Unknown message type.")
+    return kind
+
 _TOKEN_RE = re.compile(r"\{[a-z0-9_]+\}", re.IGNORECASE)
 _PING_RE = re.compile(r"@everyone|@here|<@[&!]?\d+>", re.IGNORECASE)
 _DISCORD_ENTITY_RE = re.compile(
@@ -124,8 +253,9 @@ class MemberMessageError(ValueError):
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
-def message_issue(text: str) -> str | None:
+def message_issue(text: str, message_type: str = MESSAGE_TYPE_DEATH) -> str | None:
     """Why one (already trimmed) message cannot be saved, or ``None``."""
+    kind = MESSAGE_KINDS.get(message_type) or MESSAGE_KINDS[MESSAGE_TYPE_DEATH]
     if len(text) > MAX_MESSAGE_LENGTH:
         return f"Each message can be at most {MAX_MESSAGE_LENGTH} characters."
     if _CONTROL_RE.search(text):
@@ -138,17 +268,17 @@ def message_issue(text: str) -> str | None:
         return "Messages can't start with a heading or a quote."
     unknown = sorted({
         token for token in _TOKEN_RE.findall(text)
-        if token.lower() not in MEMBER_DEATH_TOKENS
+        if token.lower() not in kind.allowed_tokens
     })
     if unknown:
         names = ", ".join(unknown)
-        allowed = ", ".join(doc["token"] for doc in DEATH_TOKENS)
+        allowed = ", ".join(doc["token"] for doc in kind.tokens)
         plural = "s" if len(unknown) > 1 else ""
         return f"Unknown placeholder{plural} {names}. You can use {allowed}."
     return None
 
 
-def normalize_messages(value) -> list[str]:
+def normalize_messages(value, message_type: str = MESSAGE_TYPE_DEATH) -> list[str]:
     """Validate what a member submitted and return the list to store.
 
     Takes a list of strings (or the same as a JSON array string). Each message
@@ -177,7 +307,7 @@ def normalize_messages(value) -> list[str]:
         text = _TOKEN_RE.sub(lambda m: m.group(0).lower(), raw.strip())
         if not text or text in seen:
             continue
-        issue = message_issue(text)
+        issue = message_issue(text, message_type)
         if issue:
             raise MemberMessageError(issue)
         seen.add(text)
@@ -187,7 +317,7 @@ def normalize_messages(value) -> list[str]:
     return cleaned
 
 
-def parse_stored_messages(raw) -> list[str]:
+def parse_stored_messages(raw, message_type: str = MESSAGE_TYPE_DEATH) -> list[str]:
     """A stored ``messages`` value -> the messages that are valid today.
 
     Tolerant: bad JSON, non-strings and entries a newer rule refuses are all
@@ -206,7 +336,7 @@ def parse_stored_messages(raw) -> list[str]:
         if not isinstance(entry, str):
             continue
         text = entry.strip()
-        if text and text not in out and message_issue(text) is None:
+        if text and text not in out and message_issue(text, message_type) is None:
             out.append(text)
     return out[:MAX_MESSAGES]
 
@@ -229,41 +359,55 @@ def _sanitize_member_template(template: str) -> str:
     return text
 
 
-def is_renderable(template: str, replacements: dict) -> bool:
-    """False when the template names a death detail this death does not have."""
+def is_renderable(template: str, replacements: dict,
+                  message_type: str = MESSAGE_TYPE_DEATH) -> bool:
+    """False when the template names a detail this notification does not have."""
+    kind = MESSAGE_KINDS.get(message_type) or MESSAGE_KINDS[MESSAGE_TYPE_DEATH]
     for token in _TOKEN_RE.findall(template or ""):
-        if token in DEATH_DATA_TOKENS and not str(replacements.get(token) or "").strip():
+        if token in kind.data_tokens and not str(replacements.get(token) or "").strip():
             return False
     return True
 
 
-def pick_template(templates, replacements: dict, rng=None) -> str | None:
-    """A random template among those this death can fill, or ``None``."""
-    eligible = [t for t in (templates or []) if t and is_renderable(t, replacements)]
+def pick_template(templates, replacements: dict, rng=None,
+                  message_type: str = MESSAGE_TYPE_DEATH) -> str | None:
+    """A random template among those this notification can fill, or ``None``."""
+    eligible = [
+        t for t in (templates or [])
+        if t and is_renderable(t, replacements, message_type)
+    ]
     if not eligible:
         return None
     return (rng or random).choice(eligible)
 
 
-def choose_death_template(member_templates, group_templates, replacements: dict, rng=None):
-    """The template for this death's message line, and where it came from.
+def choose_template(member_templates, group_templates, replacements: dict, rng=None,
+                    message_type: str = MESSAGE_TYPE_DEATH):
+    """The template for this notification's message line, and where it came from.
 
     Returns ``(template, source)`` with source ``"member"``, ``"group"`` or
-    ``"default"`` (template ``None``: the sender's own "has died!" line).
+    ``"default"`` (template ``None``: the sender's own line, "has died!").
     ``member_templates`` must already be empty when the group does not allow
     member messages or has blocked this member —
-    :func:`member_death_templates_for_group` does both checks.
+    :func:`member_templates_for_group` does both checks.
     """
-    template = pick_template(member_templates, replacements, rng)
+    template = pick_template(member_templates, replacements, rng, message_type)
     if template:
         return template, "member"
-    template = pick_template(group_templates, replacements, rng)
+    template = pick_template(group_templates, replacements, rng, message_type)
     if template:
         return template, "group"
     return None, "default"
 
 
-def render_template(template: str, replacements: dict, *, member: bool) -> str:
+def choose_death_template(member_templates, group_templates, replacements: dict, rng=None):
+    """:func:`choose_template` for deaths."""
+    return choose_template(member_templates, group_templates, replacements, rng,
+                           MESSAGE_TYPE_DEATH)
+
+
+def render_template(template: str, replacements: dict, *, member: bool,
+                    message_type: str = MESSAGE_TYPE_DEATH) -> str:
     """Fill a message template in one pass.
 
     One pass, not sequential ``str.replace``: a substituted value can never be
@@ -273,9 +417,10 @@ def render_template(template: str, replacements: dict, *, member: bool) -> str:
     its unknown placeholders as written (how its editor documents them) and
     only loses pings. Client-sent values are cleaned either way.
     """
+    kind = MESSAGE_KINDS.get(message_type) or MESSAGE_KINDS[MESSAGE_TYPE_DEATH]
     if member:
         text = _sanitize_member_template(template or "")
-        allowed = MEMBER_DEATH_TOKENS
+        allowed = kind.allowed_tokens
     else:
         text = _PING_RE.sub("", template or "")
         allowed = None
@@ -287,31 +432,39 @@ def render_template(template: str, replacements: dict, *, member: bool) -> str:
         if token not in replacements:
             return "" if allowed is not None else token
         value = replacements[token]
-        if token in _CLIENT_VALUE_TOKENS:
+        if token in kind.client_tokens:
             return sanitize_text(value)[:_CLIENT_VALUE_MAX_LENGTH]
         return "" if value is None else str(value)
 
     return _SPACES_RE.sub(" ", _TOKEN_RE.sub(_sub, text)).strip()
 
 
-def sample_replacements() -> dict:
+def sample_replacements(message_type: str = MESSAGE_TYPE_DEATH) -> dict:
     """The preview values the editors show, keyed like a real send."""
-    values = {doc["token"]: doc["sample"] for doc in DEATH_TOKENS}
-    for alias, canonical in DEATH_TOKEN_ALIASES.items():
+    kind = MESSAGE_KINDS.get(message_type) or MESSAGE_KINDS[MESSAGE_TYPE_DEATH]
+    values = {doc["token"]: doc["sample"] for doc in kind.tokens}
+    for alias, canonical in kind.aliases.items():
         values[alias] = values[canonical]
     return values
 
 
 # ── Storage (session in, lazy model imports) ─────────────────────────────────
 
-def group_allows_member_death_messages(session, group_id) -> bool:
-    """Whether a group posts members' own death messages. Fails closed."""
+def group_allows_member_messages(session, group_id,
+                                 message_type: str = MESSAGE_TYPE_DEATH) -> bool:
+    """Whether a group posts members' own messages of this type. Fails closed."""
     from utils import group_config as gc
 
     try:
-        return gc.is_truthy(gc.get(session, group_id, ALLOW_DEATH_CONFIG_KEY))
+        kind = message_kind(message_type)
+        return gc.is_truthy(gc.get(session, group_id, kind.allow_key))
     except Exception:
         return False
+
+
+def group_allows_member_death_messages(session, group_id) -> bool:
+    """Whether a group posts members' own death messages. Fails closed."""
+    return group_allows_member_messages(session, group_id, MESSAGE_TYPE_DEATH)
 
 
 def is_member_blocked(session, group_id, player_id) -> bool:
@@ -343,7 +496,7 @@ def load_member_message_row(session, player_id, message_type=MESSAGE_TYPE_DEATH)
 
 def load_member_messages(session, player_id, message_type=MESSAGE_TYPE_DEATH) -> list[str]:
     row = load_member_message_row(session, player_id, message_type)
-    return parse_stored_messages(row.messages) if row is not None else []
+    return parse_stored_messages(row.messages, message_type) if row is not None else []
 
 
 def store_member_messages(
@@ -362,7 +515,8 @@ def store_member_messages(
     """
     from db.models import PlayerCustomMessage
 
-    cleaned = normalize_messages(messages)
+    message_kind(message_type)
+    cleaned = normalize_messages(messages, message_type)
     row = load_member_message_row(session, player_id, message_type)
     if not cleaned:
         if row is not None:
@@ -379,8 +533,9 @@ def store_member_messages(
     return cleaned
 
 
-def member_death_templates_for_group(session, group_id, player_id) -> list[str]:
-    """This member's death messages, if this group will post them; else ``[]``.
+def member_templates_for_group(session, group_id, player_id,
+                               message_type: str = MESSAGE_TYPE_DEATH) -> list[str]:
+    """This member's messages of this type, if this group will post them; else ``[]``.
 
     Every failure reads as "no member message": the group's own messages or the
     default line go out instead, and a blocked member is never let through by a
@@ -389,18 +544,30 @@ def member_death_templates_for_group(session, group_id, player_id) -> list[str]:
     if group_id is None or player_id is None:
         return []
     try:
-        if not group_allows_member_death_messages(session, group_id):
+        if not group_allows_member_messages(session, group_id, message_type):
             return []
         if is_member_blocked(session, group_id, player_id):
             return []
-        return load_member_messages(session, player_id)
+        return load_member_messages(session, player_id, message_type)
     except Exception:
         return []
 
 
+def member_death_templates_for_group(session, group_id, player_id) -> list[str]:
+    """:func:`member_templates_for_group` for deaths."""
+    return member_templates_for_group(session, group_id, player_id, MESSAGE_TYPE_DEATH)
+
+
 def death_message_group_status(session, player_id) -> list[dict]:
-    """Every group this account belongs to, and whether its death message
-    would be posted there: ``[{id, name, allowed, blocked}]``, by name."""
+    """:func:`member_message_group_status` for deaths."""
+    return member_message_group_status(session, player_id, MESSAGE_TYPE_DEATH)
+
+
+def member_message_group_status(session, player_id,
+                                message_type: str = MESSAGE_TYPE_DEATH) -> list[dict]:
+    """Every group this account belongs to, and whether its message of this
+    type would be posted there: ``[{id, name, allowed, blocked}]``, by name."""
+    allow_key = message_kind(message_type).allow_key
     from sqlalchemy import text
 
     from db.models import Group, GroupConfiguration, GroupMemberMessageBlock
@@ -428,7 +595,7 @@ def death_message_group_status(session, player_id) -> list[dict]:
         )
         .filter(
             GroupConfiguration.group_id.in_(group_ids),
-            GroupConfiguration.config_key == ALLOW_DEATH_CONFIG_KEY,
+            GroupConfiguration.config_key == allow_key,
         )
         .all()
         if gc.is_truthy(value)
@@ -456,10 +623,20 @@ def death_message_group_status(session, player_id) -> list[dict]:
     return status
 
 
-def limits_payload() -> dict:
-    """What every editor needs to know up front: the limits and the tokens."""
+def limits_payload(message_type: str = MESSAGE_TYPE_DEATH) -> dict:
+    """What every editor needs to know up front: the limits and the tokens.
+
+    ``types`` lists every message type, so an editor can offer a picker
+    without a copy of the list; ``type``/``tokens`` describe the one asked for.
+    """
+    kind = message_kind(message_type)
     return {
+        "type": kind.key,
         "max_messages": MAX_MESSAGES,
         "max_length": MAX_MESSAGE_LENGTH,
-        "tokens": [dict(doc) for doc in DEATH_TOKENS],
+        "tokens": [dict(doc) for doc in kind.tokens],
+        "example": kind.example,
+        "types": [
+            {"type": k, "noun": MESSAGE_KINDS[k].noun} for k in MESSAGE_TYPES
+        ],
     }

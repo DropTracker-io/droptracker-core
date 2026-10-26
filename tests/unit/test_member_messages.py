@@ -215,23 +215,23 @@ class TestMemberDeathTemplatesForGroup:
     def test_allowed_and_not_blocked(self, monkeypatch):
         _gc(monkeypatch, "1")
         monkeypatch.setattr(mm, "is_member_blocked", lambda s, g, p: False)
-        monkeypatch.setattr(mm, "load_member_messages", lambda s, p: ["{player_name} m"])
+        monkeypatch.setattr(mm, "load_member_messages", lambda s, p, t="death": ["{player_name} m"])
         assert mm.member_death_templates_for_group(MagicMock(), 5, 9) == ["{player_name} m"]
 
     def test_not_allowed(self, monkeypatch):
         _gc(monkeypatch, "0")
-        monkeypatch.setattr(mm, "load_member_messages", lambda s, p: ["{player_name} m"])
+        monkeypatch.setattr(mm, "load_member_messages", lambda s, p, t="death": ["{player_name} m"])
         assert mm.member_death_templates_for_group(MagicMock(), 5, 9) == []
 
     def test_unset_is_not_allowed(self, monkeypatch):
         _gc(monkeypatch, None)
-        monkeypatch.setattr(mm, "load_member_messages", lambda s, p: ["{player_name} m"])
+        monkeypatch.setattr(mm, "load_member_messages", lambda s, p, t="death": ["{player_name} m"])
         assert mm.member_death_templates_for_group(MagicMock(), 5, 9) == []
 
     def test_blocked(self, monkeypatch):
         _gc(monkeypatch, "true")
         monkeypatch.setattr(mm, "is_member_blocked", lambda s, g, p: True)
-        monkeypatch.setattr(mm, "load_member_messages", lambda s, p: ["{player_name} m"])
+        monkeypatch.setattr(mm, "load_member_messages", lambda s, p, t="death": ["{player_name} m"])
         assert mm.member_death_templates_for_group(MagicMock(), 5, 9) == []
 
     def test_a_failing_block_lookup_fails_closed(self, monkeypatch):
@@ -241,18 +241,18 @@ class TestMemberDeathTemplatesForGroup:
             raise RuntimeError("db down")
 
         monkeypatch.setattr(mm, "is_member_blocked", _boom)
-        monkeypatch.setattr(mm, "load_member_messages", lambda s, p: ["{player_name} m"])
+        monkeypatch.setattr(mm, "load_member_messages", lambda s, p, t="death": ["{player_name} m"])
         assert mm.member_death_templates_for_group(MagicMock(), 5, 9) == []
 
     def test_a_failing_config_read_fails_closed(self, monkeypatch):
         _gc(monkeypatch, raises=True)
-        monkeypatch.setattr(mm, "load_member_messages", lambda s, p: ["{player_name} m"])
+        monkeypatch.setattr(mm, "load_member_messages", lambda s, p, t="death": ["{player_name} m"])
         assert mm.member_death_templates_for_group(MagicMock(), 5, 9) == []
 
     def test_id_zero_is_a_real_id(self, monkeypatch):
         _gc(monkeypatch, "1")
         monkeypatch.setattr(mm, "is_member_blocked", lambda s, g, p: False)
-        monkeypatch.setattr(mm, "load_member_messages", lambda s, p: ["{player_name} m"])
+        monkeypatch.setattr(mm, "load_member_messages", lambda s, p, t="death": ["{player_name} m"])
         assert mm.member_death_templates_for_group(MagicMock(), 0, 0) == ["{player_name} m"]
         assert mm.member_death_templates_for_group(MagicMock(), None, 9) == []
 

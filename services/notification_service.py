@@ -221,6 +221,12 @@ class NotificationService:
             return None
 
     @classmethod
+    def _kc_text(cls, kill_count) -> str:
+        """A kill count for a message line: "1,204", or "" when unknown."""
+        kc = cls._coerce_int(kill_count)
+        return f"{kc:,}" if kc is not None and kc > 0 else ""
+
+    @classmethod
     def _clog_kc_and_source(cls, kc, npc_name):
         """A clog unlock's KC and source, or None for each one it lacks.
 
@@ -362,39 +368,122 @@ class NotificationService:
     def _death_message_config(self, db_session, group_id: int) -> tuple[list[str], bool]:
         """Group's death message variants + whether they replace the embed
         description (False = they become the message content line)."""
+        return self._message_config(db_session, group_id, "death")
+
+    def _message_config(self, db_session, group_id: int, message_type: str) -> tuple[list[str], bool]:
+        """A group's own messages of one type (``<type>_message_variants``) and
+        whether the picked line replaces the embed description."""
+        from db.member_messages import message_kind
+
+        kind = message_kind(message_type)
         rows = db_session.query(GroupConfiguration).filter(
             GroupConfiguration.group_id == group_id,
-            GroupConfiguration.config_key.in_(
-                ("death_message_variants", "death_message_as_embed_description")
-            ),
+            GroupConfiguration.config_key.in_((kind.variants_key, kind.as_embed_key)),
         ).all()
         raw_variants = None
         as_embed_description = False
         for row in rows:
-            if row.config_key == "death_message_variants":
+            if row.config_key == kind.variants_key:
                 # Mirror web_api/routes/config.py _effective_stored_value:
                 # the key is in LONG_VALUE_KEYS, so a saved list past 255
                 # chars lives in long_value with config_value blanked.
                 value = row.config_value or ""
                 raw_variants = (row.long_value or value) if len(value) < 10 else value
-            elif row.config_key == "death_message_as_embed_description":
+            elif row.config_key == kind.as_embed_key:
                 as_embed_description = str(row.config_value or "").lower() in ("true", "1")
         return parse_death_variants(raw_variants), as_embed_description
 
     def _death_line(self, db_session, group_id, player_id, replacements: dict):
-        """``(template, source, as_embed_description)`` for one death in one group.
+        """``(template, source, as_embed_description)`` for one death in one group."""
+        return self._custom_line(db_session, "death", group_id, player_id, replacements)
+
+    def _custom_line(self, db_session, message_type, group_id, player_id, replacements: dict):
+        """``(template, source, as_embed_description)`` for one notification in one group.
 
         ``source`` says whose line it is — "member", "group" or "default" (no
         template). The member's messages only count when the group allows them
         and has not blocked this member; db.member_messages owns that rule and
         the order.
         """
-        from db.member_messages import choose_death_template, member_death_templates_for_group
+        from db.member_messages import choose_template, member_templates_for_group
 
-        variants, as_embed_description = self._death_message_config(db_session, group_id)
-        member_templates = member_death_templates_for_group(db_session, group_id, player_id)
-        template, source = choose_death_template(member_templates, variants, replacements)
+        variants, as_embed_description = self._message_config(db_session, group_id, message_type)
+        member_templates = member_templates_for_group(db_session, group_id, player_id, message_type)
+        template, source = choose_template(
+            member_templates, variants, replacements, message_type=message_type
+        )
         return template, source, as_embed_description
+
+    def _custom_lines(self, db_session, message_type, group_id, player_id,
+                      replacements: dict, content_replacements: dict):
+        """The picked custom message for a drop, clog or PB, rendered twice.
+
+        Returns ``(embed_line, content_line, as_embed_description)``: the line
+        as an embed shows it (profile links) and as message text shows it (the
+        formatted name, which may carry the member's ping). Both "" when no
+        member or group message applies, or one sanitized down to nothing; the
+        sender then keeps its own line. A failure here is never worth the
+        notification, so it reads as "no custom message".
+        """
+        try:
+            from db.member_messages import render_template
+
+            template, source, as_embed = self._custom_line(
+                db_session, message_type, group_id, player_id, replacements
+            )
+            if not template:
+                return "", "", as_embed
+            member = source == "member"
+            embed_line = render_template(template, replacements, member=member,
+                                         message_type=message_type)
+            content_line = render_template(template, content_replacements, member=member,
+                                           message_type=message_type)
+            if not (embed_line and content_line):
+                return "", "", as_embed
+            return embed_line, content_line, as_embed
+        except Exception as exc:
+            print(f"Custom {message_type} message failed for group {group_id}: {exc}")
+            return "", "", False
+
+    def _custom_line_values(self, db_session, message_type, group_id, player_id,
+                            values: dict, line_values: dict, formatted_name, video_url):
+        """Pick this notification's custom message and publish it as a token.
+
+        ``line_values`` are the member-facing placeholders (db.member_messages)
+        layered over the sender's ``values``. Sets ``values["{<type>_message}"]``
+        for a custom embed or Components layout: the picked line, else the
+        built-in sentence, so it is never blank. Returns
+        ``(embed_line, content_line, as_embed_description)`` as
+        :meth:`_custom_lines` does.
+        """
+        replacements = {**values, **line_values}
+        content_replacements = {
+            **replacements,
+            "{player_name}": formatted_name,
+            "{video_link}": video_url or "",
+        }
+        embed_line, content_line, as_embed = self._custom_lines(
+            db_session, message_type, group_id, player_id, replacements, content_replacements
+        )
+        values["{" + message_type + "_message}"] = embed_line or notification_text.plain_content(
+            message_type, values, f"**{values.get('{player_name}') or ''}**"
+        ) or ""
+        return embed_line, content_line, as_embed
+
+    @staticmethod
+    def _place_custom_line(embed, template, token, embed_line, as_embed_description) -> bool:
+        """Put a picked line into the embed when the group asked for that.
+
+        True when the embed now carries it (so the message text must not
+        repeat it): the line replaces the description, or the group's custom
+        embed placed it itself with ``token``.
+        """
+        if not embed_line:
+            return False
+        if as_embed_description:
+            embed.description = embed_line
+            return True
+        return NotificationService._embed_mentions(template, token)
 
     @staticmethod
     def _embed_mentions(embed, token: str) -> bool:
@@ -975,7 +1064,8 @@ class NotificationService:
         return created_ms < started_ms - slack_ms
 
     def _message_text(self, group_id, embed_type, values, formatted_name, *,
-                      custom_embeds, fallback=None, own_type=None, line=None):
+                      custom_embeds, fallback=None, own_type=None, line=None,
+                      line_in_embed=False):
         """The text sent above a notification embed.
 
         The group's own text (needs ``custom_embeds``) or the template group's,
@@ -983,14 +1073,19 @@ class NotificationService:
         ``fallback``, the sender's built-in line (``DEFAULT_CONTENT`` when not
         given). None means send no text.
 
+        ``line`` is the member's or group's picked custom message, rendered
+        for content. It is the text unless the group wrote its own, or the
+        embed already carries it (``line_in_embed``).
+
         When this notification goes out as plain text (no embed), the line is
-        the whole message: the group's own text still wins, then ``line`` (the
-        member's or group's picked custom message, rendered for content), then
-        the built-in plain line, which says what happened. The template group's
-        text is skipped there: it was written to sit above an embed.
+        the whole message: the group's own text still wins, then ``line`` (even
+        one meant for the embed, which is not sent), then the built-in plain
+        line, which says what happened. The template group's text is skipped
+        there: it was written to sit above an embed.
         """
         scope = _send_scope.get()
-        if scope is not None and scope.style()[0]:
+        plain_text = scope is not None and scope.style()[0]
+        if plain_text or (line and not line_in_embed):
             own = notification_text.own_content_template(
                 group_id, embed_type, bool(custom_embeds), own_type=own_type
             )
@@ -2729,7 +2824,8 @@ class NotificationService:
             # still there for it as {death_message}.
             content = self._message_text(group_id, "death", replacements, formatted_name,
                                          custom_embeds=upgrade_active, fallback=content,
-                                         line=content_line if line_template else None)
+                                         line=content_line if line_template else None,
+                                         line_in_embed=as_embed_description or embed_places_line)
             notification_text.apply_footer(embed, group_id, "death", replacements)
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.
@@ -4418,7 +4514,19 @@ class NotificationService:
             }
             values.update(self._group_points_placeholder_map(data))
             values.update(self._plugin_version_placeholder_map(data))
-            #print("Sending to replace_placeholders")
+
+            # The member's own drop message, else one of the group's, as
+            # {drop_message} and (unless the embed carries it) the message text.
+            drop_line, drop_content_line, drop_line_as_embed = self._custom_line_values(
+                db_session, "drop", group_id, player_id, values,
+                {
+                    "{source}": npc_name or "",
+                    "{value}": format_number(total_value) if total_value else "",
+                    "{quantity}": str(quantity),
+                    "{kill_count}": self._kc_text(kill_count),
+                },
+                formatted_name, video_url,
+            )
 
             component_message = await self._try_send_component_layout(
                 db_session, notification, channel, group_id, "drop", values
@@ -4446,8 +4554,13 @@ class NotificationService:
                 embed = await self.remove_group_field(embed)
             if kill_count is None or int(kill_count) < 1:
                 embed = await self.remove_kc_field(embed)
+            drop_line_in_embed = self._place_custom_line(
+                embed, embed_template, "{drop_message}", drop_line, drop_line_as_embed
+            )
             content = self._message_text(group_id, "drop", values, formatted_name,
-                                         custom_embeds=upgrade_active)
+                                         custom_embeds=upgrade_active,
+                                         line=drop_content_line or None,
+                                         line_in_embed=drop_line_in_embed)
             notification_text.apply_footer(embed, group_id, "drop", values)
             # (The old second attach pass lived here; _resolve_image_attachment
             # above already covers both hosted and remote URLs.)
@@ -4945,6 +5058,17 @@ class NotificationService:
             # referencing it degrades to nothing rather than a broken image.
             replacements["{gear_image_url}"] = self._gear_image_url(player_id)
 
+            # The member's own personal best message, else one of the group's,
+            # as {pb_message} and (unless the embed carries it) the message text.
+            pb_line, pb_content_line, pb_line_as_embed = self._custom_line_values(
+                db_session, "pb", group_id, player_id, replacements,
+                {
+                    "{boss}": boss_name or "",
+                    "{time}": time_formatted or "",
+                },
+                formatted_name, video_url,
+            )
+
             # Components V2, when this group has an active layout for personal
             # bests; everyone else keeps the embed exactly as before.
             if await self._try_send_component_layout(
@@ -4955,10 +5079,15 @@ class NotificationService:
 
             embed = replace_placeholders(embed_template, replacements)
             embed = self._finalize_group_points_embed(embed)
+            pb_line_in_embed = self._place_custom_line(
+                embed, embed_template, "{pb_message}", pb_line, pb_line_as_embed
+            )
 
             # Send message
             content = self._message_text(group_id, "pb", replacements, formatted_name,
-                                         custom_embeds=upgrade_active)
+                                         custom_embeds=upgrade_active,
+                                         line=pb_content_line or None,
+                                         line_in_embed=pb_line_in_embed)
             notification_text.apply_footer(embed, group_id, "pb", replacements)
             video_attachment, video_local_path = (None, None)
             if video_url:
@@ -5426,6 +5555,19 @@ class NotificationService:
             # Prefer video for display; keep screenshot in data["image_url"] for attachments
             replacements["{image_url}"] = video_url or (data.get("image_url") or "")
 
+            # The member's own collection log message, else one of the
+            # group's, as {clog_message} and (unless the embed carries it)
+            # the message text.
+            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
+            clog_line, clog_content_line, clog_line_as_embed = self._custom_line_values(
+                db_session, "clog", group_id, player_id, replacements,
+                {
+                    "{source}": npc_name or "",
+                    "{kill_count}": self._kc_text(kc),
+                },
+                formatted_name, video_url,
+            )
+
             if await self._try_send_component_layout(
                 db_session, notification, channel, group_id, "clog", replacements
             ):
@@ -5434,11 +5576,15 @@ class NotificationService:
 
             embed = replace_placeholders(embed_template, replacements)
             embed = self._finalize_group_points_embed(embed)
+            clog_line_in_embed = self._place_custom_line(
+                embed, embed_template, "{clog_message}", clog_line, clog_line_as_embed
+            )
 
             # Send message
-            formatted_name = get_formatted_name(player_name, group_id, db_session, player_id=player_id)
             content = self._message_text(group_id, "clog", replacements, formatted_name,
-                                         custom_embeds=upgrade_active)
+                                         custom_embeds=upgrade_active,
+                                         line=clog_content_line or None,
+                                         line_in_embed=clog_line_in_embed)
             notification_text.apply_footer(embed, group_id, "clog", replacements)
             
             video_attachment, video_local_path = (None, None)

@@ -66,6 +66,9 @@ config_bp = Blueprint("v1_config", __name__)
 LONG_VALUE_KEYS = {
     "personal_best_embed_boss_list",
     "death_message_variants",
+    "drop_message_variants",
+    "clog_message_variants",
+    "pb_message_variants",
     "notify_pet_duplicate_pets",
     "seasonal_notify_pet_duplicate_pets",
 }
