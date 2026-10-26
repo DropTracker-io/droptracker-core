@@ -30,6 +30,11 @@ class Ticket(Base):
     # ticket channel. An exempt ticket is never warned or auto-closed; it
     # stays open until someone closes it.
     autoclose_exempt = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Ping mute (web149a), set with /pings or the welcome card's button by
+    # anyone in the ticket. A muted ticket gets no per-message ghost pings in
+    # either direction: not the opener when staff reply, not staff when the
+    # opener (or anyone else) posts.
+    pings_muted = Column(Boolean, nullable=False, default=False, server_default="0")
 
 
 class TicketMessage(Base):

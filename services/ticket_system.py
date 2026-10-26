@@ -131,6 +131,97 @@ def _autoclose_status_text(exempt: bool) -> str:
     )
 
 
+# Welcome-card button that flips the ticket's ping mute (see /pings).
+PINGS_TOGGLE_CUSTOM_ID = "ticket_pings_toggle"
+
+
+def _next_pings_muted(current: bool, setting) -> bool | None:
+    """Pure: the mute state ``setting`` asks for, or None to only read it.
+
+    ``setting`` is 'off' (mute), 'on' (unmute), 'toggle' (the button), or
+    None (/pings with no option).
+    """
+    if setting is None:
+        return None
+    if setting == "toggle":
+        return not current
+    return setting == "off"
+
+
+def _apply_pings_setting(channel_id, setting):
+    """DB half of /pings and the toggle button (runs in a worker thread).
+
+    Returns (outcome, muted) where outcome is one of 'not_ticket', 'not_open',
+    'status', 'unchanged' or 'changed', and muted is the setting afterwards.
+    """
+    s = Session()
+    try:
+        ticket = s.query(Ticket).filter(Ticket.channel_id == str(channel_id)).first()
+        if ticket is None:
+            return "not_ticket", False
+        current = bool(ticket.pings_muted)
+        if ticket.status != "open":
+            return "not_open", current
+        muted = _next_pings_muted(current, setting)
+        if muted is None:
+            return "status", current
+        if muted == current:
+            return "unchanged", current
+        ticket.pings_muted = muted
+        s.commit()
+        return "changed", muted
+    except Exception:
+        s.rollback()
+        raise
+    finally:
+        s.close()
+
+
+def _ping_target(muted: bool, author, opener_discord_id):
+    """Pure: who a new human message in a ticket should ghost-ping.
+
+    Returns ('role', SUPPORT_ROLE_ID), ('user', opener id) or None.
+    * muted (/pings off)                          -> None, either direction
+    * the opener posts                            -> support role (even if
+      the opener is staff: the opener check wins)
+    * staff posts                                 -> the opener, if known
+    * anyone else (on the "needs help" side)      -> support role
+    """
+    if muted:
+        return None
+    if opener_discord_id is not None and str(author.id) == str(opener_discord_id):
+        return "role", SUPPORT_ROLE_ID
+    if _author_has_staff_role(author):
+        return ("user", opener_discord_id) if opener_discord_id else None
+    return "role", SUPPORT_ROLE_ID
+
+
+def _pings_status_text(muted: bool) -> str:
+    if muted:
+        return (
+            "🔕 Pings are **off** for this ticket. New messages don't ping the opener or staff.\n"
+            "-# Run `/pings` and pick On to turn them back on."
+        )
+    return (
+        "🔔 Pings are **on** for this ticket. Staff replies ping the opener, and the "
+        "opener's messages ping staff.\n"
+        "-# Run `/pings` and pick Off to stop them."
+    )
+
+
+def _pings_changed_text(muted: bool, changed_by: str) -> str:
+    if muted:
+        return (
+            "🔕 **Pings are off for this ticket.** New messages won't ping the opener or staff.\n"
+            f"-# Turned off by {changed_by}. Press the button again or run `/pings` to turn them back on."
+        )
+    return (
+        "🔔 **Pings are back on for this ticket.** Staff replies ping the opener, and the "
+        "opener's messages ping staff.\n"
+        f"-# Turned on by {changed_by}"
+    )
+
+
 def _autoclose_changed_text(exempt: bool, changed_by: str) -> str:
     if exempt:
         return (
@@ -288,6 +379,8 @@ def build_ticket_welcome(ticket_type: str, ticket_id: int, author_mention: str, 
             ),
             ActionRow(
                 Button(label="Close Ticket", style=ButtonStyle.DANGER, custom_id="close_ticket"),
+                Button(label="Mute/Unmute Pings", emoji="🔕", style=ButtonStyle.SECONDARY,
+                       custom_id=PINGS_TOGGLE_CUSTOM_ID),
                 Button(label="Docs", style=ButtonStyle.URL, url="https://www.droptracker.io/docs"),
                 Button(label="My Tickets", style=ButtonStyle.URL, url="https://www.droptracker.io/tickets"),
             ),
@@ -1052,35 +1145,25 @@ class Tickets(Extension):
     async def _notify_opposing(self, ticket, message):
         """Ghost-ping the *other* side of the conversation, then delete the ping.
 
-        Opener speaks -> ping the support role. Staff speaks -> ping the opener.
-        A brief message is sent purely to fire the notification, then removed so
-        the channel stays clean (see the pure-mention skip in ticket_transcripts).
+        Who gets pinged is decided by ``_ping_target``. A brief message is sent
+        purely to fire the notification, then removed so the channel stays
+        clean (see the pure-mention skip in ticket_transcripts).
         """
-        author = message.author
-        opener_discord_id = self._opener_discord_id(ticket.created_by)
-        author_is_opener = (
-            opener_discord_id is not None and str(author.id) == str(opener_discord_id)
+        target = _ping_target(
+            getattr(ticket, "pings_muted", False),
+            message.author,
+            self._opener_discord_id(ticket.created_by),
         )
-        if author_is_opener:
+        if target is None:
+            return
+        kind, target_id = target
+        if kind == "role":
             await self._ghost_ping(
-                message.channel,
-                f"<@&{SUPPORT_ROLE_ID}>",
-                AllowedMentions(roles=[str(SUPPORT_ROLE_ID)]),
+                message.channel, f"<@&{target_id}>", AllowedMentions(roles=[str(target_id)])
             )
-        elif _author_has_staff_role(author):
-            if opener_discord_id:
-                await self._ghost_ping(
-                    message.channel,
-                    f"<@{opener_discord_id}>",
-                    AllowedMentions(users=[str(opener_discord_id)]),
-                )
         else:
-            # Anyone who isn't the opener and isn't staff is on the "needs help"
-            # side — notify staff.
             await self._ghost_ping(
-                message.channel,
-                f"<@&{SUPPORT_ROLE_ID}>",
-                AllowedMentions(roles=[str(SUPPORT_ROLE_ID)]),
+                message.channel, f"<@{target_id}>", AllowedMentions(users=[str(target_id)])
             )
 
     async def _ghost_ping(self, channel, content: str, allowed: AllowedMentions):
@@ -1179,6 +1262,50 @@ class Tickets(Extension):
             _autoclose_changed_text(exempt, ctx.author.display_name or ctx.author.username)
         )
 
+    @slash_command(
+        name="pings",
+        description="Turn this ticket's message pings off or on",
+        dm_permission=False,
+    )
+    @slash_option(
+        name="setting",
+        description="Off stops pinging the opener and staff on new messages. Leave empty to see the current setting.",
+        required=False,
+        opt_type=OptionType.STRING,
+        choices=[
+            SlashCommandChoice(name="Off (no pings on new messages)", value="off"),
+            SlashCommandChoice(name="On (ping the other side on each message)", value="on"),
+        ],
+    )
+    async def pings_ticket(self, ctx: SlashContext, setting: str = None):
+        await self._change_pings(ctx, setting)
+
+    async def _change_pings(self, ctx, setting):
+        """Shared by /pings and the welcome card's toggle button. Anyone who can
+        see the ticket channel may use either: the channel overwrites already
+        limit that to the opener and staff."""
+        try:
+            outcome, muted = await asyncio.to_thread(
+                _apply_pings_setting, ctx.channel_id, setting
+            )
+        except Exception as e:
+            print(f"[tickets] pings change failed (channel {ctx.channel_id}): {e}")
+            return await ctx.send(":warning: Couldn't update this ticket. Please try again.", ephemeral=True)
+        if outcome == "not_ticket":
+            return await ctx.send(
+                ":warning: This is not a ticket channel owned by the DropTracker ticket system.",
+                ephemeral=True,
+            )
+        if outcome == "not_open":
+            return await ctx.send("This ticket is already being closed.", ephemeral=True)
+        if outcome != "changed":
+            return await ctx.send(_pings_status_text(muted), ephemeral=True)
+        # Public, like /autoclose: everyone in the ticket sees it and the
+        # mirror records who changed it.
+        await ctx.send(
+            _pings_changed_text(muted, ctx.author.display_name or ctx.author.username)
+        )
+
     @listen(Component)
     async def on_component(self, event: Component):
         print("On component called")
@@ -1197,6 +1324,10 @@ class Tickets(Extension):
                 ticket_type = custom_id.split("create_ticket_", 1)[1]
                 await self.create_ticket(event.ctx, ticket_type)
                 return  # Exit early to prevent further processing
+
+            if custom_id == PINGS_TOGGLE_CUSTOM_ID:
+                await self._change_pings(event.ctx, "toggle")
+                return
 
             if "close_ticket" in custom_id:
                 author = event.ctx.author
