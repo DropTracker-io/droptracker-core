@@ -635,6 +635,7 @@ def limits_payload(message_type: str = MESSAGE_TYPE_DEATH) -> dict:
         "max_messages": MAX_MESSAGES,
         "max_length": MAX_MESSAGE_LENGTH,
         "tokens": [dict(doc) for doc in kind.tokens],
+        "aliases": dict(kind.aliases),
         "example": kind.example,
         "types": [
             {"type": k, "noun": MESSAGE_KINDS[k].noun} for k in MESSAGE_TYPES

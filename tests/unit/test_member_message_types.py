@@ -127,6 +127,7 @@ def test_limits_payload_describes_the_type_and_lists_all_types():
     assert payload["type"] == "pb"
     assert [doc["token"] for doc in payload["tokens"]][:2] == ["{player_name}", "{boss}"]
     assert [t["type"] for t in payload["types"]] == list(mm.MESSAGE_TYPES)
+    assert payload["aliases"] == {"{npc_name}": "{boss}", "{personal_best}": "{time}"}
 
 
 # --- the senders --------------------------------------------------------------------
