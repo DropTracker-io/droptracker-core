@@ -2131,6 +2131,148 @@ def _resolve_item_ids(s, names) -> dict[str, int]:
     return out
 
 
+def event_players_payload(s, ev, viewer_id):
+    """The /events/{id}/players body past the visibility gate, shared with the
+    plugin's event window (api/routes/plugin_events.py)."""
+    event_id = ev.id
+
+    task_count = (
+        s.query(func.count(EventTask.id))
+        .filter(EventTask.event_id == event_id).scalar() or 0
+    )
+    participants = (
+        s.query(func.count(EventTeamMember.player_id))
+        .filter(EventTeamMember.event_id == event_id).scalar() or 0
+    )
+
+    # Applied-ledger rollup per player (completions / quantity / tasks).
+    # Grouped per (player, task) with the task's type so a metric task's
+    # stream of progress rows folds into ONE contribution.
+    contrib: dict[int, dict] = {}
+    for pid, tid, ttype, comps, qty in (
+        s.query(EventCompletion.player_id,
+                EventCompletion.task_id,
+                EventTask.type,
+                func.count(EventCompletion.id),
+                func.sum(EventCompletion.quantity))
+        .join(EventTask, EventTask.id == EventCompletion.task_id)
+        .filter(EventCompletion.event_id == event_id,
+                EventCompletion.status.in_(_APPLIED_STATUSES),
+                EventCompletion.player_id.isnot(None))
+        .group_by(EventCompletion.player_id, EventCompletion.task_id,
+                  EventTask.type)
+        .all()
+    ):
+        row = contrib.setdefault(
+            pid, {"completions": 0, "quantity": 0, "tasks": 0})
+        row["completions"] += task_contributions(ttype, comps or 0)
+        row["quantity"] += int(qty or 0)
+        row["tasks"] += 1
+
+    # Split points across teams (each task's points split by share).
+    points = {
+        pid: float(total or 0)
+        for pid, total in (
+            s.query(EventPlayerPoints.player_id,
+                    func.sum(EventPlayerPoints.points))
+            .filter(EventPlayerPoints.event_id == event_id)
+            .group_by(EventPlayerPoints.player_id)
+            .all()
+        )
+    }
+
+    # Team membership (name/color/role) for the WHOLE roster — rostered
+    # players with zero contributions still get a row (their
+    # event-window loot GP is meaningful even before they score).
+    membership: dict[int, dict] = {}
+    for pid, tid, tname, tcolor, role in (
+        s.query(EventTeamMember.player_id, EventTeamMember.team_id,
+                EventTeam.name, EventTeam.color, EventTeamMember.role)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeamMember.event_id == event_id)
+        .all()
+    ):
+        membership[pid] = {"team_id": tid, "team_name": tname,
+                           "team_color": tcolor, "role": role}
+
+    pids = set(contrib) | set(points) | set(membership)
+    # Total loot GP over the event window (all sources, not just
+    # task-credited drops) — decorative, fails open to zeros.
+    loot_gp = loot_gp_by_player(s, ev, pids)
+    totals = {
+        "contributors": len(set(contrib) | set(points)),
+        "participants": int(participants),
+        "completions": sum(c["completions"] for c in contrib.values()),
+        "points": round(sum(points.values()), 2),
+        "tasks": int(task_count),
+        "loot_gp": money(sum(loot_gp.values())),
+    }
+    if not pids:
+        return {"event": _summary(ev), "players": [], "totals": totals}
+
+    names = {
+        pid: name
+        for pid, name in (
+            s.query(Player.player_id, Player.player_name)
+            .filter(Player.player_id.in_(pids)).all()
+        )
+    }
+
+    # Top contributed items per player (one grouped query, bucketed).
+    by_pid: dict[int, list] = {}
+    distinct_names: set[str] = set()
+    for pid, mt, qty, drops in (
+        s.query(EventCompletion.player_id, EventCompletion.matched_target,
+                func.sum(EventCompletion.quantity),
+                func.count(EventCompletion.id))
+        .filter(EventCompletion.event_id == event_id,
+                EventCompletion.status.in_(_APPLIED_STATUSES),
+                EventCompletion.player_id.isnot(None),
+                EventCompletion.matched_target.isnot(None))
+        .group_by(EventCompletion.player_id, EventCompletion.matched_target)
+        .all()
+    ):
+        distinct_names.add(mt)
+        by_pid.setdefault(pid, []).append(
+            {"name": mt, "quantity": int(qty or 0), "drops": int(drops or 0)})
+    item_ids = _resolve_item_ids(s, distinct_names)
+    items_by_pid = {
+        pid: top_items(lst, item_ids, _PLAYERS_ITEM_PREVIEW)
+        for pid, lst in by_pid.items()
+    }
+
+    # Bingo EHB per player — the effort that credited nothing.
+    from web_api.event_effort import effort_by_player
+
+    show_effort = _effort_visible(s, viewer_id, ev)
+    effort = (effort_by_player(s, event_id, pids, boss_limit=5)
+              if show_effort else {})
+
+    players = rank_players(
+        contrib, points, membership, names, items_by_pid,
+        loot_gp=loot_gp)[:_PLAYERS_LIMIT]
+    for row in players:
+        row["effort"] = effort.get(row["player_id"])
+    # Honor the privacy opt-out: a player who hid themselves (or whose
+    # linked user did) is shown as "Hidden player" with no id/link to a
+    # non-admin viewer — same masking the completion-history read uses.
+    if not _is_event_admin(s, viewer_id, ev):
+        hidden = hidden_player_ids()
+        for row in players:
+            if row["player_id"] in hidden:
+                row["player_name"] = "Hidden player"
+                row["player_id"] = None
+    for row in players:  # raw int -> Money envelope at the boundary
+        row["loot_gp"] = money(row["loot_gp"])
+    if show_effort:
+        totals["ehb_hours"] = round(
+            sum(float(e.get("ehb_hours") or 0) for e in effort.values()), 2)
+        totals["ehb_estimated_hours"] = round(
+            sum(float(e.get("ehb_estimated_hours") or 0)
+                for e in effort.values()), 2)
+    return {"event": _summary(ev), "players": players, "totals": totals}
+
+
 @events_bp.get("/events/<int:event_id>/players")
 async def get_event_players(event_id: int):
     """Public event-wide player contribution leaderboard: every player with at
@@ -2148,142 +2290,7 @@ async def get_event_players(event_id: int):
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 _deny_restricted(ev, viewer_id)
                 return None
-
-            task_count = (
-                s.query(func.count(EventTask.id))
-                .filter(EventTask.event_id == event_id).scalar() or 0
-            )
-            participants = (
-                s.query(func.count(EventTeamMember.player_id))
-                .filter(EventTeamMember.event_id == event_id).scalar() or 0
-            )
-
-            # Applied-ledger rollup per player (completions / quantity / tasks).
-            # Grouped per (player, task) with the task's type so a metric task's
-            # stream of progress rows folds into ONE contribution.
-            contrib: dict[int, dict] = {}
-            for pid, tid, ttype, comps, qty in (
-                s.query(EventCompletion.player_id,
-                        EventCompletion.task_id,
-                        EventTask.type,
-                        func.count(EventCompletion.id),
-                        func.sum(EventCompletion.quantity))
-                .join(EventTask, EventTask.id == EventCompletion.task_id)
-                .filter(EventCompletion.event_id == event_id,
-                        EventCompletion.status.in_(_APPLIED_STATUSES),
-                        EventCompletion.player_id.isnot(None))
-                .group_by(EventCompletion.player_id, EventCompletion.task_id,
-                          EventTask.type)
-                .all()
-            ):
-                row = contrib.setdefault(
-                    pid, {"completions": 0, "quantity": 0, "tasks": 0})
-                row["completions"] += task_contributions(ttype, comps or 0)
-                row["quantity"] += int(qty or 0)
-                row["tasks"] += 1
-
-            # Split points across teams (each task's points split by share).
-            points = {
-                pid: float(total or 0)
-                for pid, total in (
-                    s.query(EventPlayerPoints.player_id,
-                            func.sum(EventPlayerPoints.points))
-                    .filter(EventPlayerPoints.event_id == event_id)
-                    .group_by(EventPlayerPoints.player_id)
-                    .all()
-                )
-            }
-
-            # Team membership (name/color/role) for the WHOLE roster — rostered
-            # players with zero contributions still get a row (their
-            # event-window loot GP is meaningful even before they score).
-            membership: dict[int, dict] = {}
-            for pid, tid, tname, tcolor, role in (
-                s.query(EventTeamMember.player_id, EventTeamMember.team_id,
-                        EventTeam.name, EventTeam.color, EventTeamMember.role)
-                .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
-                .filter(EventTeamMember.event_id == event_id)
-                .all()
-            ):
-                membership[pid] = {"team_id": tid, "team_name": tname,
-                                   "team_color": tcolor, "role": role}
-
-            pids = set(contrib) | set(points) | set(membership)
-            # Total loot GP over the event window (all sources, not just
-            # task-credited drops) — decorative, fails open to zeros.
-            loot_gp = loot_gp_by_player(s, ev, pids)
-            totals = {
-                "contributors": len(set(contrib) | set(points)),
-                "participants": int(participants),
-                "completions": sum(c["completions"] for c in contrib.values()),
-                "points": round(sum(points.values()), 2),
-                "tasks": int(task_count),
-                "loot_gp": money(sum(loot_gp.values())),
-            }
-            if not pids:
-                return {"event": _summary(ev), "players": [], "totals": totals}
-
-            names = {
-                pid: name
-                for pid, name in (
-                    s.query(Player.player_id, Player.player_name)
-                    .filter(Player.player_id.in_(pids)).all()
-                )
-            }
-
-            # Top contributed items per player (one grouped query, bucketed).
-            by_pid: dict[int, list] = {}
-            distinct_names: set[str] = set()
-            for pid, mt, qty, drops in (
-                s.query(EventCompletion.player_id, EventCompletion.matched_target,
-                        func.sum(EventCompletion.quantity),
-                        func.count(EventCompletion.id))
-                .filter(EventCompletion.event_id == event_id,
-                        EventCompletion.status.in_(_APPLIED_STATUSES),
-                        EventCompletion.player_id.isnot(None),
-                        EventCompletion.matched_target.isnot(None))
-                .group_by(EventCompletion.player_id, EventCompletion.matched_target)
-                .all()
-            ):
-                distinct_names.add(mt)
-                by_pid.setdefault(pid, []).append(
-                    {"name": mt, "quantity": int(qty or 0), "drops": int(drops or 0)})
-            item_ids = _resolve_item_ids(s, distinct_names)
-            items_by_pid = {
-                pid: top_items(lst, item_ids, _PLAYERS_ITEM_PREVIEW)
-                for pid, lst in by_pid.items()
-            }
-
-            # Bingo EHB per player — the effort that credited nothing.
-            from web_api.event_effort import effort_by_player
-
-            show_effort = _effort_visible(s, viewer_id, ev)
-            effort = (effort_by_player(s, event_id, pids, boss_limit=5)
-                      if show_effort else {})
-
-            players = rank_players(
-                contrib, points, membership, names, items_by_pid,
-                loot_gp=loot_gp)[:_PLAYERS_LIMIT]
-            for row in players:
-                row["effort"] = effort.get(row["player_id"])
-            # Honor the privacy opt-out: a player who hid themselves (or whose
-            # linked user did) is shown as "Hidden player" with no id/link to a
-            # non-admin viewer — same masking the completion-history read uses.
-            if not _is_event_admin(s, viewer_id, ev):
-                hidden = hidden_player_ids()
-                for row in players:
-                    if row["player_id"] in hidden:
-                        row["player_name"] = "Hidden player"
-                        row["player_id"] = None
-            for row in players:  # raw int -> Money envelope at the boundary
-                row["loot_gp"] = money(row["loot_gp"])
-            if show_effort:
-                totals["ehb_hours"] = round(
-                    sum(float(e.get("ehb_hours") or 0) for e in effort.values()), 2)
-                totals["ehb_estimated_hours"] = round(
-                    sum(float(e.get("ehb_estimated_hours") or 0)
-                        for e in effort.values()), 2)
-            return {"event": _summary(ev), "players": players, "totals": totals}
+            return event_players_payload(s, ev, viewer_id)
 
     payload = await asyncio.to_thread(_load)
     if payload is None:
@@ -3290,6 +3297,185 @@ def _collapse_progress(entries: list) -> list:
     return out
 
 
+def completion_history_payload(s, ev, viewer_id, *, team_arg=None, task_arg=None,
+                               player_q="", mode="all", source_filter=None,
+                               type_filter=None, collapse=True, page=1, limit=50):
+    """The /events/{id}/completions/history body past the visibility gate,
+    shared with the plugin's event window (api/routes/plugin_events.py)."""
+    from db import Player
+    from services.event_engine import display_note
+
+    event_id = ev.id
+    is_admin = _is_event_admin(s, viewer_id, ev)
+
+    task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
+    tasks = {t.id: t for t in task_rows}
+    # All tasks, for every viewer past the event gate — see the same
+    # note in get_event_team_contributions (EventTask.visibility is
+    # library sharing, not an audience).
+    visible_task_ids = set(tasks)
+    # Board/task visibility (web112a): the history keeps its rows —
+    # who scored, for which team, when — minus the task names.
+    hide_labels = not is_admin and _tasks_kept_to_admins(ev)
+
+    base = {
+        "event_id": event_id,
+        "kind": getattr(ev, "kind", "standard") or "standard",
+        "is_admin": bool(is_admin),
+    }
+    if not visible_task_ids:
+        return {**base, "entries": [],
+                "meta": {"page": page, "limit": limit, "total": 0,
+                         "mode": mode, "completions_total": 0,
+                         "progress_total": 0}}
+
+    # Batch 2 scale rework. The per-row points are a stateful fold
+    # over the ordered ledger (cumulative threshold crossing per
+    # team; loot_sweep receipt decay per (team, item)), so a page
+    # can't be computed from page rows alone. Two levers instead:
+    # - teamId/taskId push into SQL — exact, because both folds are
+    #   keyed by (task, team) and never read across the filter; and
+    # - the expensive UNFILTERED view builds its entry list once per
+    #   ledger version (max completion id) and serves pages from a
+    #   short Redis cache — hot events stop re-folding the whole
+    #   ledger for every viewer. (A revoke doesn't mint an id, so a
+    #   revoked row can linger for up to the 30s TTL.)
+    entries_all = None
+    cache_key = None
+    if team_arg is None and task_arg is None:
+        try:
+            from utils.redis import redis_client as _rc
+
+            version = (
+                s.query(func.max(EventCompletion.id))
+                .filter(EventCompletion.event_id == event_id)
+                .scalar() or 0
+            )
+            # v2 = entries carry ``completed``; v3 = no task-library
+            # filter (a v2 public blob is missing library-private rows).
+            cache_key = (
+                f"events:{event_id}:history:v3:"
+                f"{'admin' if is_admin else 'blind' if hide_labels else 'pub'}"
+                f":{version}")
+            cached = _rc.client.get(cache_key)
+            if cached:
+                entries_all = json.loads(cached)
+        except Exception:
+            cache_key = None
+
+    if entries_all is None:
+        rows_q = (
+            s.query(EventCompletion)
+            .filter(EventCompletion.event_id == event_id,
+                    EventCompletion.status.in_(_APPLIED_STATUSES),
+                    EventCompletion.task_id.in_(visible_task_ids))
+        )
+        if team_arg is not None:
+            rows_q = rows_q.filter(EventCompletion.team_id == team_arg)
+        if task_arg is not None:
+            rows_q = rows_q.filter(EventCompletion.task_id == task_arg)
+        all_rows = (
+            rows_q
+            .order_by(EventCompletion.created_at.asc(),
+                      EventCompletion.id.asc())
+            .all()
+        )
+        points_by_row, completed_rows = _history_fold(tasks, all_rows)
+
+        team_names = dict(
+            s.query(EventTeam.id, EventTeam.name)
+            .filter(EventTeam.event_id == event_id).all()
+        )
+        pids = {r.player_id for r in all_rows if r.player_id}
+        pnames: dict = {}
+        phidden: set = set()
+        if pids:
+            for pid, name, hidden in (
+                s.query(Player.player_id, Player.player_name, Player.hidden)
+                .filter(Player.player_id.in_(pids)).all()
+            ):
+                pnames[pid] = name
+                if hidden:
+                    phidden.add(pid)
+        hidden_global = hidden_player_ids()
+
+        entries_all = []
+        for r in reversed(all_rows):  # newest-first
+            is_hidden = bool(r.player_id and
+                             (r.player_id in phidden or r.player_id in hidden_global))
+            if is_hidden and not is_admin:
+                disp_name, disp_pid = "Hidden player", None
+            else:
+                disp_name, disp_pid = pnames.get(r.player_id), r.player_id
+            task = tasks.get(r.task_id)
+            entries_all.append({
+                "completion_id": r.id,
+                "task_id": r.task_id,
+                "task_label": task.label if (task and not hide_labels) else None,
+                "task_type": task.type if task else None,
+                "task_points": int(task.points or 0) if task else 0,
+                "team_id": r.team_id,
+                "team_name": team_names.get(r.team_id),
+                "player_id": disp_pid,
+                "player_name": disp_name,
+                "hidden": is_hidden,
+                "matched_target": r.matched_target,
+                "quantity": int(r.quantity or 1),
+                "points": score_num(points_by_row.get(r.id, 0.0)),
+                "completed": r.id in completed_rows,
+                "source_type": r.source_type,
+                "status": r.status,
+                "proof_url": r.proof_url,
+                "note": display_note(r.note),
+                "created_at": _ts(r.created_at),
+            })
+        if cache_key is not None:
+            try:
+                from utils.redis import redis_client as _rc
+
+                _rc.client.set(cache_key, json.dumps(entries_all), ex=30)
+            except Exception:
+                pass
+
+    # View filters run over the BUILT list, not in SQL — deliberately.
+    # Unlike teamId/taskId (which the points fold is keyed by, so
+    # pushing them down stays exact), dropping progress rows from the
+    # query would change what the cumulative fold sees and mis-price
+    # the very rows we keep. Filtering here also keeps every mode on
+    # the 30s Redis fast path above, which caches the unfiltered
+    # superset once per ledger version for all viewers.
+    entries = entries_all
+    if source_filter is not None:
+        entries = [e for e in entries
+                   if (e.get("source_type") or "") in source_filter]
+    if type_filter is not None:
+        entries = [e for e in entries
+                   if (e.get("task_type") or "") in type_filter]
+    if player_q:
+        entries = [e for e in entries
+                   if e.get("player_name")
+                   and rsn_contains(e["player_name"], player_q)]
+
+    # Counted before `mode` narrows, so the UI can label its toggle
+    # ("N progress updates hidden") without a second request.
+    completions_total = sum(1 for e in entries if _is_completion_entry(e))
+    progress_total = len(entries) - completions_total
+    if mode == "completions":
+        entries = [e for e in entries if _is_completion_entry(e)]
+    elif mode == "progress":
+        entries = [e for e in entries if not _is_completion_entry(e)]
+    if mode != "completions" and collapse:
+        entries = _collapse_progress(entries)
+
+    total = len(entries)
+    start = (page - 1) * limit
+    return {**base, "entries": entries[start:start + limit],
+            "meta": {"page": page, "limit": limit, "total": total,
+                     "mode": mode,
+                     "completions_total": completions_total,
+                     "progress_total": progress_total}}
+
+
 @events_bp.get("/events/<int:event_id>/completions/history")
 async def get_completion_history(event_id: int):
     """Public, read-only timeline of applied task completions — the centralized
@@ -3312,8 +3498,6 @@ async def get_completion_history(event_id: int):
     one player on one metric task fold into a single ``collapsed`` entry unless
     ``collapse=0``. ``meta`` reports both bucket sizes so a caller can offer the
     switch honestly."""
-    from db import Player
-
     viewer_id = optional_user_id()
 
     def _int_or_none(name: str):
@@ -3343,8 +3527,6 @@ async def get_completion_history(event_id: int):
     page, limit = parse_page(request, default_limit=50, max_limit=100)
 
     def _load():
-        from services.event_engine import display_note
-
         with db_session() as s:
             ev = s.query(Event).filter(Event.id == event_id).first()
             if not ev:
@@ -3352,174 +3534,10 @@ async def get_completion_history(event_id: int):
             if _is_restricted(ev) and not _can_view_restricted(s, viewer_id, ev):
                 _deny_restricted(ev, viewer_id)
                 return None
-            is_admin = _is_event_admin(s, viewer_id, ev)
-
-            task_rows = s.query(EventTask).filter(EventTask.event_id == event_id).all()
-            tasks = {t.id: t for t in task_rows}
-            # All tasks, for every viewer past the event gate — see the same
-            # note in get_event_team_contributions (EventTask.visibility is
-            # library sharing, not an audience).
-            visible_task_ids = set(tasks)
-            # Board/task visibility (web112a): the history keeps its rows —
-            # who scored, for which team, when — minus the task names.
-            hide_labels = not is_admin and _tasks_kept_to_admins(ev)
-
-            base = {
-                "event_id": event_id,
-                "kind": getattr(ev, "kind", "standard") or "standard",
-                "is_admin": bool(is_admin),
-            }
-            if not visible_task_ids:
-                return {**base, "entries": [],
-                        "meta": {"page": page, "limit": limit, "total": 0,
-                                 "mode": mode, "completions_total": 0,
-                                 "progress_total": 0}}
-
-            # Batch 2 scale rework. The per-row points are a stateful fold
-            # over the ordered ledger (cumulative threshold crossing per
-            # team; loot_sweep receipt decay per (team, item)), so a page
-            # can't be computed from page rows alone. Two levers instead:
-            # - teamId/taskId push into SQL — exact, because both folds are
-            #   keyed by (task, team) and never read across the filter; and
-            # - the expensive UNFILTERED view builds its entry list once per
-            #   ledger version (max completion id) and serves pages from a
-            #   short Redis cache — hot events stop re-folding the whole
-            #   ledger for every viewer. (A revoke doesn't mint an id, so a
-            #   revoked row can linger for up to the 30s TTL.)
-            entries_all = None
-            cache_key = None
-            if team_arg is None and task_arg is None:
-                try:
-                    from utils.redis import redis_client as _rc
-
-                    version = (
-                        s.query(func.max(EventCompletion.id))
-                        .filter(EventCompletion.event_id == event_id)
-                        .scalar() or 0
-                    )
-                    # v2 = entries carry ``completed``; v3 = no task-library
-                    # filter (a v2 public blob is missing library-private rows).
-                    cache_key = (
-                        f"events:{event_id}:history:v3:"
-                        f"{'admin' if is_admin else 'blind' if hide_labels else 'pub'}"
-                        f":{version}")
-                    cached = _rc.client.get(cache_key)
-                    if cached:
-                        entries_all = json.loads(cached)
-                except Exception:
-                    cache_key = None
-
-            if entries_all is None:
-                rows_q = (
-                    s.query(EventCompletion)
-                    .filter(EventCompletion.event_id == event_id,
-                            EventCompletion.status.in_(_APPLIED_STATUSES),
-                            EventCompletion.task_id.in_(visible_task_ids))
-                )
-                if team_arg is not None:
-                    rows_q = rows_q.filter(EventCompletion.team_id == team_arg)
-                if task_arg is not None:
-                    rows_q = rows_q.filter(EventCompletion.task_id == task_arg)
-                all_rows = (
-                    rows_q
-                    .order_by(EventCompletion.created_at.asc(),
-                              EventCompletion.id.asc())
-                    .all()
-                )
-                points_by_row, completed_rows = _history_fold(tasks, all_rows)
-
-                team_names = dict(
-                    s.query(EventTeam.id, EventTeam.name)
-                    .filter(EventTeam.event_id == event_id).all()
-                )
-                pids = {r.player_id for r in all_rows if r.player_id}
-                pnames: dict = {}
-                phidden: set = set()
-                if pids:
-                    for pid, name, hidden in (
-                        s.query(Player.player_id, Player.player_name, Player.hidden)
-                        .filter(Player.player_id.in_(pids)).all()
-                    ):
-                        pnames[pid] = name
-                        if hidden:
-                            phidden.add(pid)
-                hidden_global = hidden_player_ids()
-
-                entries_all = []
-                for r in reversed(all_rows):  # newest-first
-                    is_hidden = bool(r.player_id and
-                                     (r.player_id in phidden or r.player_id in hidden_global))
-                    if is_hidden and not is_admin:
-                        disp_name, disp_pid = "Hidden player", None
-                    else:
-                        disp_name, disp_pid = pnames.get(r.player_id), r.player_id
-                    task = tasks.get(r.task_id)
-                    entries_all.append({
-                        "completion_id": r.id,
-                        "task_id": r.task_id,
-                        "task_label": task.label if (task and not hide_labels) else None,
-                        "task_type": task.type if task else None,
-                        "task_points": int(task.points or 0) if task else 0,
-                        "team_id": r.team_id,
-                        "team_name": team_names.get(r.team_id),
-                        "player_id": disp_pid,
-                        "player_name": disp_name,
-                        "hidden": is_hidden,
-                        "matched_target": r.matched_target,
-                        "quantity": int(r.quantity or 1),
-                        "points": score_num(points_by_row.get(r.id, 0.0)),
-                        "completed": r.id in completed_rows,
-                        "source_type": r.source_type,
-                        "status": r.status,
-                        "proof_url": r.proof_url,
-                        "note": display_note(r.note),
-                        "created_at": _ts(r.created_at),
-                    })
-                if cache_key is not None:
-                    try:
-                        from utils.redis import redis_client as _rc
-
-                        _rc.client.set(cache_key, json.dumps(entries_all), ex=30)
-                    except Exception:
-                        pass
-
-            # View filters run over the BUILT list, not in SQL — deliberately.
-            # Unlike teamId/taskId (which the points fold is keyed by, so
-            # pushing them down stays exact), dropping progress rows from the
-            # query would change what the cumulative fold sees and mis-price
-            # the very rows we keep. Filtering here also keeps every mode on
-            # the 30s Redis fast path above, which caches the unfiltered
-            # superset once per ledger version for all viewers.
-            entries = entries_all
-            if source_filter is not None:
-                entries = [e for e in entries
-                           if (e.get("source_type") or "") in source_filter]
-            if type_filter is not None:
-                entries = [e for e in entries
-                           if (e.get("task_type") or "") in type_filter]
-            if player_q:
-                entries = [e for e in entries
-                           if e.get("player_name")
-                           and rsn_contains(e["player_name"], player_q)]
-
-            # Counted before `mode` narrows, so the UI can label its toggle
-            # ("N progress updates hidden") without a second request.
-            completions_total = sum(1 for e in entries if _is_completion_entry(e))
-            progress_total = len(entries) - completions_total
-            if mode == "completions":
-                entries = [e for e in entries if _is_completion_entry(e)]
-            elif mode == "progress":
-                entries = [e for e in entries if not _is_completion_entry(e)]
-            if mode != "completions" and collapse:
-                entries = _collapse_progress(entries)
-
-            total = len(entries)
-            start = (page - 1) * limit
-            return {**base, "entries": entries[start:start + limit],
-                    "meta": {"page": page, "limit": limit, "total": total,
-                             "mode": mode,
-                             "completions_total": completions_total,
-                             "progress_total": progress_total}}
+            return completion_history_payload(
+                s, ev, viewer_id, team_arg=team_arg, task_arg=task_arg,
+                player_q=player_q, mode=mode, source_filter=source_filter,
+                type_filter=type_filter, collapse=collapse, page=page, limit=limit)
 
     payload = await asyncio.to_thread(_load)
     if payload is None:
@@ -3804,6 +3822,57 @@ def _serialize_competition_config(s, config, comp_row) -> dict:
     return out
 
 
+def competition_payload(s, ev):
+    """The /events/{id}/competition body for a SOTW/BOTW event, shared with
+    the plugin's event window (api/routes/plugin_events.py)."""
+    event_id = ev.id
+    from services.competition import CompetitionConfig, team_score_text
+    from services.competition_setup import (competition_row,
+                                            competition_task)
+    from services.event_lifecycle import (competition_standings,
+                                          frozen_competition_standings)
+
+    task = competition_task(s, event_id)
+    comp_row = competition_row(s, event_id)
+    config = CompetitionConfig(task.config if task is not None else None)
+
+    frozen = None
+    if ev.status == "past" and comp_row is not None:
+        frozen = frozen_competition_standings(comp_row.final_standings)
+    if frozen is not None:
+        ranked, teams = frozen["players"], frozen["teams"]
+    else:
+        live = competition_standings(s, ev)
+        ranked, teams = live["players"], live["teams"]
+        if live["config"] is not None:
+            config = live["config"]
+
+    totals = {
+        "participants": len(ranked),
+        "gained": sum(int(r.get("gained") or 0) for r in ranked),
+        "bonus_points": sum(int(r.get("bonus_points") or 0) for r in ranked),
+    }
+    payload = {
+        "event_id": event_id,
+        "kind": ev.kind,
+        "status": ev.status,
+        "competition": _serialize_competition_config(s, config, comp_row),
+        "totals": totals,
+        "standings": ranked,
+        "finalized": bool(comp_row is not None and comp_row.finalized_at),
+        "updated_at": int(datetime.now().timestamp()),
+    }
+    if config.is_team_race:
+        # Team standings alongside the per-player ones; every row's
+        # ranked score comes pre-worded ("2.48M XP" / "41.3K XP per
+        # member") so no client re-derives the wording.
+        payload["teams"] = [
+            {**t, "score_text": team_score_text(t.get("score") or 0, config)}
+            for t in teams
+        ]
+    return payload
+
+
 @events_bp.get("/events/<int:event_id>/competition")
 async def get_competition_standings(event_id: int):
     """SOTW/BOTW read model: the competition config + merged, ranked
@@ -3827,51 +3896,7 @@ async def get_competition_standings(event_id: int):
             if (ev.kind or "standard") not in COMPETITION_EVENT_KINDS:
                 abort_problem(422, "Not a competition event",
                               "This event is not a Skill/Boss of the Week.")
-            from services.competition import CompetitionConfig, team_score_text
-            from services.competition_setup import (competition_row,
-                                                    competition_task)
-            from services.event_lifecycle import (competition_standings,
-                                                  frozen_competition_standings)
-
-            task = competition_task(s, event_id)
-            comp_row = competition_row(s, event_id)
-            config = CompetitionConfig(task.config if task is not None else None)
-
-            frozen = None
-            if ev.status == "past" and comp_row is not None:
-                frozen = frozen_competition_standings(comp_row.final_standings)
-            if frozen is not None:
-                ranked, teams = frozen["players"], frozen["teams"]
-            else:
-                live = competition_standings(s, ev)
-                ranked, teams = live["players"], live["teams"]
-                if live["config"] is not None:
-                    config = live["config"]
-
-            totals = {
-                "participants": len(ranked),
-                "gained": sum(int(r.get("gained") or 0) for r in ranked),
-                "bonus_points": sum(int(r.get("bonus_points") or 0) for r in ranked),
-            }
-            payload = {
-                "event_id": event_id,
-                "kind": ev.kind,
-                "status": ev.status,
-                "competition": _serialize_competition_config(s, config, comp_row),
-                "totals": totals,
-                "standings": ranked,
-                "finalized": bool(comp_row is not None and comp_row.finalized_at),
-                "updated_at": int(datetime.now().timestamp()),
-            }
-            if config.is_team_race:
-                # Team standings alongside the per-player ones; every row's
-                # ranked score comes pre-worded ("2.48M XP" / "41.3K XP per
-                # member") so no client re-derives the wording.
-                payload["teams"] = [
-                    {**t, "score_text": team_score_text(t.get("score") or 0, config)}
-                    for t in teams
-                ]
-            return payload
+            return competition_payload(s, ev)
 
     data = await asyncio.to_thread(_load)
     if data is None:

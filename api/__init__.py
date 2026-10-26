@@ -20,6 +20,7 @@ from api.routes.utils import utils_bp
 from api.routes.webhook import webhook_bp
 from api.routes.notifications import notifications_bp
 from api.routes.plugin_admin import plugin_admin_bp
+from api.routes.plugin_events import plugin_events_bp
 from api.routes.video import video_bp
 from api.routes.manifest import manifest_bp
 from api.routes.edge_config import edge_config_bp
@@ -113,6 +114,7 @@ def create_app() -> Quart:
     app.register_blueprint(webhook_bp, url_prefix='/')
     app.register_blueprint(notifications_bp, url_prefix='/')
     app.register_blueprint(plugin_admin_bp, url_prefix='/')
+    app.register_blueprint(plugin_events_bp, url_prefix='/')
     app.register_blueprint(video_bp, url_prefix='/')
     app.register_blueprint(manifest_bp, url_prefix='/')
     app.register_blueprint(edge_config_bp, url_prefix='/')

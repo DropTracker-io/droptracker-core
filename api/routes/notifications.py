@@ -376,7 +376,7 @@ async def get_event_board_png(event_id: int):
 
     def _gate():
         """Resolve identity + membership; returns the Event or an error code."""
-        from db.models import Event, EventTeam, EventTeamMember
+        from db.models import Event, EventTeam
 
         db_session = get_db_session()
         try:
@@ -386,14 +386,14 @@ async def get_event_board_png(event_id: int):
             event = db_session.query(Event).filter(Event.id == event_id).first()
             if event is None:
                 return "event_not_found"
-            member = (
-                db_session.query(EventTeamMember.player_id)
-                .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
-                .filter(EventTeam.event_id == event_id,
-                        EventTeamMember.player_id == player_id)
-                .first()
-            )
-            if member is None:
+            # The roster, plus the event's admins and members of a group
+            # taking part: the plugin's event window opens those too.
+            from api.routes.plugin_events import can_view
+            from db import Player
+
+            player = db_session.query(Player).filter(Player.player_id == player_id).first()
+            user_id = int(player.user_id) if player.user_id is not None else None
+            if not can_view(db_session, event, player, user_id):
                 return "not_rostered"
             if team_id is not None:
                 team = (
