@@ -1,4 +1,6 @@
 import interactions
+from utils.interactions_compat import install as _install_interactions_compat
+_install_interactions_compat()  # Discord enum values the library doesn't know yet
 import os
 import json
 import signal

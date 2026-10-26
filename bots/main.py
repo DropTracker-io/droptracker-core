@@ -3,6 +3,8 @@ import threading
 from typing import List
 import aiohttp
 from interactions.client.errors import Forbidden, InteractionMissingAccess
+from utils.interactions_compat import install as _install_interactions_compat
+_install_interactions_compat()  # Discord enum values the library doesn't know yet
 from db.clan_sync import insert_xf_group
 from db.entitlements import has_custom_embeds
 from h11 import LocalProtocolError

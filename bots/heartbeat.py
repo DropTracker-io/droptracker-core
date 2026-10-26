@@ -7,6 +7,8 @@ import signal
 import sys
 from dotenv import load_dotenv
 import interactions
+from utils.interactions_compat import install as _install_interactions_compat
+_install_interactions_compat()  # Discord enum values the library doesn't know yet
 from interactions import GuildText, IntervalTrigger, Permissions, Task, listen, slash_command
 from interactions.api.events import Startup, MessageCreate
 import json
