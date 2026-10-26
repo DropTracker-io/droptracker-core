@@ -209,6 +209,15 @@ PLAYER_STATS = (
 GROUP_STATS_DEFAULT = ("members", "rank", "monthly_loot", "top_player")
 PLAYER_STATS_DEFAULT = ("monthly_loot", "rank", "clan_points", "top_npc")
 STAT_COLUMNS = ("auto", "2", "3", "4")
+# How a stat tile is drawn. "auto" fills it on dark surfaces and outlines it
+# on the light ones (parchment, scroll), where a fill clashes with the art.
+STAT_TILE_STYLES = ("auto", "filled", "outline")
+# Time frames a board can show. A switchable board offers ``periods`` as
+# buttons for visitors and opens on ``period``.
+LOOT_PERIODS = ("month", "week", "day", "all")
+# "season" is the group's current clan points season (the newest one when
+# none is running); the tab is dropped when the group has no seasons.
+POINTS_PERIODS = ("all", "season", "month", "week", "day")
 # What the highlights feed can filter on (routes/page_layouts.py serves it).
 HIGHLIGHT_TYPES = ("drop", "pet", "clog", "pb")
 
@@ -250,6 +259,7 @@ _GROUP: dict[str, tuple[str, tuple, str, dict[str, Spec]]] = {
     "stats_row": ("Stats", ("group",), "plain", {
         "stats": key_list(GROUP_STATS, GROUP_STATS_DEFAULT, 8),
         "columns": enum(STAT_COLUMNS, "auto"),
+        "tile_style": enum(STAT_TILE_STYLES, "auto"),
     }),
     "bank": ("Clan bank", ("group",), "plain", {}),
     "records": ("Clan records", ("group",), "plain", {
@@ -265,28 +275,38 @@ _GROUP: dict[str, tuple[str, tuple, str, dict[str, Spec]]] = {
         "limit": int_range(1, 25, 10),
     }),
     "lootboard": ("Lootboard", ("group",), "card", {
-        "period": enum(("month", "week", "day", "all"), "month"),
+        "period": enum(LOOT_PERIODS, "month"),
     }),
     "pb_board": ("Personal best board", ("group",), "card", {
         "bosses": _pb_bosses,
-        "rows": int_range(3, 25, 5),
+        "rows": int_range(1, 50, 5),
+        # Team-size boards per boss when the boss has no sizes picked.
+        "max_sizes": int_range(1, 8, 3),
     }),
     "leaderboard": ("Loot leaderboard", ("group",), "card", {
         "limit": int_range(3, 50, 10),
-        "period": enum(("month", "week", "day", "all"), "month"),
+        "period": enum(LOOT_PERIODS, "month"),
+        "switchable": boolean(False),
+        "periods": key_list(LOOT_PERIODS, ("month", "all"), len(LOOT_PERIODS)),
     }),
     "clan_log": ("Clan Log", ("group",), "card", {
         "view": enum(("summary", "board"), "summary"),
         "show_categories": boolean(True),
         "recent": int_range(0, 20, 6),
+        "show_link": boolean(True),
     }),
     "points_leaderboard": ("Clan points", ("group",), "card", {
         "limit": int_range(3, 50, 10),
+        "period": enum(POINTS_PERIODS, "month"),
+        "switchable": boolean(False),
+        "periods": key_list(POINTS_PERIODS, ("month", "all"), len(POINTS_PERIODS)),
+        "show_link": boolean(True),
     }),
     "pvp_summary": ("PvP", ("group",), "card", {
         "period": enum(("month", "all"), "month"),
         "limit": int_range(3, 25, 5),
         "show_recent": boolean(True),
+        "show_link": boolean(True),
     }),
     "events_list": ("Events", ("group",), "card", {
         "show": enum(("active", "active_and_past"), "active_and_past"),
@@ -299,8 +319,10 @@ _GROUP: dict[str, tuple[str, tuple, str, dict[str, Spec]]] = {
     "npc_board": ("Boss leaderboard", ("group",), "card", {
         "npc_id": optional(_npc_id),
         "npc_name": text(80),
-        "period": enum(("month", "week", "day", "all"), "month"),
+        "period": enum(LOOT_PERIODS, "month"),
         "limit": int_range(3, 50, 10),
+        "switchable": boolean(False),
+        "periods": key_list(LOOT_PERIODS, ("month", "all"), len(LOOT_PERIODS)),
     }),
     "recap": ("Recap card", ("group",), "plain", {
         "period": enum(("month", "year"), "month"),
@@ -334,6 +356,7 @@ _PLAYER: dict[str, tuple[str, tuple, str, dict[str, Spec]]] = {
     "player_stats": ("Stats", ("player",), "plain", {
         "stats": key_list(PLAYER_STATS, PLAYER_STATS_DEFAULT, 8),
         "columns": enum(STAT_COLUMNS, "auto"),
+        "tile_style": enum(STAT_TILE_STYLES, "auto"),
     }),
     "player_clog": ("Collection log", ("player",), "card", {
         "view": enum(("summary", "browser"), "summary"),

@@ -171,3 +171,33 @@ def test_highlight_types_are_what_the_feed_serves():
     from web_api.routes.page_layouts import HIGHLIGHT_TYPES as SERVED
 
     assert set(SHARED) == set(SERVED)
+
+
+def test_points_board_time_frames():
+    fresh = validate_layout(_layout({"id": "p", "type": "points_leaderboard"}), "group")["blocks"][0]
+    assert fresh["period"] == "month" and fresh["switchable"] is False
+    assert fresh["periods"] == ["month", "all"] and fresh["show_link"] is True
+    b = validate_layout(_layout({
+        "id": "p", "type": "points_leaderboard", "period": "season", "switchable": True,
+        "periods": ["all", "season", "year", "all", "week"], "show_link": False,
+    }), "group")["blocks"][0]
+    assert b["period"] == "season" and b["switchable"] is True
+    assert b["periods"] == ["all", "season", "week"] and b["show_link"] is False
+    assert validate_layout(_layout({"id": "p", "type": "points_leaderboard", "period": "decade"}),
+                           "group")["blocks"][0]["period"] == "month"
+
+
+def test_loot_boards_can_switch_periods():
+    for btype in ("leaderboard", "npc_board"):
+        b = validate_layout(_layout({"id": "l", "type": btype, "switchable": True,
+                                     "periods": ["week", "season", "all"]}), "group")["blocks"][0]
+        assert b["switchable"] is True and b["periods"] == ["week", "all"]
+
+
+def test_stat_tile_style_and_pb_board_sizes():
+    s = validate_layout(_layout({"id": "s", "type": "stats_row", "tile_style": "outline"}), "group")["blocks"][0]
+    assert s["tile_style"] == "outline"
+    p = validate_layout(_layout({"id": "s", "type": "player_stats", "tile_style": "neon"}), "player")["blocks"][0]
+    assert p["tile_style"] == "auto"
+    pb = validate_layout(_layout({"id": "b", "type": "pb_board", "rows": 99, "max_sizes": 0}), "group")["blocks"][0]
+    assert pb["rows"] == 50 and pb["max_sizes"] == 1
