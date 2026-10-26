@@ -80,6 +80,11 @@ class TestSafeRegions:
         source = _plugin_file("src", "main", "java", "io", "droptracker",
                               "util", "DeathRegions.java").read_text(encoding="utf-8")
 
+        # Since plugin 0c16268 (2026-10-23) the client sends death facts and
+        # the server alone decides safety, so a current plugin has no copy left
+        # to compare against.
+        skip_without("regions(" in source, "the plugin's own safe-region sets")
+
         java_regions: set[int] = set()
         for match in re.finditer(
             r"private static final Set<Integer> \w+ = regions\(([^;]*?)\);", source, re.S

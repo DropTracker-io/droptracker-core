@@ -87,7 +87,13 @@ async def test_sends_components_with_no_content_or_embed(monkeypatch):
     assert sent is not None
     # A V2 message may carry no content and no embeds; Discord rejects the
     # whole message otherwise.
-    channel.send.assert_awaited_once_with(components=["<container>"])
+    channel.send.assert_awaited_once()
+    args, kwargs = channel.send.call_args
+    assert not args and kwargs["components"] == ["<container>"]
+    assert "content" not in kwargs and "embed" not in kwargs and "embeds" not in kwargs
+    # The text inside a layout can mention members, so it carries the same
+    # mention rule as message text (and the group's member-ping switch).
+    assert "allowed_mentions" in kwargs
 
 
 @pytest.mark.asyncio

@@ -214,7 +214,7 @@ class TestSendWrapper:
             seen.update(k)
             return object()
 
-        monkeypatch.setattr(ns, "_notification_mentions", lambda: "USERS+ROLES")
+        monkeypatch.setattr(ns, "_notification_mentions", lambda member_pings=True: "USERS+ROLES")
         await service._send(SimpleNamespace(send=send), "text", embed="E")
         assert seen["allowed_mentions"] == "USERS+ROLES"
 

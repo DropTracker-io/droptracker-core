@@ -76,6 +76,8 @@ ABSENT_DEFAULTS: Dict[str, str] = {
     NOTIFY_SLAYER_TASKS: "false",
     NOTIFY_QUESTS: "false",
     "notify_levels": "false",
+    "notification_pings": "true",
+    "notifications_plain_text": "false",
     "level_minimum_for_notifications": "1",
 }
 

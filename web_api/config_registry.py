@@ -34,6 +34,7 @@ SEASONAL_PREFIX = "seasonal_"
 CONFIG_CATEGORIES: List[Dict[str, str]] = [
     {"key": "profile", "label": "Group profile"},
     {"key": "channels", "label": "Discord channels"},
+    {"key": "style", "label": "Notification style"},
     {"key": "drops", "label": "Drop notifications"},
     {"key": "achievements", "label": "Achievement notifications"},
     {"key": "deaths", "label": "Deaths"},
@@ -208,6 +209,49 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Optional. The text on the Submit card. Leave blank for the default.",
         "default": "",
         "max_length": 250,
+    },
+
+    # --- Notification style ---
+    # Read at send time by services/notification_text.py (is_plain_text,
+    # member_pings_enabled). PLAIN_TEXT_TYPE_OPTIONS mirrors its
+    # PLAIN_TEXT_OPTIONS; tests/unit/test_notification_style.py keeps them equal.
+    {
+        "key": "notification_pings",
+        "label": "Ping members",
+        "category": "style",
+        "type": "boolean",
+        "help": "Off: member names still show as mentions, but nobody gets a ping. This overrides each member's own ping setting. Roles you mention in your message text still get pinged.",
+        "default": True,
+    },
+    {
+        "key": "notifications_plain_text",
+        "label": "Send every notification as plain text",
+        "category": "style",
+        "type": "boolean",
+        "help": "Post a message line and the screenshot, without the embed. Covers drops, collection logs, personal bests and every other member notification. Your message text is used when you set one.",
+        "default": False,
+    },
+    {
+        "key": "plain_text_notification_types",
+        "label": "Plain text for these types",
+        "category": "style",
+        "type": "multiselect",
+        "help": "Send only these types as plain text and keep the embed for the rest. Not used while the switch above is on.",
+        "default": "",
+        "options": [
+            {"value": "drop", "label": "Drops"},
+            {"value": "clog", "label": "Collection logs"},
+            {"value": "pb", "label": "Personal bests"},
+            {"value": "ca", "label": "Combat achievements"},
+            {"value": "pet", "label": "Pets"},
+            {"value": "level_up", "label": "Levels and XP milestones"},
+            {"value": "milestone", "label": "Kill count and rank milestones"},
+            {"value": "quest", "label": "Quests"},
+            {"value": "diary", "label": "Achievement diaries"},
+            {"value": "death", "label": "Deaths"},
+            {"value": "slayer", "label": "Slayer tasks"},
+            {"value": "pvp", "label": "PvP"},
+        ],
     },
 
     # --- Drop notifications ---

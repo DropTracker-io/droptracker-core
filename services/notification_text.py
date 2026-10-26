@@ -64,6 +64,7 @@ FOOTER_FALLBACK_TYPES = {"pet_dupe": "pet", "xp_milestone": "level_up"}
 PLAYER_MENTION = "{player_mention}"
 
 _MASS_MENTION = re.compile(r"@(everyone|here)\b", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"\{[a-z0-9_]+\}")
 _CACHE_TTL = 60.0
 
 _content_cache: Dict[Tuple[int, str], Tuple[float, Optional[str]]] = {}
@@ -209,6 +210,17 @@ def content_template(group_id: Optional[int], embed_type: str,
         return None
 
 
+def own_content_template(group_id: Optional[int], embed_type: str,
+                         custom_embeds: bool, own_type: Optional[str] = None) -> Optional[str]:
+    """The group's own stored message text, or None. No template-group fallback."""
+    try:
+        if custom_embeds and group_id and group_id != TEMPLATE_GROUP_ID:
+            return _cached_row_content(group_id, own_type or embed_type)
+    except Exception as exc:
+        print(f"Couldn't load the {embed_type} message text for group {group_id}: {exc}")
+    return None
+
+
 # --- footer lookup -----------------------------------------------------------
 
 def _load_footer_rows(group_id: int) -> Dict[str, Tuple[str, Optional[str]]]:
@@ -288,6 +300,193 @@ def apply_footer(embed, group_id: Optional[int], notification_type: str,
         # Discord rejects an empty footer text; no footer is the empty state.
         embed.footer = None
     return embed
+
+
+# --- plain text (no embed) -----------------------------------------------------
+#
+# A group can send its notifications as a message line plus the screenshot,
+# without the embed: every type (``notifications_plain_text``) or chosen ones
+# (``plain_text_notification_types``). The option values group the queue types
+# the way the website names them; DMs, events and DropTracker's own
+# announcements are never plain text.
+
+PLAIN_TEXT_ALL_KEY = "notifications_plain_text"
+PLAIN_TEXT_TYPES_KEY = "plain_text_notification_types"
+MEMBER_PINGS_KEY = "notification_pings"
+
+PLAIN_TEXT_OPTIONS: Tuple[Tuple[str, str], ...] = (
+    ("drop", "Drops"),
+    ("clog", "Collection logs"),
+    ("pb", "Personal bests"),
+    ("ca", "Combat achievements"),
+    ("pet", "Pets"),
+    ("level_up", "Levels and XP milestones"),
+    ("milestone", "Kill count and rank milestones"),
+    ("quest", "Quests"),
+    ("diary", "Achievement diaries"),
+    ("death", "Deaths"),
+    ("slayer", "Slayer tasks"),
+    ("pvp", "PvP"),
+)
+
+# Queue notification_type -> the option that covers it.
+PLAIN_TEXT_OPTION_FOR_TYPE: Dict[str, str] = {
+    "drop": "drop",
+    "clog": "clog",
+    "pb": "pb",
+    "ca": "ca",
+    "pet": "pet",
+    "level_up": "level_up",
+    "xp_milestone": "level_up",
+    "total_level_milestone": "level_up",
+    "kc_milestone": "milestone",
+    "rank_milestone": "milestone",
+    "quest": "quest",
+    "diary": "diary",
+    "death": "death",
+    "slayer": "slayer",
+    "pvp_kill": "pvp",
+    "pvp_death": "pvp",
+}
+
+# The built-in line when the embed is not sent. With no embed the line is the
+# whole message, so it says what happened. Candidates in order: the first whose
+# values this notification has wins (render_text drops a line naming a missing
+# value), ending in the embed-mode line, which always renders.
+PLAIN_CONTENT: Dict[str, Tuple[str, ...]] = {
+    "drop": (
+        "{player_mention} received {item_emoji} **{item_name}** ({item_value}) from **{npc_name}**",
+        "{player_mention} received {item_emoji} **{item_name}** ({item_value})",
+    ),
+    "clog": (
+        "{player_mention} added **{item_name}** to their collection log ({slots_unlocked}/{slots_total})",
+        "{player_mention} added **{item_name}** to their collection log",
+    ),
+    "pb": (
+        "{player_mention} set a new personal best at **{npc_name}** ({team_size}): **{personal_best}**",
+        "{player_mention} set a new personal best at **{npc_name}**: **{personal_best}**",
+    ),
+    "ca": (
+        "{player_mention} completed the {task_tier} combat achievement **{task_name}**",
+        "{player_mention} completed the combat achievement **{task_name}**",
+    ),
+    "pet": (
+        "{player_mention} received the pet **{pet_name}** from **{source}**",
+        "{player_mention} received the pet **{pet_name}**",
+    ),
+    "pet_dupe": (
+        "{player_mention} received a duplicate **{pet_name}** from **{source}**",
+        "{player_mention} received a duplicate **{pet_name}**",
+    ),
+    "level_up": (
+        "{player_mention} levelled up: {skills_text}",
+    ),
+    "quest": (
+        "{player_mention} completed **{quest_name}**",
+    ),
+    "death": (
+        "{player_mention} was killed by **{killer}** in {location}",
+        "{player_mention} was killed by **{killer}**",
+        "{player_mention} died in {location}",
+    ),
+    "diary": (
+        "{player_mention} completed the **{diary_tier} {diary_name}** diary",
+        "{player_mention} completed the **{diary_name}** diary",
+    ),
+    "slayer": (
+        "{player_mention} completed a slayer task: {slayer_task_size} x **{slayer_task}**",
+        "{player_mention} completed a slayer task: **{slayer_task}**",
+    ),
+    "pvp_kill": (
+        "{player_mention} killed **{victim_name_plain}** in PvP for {pvp_value}",
+        "{player_mention} killed **{victim_name_plain}** in PvP",
+    ),
+    "pvp_death": (
+        "{player_mention} was killed in PvP by **{killer_name}**",
+    ),
+}
+
+
+def parse_plain_text_types(raw) -> frozenset:
+    """The stored multiselect value -> the option values it names."""
+    if not raw:
+        return frozenset()
+    known = {value for value, _ in PLAIN_TEXT_OPTIONS}
+    return frozenset(p.strip() for p in str(raw).split(",") if p.strip() in known)
+
+
+def plain_text_applies(all_types: bool, chosen: frozenset, notification_type: str) -> bool:
+    """Pure rule: is this queue type sent without its embed?"""
+    option = PLAIN_TEXT_OPTION_FOR_TYPE.get(notification_type or "")
+    if option is None:
+        return False
+    return bool(all_types) or option in chosen
+
+
+def is_plain_text(group_id: Optional[int], notification_type: str) -> bool:
+    """Whether this group sends this notification type without its embed.
+
+    A lookup error sends the embed: the notification still goes out, just in
+    the old style.
+    """
+    if not group_id or notification_type not in PLAIN_TEXT_OPTION_FOR_TYPE:
+        return False
+    try:
+        from db.models import Session
+        from utils import group_config as gc
+
+        with Session() as s:
+            all_types = gc.is_truthy(gc.get(s, group_id, PLAIN_TEXT_ALL_KEY))
+            chosen = parse_plain_text_types(gc.get(s, group_id, PLAIN_TEXT_TYPES_KEY))
+        return plain_text_applies(all_types, chosen, notification_type)
+    except Exception as exc:
+        print(f"Couldn't read the plain-text setting for group {group_id}: {exc}")
+        return False
+
+
+def member_pings_enabled(group_id: Optional[int]) -> bool:
+    """Whether this group's notifications may ping its members.
+
+    Off keeps the mention in the text (it still reads as a name you can click)
+    but nobody is notified. Roles the group mentions itself still ping. A
+    lookup error keeps the default, pings on.
+    """
+    if not group_id:
+        return True
+    try:
+        from db.models import Session
+        from utils import group_config as gc
+
+        with Session() as s:
+            value = gc.get(s, group_id, MEMBER_PINGS_KEY)
+        return value is None or gc.is_truthy(value)
+    except Exception as exc:
+        print(f"Couldn't read the ping setting for group {group_id}: {exc}")
+        return True
+
+
+def plain_content(embed_type: str, values: dict, player_mention: str) -> Optional[str]:
+    """The built-in plain-text line for this notification, rendered."""
+    from utils.format import is_missing_value
+    from utils.game_emojis import with_derived_tokens
+
+    values = with_derived_tokens({**(values or {}), PLAYER_MENTION: player_mention})
+    for template in PLAIN_CONTENT.get(embed_type, ()):
+        # A candidate naming a value this notification lacks is skipped whole,
+        # rather than sent with a hole in it ("was killed by ** in").
+        # {item_emoji} is decoration: most items have none.
+        if any(
+            token != "{item_emoji}"
+            and (token not in values or is_missing_value(token, values[token]))
+            for token in _TOKEN_RE.findall(template)
+        ):
+            continue
+        text = re.sub(r" {2,}", " ", render_text(template, values))
+        if text:
+            return neutralize_mass_mentions(text)[:CONTENT_MAX]
+    if embed_type in DEFAULT_CONTENT:
+        return default_content(embed_type, player_mention)
+    return None
 
 
 def invalidate(group_id: Optional[int] = None) -> None:

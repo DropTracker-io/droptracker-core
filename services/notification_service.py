@@ -62,10 +62,17 @@ app_logger = AppLogger()
 global_footer = os.getenv('DISCORD_MESSAGE_FOOTER')
 
 
-def _notification_mentions():
-    """Who a notification's message text may ping: users and roles only."""
+def _notification_mentions(member_pings: bool = True):
+    """Who a notification's message text may ping: users and roles only.
+
+    A group that turned member pings off (``notification_pings``) keeps role
+    pings it wrote itself; a member's mention still renders, it just notifies
+    nobody.
+    """
     try:
-        return interactions.AllowedMentions(parse=["users", "roles"])
+        return interactions.AllowedMentions(
+            parse=["users", "roles"] if member_pings else ["roles"]
+        )
     except Exception:
         return None
 db = DatabaseOperations()
@@ -151,9 +158,21 @@ class _SendScope:
     reaches them in a different order; 24 hex chars fits Discord's 25-char cap.
     """
 
-    def __init__(self, notification_id):
+    def __init__(self, notification_id, group_id=None, notification_type=None):
         self.notification_id = notification_id
+        self.group_id = group_id
+        self.notification_type = notification_type
         self._sends_per_channel = {}
+        self._style = None
+
+    def style(self):
+        """``(plain_text, member_pings)`` for this row's group, read once per row."""
+        if self._style is None:
+            self._style = (
+                notification_text.is_plain_text(self.group_id, self.notification_type),
+                notification_text.member_pings_enabled(self.group_id),
+            )
+        return self._style
 
     def nonce_for(self, channel_id) -> str:
         n = self._sends_per_channel.get(channel_id, 0)
@@ -877,16 +896,25 @@ class NotificationService:
         ``_SendScope``), which makes that requeue safe for a send that did land.
 
         This is the ONE place allowed to call ``channel.send`` directly.
+
+        It is also where a group's notification style applies, for every row
+        sent from the queue: a plain-text type loses its embed here (the
+        screenshot and the message line stay), and a group with member pings
+        off gets no user pings, whatever the sender built.
         """
-        if "allowed_mentions" not in kwargs and (
-            (args and isinstance(args[0], str)) or isinstance(kwargs.get("content"), str)
-        ):
+        scope = _send_scope.get()
+        plain_text, member_pings = scope.style() if scope is not None else (False, True)
+        if plain_text:
+            args, kwargs = self._without_embed(args, kwargs)
+        has_text = (args and isinstance(args[0], str)) or isinstance(kwargs.get("content"), str)
+        if "allowed_mentions" not in kwargs and (has_text or "components" in kwargs):
             # Message text can be group-written: players and roles may be
             # pinged, @everyone/@here never (the editor refuses them too).
-            mentions = _notification_mentions()
+            mentions = _notification_mentions(member_pings)
             if mentions is not None:
                 kwargs["allowed_mentions"] = mentions
-        scope = _send_scope.get()
+        elif not member_pings and kwargs.get("allowed_mentions") is not None:
+            kwargs["allowed_mentions"] = self._without_user_pings(kwargs["allowed_mentions"])
         if scope is not None and "nonce" not in kwargs:
             kwargs["nonce"] = scope.nonce_for(getattr(channel, "id", None))
             kwargs["enforce_nonce"] = True
@@ -908,6 +936,35 @@ class NotificationService:
         return result
 
     @staticmethod
+    def _without_embed(args, kwargs):
+        """The send arguments with the embed removed, for a plain-text type.
+
+        Kept as sent when nothing would be left to post: a group that chose
+        "no message text" and a notification without a screenshot would
+        otherwise make Discord refuse an empty message.
+        """
+        content = args[0] if args else kwargs.get("content")
+        if not (isinstance(content, str) and content.strip()) and not kwargs.get("files"):
+            return args, kwargs
+        kwargs = {k: v for k, v in kwargs.items() if k not in ("embed", "embeds")}
+        if len(args) > 1:
+            # channel.send(content, embeds, ...): only the content is kept.
+            args = args[:1]
+        return args, kwargs
+
+    @staticmethod
+    def _without_user_pings(allowed):
+        """A sender's own AllowedMentions, minus the members it would ping."""
+        try:
+            parse = [p for p in (getattr(allowed, "parse", None) or []) if p != "users"]
+            return interactions.AllowedMentions(
+                parse=parse,
+                roles=list(getattr(allowed, "roles", None) or []),
+            )
+        except Exception:
+            return allowed
+
+    @staticmethod
     def _created_before(message, started_ms, slack_ms=2000) -> bool:
         """True when the message's snowflake says Discord created it before
         this send began, i.e. the enforced nonce matched an earlier attempt."""
@@ -918,14 +975,30 @@ class NotificationService:
         return created_ms < started_ms - slack_ms
 
     def _message_text(self, group_id, embed_type, values, formatted_name, *,
-                      custom_embeds, fallback=None, own_type=None):
+                      custom_embeds, fallback=None, own_type=None, line=None):
         """The text sent above a notification embed.
 
         The group's own text (needs ``custom_embeds``) or the template group's,
         rendered with the type's placeholders plus ``{player_mention}``; else
         ``fallback``, the sender's built-in line (``DEFAULT_CONTENT`` when not
         given). None means send no text.
+
+        When this notification goes out as plain text (no embed), the line is
+        the whole message: the group's own text still wins, then ``line`` (the
+        member's or group's picked custom message, rendered for content), then
+        the built-in plain line, which says what happened. The template group's
+        text is skipped there: it was written to sit above an embed.
         """
+        scope = _send_scope.get()
+        if scope is not None and scope.style()[0]:
+            own = notification_text.own_content_template(
+                group_id, embed_type, bool(custom_embeds), own_type=own_type
+            )
+            if own is not None:
+                return notification_text.render_content(own, values, formatted_name)
+            if line:
+                return line
+            return notification_text.plain_content(embed_type, values, formatted_name)
         if fallback is None:
             fallback = notification_text.default_content(embed_type, formatted_name)
         template = notification_text.content_template(
@@ -1682,7 +1755,11 @@ class NotificationService:
                 db_session.commit()
 
                 try:
-                    scope_token = _send_scope.set(_SendScope(notification_id))
+                    scope_token = _send_scope.set(_SendScope(
+                        notification_id,
+                        group_id=getattr(locked_notification, "group_id", None),
+                        notification_type=getattr(locked_notification, "notification_type", None),
+                    ))
                     try:
                         await asyncio.wait_for(
                             self.process_notification_with_session(locked_notification, db_session),
@@ -2651,7 +2728,8 @@ class NotificationService:
             # A group's own text replaces all of the above; the picked line is
             # still there for it as {death_message}.
             content = self._message_text(group_id, "death", replacements, formatted_name,
-                                         custom_embeds=upgrade_active, fallback=content)
+                                         custom_embeds=upgrade_active, fallback=content,
+                                         line=content_line if line_template else None)
             notification_text.apply_footer(embed, group_id, "death", replacements)
 
             # Prefer attaching MP4 if available; otherwise attach screenshot if present.

@@ -1379,9 +1379,16 @@ class HallOfFame(Extension):
         self, group: Group, channel, key: str,
         components: List[BaseComponent], stats: CycleStats,
     ) -> GroupPersonalBestMessage:
+        # A new message is the only HOF write that can ping (edits never do),
+        # so it follows the group's member-ping switch like a notification.
+        from services.notification_text import member_pings_enabled
+
+        mentions = interactions.AllowedMentions(
+            parse=["users", "roles"] if member_pings_enabled(group.group_id) else ["roles"]
+        )
         message = await self._discord_write(
             str(channel.id),
-            lambda: channel.send(components=components),
+            lambda: channel.send(components=components, allowed_mentions=mentions),
             expect_result=True,
         )
         row = GroupPersonalBestMessage(
