@@ -19,7 +19,9 @@ Each design also carries ``content``, the message text sent above the embed
 (web140a): null keeps the built-in line, "" sends none. Every entry reports
 ``default_content``, the text null resolves to (the template group's when
 staff set one, else ``services.notification_text.DEFAULT_CONTENT``), or null
-for a type that sends no text (lb).
+for a type that sends no text (lb), and ``plain_default_content``, the line
+sent instead when the group sends that type as plain text with no embed
+(``notification_text.PLAIN_CONTENT``; the group's own text still wins).
 
 The bot only *renders* a group's own rows when ``db.entitlements
 .has_custom_embeds()`` passes, so a row saved here never leaks to Discord
@@ -244,6 +246,12 @@ def _default_content(default_rows: list[GroupEmbed], embed_type: str) -> str | N
     return notification_text.DEFAULT_CONTENT[embed_type]
 
 
+def _plain_default_content(embed_type: str) -> str | None:
+    """The built-in line a plain-text notification of this type is sent with."""
+    candidates = notification_text.PLAIN_CONTENT.get(embed_type)
+    return candidates[0] if candidates else None
+
+
 def _load_rows(s, group_id: int, embed_type: str) -> list[GroupEmbed]:
     return (
         s.query(GroupEmbed)
@@ -341,6 +349,7 @@ async def list_group_embeds(group_id: int):
                     "custom": custom,
                     "default": default,
                     "default_content": _default_content(default_rows, embed_type),
+                    "plain_default_content": _plain_default_content(embed_type),
                 })
             return {"embeds": out}
 

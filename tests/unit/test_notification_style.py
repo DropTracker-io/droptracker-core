@@ -209,3 +209,14 @@ def test_message_text_in_plain_mode_still_uses_the_groups_own_text(service, monk
     finally:
         ns._send_scope.reset(token)
     assert text == "Zezima gz"
+
+
+# --- the embed editor's view of plain text ------------------------------------------
+
+def test_embed_editor_gets_a_plain_line_for_every_text_type():
+    from web_api.routes.embeds import _plain_default_content
+
+    for embed_type in nt.CONTENT_TYPES:
+        line = _plain_default_content(embed_type)
+        assert line and "{player_mention}" in line, embed_type
+    assert _plain_default_content("lb") is None
