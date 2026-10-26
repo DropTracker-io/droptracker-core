@@ -122,3 +122,6 @@ scripts/cache/*.live.json.dryrun
 /.conquest_mapgen/
 var/
 private/
+
+# Local MCP server (mcp_server/): kept out of the repository on purpose.
+/mcp_server/
