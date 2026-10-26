@@ -159,3 +159,29 @@ def test_team_page_lists_roster_and_own_tasks():
     assert roster["rows"][0]["cells"] == ["Zezima", "Leader"]
     tasks = next(b for b in blocks if b["type"] == "tasks")
     assert all(len(i["bars"]) == 1 for i in tasks["items"])
+
+
+def test_team_colors_fall_back_to_the_site_palette_in_id_order(monkeypatch):
+    real = _load("_event_team_discord_for_pe_test", "services", "event_team_discord.py")
+    monkeypatch.setitem(sys.modules, "services.event_team_discord", real)
+    colors = pe.team_colors([{"id": 9, "color": None}, {"id": 3, "color": None},
+                             {"id": 5, "color": "#123456"}])
+    assert colors == {3: real.TEAM_PALETTE[0], 5: "#123456", 9: real.TEAM_PALETTE[2]}
+
+
+def test_history_folds_repeated_lines(monkeypatch):
+    import web_api.routes.events as web_events
+
+    entry = {"player_name": "ranarr ron", "task_label": "GWD pet or 5k KC",
+             "team_id": 10, "team_name": "Red", "points": 0,
+             "created_at": int(NOW.timestamp()) - 120}
+    other = dict(entry, player_name="Yung Beez")
+    monkeypatch.setattr(web_events, "completion_history_payload",
+                        lambda *a, **k: {"entries": [entry, entry, entry, other],
+                                         "meta": {"total": 4}})
+    blocks = pe._history_page(None, _ev(), None, NOW, {10: "#ff0000"})
+    feed = blocks[0]["items"]
+    assert [i["text"] for i in feed] == ["ranarr ron completed GWD pet or 5k KC  ×3",
+                                         "Yung Beez completed GWD pet or 5k KC"]
+    assert feed[0]["color"] == "#ff0000" and feed[0]["detail"] == "Red  ·  2m ago"
+    assert len(blocks) == 1  # nothing more to show on the website

@@ -331,6 +331,16 @@ def _task_items(detail, team_ids=None):
     return items
 
 
+def team_colors(teams) -> dict:
+    """{team_id: hex}: the team's own colour, else the site palette entry for
+    its place in roster (id) order, as the event page shows it."""
+    from services.event_team_discord import effective_team_color
+
+    ordered = sorted(teams, key=lambda t: t["id"])
+    return {t["id"]: _color(effective_team_color(t.get("color"), i))
+            for i, t in enumerate(ordered)}
+
+
 def _ranked_teams(detail):
     return sorted(detail["teams"], key=lambda t: (-float(t.get("score") or 0), t["id"]))
 
@@ -439,7 +449,7 @@ def _competition_blocks(s, ev, limit=ROWS_LIMIT):
     return blocks
 
 
-def _players_page(s, ev, viewer_id):
+def _players_page(s, ev, viewer_id, colors):
     from web_api.routes.events import event_players_payload
 
     data = event_players_payload(s, ev, viewer_id)
@@ -451,7 +461,7 @@ def _players_page(s, ev, viewer_id):
                          p.get("team_name") or "—", _num(p.get("points")),
                          f"{int(p.get('completions') or 0):,}",
                          abbrev(int(loot_value or 0))],
-                        color=p.get("team_color"), team_id=p.get("team_id")))
+                        color=colors.get(p.get("team_id")), team_id=p.get("team_id")))
     totals = data.get("totals") or {}
     return [
         stats([("Contributors", f"{int(totals.get('contributors') or 0):,}", None),
@@ -463,20 +473,13 @@ def _players_page(s, ev, viewer_id):
     ]
 
 
-def _history_page(s, ev, viewer_id, now):
+def _history_page(s, ev, viewer_id, now, colors):
     from web_api.routes.events import completion_history_payload
 
     data = completion_history_payload(s, ev, viewer_id, mode="completions",
                                       page=1, limit=HISTORY_LIMIT)
-    colors = {}
-    try:
-        from db.models import EventTeam
-
-        colors = dict(s.query(EventTeam.id, EventTeam.color)
-                      .filter(EventTeam.event_id == ev.id).all())
-    except Exception:
-        pass
     items = []
+    last_key = None
     for e in data.get("entries") or []:
         who = e.get("player_name") or "Someone"
         what = e.get("task_label") or "a task"
@@ -486,15 +489,27 @@ def _history_page(s, ev, viewer_id, now):
         detail_bits = [e.get("team_name"), _ago(e.get("created_at"), now)]
         if e.get("points"):
             detail_bits.insert(1, f"+{_num(e['points'])} pts")
+        # A repeatable task credits one row per lap: fold a run of identical
+        # lines into one with a count.
+        key = (line, e.get("team_id"), e.get("points"))
+        if key == last_key and items:
+            items[-1]["_n"] = items[-1].get("_n", 1) + 1
+            continue
+        last_key = key
         item = {"text": clean(line, 120) or "",
                 "detail": clean("  ·  ".join(b for b in detail_bits if b), 80)}
-        if _color(colors.get(e.get("team_id"))):
+        if colors.get(e.get("team_id")):
             item["color"] = colors[e["team_id"]]
         items.append(item)
+    for item in items:
+        n = item.pop("_n", 1)
+        if n > 1:
+            item["text"] = clean(f"{item['text']}  ×{n}", 120)
     total = (data.get("meta") or {}).get("total") or 0
+    shown = len(data.get("entries") or [])
     blocks = [{"type": "feed", "items": items, "empty": "Nothing completed yet."}]
-    if total > len(items):
-        blocks.append(text_block(f"Showing the latest {len(items)} of {total:,}. "
+    if total > shown:
+        blocks.append(text_block(f"Showing the latest {shown} of {total:,}. "
                                  "The full history is on the website.", "muted"))
     return blocks
 
@@ -558,6 +573,9 @@ def compose_page(s, ev, viewer_id, page: str, viewer_team, now=None) -> dict:
 
     now = now or datetime.now()
     detail = _detail(s, ev, viewer_id=viewer_id)
+    colors = team_colors(detail["teams"])
+    for team in detail["teams"]:
+        team["color"] = colors.get(team["id"])
     is_admin = bool(detail.get("can_manage")) or (
         viewer_id is not None and _is_event_admin(s, viewer_id, ev))
     pages = _pages(ev, detail, is_admin)
@@ -581,9 +599,9 @@ def compose_page(s, ev, viewer_id, page: str, viewer_team, now=None) -> dict:
         blocks = (_competition_blocks(s, ev) if (ev.kind or "standard") in COMPETITION_KINDS
                   else _teams_page(detail))
     elif page == "players":
-        blocks = _players_page(s, ev, viewer_id)
+        blocks = _players_page(s, ev, viewer_id, colors)
     else:
-        blocks = _history_page(s, ev, viewer_id, now)
+        blocks = _history_page(s, ev, viewer_id, now, colors)
     status = _effective_status(ev)
     return {
         "event": {"id": ev.id, "name": clean(ev.name, 80) or "Event",
