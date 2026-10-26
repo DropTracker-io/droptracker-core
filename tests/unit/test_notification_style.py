@@ -220,3 +220,17 @@ def test_embed_editor_gets_a_plain_line_for_every_text_type():
         line = _plain_default_content(embed_type)
         assert line and "{player_mention}" in line, embed_type
     assert _plain_default_content("lb") is None
+
+
+# --- "no message text": embed only --------------------------------------------------
+
+def test_a_group_can_send_the_embed_with_no_text(service, monkeypatch):
+    # The design's content "" means no text; render_content then gives None,
+    # and _send posts the embed alone.
+    monkeypatch.setattr(nt, "content_template", lambda *a, **k: "")
+    monkeypatch.setattr(nt, "own_content_template", lambda *a, **k: "")
+    assert service._message_text(5, "drop", {}, "Zezima", custom_embeds=True) is None
+    # A picked custom message does not override the group's choice of no text.
+    assert service._message_text(5, "drop", {}, "Zezima", custom_embeds=True, line="x") is None
+    args, kwargs = _send(service, _Scope(False, True), None, embed="E")
+    assert args == (None,) and kwargs["embed"] == "E" and "allowed_mentions" not in kwargs
