@@ -15,13 +15,12 @@ as a list of blocks from a closed set the plugin draws itself:
              highlight?, tip?}], empty?}
     tasks    {items: [{label, detail?, tip?, icon_item_id?, points?,
              bars: [{label, color?, have, need, done, text}]}], empty?}
-    board    {teams: [{id, name}], team_id}   (the plugin loads board.png)
-    feed     {items: [{text, detail?, color?}], empty?}
+    board    {team_id?}   (the plugin loads board.png for that team's view)
 
 Same rules as the pop-up cards and panel cards: plain text only (tags are
 stripped and lengths capped), colours are a team's own hex, tones come from a
-closed set (muted, good, warn, bad, gold), and the only action is ``page``,
-which opens another page of the same window. Nothing here is markup.
+closed set (only ``muted`` today), and the only action is ``page``, which
+opens another page of the same window (``team:<id>``, ``board:<id>``). Nothing here is markup.
 
 Who may look: anyone on the event's roster, the event's admins, and members of
 a group taking part (the owning group, or an accepted clan of a clan-vs-clan
@@ -238,8 +237,8 @@ def column(label, width=1, right=False):
     return col
 
 
-def row(cells, *, color=None, page=None, team_id=None, tip=None):
-    out = {"cells": [clean(c, 48) or "" for c in cells]}
+def row(cells, *, color=None, page=None, team_id=None, tip=None, cap=48):
+    out = {"cells": [clean(c, cap) or "" for c in cells]}
     if _color(color):
         out["color"] = _color(color)
     if page:
@@ -405,11 +404,24 @@ def _tasks_page(detail):
     return [{"type": "tasks", "items": items, "empty": "No tasks yet."}]
 
 
-def _board_page(ev, detail, viewer_team):
-    teams = [] if (ev.kind or "standard") in COMPETITION_KINDS else [
-        {"id": t["id"], "name": clean(t["name"], 40) or "Team"} for t in _ranked_teams(detail)]
-    team_id = viewer_team.id if viewer_team is not None and teams else None
-    return [{"type": "board", "teams": teams, "team_id": team_id}]
+def _board_page(ev, detail, viewer_team, team_id=None):
+    """The board image, with a row per team to switch to its view (``board:<id>``;
+    ``board:0`` is the all-teams view). Starts on the viewer's own team."""
+    if (ev.kind or "standard") in COMPETITION_KINDS or not detail["teams"]:
+        return [{"type": "board"}]
+    if team_id is None:
+        team_id = viewer_team.id if viewer_team is not None else 0
+    if team_id and team_id not in {t["id"] for t in detail["teams"]}:
+        raise _Missing()
+    rows = [row(["All teams"], page="board:0")]
+    rows += [row([t["name"]], color=t.get("color"), page=f"board:{t['id']}")
+             for t in _ranked_teams(detail)]
+    for r, tid in zip(rows, [0] + [t["id"] for t in _ranked_teams(detail)]):
+        if tid == team_id:
+            r["highlight"] = True
+            r.pop("page")
+    return [{"type": "board", "team_id": team_id or None},
+            table([column("Show the board for")], rows)]
 
 
 def _teams_page(detail):
@@ -478,7 +490,7 @@ def _history_page(s, ev, viewer_id, now, colors):
 
     data = completion_history_payload(s, ev, viewer_id, mode="completions",
                                       page=1, limit=HISTORY_LIMIT)
-    items = []
+    rows = []
     last_key = None
     for e in data.get("entries") or []:
         who = e.get("player_name") or "Someone"
@@ -486,28 +498,25 @@ def _history_page(s, ev, viewer_id, now, colors):
         line = f"{who} completed {what}"
         if e.get("matched_target"):
             line += f" ({e['matched_target']})"
-        detail_bits = [e.get("team_name"), _ago(e.get("created_at"), now)]
-        if e.get("points"):
-            detail_bits.insert(1, f"+{_num(e['points'])} pts")
         # A repeatable task credits one row per lap: fold a run of identical
         # lines into one with a count.
         key = (line, e.get("team_id"), e.get("points"))
-        if key == last_key and items:
-            items[-1]["_n"] = items[-1].get("_n", 1) + 1
+        if key == last_key and rows:
+            rows[-1]["_n"] = rows[-1].get("_n", 1) + 1
             continue
         last_key = key
-        item = {"text": clean(line, 120) or "",
-                "detail": clean("  ·  ".join(b for b in detail_bits if b), 80)}
-        if colors.get(e.get("team_id")):
-            item["color"] = colors[e["team_id"]]
-        items.append(item)
-    for item in items:
-        n = item.pop("_n", 1)
+        points = f"+{_num(e['points'])}" if e.get("points") else ""
+        rows.append(row([line, e.get("team_name") or "", points, _ago(e.get("created_at"), now)],
+                        color=colors.get(e.get("team_id")), team_id=e.get("team_id"),
+                        tip=line, cap=120))
+    for r in rows:
+        n = r.pop("_n", 1)
         if n > 1:
-            item["text"] = clean(f"{item['text']}  ×{n}", 120)
+            r["cells"][0] = clean(f"{r['cells'][0]}  ×{n}", 120)
     total = (data.get("meta") or {}).get("total") or 0
     shown = len(data.get("entries") or [])
-    blocks = [{"type": "feed", "items": items, "empty": "Nothing completed yet."}]
+    blocks = [table([column("Completed", 7), column("Team", 3), column("Points", 1, True),
+                     column("When", 2, True)], rows, "Nothing completed yet.")]
     if total > shown:
         blocks.append(text_block(f"Showing the latest {shown} of {total:,}. "
                                  "The full history is on the website.", "muted"))
@@ -580,12 +589,18 @@ def compose_page(s, ev, viewer_id, page: str, viewer_team, now=None) -> dict:
         viewer_id is not None and _is_event_admin(s, viewer_id, ev))
     pages = _pages(ev, detail, is_admin)
     keys = {k for k, _ in pages}
-    if page.startswith("team:"):
+    if page.startswith(("team:", "board:")):
+        prefix, _, raw = page.partition(":")
         try:
-            team_id = int(page.split(":", 1)[1])
+            team_id = int(raw)
         except ValueError:
             raise _Missing()
-        blocks = _team_page(ev, detail, team_id, now)
+        if prefix == "team":
+            blocks = _team_page(ev, detail, team_id, now)
+        elif "board" in keys:
+            blocks = _board_page(ev, detail, viewer_team, team_id)
+        else:
+            raise _Missing()
     elif page not in keys:
         page = "overview"
         blocks = _overview(s, ev, detail, now)

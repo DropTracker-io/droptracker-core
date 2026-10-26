@@ -180,8 +180,26 @@ def test_history_folds_repeated_lines(monkeypatch):
                         lambda *a, **k: {"entries": [entry, entry, entry, other],
                                          "meta": {"total": 4}})
     blocks = pe._history_page(None, _ev(), None, NOW, {10: "#ff0000"})
-    feed = blocks[0]["items"]
-    assert [i["text"] for i in feed] == ["ranarr ron completed GWD pet or 5k KC  ×3",
-                                         "Yung Beez completed GWD pet or 5k KC"]
-    assert feed[0]["color"] == "#ff0000" and feed[0]["detail"] == "Red  ·  2m ago"
+    rows = pe.apply_viewer({"b": blocks}, 10)["b"][0]["rows"]
+    assert [r["cells"][0] for r in rows] == ["ranarr ron completed GWD pet or 5k KC  ×3",
+                                             "Yung Beez completed GWD pet or 5k KC"]
+    assert rows[0]["cells"][1:] == ["Red", "", "2m ago"]
+    assert rows[0]["color"] == "#ff0000" and rows[0]["highlight"] is True
     assert len(blocks) == 1  # nothing more to show on the website
+
+
+def test_board_page_starts_on_own_team_and_links_the_others():
+    detail = _detail()
+    for t, c in zip(detail["teams"], ("#ff0000", "#0000ff")):
+        t["color"] = c
+    blocks = pe._board_page(_ev(), detail, SimpleNamespace(id=10))
+    assert blocks[0] == {"type": "board", "team_id": 10}
+    rows = blocks[1]["rows"]
+    assert [r["cells"][0] for r in rows] == ["All teams", "Blue", "Red"]
+    assert [r.get("page") for r in rows] == ["board:0", "board:11", None]
+    assert rows[2]["highlight"] is True
+    everyone = pe._board_page(_ev(), detail, None, 0)
+    assert everyone[0] == {"type": "board", "team_id": None}
+    assert pe._board_page(_ev(kind="botw"), detail, None) == [{"type": "board"}]
+    with pytest.raises(pe._Missing):
+        pe._board_page(_ev(), detail, None, 999)
