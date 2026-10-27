@@ -1691,6 +1691,30 @@ def player_hidden_for_group(db_session, group_id, player_id) -> bool:
         return False
 
 
+def player_hidden_globally(db_session, group_id, player_id) -> bool:
+    """Whether the player asked to be hidden and this is the global group (2).
+
+    ``players.hidden`` (one account) and ``users.hidden`` ("Hide me everywhere",
+    every account) kept a player off the site's public surfaces, but the global
+    group still announced them in the DropTracker Discord. Their own groups
+    keep posting: hiding is from the public, not from the player's clans.
+
+    Lookup errors return False, like player_hidden_for_group.
+    """
+    if group_id != 2 or player_id is None:
+        return False
+    try:
+        row = (
+            db_session.query(Player.hidden, User.hidden)
+            .outerjoin(User, User.user_id == Player.user_id)
+            .filter(Player.player_id == player_id)
+            .first()
+        )
+    except Exception:
+        return False
+    return row is not None and (bool(row[0]) or bool(row[1]))
+
+
 def notification_blacklisted(db_session, group_id, notification_type, data) -> str | None:
     """Why this group's leaders blacklisted this notification, or ``None``.
 
@@ -1911,6 +1935,14 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         app_logger.log(
             log_type="debug",
             data=f"Skipping {notification_type} notification for group {group_id}: player {player_id} is hidden for this group",
+            app_name="core",
+            description="create_notification",
+        )
+        return None
+    if player_hidden_globally(db_session, group_id, player_id):
+        app_logger.log(
+            log_type="debug",
+            data=f"Skipping {notification_type} notification for the global group: player {player_id} is hidden",
             app_name="core",
             description="create_notification",
         )
