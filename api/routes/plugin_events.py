@@ -455,8 +455,10 @@ def _group_title(group) -> str:
         title = f"Earn {abbrev(need)} points from these"
     elif mode == "count":
         title = "Collect"
+    elif group.get("distinct") and need > 1:
+        title = f"Any {abbrev(need)} different items from these"
     elif need > 1:
-        title = f"Any {abbrev(need)} {'different ' if group.get('distinct') else ''}of these"
+        title = f"Any {abbrev(need)} of these"
     else:
         title = "Any one of these"
     return f"{title}  ({count})"

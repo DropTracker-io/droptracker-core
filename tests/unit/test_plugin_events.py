@@ -297,6 +297,14 @@ def test_task_page_checklist_puts_own_team_first(monkeypatch):
     assert [c["label"] for c in check["columns"]][2:] == ["Blue", "Red"]
 
 
+def test_group_titles():
+    assert pe._group_title({"mode": "any_of", "need": 10, "obtained": 4, "distinct": True}) \
+        == "Any 10 different items from these  (4 / 10)"
+    assert pe._group_title({"mode": "any_of", "need": 3, "obtained": 0}) == "Any 3 of these  (0 / 3)"
+    assert pe._group_title({"mode": "points", "need": 500, "obtained": 120}) \
+        == "Earn 500 points from these  (120 / 500)"
+
+
 def test_task_page_paths_and_refusals(monkeypatch):
     import web_api.routes.events as web_events
 
