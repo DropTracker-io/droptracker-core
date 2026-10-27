@@ -108,9 +108,13 @@ def _stored(row):
 
 
 def load_settings(session, group_id: int, prefix: str = "") -> tuple:
-    """``(mode, pet_names)`` for a group; ``prefix`` is ``"seasonal_"`` for
-    seasonal worlds, like every other notify key."""
+    """``(mode, pet_names)`` for a group; ``prefix`` is ``"seasonal_"`` or
+    ``"hardcore_"`` for those worlds, like every other notify key. A group that
+    shares its main settings with Hardcore Worlds reads the main keys."""
     from db.models import GroupConfiguration
+    from utils import group_config as gc
+
+    prefix = gc.resolve_prefix(session, group_id, prefix)
 
     mode_key = f"{prefix}{DUPLICATES_MODE_KEY}"
     list_key = f"{prefix}{DUPLICATE_PETS_KEY}"

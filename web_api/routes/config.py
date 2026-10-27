@@ -63,15 +63,32 @@ config_bp = Blueprint("v1_config", __name__)
 # The HoF service reads these via long_value when config_value is empty/short
 # (services/hall_of_fame.py _parse_group_boss_list), so the typed endpoints
 # must round-trip long_value or long lists silently truncate on save.
-LONG_VALUE_KEYS = {
+_LONG_VALUE_BASE_KEYS = {
     "personal_best_embed_boss_list",
     "death_message_variants",
     "drop_message_variants",
     "clog_message_variants",
     "pb_message_variants",
     "notify_pet_duplicate_pets",
-    "seasonal_notify_pet_duplicate_pets",
 }
+
+
+def _with_mirrors(base_keys):
+    """Each key plus its seasonal_/hardcore_ mirrors where the registry has
+    one. Derived, not hand-listed: the hardcore mirrors (web151a) were missing
+    from the hand-kept set, and a long hardcore pet list hit
+    "Data too long for column 'config_value'" on save."""
+    from web_api.config_registry import HARDCORE_PREFIX, SEASONAL_PREFIX, get_config_field
+    keys = set(base_keys)
+    for key in base_keys:
+        for prefix in (SEASONAL_PREFIX, HARDCORE_PREFIX):
+            field = get_config_field(f"{prefix}{key}")
+            if field is not None and field["key"] == key:
+                keys.add(f"{prefix}{key}")
+    return frozenset(keys)
+
+
+LONG_VALUE_KEYS = _with_mirrors(_LONG_VALUE_BASE_KEYS)
 
 # Auto-provisioning and the per-group WOM sync rate limit are coupled: see the
 # post-write hook in patch_group_config. The cooldown key is owned by

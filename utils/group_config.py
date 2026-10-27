@@ -108,6 +108,14 @@ def _shares_hardcore_settings(session, group_id: int) -> bool:
     return is_truthy(get(session, group_id, SHARE_HARDCORE_SETTINGS))
 
 
+def resolve_prefix(session, group_id: int, prefix: str) -> str:
+    """The prefix a reader that queries GroupConfiguration directly should use:
+    "" for a ``hardcore_`` reader in a group that shares its main settings."""
+    if prefix == HARDCORE_PREFIX and _shares_hardcore_settings(session, group_id):
+        return ""
+    return prefix
+
+
 def _resolve_key(session, group_id: int, key: str) -> str:
     """The key actually read for ``key`` in this group.
 

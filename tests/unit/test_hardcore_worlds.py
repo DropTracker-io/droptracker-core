@@ -290,3 +290,39 @@ class TestGroupSettings:
         assert "share_hardcore_settings" in reg.all_config_keys()
         for key in reg.HARDCORE_MIRROR_KEYS:
             assert f"hardcore_{key}" in reg.all_config_keys()
+
+
+# ── Mirrors of special keys (Sentry: "Data too long for column 'config_value'") ─
+
+class TestMirrorsOfSpecialKeys:
+    def test_every_mirror_of_an_overflow_key_overflows_too(self):
+        # A group saving a long hardcore duplicate-pets list wrote it into the
+        # VARCHAR(255) config_value because LONG_VALUE_KEYS was hand-kept.
+        from web_api import config_registry as reg
+        from web_api.routes import config as routes_config
+        for key in routes_config._LONG_VALUE_BASE_KEYS:
+            for prefix in (reg.SEASONAL_PREFIX, reg.HARDCORE_PREFIX):
+                field = reg.get_config_field(f"{prefix}{key}")
+                if field is not None and field["key"] == key:
+                    assert f"{prefix}{key}" in routes_config.LONG_VALUE_KEYS
+        assert "hardcore_notify_pet_duplicate_pets" in routes_config.LONG_VALUE_KEYS
+
+    def test_direct_readers_follow_the_share_switch(self, monkeypatch):
+        from utils import group_config
+        shares = {5: True, 6: False}
+        monkeypatch.setattr(group_config, "_shares_hardcore_settings", lambda s, g: shares[g])
+        assert group_config.resolve_prefix(None, 5, "hardcore_") == ""
+        assert group_config.resolve_prefix(None, 6, "hardcore_") == "hardcore_"
+        assert group_config.resolve_prefix(None, 5, "seasonal_") == "seasonal_"
+
+    def test_death_filter_reads_hardcore_mirrors(self, monkeypatch):
+        # conftest loads the real db/death_filter.py under its dotted name
+        # (the ``db`` package itself is a stub, so not ``from db import``).
+        death_filter = sys.modules["db.death_filter"]
+        from utils import group_config
+        asked = []
+        monkeypatch.setattr(group_config, "get", lambda s, g, key, default=None: asked.append(key) or "true")
+        assert death_filter._config_flag(None, 5, "notify_deaths_safe", "hardcore")
+        assert death_filter._config_flag(None, 5, "notify_deaths_safe", "seasonal")
+        assert death_filter._config_flag(None, 5, "notify_deaths_safe", "main")
+        assert asked == ["hardcore_notify_deaths_safe", "seasonal_notify_deaths_safe", "notify_deaths_safe"]

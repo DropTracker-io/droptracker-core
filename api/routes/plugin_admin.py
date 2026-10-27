@@ -315,6 +315,7 @@ def _settings_payload(s, user_id: int, group, errors=None) -> dict:
     from web_api.config_registry import (
         CONFIG_CATEGORIES,
         MANAGED_KEYS,
+        HARDCORE_PREFIX,
         SEASONAL_PREFIX,
         SENSITIVE_KEYS,
         all_config_keys,
@@ -332,6 +333,9 @@ def _settings_payload(s, user_id: int, group, errors=None) -> dict:
         if field is None or field["key"] in MANAGED_KEYS:
             continue
         seasonal = key.startswith(SEASONAL_PREFIX) and key != field["key"]
+        # Hardcore mirrors join the two switches on the Hardcore Worlds page
+        # instead of doubling every base category.
+        hardcore = key.startswith(HARDCORE_PREFIX) and key != field["key"]
         stored_type = field.get("type")
         kind = "password" if key in SENSITIVE_KEYS else _AS_TYPE.get(stored_type, stored_type)
         editable = kind in EDITABLE_TYPES
@@ -351,7 +355,7 @@ def _settings_payload(s, user_id: int, group, errors=None) -> dict:
             "key": key,
             "label": field.get("label"),
             "help": (field.get("help") or "") + (" One message per line." if stored_type == "messagelist" else ""),
-            "category": "seasonal" if seasonal else field.get("category"),
+            "category": "seasonal" if seasonal else "hardcore" if hardcore else field.get("category"),
             "type": kind,
             # Never sent for sensitive keys or types drawn on the website only.
             "value": _to_client(stored_type, values.get(key)) if editable else None,

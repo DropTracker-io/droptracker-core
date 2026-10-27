@@ -128,7 +128,9 @@ def announces_activity(db_session, group_id, activity, world_type=None) -> bool:
 def _config_flag(db_session, group_id, key, world_type) -> bool:
     from utils import group_config as gc
 
-    prefix = "seasonal_" if world_type == SEASONAL_WORLD_TYPE else ""
+    # Side worlds read their own mirrors; a group sharing its main settings
+    # with Hardcore Worlds is answered from the main keys by gc.get.
+    prefix = f"{world_type}_" if world_type in (SEASONAL_WORLD_TYPE, "hardcore") else ""
     try:
         return gc.is_truthy(gc.get(db_session, group_id, f"{prefix}{key}"))
     except Exception:
