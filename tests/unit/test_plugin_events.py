@@ -211,8 +211,8 @@ def test_task_cards_link_their_page_and_name_what_counts():
         "Twisted bow", {"name": "Dragon bones", "quantity": 3}, "Elysian sigil"]}
     items = pe._task_items(detail)
     assert items[0]["page"] == "task:1"
-    assert items[0]["note"] == "Counts: Twisted bow, 3× Dragon bones, Elysian sigil"
-    assert "note" not in items[1]  # a KC task has no item list
+    assert items[0]["detail"] == "ITEM  ·  Counts: Twisted bow, 3× Dragon bones, Elysian sigil"
+    assert "detail" not in items[1]  # a KC task has no item list
 
 
 def test_needs_line_caps_length_and_counts_the_rest():
@@ -271,7 +271,7 @@ def test_task_page_checklist_puts_own_team_first(monkeypatch):
     blocks = pe._task_page(s, _ev(), _detail(), 1, SimpleNamespace(id=10))
     assert blocks[0] == {"type": "heading", "text": "Get a Twisted bow"}
     assert blocks[1]["type"] == "tasks"
-    assert "page" not in blocks[1]["items"][0] and "note" not in blocks[1]["items"][0]
+    assert "page" not in blocks[1]["items"][0] and blocks[1]["items"][0]["detail"] == "ITEM"
     assert [b["label"] for b in blocks[1]["items"][0]["bars"]] == ["Red", "Blue"]
     check = next(b for b in blocks if b["type"] == "table")
     assert [c["label"] for c in check["columns"]] == ["Item", "Need", "Red", "Blue"]
@@ -284,6 +284,12 @@ def test_task_page_checklist_puts_own_team_first(monkeypatch):
     assert "All of these  (1 / 2)" in headings and "Who has helped (Red)" in headings
     helped = blocks[-1]["rows"][0]["cells"]
     assert helped == ["Zezima", "Twisted bow, Dragon bones"]
+
+    # Past describe_task's cap, the page doesn't claim items are missing.
+    big = _detail()
+    big["tasks"][0]["config"] = {"kind": "all_of", "items": [f"Item {i}" for i in range(13)]}
+    texts = [b["text"] for b in pe._task_page(s, _ev(), big, 1, None) if b["type"] == "text"]
+    assert texts == ["Collect every one of the 13 listed items."]
 
     # An outsider sees the leaders first (Blue leads on score).
     outsider = pe._task_page(s, _ev(), _detail(), 1, None)

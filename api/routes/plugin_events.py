@@ -13,7 +13,7 @@ as a list of blocks from a closed set the plugin draws itself:
     stats    {items: [{label, value, tip?}]}
     table    {columns: [{label, width?, right?}], rows: [{cells, color?, page?,
              highlight?, tip?, icon_item_id?}], empty?}
-    tasks    {items: [{label, detail?, note?, tip?, icon_item_id?, points?, page?,
+    tasks    {items: [{label, detail?, tip?, icon_item_id?, points?, page?,
              bars: [{label, color?, have, need, done, text}]}], empty?}
     board    {team_id?}   (the plugin loads board.png for that team's view)
 
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta
 
 from quart import Blueprint, jsonify, request
@@ -343,12 +344,10 @@ def _task_items(detail, team_ids=None):
         item = {"label": clean(task.get("label"), 80) or "Task",
                 "page": f"task:{task['id']}",
                 "bars": []}
-        note = _needs_line(reqs)
-        if note:
-            item["note"] = note
-        detail_bits = [b for b in (tile.get("badge"), tile.get("value")) if b]
+        # The "Counts: ..." line rides in detail, which every client draws.
+        detail_bits = [str(b) for b in (tile.get("badge"), tile.get("value"), _needs_line(reqs)) if b]
         if detail_bits:
-            item["detail"] = clean("  ·  ".join(str(b) for b in detail_bits), 60)
+            item["detail"] = clean("  ·  ".join(detail_bits), 140)
         if description:
             item["tip"] = clean(description, 200)
         if task.get("points"):
@@ -543,10 +542,15 @@ def _task_page(s, ev, detail, task_id, viewer_team):
 
     item = _task_items({**detail, "tasks": [card]})[0]
     item.pop("page", None)
-    item.pop("note", None)  # the checklist below names everything
+    # The checklist below names everything; keep just the tile's badge/value.
+    bits = [str(b) for b in ((card.get("tile") or {}).get("badge"), (card.get("tile") or {}).get("value")) if b]
+    item.pop("detail", None)
+    if bits:
+        item["detail"] = clean("  ·  ".join(bits), 60)
     blocks = [heading(item["label"]), {"type": "tasks", "items": [item]}]
     if item.get("tip"):
-        blocks.append(text_block(item["tip"]))
+        # describe_task's "(+N more)" counts past its cap; every item is listed below.
+        blocks.append(text_block(re.sub(r" \(\+\d+ more\)", "", item["tip"])))
 
     ranked = _ranked_teams(detail)
     first = next((t for t in ranked if viewer_team is not None and t["id"] == viewer_team.id), None)
