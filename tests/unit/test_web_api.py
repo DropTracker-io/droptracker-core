@@ -341,10 +341,10 @@ class TestApp:
         # Default bitfield = services.guild_permissions.INVITE_PERMISSIONS
         # (parity pinned in test_group_onboarding_panel) — the invite used to
         # request no permissions at all here and Administrator elsewhere.
-        assert body["permissions"] == "268553232"
+        assert body["permissions"] == "402770960"
         assert body["invite_url"].startswith("https://discord.com/oauth2/authorize?")
         assert "client_id=424242" in body["invite_url"]
-        assert "permissions=268553232" in body["invite_url"]
+        assert "permissions=402770960" in body["invite_url"]
 
 
 class TestProfileStatHelpers:

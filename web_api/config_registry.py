@@ -1065,6 +1065,16 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Public Discord invite shown on the group page.",
         "default": "",
     },
+    # services/auto_nickname.py: read by the core bot after /claim-rsn. Off by
+    # default — renaming members is the server's call, never ours.
+    {
+        "key": "auto_set_member_nicknames",
+        "label": "Set member nicknames to their RSN",
+        "category": "profile",
+        "type": "boolean",
+        "help": "When a member of your Discord server claims an account with /claim-rsn, the DropTracker bot changes their server nickname to that RuneScape name. The bot needs the Manage Nicknames permission, and its role must sit above the member's highest role. It can't rename the server owner.",
+        "default": False,
+    },
     {
         "key": "auto_provision_members",
         "label": "Auto-add WiseOldMan members",

@@ -28,7 +28,7 @@ async def bot_invite():
     # literal here because web_api must not import the interactions lib; a
     # unit test pins the two equal). Was previously ABSENT — the invite asked
     # for no permissions while components.py asked for Administrator.
-    permissions = (os.getenv("DISCORD_BOT_INVITE_PERMISSIONS") or "").strip() or "268553232"
+    permissions = (os.getenv("DISCORD_BOT_INVITE_PERMISSIONS") or "").strip() or "402770960"
 
     params = {"client_id": client_id, "scope": "bot applications.commands"}
     if permissions:

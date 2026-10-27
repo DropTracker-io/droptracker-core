@@ -80,7 +80,7 @@ def test_messages_are_plain_and_link_somewhere_useful():
 
 def test_invite_url_targets_the_server():
     url = invite_url("999")
-    assert "permissions=268553232" in url and "guild_id=999" in url and "disable_guild_select=true" in url
+    assert "permissions=402770960" in url and "guild_id=999" in url and "disable_guild_select=true" in url
 
 
 def test_mode_defaults(monkeypatch):

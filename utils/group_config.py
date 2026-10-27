@@ -53,6 +53,8 @@ SLAYER_EXCLUDED_MASTERS = "slayer_excluded_masters"
 # (web_api/routes/points.py BEHAVIOR_BOOL_KEYS). Read through
 # points_replies_ephemeral() below, never directly.
 POINTS_EPHEMERAL_MESSAGES = "points_ephemeral_messages"
+# Rename members to the RSN they claim (services/auto_nickname.py).
+AUTO_SET_MEMBER_NICKNAMES = "auto_set_member_nicknames"
 
 # What an absent row means, in storage form. These MUST equal the registry
 # defaults (web_api/config_registry.py), which is what the website shows for a
@@ -75,6 +77,7 @@ ABSENT_DEFAULTS: Dict[str, str] = {
     NOTIFY_DIARIES: "false",
     NOTIFY_SLAYER_TASKS: "false",
     NOTIFY_QUESTS: "false",
+    AUTO_SET_MEMBER_NICKNAMES: "false",
     "notify_levels": "false",
     "notification_pings": "true",
     "notifications_plain_text": "false",

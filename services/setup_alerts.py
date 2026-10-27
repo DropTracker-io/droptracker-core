@@ -47,7 +47,7 @@ from db.app_logger import AppLogger
 app_logger = AppLogger()
 
 SITE = (os.getenv("WEB_SITE_URL") or "https://www.droptracker.io").rstrip("/")
-INVITE_PERMISSIONS = "268553232"  # pinned equal to services.guild_permissions
+INVITE_PERMISSIONS = "402770960"  # pinned equal to services.guild_permissions
 CLIENT_ID = (os.getenv("DISCORD_BOT_CLIENT_ID") or "").strip() or "1172933457010245762"
 
 PREV_IDS_KEY = "bot:guilds:ids_prev"

@@ -31,6 +31,8 @@ OPTIONAL_PERMS = (
      "event team channels & voice-channel stat displays"),
     (Permissions.MANAGE_ROLES, "Manage Roles",
      "event team roles & the news opt-in role"),
+    (Permissions.MANAGE_NICKNAMES, "Manage Nicknames",
+     "setting members' nicknames to their claimed RSN"),
 )
 
 # The invite bitfield: everything above, in one place. web_api/routes/meta.py
