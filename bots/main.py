@@ -1094,6 +1094,7 @@ async def create_tasks():
     # so these sit with the interval tasks rather than behind the warm-ups.
     bot_profile_requests.start()
     bot_profile_sweep.start()
+    rank_role_sync.start()
     # Cheap and independent — run this first among the warm-ups so the Web
     # API's channel picker has data within seconds of startup instead of
     # waiting behind the slow WOM-sync pass below.
@@ -1487,7 +1488,9 @@ async def cache_channels_for_guild(guild_id, *, bypass_dead_cache: bool = False)
         try:
             roles = sorted(
                 (
-                    {"id": str(r.id), "name": r.name, "position": r.position or 0}
+                    # permissions: rank roles refuse ones that carry server control.
+                    {"id": str(r.id), "name": r.name, "position": r.position or 0,
+                     "permissions": str(int(getattr(r, "permissions", 0) or 0))}
                     for r in guild.roles
                     # Skip @everyone (its id == guild id; picked via a
                     # dedicated toggle) and bot-managed integration roles.
@@ -1669,6 +1672,19 @@ async def bot_profile_requests():
         await drain_requests(bot)
     except Exception as e:
         print(f"Bot profile requests failed: {e}")
+
+
+@Task.create(IntervalTrigger(seconds=60))
+async def rank_role_sync():
+    """Clan rank roles (services/rank_roles.py): website saves and claims
+    within a minute, every enabled group every 30 minutes. Runs in the
+    background so a long pass never delays the next tick's check."""
+    try:
+        from services.rank_roles import schedule_tick
+
+        schedule_tick(bot)
+    except Exception as e:
+        print(f"Rank role sync failed to start: {e}")
 
 
 @Task.create(IntervalTrigger(minutes=5))

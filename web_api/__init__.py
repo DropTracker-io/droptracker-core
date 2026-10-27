@@ -36,6 +36,7 @@ from web_api.routes.sites import sites_bp
 from web_api.routes.page_layouts import page_layouts_bp
 from web_api.routes.group_setup import group_setup_bp
 from web_api.routes.bot_profile import bot_profile_bp
+from web_api.routes.rank_roles import rank_roles_bp
 from web_api.routes.notification_footers import notification_footers_bp
 from web_api.routes.event_admin import event_admin_bp
 from web_api.routes.event_audit import event_audit_bp
@@ -226,6 +227,7 @@ def create_app() -> Quart:
     app.register_blueprint(page_layouts_bp, url_prefix=API_PREFIX)
     app.register_blueprint(group_setup_bp, url_prefix=API_PREFIX)
     app.register_blueprint(bot_profile_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(rank_roles_bp, url_prefix=API_PREFIX)
     app.register_blueprint(notification_footers_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_audit_bp, url_prefix=API_PREFIX)

@@ -321,6 +321,18 @@ def _queue_nickname(discord_id: str, player_name: Optional[str]) -> None:
         print(f"[player_claims] Failed to queue nickname for {discord_id}: {exc}")
 
 
+def _queue_rank_roles(player_id) -> None:
+    """Groups that sync clan rank roles give the new owner their rank's role
+    on the bot's next pass (services/rank_roles). Best-effort, like the
+    nickname job."""
+    try:
+        from services.rank_roles import request_for_player
+
+        request_for_player(session, player_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[player_claims] Failed to request rank roles for player {player_id}: {exc}")
+
+
 @_release_scoped_session
 def preview_claim(
     rsn: str, *, discord_id: Optional[str] = None, guild_id=None
@@ -387,6 +399,7 @@ def claim_player(
             _reclaim_attach_group(result, player, _resolve_guild_group(guild_id))
             # Re-claiming is also how a member fixes their nickname.
             _queue_nickname(discord_id, facts["player_name"])
+            _queue_rank_roles(player.player_id)
             return result
         return ClaimResult(
             status="claimed_by_other",
@@ -413,6 +426,7 @@ def claim_player(
     from services.discord_roles import request_sync
     request_sync()
     _queue_nickname(discord_id, facts["player_name"])
+    _queue_rank_roles(player.player_id)
 
     result = ClaimResult(status="claimed", **facts)
     if group:
