@@ -290,6 +290,7 @@ async def _process_entry(entry_bytes: bytes) -> None:
 async def _process_submission(entry_bytes: bytes) -> None:
     from api.core import get_db_session
     from api.routes.webhook import (
+        _dispatch_hardcore_submission,
         _dispatch_seasonal_submission,
         _link_video_to_submission,
         _mark_submission_outcome,
@@ -439,6 +440,19 @@ async def _process_submission(entry_bytes: bytes) -> None:
                     _record_status_metrics(processed_data)
                     _record_plugin_version(processed_data)
                     _record_last_seen(processed_data)
+                    continue
+                elif world_type == "hardcore":
+                    # Stored apart from the main game (data/submissions/hardcore.py).
+                    # No plugin notice or last-seen: those belong to the main account.
+                    response = await _dispatch_hardcore_submission(norm_type, processed_data, db_session)
+                    if response is None:
+                        response = SubmissionResponse(
+                            False, f"{norm_type} is not stored for hardcore worlds"
+                        )
+                    db_session.commit()
+                    _mark_submission_outcome(processed_data, norm_type, response)
+                    _record_status_metrics(processed_data)
+                    _record_plugin_version(processed_data)
                     continue
                 elif world_type != "main":
                     continue

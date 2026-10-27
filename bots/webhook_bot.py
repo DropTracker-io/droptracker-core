@@ -16,6 +16,7 @@ from db.models import Group, ItemList, PersonalBestEntry, PlayerPet, Session, Pl
 # through data.submissions.dispatch so it cannot support fewer types than the
 # API intake does. tests/unit/test_submission_dispatch_parity.py enforces it.
 from data.submissions.dispatch import (
+    HARDCORE_WORLD_TYPE,
     SEASONAL_WORLD_TYPE,
     SUPPORTED_TYPES,
     dispatch_submission,
@@ -630,6 +631,15 @@ async def process_submission_with_session(submission_type, embed_data):
             else:
                 # Global kill switch (admin panel): skip seasonal processing.
                 result = None
+            success = True
+        elif world_type == HARDCORE_WORLD_TYPE:
+            # Stored apart from the main game (data/submissions/hardcore.py).
+            result = await dispatch_submission(
+                normalized_submission_type,
+                embed_data,
+                session,
+                world_type=HARDCORE_WORLD_TYPE,
+            )
             success = True
         elif world_type != MAIN_WORLD_TYPE:
             result = None

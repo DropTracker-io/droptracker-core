@@ -25,6 +25,15 @@ that build is provably gone.
 
 MAIN_WORLD_TYPE = "main"
 SEASONAL_WORLD_TYPE = "seasonal"
+# Hardcore Worlds (2026-11-04): fresh one-life characters with their own
+# economy. Stored apart from everything else by data/submissions/hardcore.py.
+HARDCORE_WORLD_TYPE = "hardcore"
+
+# Raw world type (lowered) -> canonical. The plugin (6.1.19+) sends RuneLite's
+# enum name, HARDCORE_MAIN.
+WORLD_TYPE_ALIASES = {
+    "hardcore_main": HARDCORE_WORLD_TYPE,
+}
 
 
 # Raw type string (as the plugin sends it) -> canonical type.
@@ -96,11 +105,22 @@ SEASONAL_TYPES = frozenset({
 })
 
 
+# Types stored from hardcore worlds: everything with a processor except the
+# clan relays (main-world chat, bridged into Discord) and the plugin settings
+# snapshot (a debugging aid that says nothing about the world).
+HARDCORE_TYPES = SUPPORTED_TYPES - frozenset({
+    "clan_broadcast",
+    "clan_chat",
+    "config_snapshot",
+})
+
+
 def normalize_world_type(raw_world_type):
     """Canonical world type; anything empty/absent means the main game."""
     if raw_world_type is None:
         return MAIN_WORLD_TYPE
     normalized = str(raw_world_type).strip().lower()
+    normalized = WORLD_TYPE_ALIASES.get(normalized, normalized)
     return normalized or MAIN_WORLD_TYPE
 
 
@@ -186,6 +206,14 @@ async def dispatch_submission(submission_type, data, session, *, world_type=MAIN
 
 
 async def _run_processor(submissions, norm_type, world, data, session):
+    if world == HARDCORE_WORLD_TYPE:
+        # One storage path for every type, not the per-type processors: those
+        # create main-game players, price items and feed boards and events.
+        if norm_type not in HARDCORE_TYPES:
+            return None
+        from data.submissions.hardcore import store_hardcore_submission
+        return await store_hardcore_submission(norm_type, data, session)
+
     if world == SEASONAL_WORLD_TYPE:
         if norm_type not in SEASONAL_TYPES:
             return None

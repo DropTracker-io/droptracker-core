@@ -11,6 +11,7 @@ from quart_rate_limiter import rate_limit
 from api.core import logger, get_db_session, metrics, reset_db_connections
 from data import submissions
 from data.submissions.dispatch import (
+    HARDCORE_WORLD_TYPE,
     SEASONAL_WORLD_TYPE,
     SUPPORTED_TYPES,
     dispatch_submission,
@@ -114,6 +115,14 @@ async def _dispatch_seasonal_submission(submission_type, processed_data, db_sess
     """Route seasonal submissions to their processors with world_type='seasonal'."""
     return await dispatch_submission(
         submission_type, processed_data, db_session, world_type=SEASONAL_WORLD_TYPE
+    )
+
+
+async def _dispatch_hardcore_submission(submission_type, processed_data, db_session):
+    """Store a Hardcore Worlds submission apart from the main game
+    (data/submissions/hardcore.py)."""
+    return await dispatch_submission(
+        submission_type, processed_data, db_session, world_type=HARDCORE_WORLD_TYPE
     )
 
 
@@ -570,6 +579,18 @@ async def _process_webhook_request(req_start):
                                 _normalize_submission_type(submission_type),
                                 response,
                             )
+                            continue
+                        elif world_type == HARDCORE_WORLD_TYPE:
+                            norm_type = _normalize_submission_type(submission_type)
+                            response = await _dispatch_hardcore_submission(
+                                norm_type, processed_data, db_session,
+                            )
+                            if response is None:
+                                response = SubmissionResponse(
+                                    False, f"{norm_type} is not stored for hardcore worlds"
+                                )
+                            db_session.commit()
+                            _mark_submission_outcome(processed_data, norm_type, response)
                             continue
                         elif world_type != MAIN_WORLD_TYPE:
                             continue
