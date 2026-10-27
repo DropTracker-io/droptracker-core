@@ -1507,7 +1507,22 @@ def coerce_from_storage(field: Dict[str, Any], stored: Optional[str]) -> Any:
         if ("min" in field and value < field["min"]) or ("max" in field and value > field["max"]):
             return field.get("default")
         return value
-    # channel / string / text / csv / bosslist / select / multiselect -> string
+    if ftype == "select":
+        # Legacy rows predate the options' casing (312 groups store
+        # min_ca_tier_to_notify='Easy' against 'EASY') or hold the '0'
+        # "unset" sentinel. Editors match options exactly, so surface the
+        # canonical option; readers compare case-insensitively already.
+        options = [str(o.get("value")) if isinstance(o, dict) else str(o)
+                   for o in field.get("options") or []]
+        text = str(stored)
+        if text not in options:
+            match = next((o for o in options if o.lower() == text.strip().lower()), None)
+            if match is not None:
+                return match
+            if text.strip() == "0":
+                return field.get("default")
+        return text
+    # channel / string / text / csv / bosslist / multiselect -> string
     return str(stored)
 
 

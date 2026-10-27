@@ -65,6 +65,14 @@ class TestRegistry:
     def test_unknown_key(self):
         assert reg.get_config_field("does_not_exist") is None
 
+    def test_coerce_from_storage_select_canonical_case_and_zero_sentinel(self):
+        field = reg.get_config_field("min_ca_tier_to_notify")
+        assert reg.coerce_from_storage(field, "Easy") == "EASY"
+        assert reg.coerce_from_storage(field, "grandmaster") == "GRANDMASTER"
+        assert reg.coerce_from_storage(field, "HARD") == "HARD"
+        assert reg.coerce_from_storage(field, "0") == field["default"]
+        assert reg.coerce_from_storage(field, "disabled") == "disabled"  # unknown kept
+
     def test_coerce_from_storage_types(self):
         bfield = reg.get_config_field("notify_pbs")
         assert reg.coerce_from_storage(bfield, "1") is True
