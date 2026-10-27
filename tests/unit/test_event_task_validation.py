@@ -1601,3 +1601,56 @@ def test_loot_sweep_per_drop_must_be_bool(_stub_ls):
     with pytest.raises(ProblemException):
         _validate({"type": "loot_sweep", "config": {"groups": [
             {"npcs": ["Kree'arra"], "items": [{"item_name": "Armadyl helmet", "per_drop": "yes"}]}]}})
+
+
+# ── any_of_distinct requirement groups (suggestion #216) ─────────────────────
+
+def test_any_path_accepts_distinct_group():
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "any_path", "paths": [
+            {"label": "Full set",
+             "groups": [{"mode": "all_of",
+                         "items": ["Justiciar faceguard", "Justiciar chestguard",
+                                   "Justiciar legguards"]}]},
+            {"label": "Any 2 different",
+             "groups": [{"mode": "any_of_distinct", "need": 2,
+                         "items": ["Justiciar faceguard", "Justiciar chestguard",
+                                   "Justiciar legguards"]}]},
+        ]},
+    })
+    group = _cfg(out)["paths"][1]["groups"][0]
+    assert group["mode"] == "any_of_distinct"
+    assert group["need"] == 2
+
+
+def test_distinct_group_need_cannot_exceed_item_count():
+    with pytest.raises(ProblemException) as exc:
+        _validate({
+            "type": "item_collection",
+            "config": {"kind": "groups", "groups": [
+                {"mode": "any_of_distinct", "need": 3,
+                 "items": ["Boater", "Red boater"]}]},
+        })
+    assert "different" in str(exc.value.detail if hasattr(exc.value, "detail") else exc.value)
+
+
+def test_groups_kind_target_counts_distinct_need():
+    out = _validate({
+        "type": "item_collection",
+        "config": {"kind": "groups", "groups": [
+            {"mode": "all_of", "items": ["Godsword shard 1", "Godsword shard 2"]},
+            {"mode": "any_of_distinct", "need": 2,
+             "items": ["Armadyl hilt", "Bandos hilt", "Zamorak hilt"]},
+        ]},
+    })
+    assert out["target_value"] == 4
+
+
+def test_unknown_group_mode_still_rejected():
+    with pytest.raises(ProblemException):
+        _validate({
+            "type": "item_collection",
+            "config": {"kind": "groups", "groups": [
+                {"mode": "some_of", "items": ["Boater"]}]},
+        })

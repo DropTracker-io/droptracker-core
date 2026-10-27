@@ -68,7 +68,12 @@ def _item(name: str, entry=None, required_default: int = 1) -> dict:
 
 
 def _group(mode: str, items: list, need: int, *, label=None, unit=None) -> dict:
-    out = {"mode": mode, "need": need, "items": items}
+    # An any_of_distinct group goes on the wire as any_of + distinct (clients
+    # parse ``mode`` as a strict enum), the same shape as the flat kind.
+    if mode == "any_of_distinct":
+        out = {"mode": "any_of", "need": need, "items": items, "distinct": True}
+    else:
+        out = {"mode": mode, "need": need, "items": items}
     if label:
         out["label"] = label
     if unit:
@@ -106,6 +111,15 @@ def _display_names(config: dict, norms) -> dict:
     return {n: out.get(n, n) for n in norms}
 
 
+def _group_label(mode: str, need: int) -> str:
+    """Heading for one requirement group of a ``groups``/``any_path`` config."""
+    if mode == "all_of":
+        return "All of"
+    if mode == "any_of_distinct":
+        return f"Any {need} different" if need > 1 else "Any of"
+    return f"Any {need} of" if need > 1 else "Any of"
+
+
 def _item_collection_groups(task: dict, config: dict, need: int) -> tuple[list, list]:
     """(groups, paths) for an item_collection task — the same three shapes the
     breakdown reconstructs: multi-group ``groups``, either/or ``paths``, and
@@ -122,8 +136,7 @@ def _item_collection_groups(task: dict, config: dict, need: int) -> tuple[list, 
     if kind == "groups":
         return [
             _group(mode, _named(sorted(names), entries), grp_need,
-                   label=("All of" if mode == "all_of" else
-                          f"Any {grp_need} of" if grp_need > 1 else "Any of"))
+                   label=_group_label(mode, grp_need))
             for mode, names, grp_need in _parse_requirement_groups(config)
         ], []
 
@@ -158,8 +171,7 @@ def _item_collection_groups(task: dict, config: dict, need: int) -> tuple[list, 
             else:
                 groups = [
                     _group(mode, _named(sorted(names), entries), grp_need,
-                           label=("All of" if mode == "all_of" else
-                                  f"Any {grp_need} of" if grp_need > 1 else "Any of"))
+                           label=_group_label(mode, grp_need))
                     for mode, names, grp_need in _parse_requirement_groups(path)
                 ]
                 paths.append({
@@ -284,6 +296,12 @@ def requirement_spec(task: dict) -> dict:
             out["summary"] = f"Collect any {need} from these {total} items"
         elif target:
             out["summary"] = f"Collect {need}× {target}" if need > 1 else f"Collect {target}"
+        if kind in ("groups", "any_path") and any(
+                g.get("distinct") for g in groups + [g for p in paths for g in p["groups"]]):
+            out["notes"].append(
+                "In an \"Any N different\" requirement each item counts once. "
+                "Another copy of an item your team already has doesn't add "
+                "progress there.")
         sources = [str(n).strip() for n in (config.get("source_npcs") or [])
                    if str(n).strip()]
         out["npcs"] = sources

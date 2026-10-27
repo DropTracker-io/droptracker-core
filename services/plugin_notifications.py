@@ -40,7 +40,7 @@ import json
 import time
 import uuid
 
-from utils.task_progress import DISTINCT_ITEM_KINDS
+from utils.task_progress import DISTINCT_GROUP_MODES, DISTINCT_ITEM_KINDS, GROUP_MODES
 
 INBOX_KEY_TEMPLATE = "plugin:notify:{player_id}"
 INBOX_CAP = 50
@@ -513,7 +513,7 @@ def mark_obtained_requirements(requirements: list, config: dict,
 
     Eligible kinds: :data:`DISTINCT_ITEM_KINDS` (``all_of``/``assembly``/
     ``any_of_distinct`` — every listed item counts once), and ``groups`` for
-    items inside all_of-mode groups. ``any_of`` re-receives still fold into
+    items inside all_of / any_of_distinct groups. ``any_of`` re-receives still fold into
     progress and ``point_collection`` items are re-earnable for points, so
     those are never annotated. ``collected_names`` is a set of normalized
     ``EventCompletion.matched_target`` values.
@@ -529,8 +529,8 @@ def mark_obtained_requirements(requirements: list, config: dict,
         for group in (config.get("groups") or []):
             if not isinstance(group, dict):
                 continue
-            mode = group.get("mode") if group.get("mode") in ("all_of", "any_of") else "all_of"
-            if mode != "all_of":
+            mode = group.get("mode") if group.get("mode") in GROUP_MODES else "all_of"
+            if mode not in DISTINCT_GROUP_MODES:
                 continue
             for it in group.get("items") or []:
                 name = it if isinstance(it, str) \

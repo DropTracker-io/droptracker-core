@@ -127,9 +127,19 @@ def points_fold(rows, weights: dict) -> int:
     return total
 
 
+# Modes a requirement group (``groups`` kind, or one path of ``any_path``) may
+# take. ``any_of_distinct`` is the group form of the flat kind of the same
+# name: N DIFFERENT listed items, each counting once ("any 10 different
+# Barrows items", suggestion #216).
+GROUP_MODES = ("all_of", "any_of", "any_of_distinct")
+# Group modes folded one unit per different item held (never by quantity).
+DISTINCT_GROUP_MODES = ("all_of", "any_of_distinct")
+
+
 def parse_requirement_groups(config: dict) -> list:
     """``groups`` config -> normalized ``(mode, item-name set, need)`` tuples
-    (shared by the grouped and any_path rollups)."""
+    (shared by the grouped and any_path rollups). An ``any_of_distinct``
+    group's need is capped at its item count, since each item counts once."""
     groups: list = []
     for group in (config.get("groups") or []):
         if not isinstance(group, dict):
@@ -142,11 +152,16 @@ def parse_requirement_groups(config: dict) -> list:
         names.discard("")
         if not names:
             continue
-        mode = group.get("mode") if group.get("mode") in ("all_of", "any_of") else "all_of"
-        try:
-            need = max(int(group.get("need") or 0), 1) if mode == "any_of" else len(names)
-        except (TypeError, ValueError):
-            need = 1
+        mode = group.get("mode") if group.get("mode") in GROUP_MODES else "all_of"
+        if mode == "all_of":
+            need = len(names)
+        else:
+            try:
+                need = max(int(group.get("need") or 0), 1)
+            except (TypeError, ValueError):
+                need = 1
+            if mode == "any_of_distinct":
+                need = min(need, len(names))
         groups.append((mode, names, need))
     return groups
 
@@ -198,9 +213,10 @@ def distinct_players_from_rows(rows, threshold: int) -> int:
 
 
 def grouped_progress_from_rows(rows, config: dict, threshold: int) -> int:
-    """``kind: "groups"`` rollup — each group is its own all-of (distinct
-    listed items) or any-of (quantities fold, capped at ``need``) requirement,
-    and overall progress is the sum of per-group progress."""
+    """``kind: "groups"`` rollup — each group is its own all-of or
+    any-of-distinct (one unit per different listed item) or any-of
+    (quantities fold) requirement, capped at its ``need``; overall progress
+    is the sum of per-group progress."""
     groups = parse_requirement_groups(config)
 
     distinct: list = [set() for _ in groups]
@@ -216,7 +232,7 @@ def grouped_progress_from_rows(rows, config: dict, threshold: int) -> int:
             continue
         for gi, (mode, names, _need) in enumerate(groups):
             if name in names:
-                if mode == "all_of":
+                if mode in DISTINCT_GROUP_MODES:
                     distinct[gi].add(name)
                 else:
                     folded[gi] += qty
@@ -224,7 +240,7 @@ def grouped_progress_from_rows(rows, config: dict, threshold: int) -> int:
 
     progress = wildcard
     for gi, (mode, _names, need) in enumerate(groups):
-        got = len(distinct[gi]) if mode == "all_of" else folded[gi]
+        got = len(distinct[gi]) if mode in DISTINCT_GROUP_MODES else folded[gi]
         progress += min(got, need)
     return min(progress, threshold)
 

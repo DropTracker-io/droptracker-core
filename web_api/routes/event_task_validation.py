@@ -661,13 +661,14 @@ def _validated_item_entries(s, items, *, with_points: bool,
 
 def _validated_groups(s, groups, *, pet_names: set[str] | None = None,
                       found_pets: dict | None = None) -> tuple[list[dict], int]:
-    """Validate a ``kind: "groups"`` config: every group is its own all-of or
-    any-of item requirement, and the task completes when all groups are
+    """Validate a ``kind: "groups"`` config: every group is its own all-of,
+    any-of or any-of-distinct item requirement, and the task completes when all groups are
     satisfied (e.g. a godsword: ALL three shards + ANY one hilt).
 
     Returns ``(normalized groups, total target_value)`` where each group is
     ``{"mode", "items", "need"}`` — need is len(items) for all_of, the
-    requested count (default 1) for any_of.
+    requested count (default 1) for any_of / any_of_distinct (the latter
+    capped at len(items), since each item counts once).
     """
     if not isinstance(groups, list) or not groups:
         abort_problem(422, "Invalid config", "Grouped config requires a non-empty 'groups' array.")
@@ -681,9 +682,9 @@ def _validated_groups(s, groups, *, pet_names: set[str] | None = None,
         if not isinstance(group, dict):
             abort_problem(422, "Invalid config", "Each requirement group must be an object.")
         mode = group.get("mode")
-        if mode not in ("all_of", "any_of"):
+        if mode not in ("all_of", "any_of", "any_of_distinct"):
             abort_problem(422, "Invalid config",
-                          f"Group {gi}: mode must be 'all_of' or 'any_of'.")
+                          f"Group {gi}: mode must be 'all_of', 'any_of' or 'any_of_distinct'.")
         entries = _validated_item_entries(s, group.get("items"), with_points=False,
                                           pet_names=pet_names, found_pets=found_pets)
         names = [e["item_name"] for e in entries]
@@ -704,6 +705,18 @@ def _validated_groups(s, groups, *, pet_names: set[str] | None = None,
             # length (e.g. any 500 javelins across the javelin types).
             need = _require_target_value(group.get("need", 1), what=f"Group {gi} 'need'")
             out.append({"mode": "any_of", "items": names, "need": need})
+            total_need += need
+        elif mode == "any_of_distinct":
+            # Each listed item counts once, so the goal can't exceed the list
+            # ("any 10 different Barrows items", suggestion #216).
+            need = _require_target_value(group.get("need", 1), what=f"Group {gi} 'need'")
+            if need > len(names):
+                abort_problem(
+                    422, "Invalid config",
+                    f"Group {gi}: needs {need} different items but only lists "
+                    f"{len(names)}. Each item counts once.",
+                )
+            out.append({"mode": "any_of_distinct", "items": names, "need": need})
             total_need += need
         else:
             out.append({"mode": "all_of", "items": names, "need": len(names)})

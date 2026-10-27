@@ -222,6 +222,31 @@ class TestItemCollection:
         _items, npcs = spec_requirement_names(spec)
         assert npcs == {"theatre of blood"}
 
+    def test_distinct_path_group_goes_out_as_any_of_distinct(self):
+        # Suggestion #216: the wire keeps mode any_of (strict client enum) and
+        # flags distinct, the same shape as the flat any_of_distinct kind.
+        spec = requirement_spec(_task(type="item_collection", config={
+            "kind": "any_path", "paths": [
+                {"groups": [{"mode": "all_of", "items": [
+                    "Torag's helm", "Torag's platebody"]}]},
+                {"groups": [{"mode": "any_of_distinct", "need": 2, "items": [
+                    "Torag's helm", "Dharok's helm", "Karil's coif"]}]},
+            ]}))
+        group = spec["paths"][1]["groups"][0]
+        assert group["mode"] == "any_of"
+        assert group["distinct"] is True
+        assert group["label"] == "Any 2 different"
+        assert spec["paths"][1]["need"] == 2
+        assert any("counts once" in n for n in spec["notes"])
+
+    def test_plain_groups_have_no_distinct_note(self):
+        spec = requirement_spec(_task(type="item_collection", config={
+            "kind": "groups", "groups": [
+                {"mode": "any_of", "need": 2, "items": ["Bandos hilt", "Armadyl hilt"]},
+            ]}))
+        assert "distinct" not in spec["groups"][0]
+        assert not any("counts once" in n for n in spec["notes"])
+
     def test_source_restriction_is_stated(self):
         spec = requirement_spec(_task(
             type="item_collection", target="Dragon axe",

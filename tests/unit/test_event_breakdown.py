@@ -121,6 +121,42 @@ class TestAnyPathQuantityFold:
         assert set_path["need"] == 3
 
 
+# Suggestion #216: full Barrows set OR any 3 DIFFERENT Barrows items.
+DISTINCT_PATH_CONFIG = {
+    "kind": "any_path",
+    "paths": [
+        {"groups": [{"mode": "all_of", "need": 2, "items": [
+            "Torag's helm", "Torag's platebody"]}]},
+        {"groups": [{"mode": "any_of_distinct", "need": 3, "items": [
+            "Torag's helm", "Dharok's helm", "Karil's coif", "Ahrim's hood"]}]},
+    ],
+}
+
+
+class TestDistinctPathGroup:
+    def test_duplicates_count_once(self):
+        rows = [_row(2, target="Torag's helm", rid=1),
+                _row(1, target="Torag's helm", rid=2),
+                _row(1, target="Dharok's helm", rid=3)]
+        out = _breakdown(_task(DISTINCT_PATH_CONFIG), rows)
+        path = out["paths"][1]
+        assert path["got"] == 2
+        assert path["need"] == 3
+        assert path["pct"] == engine._anypath_progress_from_rows(
+            rows, DISTINCT_PATH_CONFIG, 100)
+
+    def test_wire_shape_is_any_of_flagged_distinct(self):
+        out = _breakdown(_task(DISTINCT_PATH_CONFIG), [])
+        group = out["paths"][1]["groups"][0]
+        assert group["mode"] == "any_of"
+        assert group["distinct"] is True
+        assert all(it["required"] == 1 for it in group["items"])
+
+    def test_plain_groups_not_flagged(self):
+        out = _breakdown(_task(ANY_PATH_CONFIG), [])
+        assert all("distinct" not in g for p in out["paths"] for g in p["groups"])
+
+
 class TestGroupsChecklistQuantityFold:
     CONFIG = {"kind": "groups", "groups": [
         {"mode": "any_of", "need": 10, "items": ["Blood rune", "Death rune"]},

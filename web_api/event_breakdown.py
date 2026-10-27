@@ -131,27 +131,34 @@ def _item_row(name_norm: str, icons: dict, qty_by: dict, entry, required_default
 def _group_from_names(mode: str, names_norm, need: int, qty_by: dict,
                       icons: dict, entries: dict) -> dict:
     """Build one requirement group ({mode, need, obtained, satisfied, items})
-    from a set/list of normalized item names."""
+    from a set/list of normalized item names. An ``any_of_distinct`` group
+    goes on the wire as ``mode: "any_of"`` + ``distinct: true`` (the same
+    shape as the flat kind), since clients parse ``mode`` as a strict enum."""
     names = list(names_norm)
+    distinct = mode == "any_of_distinct"
     # A single-item any_of ("6000× Vial of blood") is really a counted goal:
     # surface the group need on the item row so it reads 158/6000, not ✓.
-    single_need = need if mode != "all_of" and len(names) == 1 else 1
+    single_need = need if mode == "any_of" and len(names) == 1 else 1
     items = [_item_row(nn, icons, qty_by, (entries or {}).get(nn),
                        required_default=single_need) for nn in names]
-    if mode == "all_of":
+    if mode == "all_of" or distinct:
+        # One unit per different item held — the engine's distinct fold.
         got = sum(1 for it in items if it["satisfied"])
     else:
         # any_of: full quantities fold, capped only at the group need — the
         # engine (_grouped_progress_from_rows) has no per-item cap, so a
         # 53-vial stack must count 53 here too, not 1.
         got = min(sum(it["obtained"] for it in items), need)
-    return {
-        "mode": mode,
+    group = {
+        "mode": "any_of" if distinct else mode,
         "need": need,
         "obtained": min(got, need),
         "satisfied": got >= need,
         "items": items,
     }
+    if distinct:
+        group["distinct"] = True
+    return group
 
 
 def _contributors(rows, player_names: dict, ts) -> list[dict]:

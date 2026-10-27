@@ -627,6 +627,19 @@ class TestMarkObtainedRequirements:
         assert reqs[0].get("obtained") is True
         assert "obtained" not in reqs[1]
 
+    def test_groups_marks_any_of_distinct_groups(self):
+        # Suggestion #216: a banked item can't advance a distinct group again.
+        config = {"kind": "groups", "groups": [
+            {"mode": "any_of_distinct", "need": 2,
+             "items": [{"item_name": "Coins"}, {"item_name": "Bones"}]},
+            {"mode": "any_of", "need": 2, "items": [{"item_name": "Bronze axe"}]},
+        ]}
+        reqs = pn.mark_obtained_requirements(
+            self._reqs(), config, {"coins", "bronze axe"})
+        assert reqs[0].get("obtained") is True
+        assert "obtained" not in reqs[1]
+        assert "obtained" not in reqs[2]
+
     def test_empty_collected_is_noop(self):
         reqs = pn.mark_obtained_requirements(self._reqs(), {"kind": "all_of"}, set())
         assert all("obtained" not in r for r in reqs)

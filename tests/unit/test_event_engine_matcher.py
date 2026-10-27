@@ -2073,3 +2073,68 @@ class TestPerDropItems:
         t = _task(target="Hueycoatl hide")
         m = engine.match_task(t, _env("drop", {"item_name": "Hueycoatl hide", "quantity": 3}))
         assert m["quantity"] == 3
+
+
+# ── any_of_distinct requirement groups (suggestion #216) ─────────────────────
+
+# Koeppy's case: a full Barrows set OR any N DIFFERENT Barrows items, where a
+# second Torag's helm must not count twice toward the uniques.
+BARROWS_DISTINCT = {
+    "kind": "any_path",
+    "paths": [
+        {"label": "Full set",
+         "groups": [{"mode": "all_of",
+                     "items": ["Torag's helm", "Torag's platebody",
+                               "Torag's platelegs", "Torag's hammers"]}]},
+        {"label": "Any 3 different",
+         "groups": [{"mode": "any_of_distinct", "need": 3,
+                     "items": ["Torag's helm", "Dharok's helm", "Ahrim's hood",
+                               "Karil's coif", "Guthan's helm"]}]},
+    ],
+}
+
+
+class TestDistinctRequirementGroups:
+    def test_duplicates_count_once_in_a_distinct_path(self):
+        # Three Torag's helms: full set 1/4 (25%), any-3-different 1/3 (33%).
+        rows = [_Row("Torag's helm", quantity=3)]
+        assert engine._anypath_progress_from_rows(
+            rows, BARROWS_DISTINCT, ANY_PATH_THRESHOLD) == 33
+
+    def test_separate_duplicate_rows_count_once(self):
+        rows = [_Row("Torag's helm"), _Row("Torag's helm"), _Row("Dharok's helm")]
+        assert engine._anypath_progress_from_rows(
+            rows, BARROWS_DISTINCT, ANY_PATH_THRESHOLD) == 66
+
+    def test_distinct_path_completes_on_n_different_items(self):
+        rows = [_Row("Torag's helm"), _Row("Dharok's helm"), _Row("Karil's coif")]
+        assert engine._anypath_progress_from_rows(
+            rows, BARROWS_DISTINCT, ANY_PATH_THRESHOLD) == 100
+
+    def test_full_set_path_still_completes(self):
+        rows = [_Row("Torag's helm"), _Row("Torag's platebody"),
+                _Row("Torag's platelegs"), _Row("Torag's hammers")]
+        assert engine._anypath_progress_from_rows(
+            rows, BARROWS_DISTINCT, ANY_PATH_THRESHOLD) == 100
+
+    def test_groups_kind_folds_distinct_group(self):
+        config = {"kind": "groups", "groups": [
+            {"mode": "all_of", "items": ["Godsword shard 1"]},
+            {"mode": "any_of_distinct", "need": 2,
+             "items": ["Armadyl hilt", "Bandos hilt", "Zamorak hilt"]},
+        ]}
+        rows = [_Row("Godsword shard 1"), _Row("Bandos hilt", quantity=2)]
+        assert engine._grouped_progress_from_rows(rows, config, 3) == 2
+        rows.append(_Row("Zamorak hilt"))
+        assert engine._grouped_progress_from_rows(rows, config, 3) == 3
+
+    def test_parse_caps_need_at_item_count(self):
+        groups = engine._parse_requirement_groups({"groups": [
+            {"mode": "any_of_distinct", "need": 9, "items": ["A", "B"]}]})
+        assert groups == [("any_of_distinct", {"a", "b"}, 2)]
+
+    def test_plain_any_of_still_folds_duplicates(self):
+        config = {"kind": "groups", "groups": [
+            {"mode": "any_of", "need": 3, "items": ["Torag's helm", "Dharok's helm"]}]}
+        assert engine._grouped_progress_from_rows(
+            [_Row("Torag's helm", quantity=3)], config, 3) == 3
