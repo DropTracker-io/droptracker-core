@@ -203,3 +203,116 @@ def test_board_page_starts_on_own_team_and_links_the_others():
     assert pe._board_page(_ev(kind="botw"), detail, None) == [{"type": "board"}]
     with pytest.raises(pe._Missing):
         pe._board_page(_ev(), detail, None, 999)
+
+
+def test_task_cards_link_their_page_and_name_what_counts():
+    detail = _detail()
+    detail["tasks"][0]["config"] = {"kind": "all_of", "items": [
+        "Twisted bow", {"name": "Dragon bones", "quantity": 3}, "Elysian sigil"]}
+    items = pe._task_items(detail)
+    assert items[0]["page"] == "task:1"
+    assert items[0]["note"] == "Counts: Twisted bow, 3× Dragon bones, Elysian sigil"
+    assert "note" not in items[1]  # a KC task has no item list
+
+
+def test_needs_line_caps_length_and_counts_the_rest():
+    many = [{"name": f"Item number {i} of a long set"} for i in range(9)]
+    line = pe._needs_line(many)
+    assert line.startswith("Counts: Item number 0 of a long set, ") and line.endswith(" +6 more")
+    assert len(line) < 125
+    assert pe._needs_line([]) is None
+    capped = pe._needs_line([{"name": "A"}] * pe.REQUIREMENTS_LIMIT)
+    assert capped.endswith(" and more")
+
+
+class _Query:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def filter(self, *a):
+        return self
+
+    def first(self):
+        return self.rows[0] if self.rows else None
+
+    def __iter__(self):
+        return iter(self.rows)
+
+
+def _session(task, teams):
+    from db.models import EventTask
+
+    return SimpleNamespace(query=lambda model: _Query([task] if model is EventTask else teams))
+
+
+def _item(name, obtained, required=1, item_id=None, **kw):
+    out = {"name": name, "icon": {"type": "item", "id": item_id, "name": name} if item_id else None,
+           "required": required, "obtained": obtained, "satisfied": obtained >= required}
+    out.update(kw)
+    return out
+
+
+def test_task_page_checklist_puts_own_team_first(monkeypatch):
+    import web_api.routes.events as web_events
+
+    states = {
+        10: {"structure": "checklist", "groups": [{"mode": "all_of", "need": 2, "obtained": 1, "items": [
+            _item("Twisted bow", 1, item_id=20997), _item("Dragon bones", 1, 3, pending=1)]}],
+             "contributors": [{"player_name": "Zezima", "quantity": 2,
+                               "items": [{"name": "Twisted bow", "quantity": 1},
+                                         {"name": "Dragon bones", "quantity": 1}]}]},
+        11: {"structure": "checklist", "groups": [{"mode": "all_of", "need": 2, "obtained": 0, "items": [
+            _item("Twisted bow", 0, item_id=20997), _item("Dragon bones", 3, 3)]}],
+             "contributors": []},
+    }
+    monkeypatch.setattr(web_events, "team_task_breakdown", lambda s, eid, task, team: states[team.id])
+    teams = [SimpleNamespace(id=10), SimpleNamespace(id=11)]
+    s = _session(SimpleNamespace(id=1), teams)
+    blocks = pe._task_page(s, _ev(), _detail(), 1, SimpleNamespace(id=10))
+    assert blocks[0] == {"type": "heading", "text": "Get a Twisted bow"}
+    assert blocks[1]["type"] == "tasks"
+    assert "page" not in blocks[1]["items"][0] and "note" not in blocks[1]["items"][0]
+    assert [b["label"] for b in blocks[1]["items"][0]["bars"]] == ["Red", "Blue"]
+    check = next(b for b in blocks if b["type"] == "table")
+    assert [c["label"] for c in check["columns"]] == ["Item", "Need", "Red", "Blue"]
+    bow, bones = check["rows"]
+    assert bow["cells"] == ["Twisted bow", "1", "Done", "-"]
+    assert bow["icon_item_id"] == 20997 and bow["color"] == pe.DONE_COLOR
+    assert bones["cells"] == ["Dragon bones", "3×", "Pending review", "Done"]
+    assert "icon_item_id" not in bones and "color" not in bones
+    headings = [b["text"] for b in blocks if b["type"] == "heading"]
+    assert "All of these  (1 / 2)" in headings and "Who has helped (Red)" in headings
+    helped = blocks[-1]["rows"][0]["cells"]
+    assert helped == ["Zezima", "Twisted bow, Dragon bones"]
+
+    # An outsider sees the leaders first (Blue leads on score).
+    outsider = pe._task_page(s, _ev(), _detail(), 1, None)
+    check = next(b for b in outsider if b["type"] == "table")
+    assert [c["label"] for c in check["columns"]][2:] == ["Blue", "Red"]
+
+
+def test_task_page_paths_and_refusals(monkeypatch):
+    import web_api.routes.events as web_events
+
+    bd = {"structure": "paths", "contributors": [], "paths": [
+        {"label": "Pet", "groups": [{"mode": "any_of", "need": 1, "obtained": 0,
+                                     "items": [_item("Pet general graardor", 0)]}]},
+        {"label": "5,000 KC", "groups": [], "need": 5000, "got": 1200, "unit": "KC",
+         "npcs": [{"name": "General Graardor"}, {"name": "Kree'arra"}]},
+    ]}
+    monkeypatch.setattr(web_events, "team_task_breakdown", lambda *a: bd)
+    s = _session(SimpleNamespace(id=2), [SimpleNamespace(id=10), SimpleNamespace(id=11)])
+    blocks = pe._task_page(s, _ev(), _detail(), 2, None)
+    headings = [b["text"] for b in blocks if b["type"] == "heading"]
+    assert "Option 1: Pet  ·  Any one of these  (0 / 1)" in headings
+    assert "Option 2: 5,000 KC" in headings
+    kc = [b for b in blocks if b["type"] == "table"][1]
+    assert kc["rows"][0]["cells"] == ["Option 2: 5,000 KC", "5,000 KC", "1,200 / 5,000", "1,200 / 5,000"]
+    assert any(b.get("text") == "Counts at: General Graardor, Kree'arra" for b in blocks)
+
+    with pytest.raises(pe._Missing):
+        pe._task_page(s, _ev(), _detail(), 3, None)  # managed
+    with pytest.raises(pe._Missing):
+        pe._task_page(s, _ev(), _detail(tasks_hidden=True), 1, None)
+    with pytest.raises(pe._Missing):
+        pe._task_page(s, _ev(kind="loot_sweep"), _detail(), 1, None)

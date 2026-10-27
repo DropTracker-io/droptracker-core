@@ -2574,6 +2574,68 @@ async def get_event_player(event_id: int, player_id: int):
     return with_cache_headers(jsonify(payload), max_age=15)
 
 
+def team_task_breakdown(s, event_id: int, task, team) -> dict:
+    """One team's item-level progress on one task (GET .../breakdown).
+    Also behind the plugin's event window (api/routes/plugin_events.py), so
+    both read the same checklist."""
+    # Lazy: event_breakdown pulls in services.event_engine, which the unit-test
+    # conftest stubs — a module-level import breaks test collection.
+    from web_api.event_breakdown import build_task_breakdown
+
+    task_dict = {
+        "id": task.id, "type": task.type, "label": task.label,
+        "target": task.target or None, "target_value": task.target_value,
+        "points": int(task.points or 0), "config": task.config or None,
+    }
+    # Uncapped: this is the detail read, so every requirement must be
+    # named. The 12-icon collage budget is for board art only.
+    _attach_task_tiles(s, [task_dict], cap=None)
+
+    rows = (
+        s.query(EventCompletion)
+        .filter(EventCompletion.event_id == event_id,
+                EventCompletion.task_id == task.id,
+                EventCompletion.team_id == team.id,
+                EventCompletion.status.in_(_APPLIED_STATUSES))
+        .order_by(EventCompletion.id.desc())
+        .all()
+    )
+    pending_rows = (
+        s.query(EventCompletion)
+        .filter(EventCompletion.event_id == event_id,
+                EventCompletion.task_id == task.id,
+                EventCompletion.team_id == team.id,
+                EventCompletion.status == "pending")
+        .order_by(EventCompletion.id.desc())
+        .all()
+    )
+    progress_row = (
+        s.query(EventProgress)
+        .filter(EventProgress.task_id == task.id, EventProgress.team_id == team.id)
+        .first()
+    )
+    pids = {r.player_id for r in rows if r.player_id}
+    player_names: dict[int, str] = {}
+    if pids:
+        for pid, name in (
+            s.query(Player.player_id, Player.player_name)
+            .filter(Player.player_id.in_(pids)).all()
+        ):
+            player_names[pid] = name
+
+    # Team-aware threshold (whole_team pb tasks scale to the roster).
+    from services.event_engine import effective_threshold
+
+    target_override = effective_threshold(
+        s, {"type": task.type, "target_value": task.target_value,
+            "config": task.config}, team.id)
+    return build_task_breakdown(
+        task_dict, task_dict.get("tile"), rows, progress_row,
+        {"id": team.id, "name": team.name}, player_names, _ts,
+        pending_rows=pending_rows, target_override=target_override,
+    )
+
+
 @events_bp.get("/events/<int:event_id>/tasks/<int:task_id>/breakdown")
 async def get_task_breakdown(event_id: int, task_id: int):
     """Per-(task, team) item-level progress: which required items/requirements a
@@ -2581,10 +2643,6 @@ async def get_task_breakdown(event_id: int, task_id: int):
     param selects the team (defaults to the viewer's own team, else the current
     leader). Reconstructed from the applied ledger — see web_api/event_breakdown.
     """
-    # Lazy: event_breakdown pulls in services.event_engine, which the unit-test
-    # conftest stubs — a module-level import breaks test collection.
-    from web_api.event_breakdown import build_task_breakdown
-
     viewer_id = optional_user_id()
     team_arg = request.args.get("team_id") or request.args.get("teamId")
 
@@ -2641,58 +2699,7 @@ async def get_task_breakdown(event_id: int, task_id: int):
             if team is None:
                 team = teams[0]
 
-            task_dict = {
-                "id": task.id, "type": task.type, "label": task.label,
-                "target": task.target or None, "target_value": task.target_value,
-                "points": int(task.points or 0), "config": task.config or None,
-            }
-            # Uncapped: this is the detail read, so every requirement must be
-            # named. The 12-icon collage budget is for board art only.
-            _attach_task_tiles(s, [task_dict], cap=None)
-
-            rows = (
-                s.query(EventCompletion)
-                .filter(EventCompletion.event_id == event_id,
-                        EventCompletion.task_id == task_id,
-                        EventCompletion.team_id == team.id,
-                        EventCompletion.status.in_(_APPLIED_STATUSES))
-                .order_by(EventCompletion.id.desc())
-                .all()
-            )
-            pending_rows = (
-                s.query(EventCompletion)
-                .filter(EventCompletion.event_id == event_id,
-                        EventCompletion.task_id == task_id,
-                        EventCompletion.team_id == team.id,
-                        EventCompletion.status == "pending")
-                .order_by(EventCompletion.id.desc())
-                .all()
-            )
-            progress_row = (
-                s.query(EventProgress)
-                .filter(EventProgress.task_id == task_id, EventProgress.team_id == team.id)
-                .first()
-            )
-            pids = {r.player_id for r in rows if r.player_id}
-            player_names: dict[int, str] = {}
-            if pids:
-                for pid, name in (
-                    s.query(Player.player_id, Player.player_name)
-                    .filter(Player.player_id.in_(pids)).all()
-                ):
-                    player_names[pid] = name
-
-            # Team-aware threshold (whole_team pb tasks scale to the roster).
-            from services.event_engine import effective_threshold
-
-            target_override = effective_threshold(
-                s, {"type": task.type, "target_value": task.target_value,
-                    "config": task.config}, team.id)
-            return build_task_breakdown(
-                task_dict, task_dict.get("tile"), rows, progress_row,
-                {"id": team.id, "name": team.name}, player_names, _ts,
-                pending_rows=pending_rows, target_override=target_override,
-            )
+            return team_task_breakdown(s, event_id, task, team)
 
     payload = await asyncio.to_thread(_load)
     if payload is None:

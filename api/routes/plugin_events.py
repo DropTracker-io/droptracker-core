@@ -12,15 +12,16 @@ as a list of blocks from a closed set the plugin draws itself:
     text     {text, tone?}
     stats    {items: [{label, value, tip?}]}
     table    {columns: [{label, width?, right?}], rows: [{cells, color?, page?,
-             highlight?, tip?}], empty?}
-    tasks    {items: [{label, detail?, tip?, icon_item_id?, points?,
+             highlight?, tip?, icon_item_id?}], empty?}
+    tasks    {items: [{label, detail?, note?, tip?, icon_item_id?, points?, page?,
              bars: [{label, color?, have, need, done, text}]}], empty?}
     board    {team_id?}   (the plugin loads board.png for that team's view)
 
 Same rules as the pop-up cards and panel cards: plain text only (tags are
 stripped and lengths capped), colours are a team's own hex, tones come from a
 closed set (only ``muted`` today), and the only action is ``page``, which
-opens another page of the same window (``team:<id>``, ``board:<id>``). Nothing here is markup.
+opens another page of the same window (``team:<id>``, ``board:<id>``,
+``task:<id>``). Nothing here is markup.
 
 Who may look: anyone on the event's roster, the event's admins, and members of
 a group taking part (the owning group, or an accepted clan of a clan-vs-clan
@@ -237,8 +238,10 @@ def column(label, width=1, right=False):
     return col
 
 
-def row(cells, *, color=None, page=None, team_id=None, tip=None, cap=48):
+def row(cells, *, color=None, page=None, team_id=None, tip=None, cap=48, icon_item_id=None):
     out = {"cells": [clean(c, cap) or "" for c in cells]}
+    if isinstance(icon_item_id, int) and icon_item_id > 0:
+        out["icon_item_id"] = icon_item_id
     if _color(color):
         out["color"] = _color(color)
     if page:
@@ -293,6 +296,38 @@ def _bar(task, cell, label, color):
             "need": need, "done": done, "text": text}
 
 
+#: describe_task's requirement cap (services.plugin_notifications).
+REQUIREMENTS_LIMIT = 12
+#: Team columns on a task's checklist: the viewer's team, then the leaders.
+TASK_TEAM_COLUMNS = 4
+DONE_COLOR = "#4caf50"
+
+
+def _needs_line(reqs) -> str | None:
+    """"Counts: Dragon axe, 3× Bones, ..." from describe_task's requirement
+    list, so a card says which items move it without opening it."""
+    names = []
+    for r in reqs or []:
+        name = clean(r.get("name"), 40)
+        if not name:
+            continue
+        qty = r.get("quantity")
+        names.append(f"{abbrev(qty)}× {name}" if isinstance(qty, int) and qty > 1 else name)
+    if not names:
+        return None
+    line, shown = "Counts: ", 0
+    for name in names:
+        if shown and len(line) + len(name) > 100:
+            break
+        line += (", " if shown else "") + name
+        shown += 1
+    if len(reqs) >= REQUIREMENTS_LIMIT:
+        line += " and more"  # describe_task caps the list, so no count
+    elif shown < len(names):
+        line += f" +{len(names) - shown} more"
+    return line
+
+
 def _task_items(detail, team_ids=None):
     """One ``tasks`` item per task with a bar per team (or just ``team_ids``)."""
     from services.plugin_notifications import describe_task
@@ -304,9 +339,13 @@ def _task_items(detail, team_ids=None):
         if task.get("managed"):
             continue
         tile = task.get("tile") or {}
-        description, _reqs = describe_task(task)
+        description, reqs = describe_task(task)
         item = {"label": clean(task.get("label"), 80) or "Task",
+                "page": f"task:{task['id']}",
                 "bars": []}
+        note = _needs_line(reqs)
+        if note:
+            item["note"] = note
         detail_bits = [b for b in (tile.get("badge"), tile.get("value")) if b]
         if detail_bits:
             item["detail"] = clean("  ·  ".join(str(b) for b in detail_bits), 60)
@@ -403,6 +442,147 @@ def _tasks_page(detail):
     items = _task_items(detail)
     return [{"type": "tasks", "items": items, "empty": "No tasks yet."}]
 
+
+
+# --------------------------------------------------------------------------- #
+# One task: what counts, and who has what
+# --------------------------------------------------------------------------- #
+def _group_title(group) -> str:
+    mode, need = group.get("mode"), int(group.get("need") or 0)
+    count = f"{abbrev(group.get('obtained') or 0)} / {abbrev(need)}"
+    if mode == "all_of":
+        title = "All of these"
+    elif mode == "points":
+        title = f"Earn {abbrev(need)} points from these"
+    elif mode == "count":
+        title = "Collect"
+    elif need > 1:
+        title = f"Any {abbrev(need)} {'different ' if group.get('distinct') else ''}of these"
+    else:
+        title = "Any one of these"
+    return f"{title}  ({count})"
+
+
+def _item_cell(item, mode) -> str:
+    """One team's state on one requirement row."""
+    got, required = int(item.get("obtained") or 0), int(item.get("required") or 1)
+    if mode == "points":
+        return f"{abbrev(got)}×" if got else "-"
+    if item.get("satisfied"):
+        return "Done"
+    if item.get("pending_satisfied") or item.get("pending"):
+        return "Pending review"
+    if required > 1:
+        return f"{abbrev(got)} / {abbrev(required)}"
+    return "-"
+
+
+def _need_cell(item, mode) -> str:
+    if mode == "points":
+        return plural(int(item.get("points") or 0), "pt")
+    required = int(item.get("required") or 1)
+    return f"{abbrev(required)}×" if required > 1 else "1"
+
+
+def _checklist_blocks(groups_by_team, teams, prefix=""):
+    """Heading + table per requirement group: an item per row, a column per
+    team. ``groups_by_team`` is aligned with ``teams`` (same task, same
+    group order); the first team's state colours the row."""
+    blocks = []
+    first = groups_by_team[0] if groups_by_team else []
+    for gi, group in enumerate(first):
+        mode = group.get("mode")
+        blocks.append(heading(prefix + _group_title(group)))
+        cols = [column("Item", 5), column("Points" if mode == "points" else "Need", 1, True)]
+        cols += [column(t["name"], 2, True) for t in teams]
+        rows = []
+        for ii, item in enumerate(group.get("items") or []):
+            cells = [item.get("name") or "Item", _need_cell(item, mode)]
+            for groups in groups_by_team:
+                peer = groups[gi]["items"][ii] if gi < len(groups) and ii < len(groups[gi].get("items") or []) else {}
+                cells.append(_item_cell(peer, mode))
+            icon = item.get("icon") or {}
+            rows.append(row(cells, color=DONE_COLOR if item.get("satisfied") else None,
+                            icon_item_id=icon.get("id") if icon.get("type") == "item" else None,
+                            tip=item.get("name")))
+        blocks.append(table(cols, rows, "Nothing listed."))
+    return blocks
+
+
+def _path(breakdown, index) -> dict:
+    paths = breakdown.get("paths") or []
+    return paths[index] if index < len(paths) else {}
+
+
+def _contributor_blocks(breakdown, team_name):
+    rows = []
+    for c in breakdown.get("contributors") or []:
+        bits = [f"{abbrev(i['quantity'])}× {i['name']}" if i.get("quantity", 1) > 1 else i["name"]
+                for i in c.get("items") or [] if i.get("name")]
+        what = ", ".join(bits) or c.get("note") or f"{abbrev(c.get('quantity') or 0)} counted"
+        rows.append(row([c.get("player_name") or "Organiser", what], cap=120, tip=what))
+    if not rows:
+        return []
+    return [heading(f"Who has helped ({team_name})"),
+            table([column("Player", 2), column("Counted", 5)], rows)]
+
+
+def _task_page(s, ev, detail, task_id, viewer_team):
+    """``task:<id>``: the task card with every team's bar, then the website's
+    item checklist (web_api.event_breakdown) for the viewer's team beside the
+    leading teams, then who on the first team has added to it."""
+    from db.models import EventTask, EventTeam
+    from web_api.routes.events import team_task_breakdown
+
+    if detail.get("tasks_hidden") or (ev.kind or "standard") in BOARD_ONLY_KINDS:
+        raise _Missing()
+    card = next((t for t in detail["tasks"] if t["id"] == task_id and not t.get("managed")), None)
+    task = s.query(EventTask).filter(EventTask.id == task_id, EventTask.event_id == ev.id).first()
+    if card is None or task is None:
+        raise _Missing()
+
+    item = _task_items({**detail, "tasks": [card]})[0]
+    item.pop("page", None)
+    item.pop("note", None)  # the checklist below names everything
+    blocks = [heading(item["label"]), {"type": "tasks", "items": [item]}]
+    if item.get("tip"):
+        blocks.append(text_block(item["tip"]))
+
+    ranked = _ranked_teams(detail)
+    first = next((t for t in ranked if viewer_team is not None and t["id"] == viewer_team.id), None)
+    shown = ([first] if first else []) + [t for t in ranked if t is not first]
+    shown = shown[:TASK_TEAM_COLUMNS]
+    if not shown:
+        blocks.append(text_block("Once teams are set up, each team's progress on this task shows here.",
+                                 "muted"))
+        return blocks
+    rows = {t.id: t for t in s.query(EventTeam).filter(EventTeam.id.in_([t["id"] for t in shown]))}
+    breakdowns = [team_task_breakdown(s, ev.id, task, rows[t["id"]]) for t in shown if t["id"] in rows]
+    shown = [t for t in shown if t["id"] in rows]
+    main = breakdowns[0]
+    teams = [{"id": t["id"], "name": clean(t["name"], 16) or "Team"} for t in shown]
+    if main.get("structure") == "checklist":
+        blocks += _checklist_blocks([b.get("groups") or [] for b in breakdowns], teams)
+    elif main.get("structure") == "paths":
+        blocks.append(text_block("Finish any one of these to complete the task.", "muted"))
+        for pi, path in enumerate(main.get("paths") or []):
+            label = f"Option {pi + 1}: {path.get('label') or ''}".rstrip(": ")
+            if path.get("groups"):
+                blocks += _checklist_blocks([_path(b, pi).get("groups") or [] for b in breakdowns],
+                                            teams, prefix=label + "  ·  ")
+            else:
+                cells = [label, f"{abbrev(path.get('need') or 0)} {path.get('unit') or ''}".strip()]
+                for b in breakdowns:
+                    peer = _path(b, pi)
+                    cells.append(f"{abbrev(peer.get('got') or 0)} / {abbrev(peer.get('need') or 0)}")
+                npcs = ", ".join(n["name"] for n in path.get("npcs") or [] if n.get("name"))
+                blocks.append(heading(label))
+                blocks.append(table([column("Goal", 5), column("Need", 1, True)]
+                                    + [column(t["name"], 2, True) for t in teams], [row(cells)]))
+                if npcs:
+                    blocks.append(text_block("Counts at: " + npcs, "muted", max_length=300))
+    blocks += _contributor_blocks(main, teams[0]["name"])
+    return blocks
 
 def _board_page(ev, detail, viewer_team, team_id=None):
     """The board image, with a row per team to switch to its view (``board:<id>``;
@@ -589,7 +769,7 @@ def compose_page(s, ev, viewer_id, page: str, viewer_team, now=None) -> dict:
         viewer_id is not None and _is_event_admin(s, viewer_id, ev))
     pages = _pages(ev, detail, is_admin)
     keys = {k for k, _ in pages}
-    if page.startswith(("team:", "board:")):
+    if page.startswith(("team:", "board:", "task:")):
         prefix, _, raw = page.partition(":")
         try:
             team_id = int(raw)
@@ -597,6 +777,8 @@ def compose_page(s, ev, viewer_id, page: str, viewer_team, now=None) -> dict:
             raise _Missing()
         if prefix == "team":
             blocks = _team_page(ev, detail, team_id, now)
+        elif prefix == "task":
+            blocks = _task_page(s, ev, detail, team_id, viewer_team)
         elif "board" in keys:
             blocks = _board_page(ev, detail, viewer_team, team_id)
         else:
@@ -764,6 +946,9 @@ async def plugin_event_view(event_id: int):
         # the viewer's own team is marked after the cache.
         admin = user_id is not None and _is_event_admin(s, user_id, ev)
         key = f"plugin:event_view:v1:{ev.id}:{page}:{'a' if admin else 'p'}"
+        if page.startswith("task:"):
+            # The viewer's team leads a task's checklist.
+            key += f":{team.id if team is not None else 0}"
         cached = None
         try:
             from utils.redis import redis_client
