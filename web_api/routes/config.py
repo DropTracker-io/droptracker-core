@@ -79,6 +79,8 @@ LONG_VALUE_KEYS = {
 # "never synced".
 _AUTO_PROVISION_KEY = "auto_provision_members"
 _WOM_SYNC_COOLDOWN_KEY = "last_wom_sync"
+# services/auto_nickname.py: turning this on renames members who already claimed.
+_AUTO_NICKNAMES_KEY = "auto_set_member_nicknames"
 
 
 def _auto_provision_turned_on(coerced: dict, before) -> bool:
@@ -228,6 +230,9 @@ def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
             # Prior value of auto_provision_members, captured so the post-write
             # hook below can tell an off->on flip from a no-op re-save.
             provision_before = None
+            # Same for auto_set_member_nicknames: an off->on flip queues the
+            # bot's rename pass over members who claimed before it existed.
+            nicknames_before = None
             for key, new_value in coerced.items():
                 # `group_name` is the group's actual name rather than a setting
                 # of its own: rename_group writes the canonical column, this
@@ -263,6 +268,8 @@ def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
                 before = _effective_stored_value(row) if row else None
                 if key == _AUTO_PROVISION_KEY:
                     provision_before = before
+                elif key == _AUTO_NICKNAMES_KEY:
+                    nicknames_before = before
                 # Overflow-capable keys: the full value always lives in
                 # long_value; config_value only holds it when it fits (empty
                 # otherwise, so the short-value fallback in the HoF parser
@@ -329,6 +336,13 @@ def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
                     GroupConfiguration.group_id == group_id,
                     GroupConfiguration.config_key == _WOM_SYNC_COOLDOWN_KEY,
                 ).delete(synchronize_session=False)
+
+            if _AUTO_NICKNAMES_KEY in coerced:
+                from services.auto_nickname import enqueue_backfill_if_turned_on
+
+                enqueue_backfill_if_turned_on(s, group_id, nicknames_before,
+                                              coerced[_AUTO_NICKNAMES_KEY],
+                                              actor_user_id=user_id)
 
             s.commit()
 

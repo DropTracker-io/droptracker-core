@@ -1072,7 +1072,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Set member nicknames to their RSN",
         "category": "profile",
         "type": "boolean",
-        "help": "When a member of your Discord server claims an account with /claim-rsn, the DropTracker bot changes their server nickname to that RuneScape name. The bot needs the Manage Nicknames permission, and its role must sit above the member's highest role. It can't rename the server owner.",
+        "help": "Sets members' server nicknames to their claimed RuneScape name. Turning this on renames everyone in this group who has already claimed an account, and anyone who claims one later (with /claim-rsn or on the website) is renamed as they do. The bot needs the Manage Nicknames permission, and its role must sit above the member's highest role. It can't rename the server owner.",
         "default": False,
     },
     {

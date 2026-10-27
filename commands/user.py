@@ -18,7 +18,6 @@ from data.submissions import try_create_player
 from interactions import AutocompleteContext, SlashContext, Embed, OptionType, Extension, slash_command, slash_option
 from db.models import Session, User, Group, Guild, Player, UserConfiguration, session
 from db.player_claims import claim_player, unclaim_player
-from services.auto_nickname import schedule_rsn_nickname
 from services.components import build_help_components
 from services.points import award_points_to_player
 from utils.format import format_time_since_update, get_command_id, pick_player_by_rsn
@@ -521,13 +520,6 @@ class UserCommands(Extension):
             await ctx.send(f"An error occurred claiming your account.\n" +
                            "Try again later, or reach out in our Discord server",
                            ephemeral=True)
-
-        if status in ("claimed", "already_yours"):
-            # Opt-in groups rename the member to the RSN in their servers.
-            # After the reply, in the background: one REST round trip per
-            # opted-in server. The stored name, not what was typed, so the
-            # nickname carries the account's real capitalisation.
-            schedule_rsn_nickname(self.bot, ctx.user.id, result.get("player_name") or rsn)
 
     @slash_command(name="unclaim-rsn",
                     description="Remove a RuneScape account name from your Discord account")

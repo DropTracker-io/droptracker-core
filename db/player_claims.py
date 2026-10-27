@@ -20,6 +20,9 @@ Behavioral contract (mirrors ``UserCommands.claim_rsn_command``):
       ``_reclaim_attach_group``. Membership of a WOM-backed group belongs to
       its roster, so the result reports ``wom_managed`` instead of writing a
       row that would be evicted (and publicly announced) within the hour.
+    * ``claimed`` and ``already_yours`` both queue a nickname job for the core
+      bot (``services/auto_nickname``): groups that opted in rename the
+      member to the RSN in their Discord servers.
 
 The functions are context free: they accept plain primitives (Discord ids as
 strings) so they can run inside the Quart web_api process without importing
@@ -304,6 +307,20 @@ def _player_claim_facts(player: Player) -> dict:
     }
 
 
+def _queue_nickname(discord_id: str, player_name: Optional[str]) -> None:
+    """Ask the core bot to set the claimer's nickname to this RSN in every
+    opted-in group's server (services/auto_nickname). Through the outbox
+    because web_api callers must never touch Discord; best-effort, so a
+    failed enqueue never fails a claim that already committed."""
+    try:
+        from services.auto_nickname import enqueue_claim_rename
+
+        enqueue_claim_rename(session, discord_id, player_name)
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        print(f"[player_claims] Failed to queue nickname for {discord_id}: {exc}")
+
+
 @_release_scoped_session
 def preview_claim(
     rsn: str, *, discord_id: Optional[str] = None, guild_id=None
@@ -368,6 +385,8 @@ def claim_player(
             # Re-claiming is how users try to fix "my drops aren't posting in
             # our clan channel" — make it self-healing where that is safe.
             _reclaim_attach_group(result, player, _resolve_guild_group(guild_id))
+            # Re-claiming is also how a member fixes their nickname.
+            _queue_nickname(discord_id, facts["player_name"])
             return result
         return ClaimResult(
             status="claimed_by_other",
@@ -393,6 +412,7 @@ def claim_player(
     # Registered / Unregistered follow claimed RSNs; ask the role sync for a pass.
     from services.discord_roles import request_sync
     request_sync()
+    _queue_nickname(discord_id, facts["player_name"])
 
     result = ClaimResult(status="claimed", **facts)
     if group:

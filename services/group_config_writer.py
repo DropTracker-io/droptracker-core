@@ -54,6 +54,10 @@ def set_group_config(group_id: int, stored: dict, *,
                     GroupConfiguration.config_key.in_(list(stored)))
             .all()
         }
+        # Read before the loop rewrites the row: an off->on flip of the
+        # nickname setting queues the bot's rename pass (services/auto_nickname).
+        nick_row = existing.get(group_config.AUTO_SET_MEMBER_NICKNAMES)
+        nicknames_before = nick_row.config_value if nick_row is not None else None
         for key, value in stored.items():
             value = "" if value is None else str(value)
             long_value = None
@@ -83,6 +87,12 @@ def set_group_config(group_id: int, stored: dict, *,
                 before=json.dumps(before) if before is not None else None,
                 after=json.dumps(shown_after),
             ))
+        if group_config.AUTO_SET_MEMBER_NICKNAMES in stored:
+            from services.auto_nickname import enqueue_backfill_if_turned_on
+
+            enqueue_backfill_if_turned_on(s, group_id, nicknames_before,
+                                          stored[group_config.AUTO_SET_MEMBER_NICKNAMES],
+                                          actor_user_id=actor_user_id)
         s.commit()
     finally:
         s.close()

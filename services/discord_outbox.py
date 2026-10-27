@@ -72,6 +72,10 @@ def enqueue(
     ``kind='dm'`` sends a direct message; ``channel_id`` then holds the
     recipient's Discord **user** id and the drain opens the DM channel itself.
 
+    ``kind='rsn_nickname'`` / ``'nickname_backfill'`` are not messages: the
+    drain hands them to ``services/auto_nickname``, which renames members in
+    the background.
+
     ``kind='news_post'`` sends like a plain message and then publishes it, so
     an Announcement channel's followers receive it (``services/leader_updates``).
 
@@ -392,6 +396,17 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
 
                 if row.kind in ("delete_message", "delete_own_message"):
                     await _delete_message(bot, session, row, own_only=row.kind == "delete_own_message")
+                    row.status = "sent"
+                    row.processed_at = datetime.now()
+                    sent += 1
+                    continue
+
+                if row.kind in ("rsn_nickname", "nickname_backfill"):
+                    # Only starts the job: a backfill can run for minutes and
+                    # must not hold up the rest of the queue.
+                    from services.auto_nickname import handle_outbox_row
+
+                    handle_outbox_row(bot, row)
                     row.status = "sent"
                     row.processed_at = datetime.now()
                     sent += 1
