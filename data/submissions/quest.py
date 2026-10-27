@@ -6,6 +6,8 @@ from db import QuestCompletionEntry
 from db.models import Group
 
 from .common import (
+    is_side_world,
+    get_world_model,
     SubmissionResponse,
     apply_account_type,
     attach_webhook_screenshot,
@@ -52,7 +54,8 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
     debug_print(f"[QUEST] Raw quest data: {quest_data}")
 
     config_prefix = get_config_prefix(world_type)
-    is_seasonal = world_type == SEASONAL_WORLD_TYPE
+    # Seasonal or hardcore: mirror tables, main-only features skipped.
+    side_world = is_side_world(world_type)
     session, use_external_session = select_session_and_flag(external_session)
 
     player_name = quest_data.get("player_name") or quest_data.get("player")
@@ -81,13 +84,13 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
         return SubmissionResponse(success=False, message="Missing player_name or acc_hash.")
     if not quest_name:
         return SubmissionResponse(success=False, message="Missing quest_name.")
-    dedup_type = "seasonal_quest" if is_seasonal else "quest"
+    dedup_type = f"{world_type}_quest" if side_world else "quest"
     if unique_id and not await ensure_can_create(session, unique_id, dedup_type):
         return SubmissionResponse(success=True, message="Quest already processed (duplicate guid).")
 
     # Authenticate player
     player, authed, user_exists = await ensure_player_by_name_then_auth(
-        session, player_name, account_hash, auth_key
+        session, player_name, account_hash, auth_key, world_type=world_type
     )
     if not player:
         return SubmissionResponse(success=False, message="Player not found or could not be created.")
@@ -96,7 +99,7 @@ async def quest_processor(quest_data, external_session=None, world_type="main"):
     apply_account_type(player, quest_data.get("account_type"), world_type)
 
     player_id = player.player_id
-    quest_model = SeasonalQuestCompletionEntry if is_seasonal else QuestCompletionEntry
+    quest_model = get_world_model(world_type, "quest", QuestCompletionEntry)
     quest_entry = quest_model(
         player_id=player_id,
         quest_name=quest_name,

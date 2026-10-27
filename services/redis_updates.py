@@ -14,6 +14,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import joinedload
 from utils.format import get_current_partition
 
+# Worlds kept in their own key namespace ("seasonal:", "hardcore:"), apart
+# from the main game. Hardcore drops are valued at the client price.
+SIDE_WORLDS = ("seasonal", "hardcore")
+
 class UpdateMode(Enum):
     INCREMENTAL = "incremental"  # Add new drops to existing data
     FORCE_UPDATE = "force_update"  # Recalculate everything from database
@@ -100,7 +104,7 @@ class RedisLootTracker:
         (``seasonal:player:...``) to keep them completely isolated from
         main-world data.
         """
-        ns = "seasonal:player" if world_type == "seasonal" else "player"
+        ns = f"{world_type}:player" if world_type in SIDE_WORLDS else "player"
         base_keys = {
             'total_items': f"{ns}:{player_id}:{partition}:total_items",
             'total_loot': f"{ns}:{player_id}:{partition}:total_loot",
@@ -259,7 +263,7 @@ class RedisLootTracker:
         if partition is None:
             partition = self._get_partition()
 
-        prefix = "seasonal:" if world_type == "seasonal" else ""
+        prefix = f"{world_type}:" if world_type in SIDE_WORLDS else ""
         pipeline = redis_client.client.pipeline(transaction=True)
 
         # Update global leaderboard
@@ -1220,7 +1224,7 @@ class RedisLootTracker:
         Only the group leaderboard sorted set is touched — global leaderboard and
         individual player:*:total_loot keys are never modified.
         """
-        prefix = "seasonal:" if world_type == "seasonal" else ""
+        prefix = f"{world_type}:" if world_type in SIDE_WORLDS else ""
         key = f"{prefix}leaderboard:{partition}:group:{group_id}"
         redis_client.client.zincrby(key, split_value, player_id)
 

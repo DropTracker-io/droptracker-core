@@ -81,6 +81,11 @@ class Player(Base):
     # OSRS game mode (varbit 1777) reported with submissions; last-write-wins.
     # NULL until the player's plugin first reports it (Task 23).
     account_type = Column(String(32), nullable=True)
+    # Which game this character plays (web151a): 'main', or 'hardcore' for a
+    # Hardcore Worlds character (db/models/hardcore.py). A hardcore row is
+    # never in a group's user_group_association, never in the global group and
+    # never looked up on Wise Old Man; public listings show 'main' only.
+    world = Column(String(16), nullable=False, default="main", server_default="main", index=True)
 
     # Display-equivalence key for name resolution, computed by MariaDB from
     # player_name -- never written directly. It mirrors

@@ -471,7 +471,8 @@ class DatabaseOperations:
                 # Legacy fallback rows can still exist by hash/name; reconcile those.
                 player = session.query(Player).filter(Player.account_hash == account_hash).first()
             if not player:
-                player = session.query(Player).filter(Player.player_name == player_name).first()
+                player = session.query(Player).filter(
+                    Player.player_name == player_name, Player.world == "main").first()
 
             if player is not None:
                 changed = False

@@ -6,6 +6,7 @@ from db import DiaryCompletionEntry
 from db.models import Group
 
 from .common import (
+    is_side_world,
     SubmissionResponse,
     attach_webhook_screenshot,
     ensure_player_by_name_then_auth,
@@ -49,7 +50,8 @@ async def diary_processor(diary_data, external_session=None, world_type="main"):
     debug_print(f"[DIARY] Raw diary data: {diary_data}")
 
     config_prefix = get_config_prefix(world_type)
-    is_seasonal = world_type == SEASONAL_WORLD_TYPE
+    # Seasonal or hardcore: mirror tables, main-only features skipped.
+    side_world = is_side_world(world_type)
     session, use_external_session = select_session_and_flag(external_session)
 
     player_name = diary_data.get("player_name") or diary_data.get("player")
@@ -73,13 +75,13 @@ async def diary_processor(diary_data, external_session=None, world_type="main"):
         return SubmissionResponse(success=False, message="Missing player_name or acc_hash.")
     if not diary_name:
         return SubmissionResponse(success=False, message="Missing diary_name.")
-    dedup_type = "seasonal_diary" if is_seasonal else "diary"
+    dedup_type = f"{world_type}_diary" if side_world else "diary"
     if unique_id and not await ensure_can_create(session, unique_id, dedup_type):
         return SubmissionResponse(success=True, message="Diary already processed (duplicate guid).")
 
     # Authenticate player
     player, authed, user_exists = await ensure_player_by_name_then_auth(
-        session, player_name, account_hash, auth_key
+        session, player_name, account_hash, auth_key, world_type=world_type
     )
     if not player:
         return SubmissionResponse(success=False, message="Player not found or could not be created.")

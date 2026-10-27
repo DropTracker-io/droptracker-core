@@ -16,6 +16,8 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 
 from .common import (
+    is_side_world,
+    get_world_model,
     SubmissionResponse,
     convert_to_ms,
     convert_from_ms,
@@ -200,7 +202,8 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     session, use_external_session = select_session_and_flag(external_session)
     debug_print(f"Using external session: {use_external_session}")
     config_prefix = get_config_prefix(world_type)
-    is_seasonal = world_type == SEASONAL_WORLD_TYPE
+    # Seasonal or hardcore: mirror tables, main-only features skipped.
+    side_world = is_side_world(world_type)
     player_name = pb_data["player_name"]
     account_hash = pb_data["acc_hash"]
     boss_name = pb_data.get("npc_name", pb_data.get("boss_name", None))
@@ -260,7 +263,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
 
     notice = ""
 
-    dedup_type = "seasonal_pb" if is_seasonal else "pb"
+    dedup_type = f"{world_type}_pb" if side_world else "pb"
     if not await ensure_can_create(session, unique_id, dedup_type):
         debug_print(
             f"Personal Best entry with Unique ID {unique_id} already exists in the database, aborting"
@@ -290,7 +293,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         # Fail open: a blocklist read error must never break PB intake.
         pass
     player, authed, user_exists = await ensure_player_by_name_then_auth(
-        session, player_name, account_hash, auth_key
+        session, player_name, account_hash, auth_key, world_type=world_type
     )
     if not player:
         return
@@ -302,7 +305,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # Doom of Mokhaiotl: every timed delve level is a completion, PB or not,
     # so it can raise the player's deepest delve (the Hall of Fame board).
     # A SAVEPOINT, so a failed write can never cost the PB itself.
-    if not is_seasonal:
+    if not side_world:
         try:
             from utils.doom_delve import completed_level, record_completed
 
@@ -334,7 +337,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
 
     from db import PersonalBestEntry
 
-    pb_model = SeasonalPersonalBestEntry if is_seasonal else PersonalBestEntry
+    pb_model = get_world_model(world_type, "personal_best", PersonalBestEntry)
     pb_entry = (
         session.query(pb_model)
         .filter(
@@ -465,7 +468,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
 
     # Attach the loadout once the PB row has an id. Best-effort by design: a
     # decorative extra must never cost the player their personal best.
-    if pb_entry is not None and not is_seasonal:
+    if pb_entry is not None and not side_world:
         loadout_item_ids = _store_loadout(
             session, pb_entry, equipment_raw, inventory_raw, pb_row_changed,
             model_fingerprint_raw, player_id,
@@ -489,7 +492,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # PersonalBestEntry, not the seasonal mirror). Best-effort cross-process
     # signal: the HOF bot drains this queue and edits just the affected boss
     # message within seconds instead of waiting for its periodic sweep.
-    if pb_row_changed and not is_seasonal:
+    if pb_row_changed and not side_world:
         try:
             import json as _json
             from utils.redis import redis_client as _rc
@@ -503,7 +506,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # Site-wide ticker (rt:feed): announce a stored new PB when it lands in
     # the top 25 of its (boss, team-size) board. Best-effort — the rank query
     # only runs on actual PB improvements, never the drop hot path.
-    if pb_row_changed and is_personal_best and not is_seasonal:
+    if pb_row_changed and is_personal_best and not side_world:
         try:
             from utils.pb_rank import pb_board_rank
             from services.realtime import publish_feed_personal_best
@@ -604,7 +607,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         # notification for a manual submission it doesn't trust (non-drop
         # types are notification-only — no leaderboard, no review queue).
         manual_suppressed = set()
-        if pb_data.get("intake_source") == "manual" and not is_seasonal:
+        if pb_data.get("intake_source") == "manual" and not side_world:
             try:
                 from .manual_policy import manual_notification_suppressed_groups
                 manual_suppressed = manual_notification_suppressed_groups(
@@ -626,7 +629,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 "total_points_awarded": 0,
                 "awarded_members": [],
             }
-            if is_seasonal:
+            if side_world:
                 # TODO: award group points for seasonal PBs once award_points_in_leagues
                 # config key is supported. Check group config for "award_points_in_leagues"
                 # before calling check_and_award_points with the seasonal entry_id.

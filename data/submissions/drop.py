@@ -5,6 +5,9 @@ import json
 import time
 
 from .common import (
+    is_side_world,
+    HARDCORE_WORLD_TYPE,
+    get_world_model,
     received_at,
     SubmissionResponse,
     ensure_item_for_drop,
@@ -502,8 +505,9 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         )
 
         config_prefix = get_config_prefix(world_type)
-        is_seasonal = world_type == SEASONAL_WORLD_TYPE
-        dedup_type = "seasonal_drop" if is_seasonal else "drop"
+        # Seasonal or hardcore: mirror tables, main-only features skipped.
+        side_world = is_side_world(world_type)
+        dedup_type = f"{world_type}_drop" if side_world else "drop"
 
         # dedupe via NotifiedSubmission cache in caller; keep local prevention via ensure_can_create
         from .common import ensure_can_create
@@ -528,7 +532,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
 
         debug_print(f"Ensuring player and auth...")
         player, authed, user_exists = await ensure_player_and_auth(
-            session, player_name, account_hash, auth_key
+            session, player_name, account_hash, auth_key, world_type=world_type
         )
         if not player:
             debug_print("Player not found in the database")
@@ -582,7 +586,12 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             )
 
         debug_print(f"Calculating drop value...")
-        raw_drop_value = await get_true_item_value(item_name, int(value), item_id=item_id)
+        if world_type == HARDCORE_WORLD_TYPE:
+            # The client's price, as sent: our values are main-game GE prices,
+            # and Hardcore Worlds have an economy of their own.
+            raw_drop_value = int(value)
+        else:
+            raw_drop_value = await get_true_item_value(item_name, int(value), item_id=item_id)
         drop_value = int(raw_drop_value) * int(quantity)
         debug_print(
             f"Drop value calculated - Raw: {raw_drop_value}, Total: {drop_value} ({quantity}x)"
@@ -637,7 +646,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             used_api=used_api,
             unique_id=guid,
             existing_session=session if use_external_session else None,
-            model_class=SeasonalDrop if is_seasonal else None,
+            model_class=get_world_model(world_type, "drop"),
             source=intake_source,
             kill_count=kill_count,
         )
@@ -658,7 +667,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
         # other groups. Recorded durably so board rebuilds re-apply it
         # (drop_group_moderation). Both statuses withhold at intake.
         manual_moderation = {}
-        if intake_source == "manual" and not is_seasonal:
+        if intake_source == "manual" and not side_world:
             try:
                 from .manual_policy import manual_moderation_for_player, record_moderation
                 manual_moderation = manual_moderation_for_player(
@@ -841,7 +850,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             # print(f"Processing group: {group.group_name} (ID: {group_id})")
             """ Here we can process the drop to determine if it needs to be calculated for a point award (group-specific points) """
 
-            if is_seasonal:
+            if side_world:
                 # TODO: award group points for seasonal drops once award_points_in_leagues
                 # config key is supported. Check group config for "award_points_in_leagues"
                 # before calling check_and_award_points with the seasonal entry_id.
@@ -894,7 +903,7 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
             split_tracking_enabled = (
                 group_config_values.get((group_id, "split_gp_tracking")) == "1"
             )
-            if split_tracking_enabled and (players_included or split_size) and not is_seasonal:
+            if split_tracking_enabled and (players_included or split_size) and not side_world:
                 # A split really was about to run here: count it against the
                 # source policy (per group, since split credit is per group)
                 # before deciding whether the policy lets it through.

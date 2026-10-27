@@ -9,6 +9,7 @@ from utils import region_names
 from utils.death_regions import is_safe_region
 
 from .common import (
+    is_side_world,
     SubmissionResponse,
     attach_webhook_screenshot,
     ensure_player_by_name_then_auth,
@@ -109,7 +110,8 @@ async def death_processor(death_data, external_session=None, world_type="main"):
     debug_print(f"[DEATH] Raw death data: {death_data}")
 
     config_prefix = get_config_prefix(world_type)
-    is_seasonal = world_type == SEASONAL_WORLD_TYPE
+    # Seasonal or hardcore: mirror tables, main-only features skipped.
+    side_world = is_side_world(world_type)
     session, use_external_session = select_session_and_flag(external_session)
 
     player_name = death_data.get("player_name") or death_data.get("player")
@@ -175,13 +177,13 @@ async def death_processor(death_data, external_session=None, world_type="main"):
 
     if not player_name or not account_hash:
         return SubmissionResponse(success=False, message="Missing player_name or acc_hash.")
-    dedup_type = "seasonal_death" if is_seasonal else "death"
+    dedup_type = f"{world_type}_death" if side_world else "death"
     if unique_id and not await ensure_can_create(session, unique_id, dedup_type):
         return SubmissionResponse(success=True, message="Death already processed (duplicate guid).")
 
     # Authenticate player
     player, authed, user_exists = await ensure_player_by_name_then_auth(
-        session, player_name, account_hash, auth_key
+        session, player_name, account_hash, auth_key, world_type=world_type
     )
     if not player:
         return SubmissionResponse(success=False, message="Player not found or could not be created.")
@@ -293,7 +295,7 @@ async def death_processor(death_data, external_session=None, world_type="main"):
     # A death to another player also counts on the PvP standings, and posts
     # to the PvP channel for groups that turned pvp_notify_deaths on. Separate
     # from the loop above: a group can want PvP deaths without all deaths.
-    if not is_seasonal:
+    if not side_world:
         try:
             from .pvp import is_pvp_death, record_pvp_death
 

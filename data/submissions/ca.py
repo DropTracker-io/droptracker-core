@@ -5,6 +5,8 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 
 from .common import (
+    is_side_world,
+    get_world_model,
     SubmissionResponse,
     apply_account_type,
     ensure_player_by_name_then_auth,
@@ -71,7 +73,8 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
     debug_print(f"External session provided: {external_session is not None}")
 
     config_prefix = get_config_prefix(world_type)
-    is_seasonal = world_type == SEASONAL_WORLD_TYPE
+    # Seasonal or hardcore: mirror tables, main-only features skipped.
+    side_world = is_side_world(world_type)
     has_xf_entry = False
     session, use_external_session = select_session_and_flag(external_session)
     debug_print(f"Using external session: {use_external_session}")
@@ -105,7 +108,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
     )
 
     player, authed, user_exists = await ensure_player_by_name_then_auth(
-        session, player_name, account_hash, auth_key
+        session, player_name, account_hash, auth_key, world_type=world_type
     )
     if not player:
         debug_print("Player still not found in the database, aborting")
@@ -116,7 +119,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
         return
     apply_account_type(player, ca_data.get("account_type"), world_type)
 
-    dedup_type = "seasonal_ca" if is_seasonal else "ca"
+    dedup_type = f"{world_type}_ca" if side_world else "ca"
     if not await ensure_can_create(session, unique_id, dedup_type):
         debug_print(
             f"Combat Achievement entry with Unique ID {unique_id} already exists in the database, aborting"
@@ -152,7 +155,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
 
     from db import CombatAchievementEntry
 
-    ca_model = SeasonalCombatAchievementEntry if is_seasonal else CombatAchievementEntry
+    ca_model = get_world_model(world_type, "combat_achievement", CombatAchievementEntry)
     ca_entry = (
         session.query(ca_model)
         .filter(
@@ -228,7 +231,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
             ca_entry.image_url = image_url
         if video_url:
             ca_entry.video_url = video_url
-    if not is_seasonal:
+    if not side_world:
         # Immediately before the commit, with no await between: the points
         # row lock is held until the commit releases it.
         _record_game_total(session, player_id, points_total, ca_data)
@@ -287,7 +290,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
         # notification for a manual submission it doesn't trust (non-drop
         # types are notification-only — no leaderboard, no review queue).
         manual_suppressed = set()
-        if ca_data.get("intake_source") == "manual" and not is_seasonal:
+        if ca_data.get("intake_source") == "manual" and not side_world:
             try:
                 from .manual_policy import manual_notification_suppressed_groups
                 manual_suppressed = manual_notification_suppressed_groups(
@@ -307,7 +310,7 @@ async def ca_processor(ca_data, external_session=None, world_type="main"):
                 "total_points_awarded": 0,
                 "awarded_members": [],
             }
-            if is_seasonal:
+            if side_world:
                 # TODO: award group points for seasonal CAs once award_points_in_leagues
                 # config key is supported.
                 pass

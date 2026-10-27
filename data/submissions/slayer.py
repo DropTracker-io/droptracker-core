@@ -20,6 +20,7 @@ from utils.slayer_masters import BOSS_TASK_ID, excluded_master_ids_from_config
 from utils.slayer_masters import master_name as _registry_master_name
 
 from .common import (
+    is_side_world,
     SubmissionResponse,
     attach_webhook_screenshot,
     create_notification,
@@ -77,7 +78,8 @@ async def slayer_processor(slayer_data, external_session=None, world_type="main"
     debug_print(f"[SLAYER] Raw slayer data: {slayer_data}")
 
     config_prefix = get_config_prefix(world_type)
-    is_seasonal = world_type == SEASONAL_WORLD_TYPE
+    # Seasonal or hardcore: mirror tables, main-only features skipped.
+    side_world = is_side_world(world_type)
     session, use_external_session = select_session_and_flag(external_session)
 
     player_name = slayer_data.get("player_name") or slayer_data.get("player")
@@ -110,12 +112,12 @@ async def slayer_processor(slayer_data, external_session=None, world_type="main"
         return SubmissionResponse(success=False, message="Missing player_name or acc_hash.")
     if not task_name:
         return SubmissionResponse(success=False, message="Missing task_name.")
-    dedup_type = "seasonal_slayer" if is_seasonal else "slayer"
+    dedup_type = f"{world_type}_slayer" if side_world else "slayer"
     if unique_id and not await ensure_can_create(session, unique_id, dedup_type):
         return SubmissionResponse(success=True, message="Slayer task already processed (duplicate guid).")
 
     player, authed, user_exists = await ensure_player_by_name_then_auth(
-        session, player_name, account_hash, auth_key
+        session, player_name, account_hash, auth_key, world_type=world_type
     )
     if not player:
         return SubmissionResponse(success=False, message="Player not found or could not be created.")
@@ -167,7 +169,7 @@ async def slayer_processor(slayer_data, external_session=None, world_type="main"
 
     # Event engine hook: gated, fire-and-forget LPUSH. The guid dedupe above
     # means every envelope is a first completion. Never fails the submission.
-    if not is_seasonal:
+    if not side_world:
         try:
             from services.event_engine import queue_submission
             queue_submission(

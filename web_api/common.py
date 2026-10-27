@@ -354,7 +354,9 @@ def hidden_player_ids() -> set:
             rows = (
                 s.query(Player.player_id)
                 .outerjoin(User, User.user_id == Player.user_id)
-                .filter(or_(Player.hidden.is_(True), User.hidden.is_(True)))
+                # Hardcore Worlds characters (web151a) are never on the main
+                # game's public surfaces either.
+                .filter(or_(Player.hidden.is_(True), User.hidden.is_(True), Player.world != "main"))
                 .all()
             )
             out = {int(pid) for (pid,) in rows}

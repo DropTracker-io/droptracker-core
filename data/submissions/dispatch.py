@@ -115,6 +115,12 @@ HARDCORE_TYPES = SUPPORTED_TYPES - frozenset({
 })
 
 
+# Hardcore types that also run through their processor (everything with a
+# seasonal mirror, the same processors and the same world_type argument). The
+# rest of HARDCORE_TYPES (experience, adventure log, PvP) is archived only.
+HARDCORE_PROCESSED_TYPES = HARDCORE_TYPES & SEASONAL_TYPES
+
+
 def normalize_world_type(raw_world_type):
     """Canonical world type; anything empty/absent means the main game."""
     if raw_world_type is None:
@@ -207,12 +213,17 @@ async def dispatch_submission(submission_type, data, session, *, world_type=MAIN
 
 async def _run_processor(submissions, norm_type, world, data, session):
     if world == HARDCORE_WORLD_TYPE:
-        # One storage path for every type, not the per-type processors: those
-        # create main-game players, price items and feed boards and events.
+        # Archived first, so nothing from these worlds is lost; then the types
+        # with hardcore mirror tables run through their processors exactly as
+        # seasonal ones do (world_type selects the tables, settings and boards).
         if norm_type not in HARDCORE_TYPES:
             return None
-        from data.submissions.hardcore import store_hardcore_submission
-        return await store_hardcore_submission(norm_type, data, session)
+        from data.submissions.hardcore import archive_hardcore_submission
+        archived = await archive_hardcore_submission(norm_type, data, session)
+        if not archived.success or norm_type not in HARDCORE_PROCESSED_TYPES:
+            return archived
+        processor = getattr(submissions, _PROCESSORS[norm_type])
+        return await processor(data, external_session=session, world_type=HARDCORE_WORLD_TYPE)
 
     if world == SEASONAL_WORLD_TYPE:
         if norm_type not in SEASONAL_TYPES:

@@ -156,7 +156,9 @@ async def update_players():
             with Session() as list_session:
                 stale_rows = (
                     list_session.query(Player.player_id)
-                    .filter(Player.date_updated < datetime.now() - timedelta(days=14))
+                    # Hardcore Worlds characters are not WOM's (web151a).
+                    .filter(Player.date_updated < datetime.now() - timedelta(days=14),
+                            Player.world == "main")
                     .order_by(Player.date_updated.asc())
                     .limit(2)
                     .all()

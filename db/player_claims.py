@@ -304,6 +304,7 @@ def _player_claim_facts(player: Player) -> dict:
         "player_id": player.player_id,
         "player_name": player.player_name,
         "claimed_at": claimed_at,
+        "world": getattr(player, "world", None) or "main",
     }
 
 
@@ -391,9 +392,16 @@ def claim_player(
         )
 
     facts = _player_claim_facts(player)
+    # A Hardcore Worlds character (web151a) is linked to its owner and nothing
+    # else: it posts to the groups of the owner's main accounts that track
+    # Hardcore Worlds, never through a membership row of its own, and the
+    # member's nickname and rank roles stay with their main account.
+    hardcore = (getattr(player, "world", None) or "main") == "hardcore"
     if player.user:
         if str(player.user.discord_id) == str(discord_id):
             result = ClaimResult(status="already_yours", **facts)
+            if hardcore:
+                return result
             # Re-claiming is how users try to fix "my drops aren't posting in
             # our clan channel" — make it self-healing where that is safe.
             _reclaim_attach_group(result, player, _resolve_guild_group(guild_id))
@@ -407,7 +415,7 @@ def claim_player(
             **facts,
         )
 
-    group = _resolve_guild_group(guild_id)
+    group = None if hardcore else _resolve_guild_group(guild_id)
     try:
         player.user = user
         if group and group not in player.groups:
@@ -425,8 +433,9 @@ def claim_player(
     # Registered / Unregistered follow claimed RSNs; ask the role sync for a pass.
     from services.discord_roles import request_sync
     request_sync()
-    _queue_nickname(discord_id, facts["player_name"])
-    _queue_rank_roles(player.player_id)
+    if not hardcore:
+        _queue_nickname(discord_id, facts["player_name"])
+        _queue_rank_roles(player.player_id)
 
     result = ClaimResult(status="claimed", **facts)
     if group:

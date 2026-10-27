@@ -46,6 +46,7 @@ def _search_players(s, q, partition):
         .filter(player_name_search_expr(Player.player_name).contains(needle, autoescape=True))
         .filter(Player.hidden.isnot(True))
         .filter(User.hidden.isnot(True))
+        .filter(Player.world == "main")
         .order_by(Player.player_name.asc())
         .limit(LIMIT_EACH)
         .all()

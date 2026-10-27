@@ -55,6 +55,13 @@ SLAYER_EXCLUDED_MASTERS = "slayer_excluded_masters"
 POINTS_EPHEMERAL_MESSAGES = "points_ephemeral_messages"
 # Rename members to the RSN they claim (services/auto_nickname.py).
 AUTO_SET_MEMBER_NICKNAMES = "auto_set_member_nicknames"
+# Hardcore Worlds (web151a). A group opts in with TRACK_HARDCORE_WORLDS; then
+# its hardcore submissions read ``hardcore_``-prefixed settings, unless
+# SHARE_HARDCORE_SETTINGS says to use the main ones (see _resolve_key). Both
+# default off, and neither starts with the prefix, so neither is a mirror.
+TRACK_HARDCORE_WORLDS = "track_hardcore_worlds"
+SHARE_HARDCORE_SETTINGS = "share_hardcore_settings"
+HARDCORE_PREFIX = "hardcore_"
 
 # What an absent row means, in storage form. These MUST equal the registry
 # defaults (web_api/config_registry.py), which is what the website shows for a
@@ -78,6 +85,8 @@ ABSENT_DEFAULTS: Dict[str, str] = {
     NOTIFY_SLAYER_TASKS: "false",
     NOTIFY_QUESTS: "false",
     AUTO_SET_MEMBER_NICKNAMES: "false",
+    TRACK_HARDCORE_WORLDS: "false",
+    SHARE_HARDCORE_SETTINGS: "false",
     "notify_levels": "false",
     "notification_pings": "true",
     "notifications_plain_text": "false",
@@ -86,12 +95,29 @@ ABSENT_DEFAULTS: Dict[str, str] = {
 
 
 def absent_default(key: str) -> Optional[str]:
-    """Storage-form value of ``key`` (or its ``seasonal_`` mirror) when unset."""
+    """Storage-form value of ``key`` (or its ``seasonal_``/``hardcore_`` mirror) when unset."""
     if key in ABSENT_DEFAULTS:
         return ABSENT_DEFAULTS[key]
-    if key.startswith(SEASONAL_PREFIX):
-        return ABSENT_DEFAULTS.get(key[len(SEASONAL_PREFIX):])
+    for prefix in (SEASONAL_PREFIX, HARDCORE_PREFIX):
+        if key.startswith(prefix):
+            return ABSENT_DEFAULTS.get(key[len(prefix):])
     return None
+
+
+def _shares_hardcore_settings(session, group_id: int) -> bool:
+    return is_truthy(get(session, group_id, SHARE_HARDCORE_SETTINGS))
+
+
+def _resolve_key(session, group_id: int, key: str) -> str:
+    """The key actually read for ``key`` in this group.
+
+    A ``hardcore_`` mirror reads its main-world key when the group chose to
+    share its main settings with Hardcore Worlds, so processors always ask for
+    ``hardcore_<key>`` and never need to know which way the group went.
+    """
+    if key.startswith(HARDCORE_PREFIX) and _shares_hardcore_settings(session, group_id):
+        return key[len(HARDCORE_PREFIX):]
+    return key
 
 
 # ── Cache internals ───────────────────────────────────────────────────────────
@@ -113,6 +139,7 @@ def is_truthy(value: Any) -> bool:
 
 def get(session, group_id: int, key: str, default: Any = None) -> Any:
     """Return one config value for a group, consulting cache first."""
+    key = _resolve_key(session, group_id, key)
     now = time.monotonic()
     with _lock:
         entry = _cache.get(group_id, {}).get(key, _MISS)
@@ -144,8 +171,26 @@ def get_bulk(
 
     Returns a dict mapping ``(group_id, key)`` → ``value_str``.  Absent keys
     are not present in the result (callers must supply their own defaults).
-    All fetched rows are stored in the cache.
+    All fetched rows are stored in the cache. ``hardcore_`` keys are answered
+    under the requested key even when a group reads its main one instead.
     """
+    if any(k.startswith(HARDCORE_PREFIX) for k in keys):
+        result: Dict[Tuple[int, str], str] = {}
+        for gid in group_ids:
+            wanted = {key: _resolve_key(session, gid, key) for key in keys}
+            got = _get_bulk_raw(session, [gid], list(set(wanted.values())))
+            for asked, actual in wanted.items():
+                if (gid, actual) in got:
+                    result[(gid, asked)] = got[(gid, actual)]
+        return result
+    return _get_bulk_raw(session, group_ids, keys)
+
+
+def _get_bulk_raw(
+    session,
+    group_ids: List[int],
+    keys: List[str],
+) -> Dict[Tuple[int, str], str]:
     now = time.monotonic()
     result: Dict[Tuple[int, str], str] = {}
 
@@ -188,7 +233,7 @@ def get_effective(session, group_id: int, key: str) -> Optional[str]:
     """``get`` with the registry default for an absent row: the value the
     website shows for this group."""
     value = get(session, group_id, key)
-    return absent_default(key) if value is None else value
+    return absent_default(_resolve_key(session, group_id, key)) if value is None else value
 
 
 def get_bulk_effective(

@@ -48,7 +48,14 @@ from db import (
     SeasonalCombatAchievementEntry,
     SeasonalPlayerPet,
     SeasonalQuestCompletionEntry,
+    HardcoreCollectionLogEntry,
+    HardcoreCombatAchievementEntry,
+    HardcoreDrop,
+    HardcorePersonalBestEntry,
+    HardcorePlayerPet,
+    HardcoreQuestCompletionEntry,
 )
+from sqlalchemy.exc import IntegrityError
 from db.ops import DatabaseOperations, associate_player_ids, get_point_divisor
 from sqlalchemy import func, text
 from sqlalchemy.engine import Row
@@ -98,6 +105,15 @@ def debug_print(message, **kwargs):
 
 
 SEASONAL_WORLD_TYPE = "seasonal"
+# Hardcore Worlds (db/models/hardcore.py). Like seasonal, a "side world": its
+# own mirror tables, its own settings prefix, its own Redis namespace.
+HARDCORE_WORLD_TYPE = "hardcore"
+SIDE_WORLD_TYPES = (SEASONAL_WORLD_TYPE, HARDCORE_WORLD_TYPE)
+
+
+def is_side_world(world_type) -> bool:
+    """True for the worlds with mirror tables of their own (seasonal, hardcore)."""
+    return world_type in SIDE_WORLD_TYPES
 
 
 def apply_account_type(player, raw_value, world_type: str = "main"):
@@ -241,22 +257,44 @@ def event_ts(submission_data: dict) -> int:
 def get_config_prefix(world_type: str) -> str:
     """Return the GroupConfiguration key prefix for the given world type.
 
-    Seasonal submissions use config keys prefixed with "seasonal_" so groups
-    can define separate channel IDs, limits, and enabled flags for each mode.
+    Side-world submissions use config keys prefixed with "seasonal_" or
+    "hardcore_" so groups can define separate limits and enabled flags for
+    each mode. A group that shares its main settings with Hardcore Worlds
+    still gets asked for "hardcore_" keys; utils.group_config answers them
+    from the main ones.
     """
-    return "seasonal_" if world_type == SEASONAL_WORLD_TYPE else ""
+    return f"{world_type}_" if is_side_world(world_type) else ""
 
 
-def get_seasonal_model(submission_type: str):
-    """Return the seasonal ORM model class for the given submission type string."""
-    return {
+_WORLD_MODELS = {
+    SEASONAL_WORLD_TYPE: {
         "drop": SeasonalDrop,
         "personal_best": SeasonalPersonalBestEntry,
         "collection_log": SeasonalCollectionLogEntry,
         "combat_achievement": SeasonalCombatAchievementEntry,
         "pet": SeasonalPlayerPet,
         "quest": SeasonalQuestCompletionEntry,
-    }.get(submission_type)
+    },
+    HARDCORE_WORLD_TYPE: {
+        "drop": HardcoreDrop,
+        "personal_best": HardcorePersonalBestEntry,
+        "collection_log": HardcoreCollectionLogEntry,
+        "combat_achievement": HardcoreCombatAchievementEntry,
+        "pet": HardcorePlayerPet,
+        "quest": HardcoreQuestCompletionEntry,
+    },
+}
+
+
+def get_world_model(world_type: str, submission_type: str, main_model=None):
+    """The ORM model a submission of this type is stored in for this world:
+    the side world's mirror, or ``main_model`` for the main game."""
+    return _WORLD_MODELS.get(world_type, {}).get(submission_type, main_model)
+
+
+def get_seasonal_model(submission_type: str):
+    """Return the seasonal ORM model class for the given submission type string."""
+    return get_world_model(SEASONAL_WORLD_TYPE, submission_type)
 
 
 global_footer = os.getenv("DISCORD_MESSAGE_FOOTER")
@@ -837,8 +875,60 @@ def _heal_stub_onto_hash_owner(session, player_by_wom, player_by_hash, expected_
     return player_by_hash
 
 
-async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
-    """Ensure player exists, cache id, then auth. Returns (player, authed, user_exists)."""
+_HARDCORE_DEDUP_KINDS = {
+    "hardcore_drop": "drop",
+    "hardcore_pb": "personal_best",
+    "hardcore_clog": "collection_log",
+    "hardcore_ca": "combat_achievement",
+    "hardcore_pet": "pet",
+    "hardcore_quest": "quest",
+}
+
+
+def ensure_hardcore_player(session, player_name, account_hash):
+    """The ``world='hardcore'`` players row for this character, created on
+    first sight. Returns None when the hash belongs to a main-game player.
+
+    No Wise Old Man: a fresh Hardcore Worlds character is not something WOM
+    can vouch for (they have not said how they will track these worlds), and
+    nothing about it touches the main game. The account hash is the identity;
+    the name follows renames. The row has no groups until a Discord user
+    claims it (get_player_groups_with_global).
+    """
+    player_name = str(player_name or "").strip()
+    account_hash = str(account_hash or "").strip()
+    if not player_name or not account_hash or _is_temp_account_hash(account_hash):
+        return None
+    player = session.query(Player).filter(Player.account_hash == account_hash).first()
+    if player is not None:
+        if (player.world or "main") != HARDCORE_WORLD_TYPE:
+            return None
+        if player.player_name != player_name:
+            player.player_name = player_name
+            session.flush()
+        return player
+    try:
+        with session.begin_nested():
+            player = Player(player_name=player_name, account_hash=account_hash,
+                            world=HARDCORE_WORLD_TYPE)
+            session.add(player)
+    except IntegrityError:
+        # A concurrent first submission from the same character won the insert.
+        player = session.query(Player).filter(Player.account_hash == account_hash).first()
+        if player is None or (player.world or "main") != HARDCORE_WORLD_TYPE:
+            return None
+    return player
+
+
+async def ensure_player_and_auth(session, player_name, account_hash, auth_key, world_type="main"):
+    """Ensure player exists, cache id, then auth. Returns (player, authed, user_exists).
+
+    ``world_type="hardcore"`` resolves the character's own ``world='hardcore'``
+    row instead (ensure_hardcore_player): never a main-game player, never WOM.
+    """
+    if world_type == HARDCORE_WORLD_TYPE:
+        player = ensure_hardcore_player(session, player_name, account_hash)
+        return player, player is not None, player is not None
 
     player_name = str(player_name).strip() if player_name is not None else ""
     account_hash = str(account_hash) if account_hash is not None else ""
@@ -852,7 +942,17 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key):
     if account_hash:
         player_by_hash = session.query(Player).filter(Player.account_hash == account_hash).first()
 
-    player_by_name_fast = session.query(Player).filter(Player.player_name == player_name).first()
+    if player_by_hash is not None and (player_by_hash.world or "main") == HARDCORE_WORLD_TYPE:
+        # A main-world submission from a Hardcore Worlds character: it moved to
+        # the main game (a one-way, permanent move). From here on it is a main
+        # account; its hardcore history stays in the hardcore tables.
+        player_by_hash.world = "main"
+        session.flush()
+
+    # Name fallbacks never pick a Hardcore Worlds character: a fresh hardcore
+    # name that matches a main account's must not swallow its submissions.
+    player_by_name_fast = session.query(Player).filter(
+        Player.player_name == player_name, Player.world == "main").first()
     player = player_by_hash or player_by_name_fast
     resolved_by_name = False
     expected_wom_id = None
@@ -1122,17 +1222,17 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
                 return session.query(QuestCompletionEntry).filter(
                     QuestCompletionEntry.unique_id == unique_id,
                 ).first()
-            case "death" | "seasonal_death":
+            case "death" | "seasonal_death" | "hardcore_death":
                 # Deaths share one table across world types (world_type column).
                 return session.query(PlayerDeath).filter(
                     PlayerDeath.unique_id == unique_id,
                 ).first()
-            case "diary" | "seasonal_diary":
+            case "diary" | "seasonal_diary" | "hardcore_diary":
                 # Diary completions share one table across world types (world_type column).
                 return session.query(DiaryCompletionEntry).filter(
                     DiaryCompletionEntry.unique_id == unique_id,
                 ).first()
-            case "slayer" | "seasonal_slayer":
+            case "slayer" | "seasonal_slayer" | "hardcore_slayer":
                 # Slayer task completions share one table across world types (world_type column).
                 return session.query(SlayerTaskCompletionEntry).filter(
                     SlayerTaskCompletionEntry.unique_id == unique_id,
@@ -1164,6 +1264,9 @@ async def ensure_can_create(session, unique_id, submission_type) -> bool:
                 return session.query(SeasonalQuestCompletionEntry).filter(
                     SeasonalQuestCompletionEntry.unique_id == unique_id,
                 ).first()
+            case "hardcore_drop" | "hardcore_pb" | "hardcore_clog" | "hardcore_ca" | "hardcore_pet" | "hardcore_quest":
+                model = get_world_model(HARDCORE_WORLD_TYPE, _HARDCORE_DEDUP_KINDS[submission_type])
+                return session.query(model).filter(model.unique_id == unique_id).first()
         return None
     
     existing_entry = _check_existing()
@@ -1430,7 +1533,14 @@ async def attach_webhook_screenshot(
 
 
 def get_player_groups_with_global(session, player: Player):
-    """Fetch groups via association table, ensure global group membership."""
+    """Fetch groups via association table, ensure global group membership.
+
+    A Hardcore Worlds character has no association rows and never joins the
+    global group: its groups are those of the main accounts owned by the
+    Discord user who claimed it, kept to the groups that track Hardcore Worlds.
+    """
+    if (getattr(player, "world", None) or "main") == HARDCORE_WORLD_TYPE:
+        return get_hardcore_player_groups(session, player)
 
     player_gids = session.execute(
         text("SELECT group_id FROM user_group_association WHERE player_id = :player_id"),
@@ -1453,6 +1563,31 @@ def get_player_groups_with_global(session, player: Player):
 
     player_groups = session.query(Group).filter(Group.group_id.in_(group_ids)).all()
     return player_groups
+
+
+def get_hardcore_player_groups(session, player: Player):
+    """Groups a hardcore character posts to: those of its owner's main
+    accounts that turned ``track_hardcore_worlds`` on. Never the global group."""
+    if player.user_id is None:
+        return []
+    rows = session.execute(
+        text(
+            "SELECT DISTINCT uga.group_id FROM user_group_association uga "
+            "JOIN players p ON p.player_id = uga.player_id "
+            "WHERE p.user_id = :user_id AND p.world = 'main' AND uga.group_id != 2"
+        ),
+        {"user_id": player.user_id},
+    ).all()
+    group_ids = [row[0] for row in rows]
+    if not group_ids:
+        return []
+    from utils import group_config as gc
+    tracking = gc.get_bulk(session, group_ids, [gc.TRACK_HARDCORE_WORLDS])
+    group_ids = [gid for gid in group_ids
+                 if gc.is_truthy(tracking.get((gid, gc.TRACK_HARDCORE_WORLDS)))]
+    if not group_ids:
+        return []
+    return session.query(Group).filter(Group.group_id.in_(group_ids)).all()
 
 
 def is_truthy_config(value):
@@ -1588,9 +1723,9 @@ async def ensure_item_by_name(session, item_name, item_id_hint=None):
     return item
 
 
-async def ensure_player_by_name_then_auth(session, player_name, account_hash, auth_key):
+async def ensure_player_by_name_then_auth(session, player_name, account_hash, auth_key, world_type="main"):
     # Use the canonical identity flow so WOM stays source-of-truth for RSN -> WOM ID.
-    return await ensure_player_and_auth(session, player_name, account_hash, auth_key)
+    return await ensure_player_and_auth(session, player_name, account_hash, auth_key, world_type=world_type)
 
 
 stored_notifications = {}
@@ -2036,7 +2171,8 @@ async def create_player(player_name, account_hash, existing_session=None):
         # Fallback to existing local identity rows and reconcile to authoritative WOM ID.
         player = db_session.query(Player).filter(Player.account_hash == account_hash).first()
     if not player:
-        player = db_session.query(Player).filter(Player.player_name == player_name).first()
+        player = db_session.query(Player).filter(
+            Player.player_name == player_name, Player.world == "main").first()
 
     if player is not None:
         old_name = player.player_name

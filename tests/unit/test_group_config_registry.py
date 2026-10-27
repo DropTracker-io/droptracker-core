@@ -184,7 +184,13 @@ class TestRegistry:
             if re.search(r"seasonalMirror:\s*true", chunk):
                 mirror_keys.append(key)
 
-        expected = set(base_keys) | {f"seasonal_{k}" for k in mirror_keys}
+        hardcore_extra = re.search(r"HARDCORE_MIRROR_KEYS[^=]*=\s*\[(.*?)\];", src, re.DOTALL)
+        assert hardcore_extra, "could not locate HARDCORE_MIRROR_KEYS"
+        hardcore_keys = set(mirror_keys) | set(re.findall(r'"([a-z0-9_]+)"', hardcore_extra.group(1)))
+        assert set(re.findall(r'"([a-z0-9_]+)"', hardcore_extra.group(1))) == reg.HARDCORE_MIRROR_KEYS
+
+        expected = (set(base_keys) | {f"seasonal_{k}" for k in mirror_keys}
+                    | {f"hardcore_{k}" for k in hardcore_keys})
         got = set(reg.all_config_keys())
         assert got == expected, f"missing={expected - got} extra={got - expected}"
 

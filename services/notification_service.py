@@ -190,6 +190,11 @@ _send_scope: contextvars.ContextVar = contextvars.ContextVar(
 _DISCORD_EPOCH_MS = 1420070400000
 
 
+
+# Per-notification hardcore channel override (see _hardcore_channel_override).
+# A ContextVar so concurrent sends can never see each other's.
+_HARDCORE_CHANNEL: contextvars.ContextVar = contextvars.ContextVar("hardcore_channel", default=None)
+
 class NotificationService:
     def __init__(self, bot: interactions.Client, db_ops: DatabaseOperations):
         self.bot = bot
@@ -1453,6 +1458,28 @@ class NotificationService:
                 return value
         return ""
 
+    def _hardcore_channel_override(self, db_session, notification, data):
+        """The channel a Hardcore Worlds notification goes to instead of the
+        main one, or None.
+
+        Only for a group that set Hardcore Worlds up separately and gave this
+        type a ``hardcore_`` channel; otherwise the main channel resolution is
+        untouched, which is also the fallback for an unset hardcore channel.
+        Fail-open: any error posts to the main channel.
+        """
+        try:
+            if not isinstance(data, dict) or data.get("world_type") != "hardcore" or not notification.group_id:
+                return None
+            from data.submissions.common import GROUP_CHANNEL_NOTIFICATION_KEYS
+            from utils import group_config as gc
+            keys = GROUP_CHANNEL_NOTIFICATION_KEYS.get(notification.notification_type)
+            if not keys or gc.is_truthy(gc.get(db_session, notification.group_id, gc.SHARE_HARDCORE_SETTINGS)):
+                return None
+            value = str(gc.get(db_session, notification.group_id, f"{gc.HARDCORE_PREFIX}{keys[0]}") or "").strip()
+            return value if value and value != "0" else None
+        except Exception:
+            return None
+
     async def _fetch_sendable_channel(self, channel_id):
         """Fetch a Discord channel and verify it can actually receive messages.
 
@@ -1465,6 +1492,7 @@ class NotificationService:
         'send'", which polluted the queue with what looked like crashes.
         A hasattr-based guard keeps this working across channel classes.
         """
+        channel_id = _HARDCORE_CHANNEL.get() or channel_id
         channel = await self.bot.fetch_channel(channel_id=channel_id)
         if channel is None:
             return None, f"Channel {channel_id} not found"
@@ -1924,6 +1952,9 @@ class NotificationService:
             
             data = json.loads(notification.data)
             notification_type = notification.notification_type
+            # Hardcore Worlds posts of a group with separate settings go to its
+            # hardcore channel when it set one; _fetch_sendable_channel reads this.
+            _HARDCORE_CHANNEL.set(self._hardcore_channel_override(db_session, notification, data))
 
             # The group's leaders blacklisted this item / source NPC. The
             # enqueue gate (data/submissions/common.create_notification) is the

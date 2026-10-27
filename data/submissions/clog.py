@@ -5,6 +5,8 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 
 from .common import (
+    is_side_world,
+    get_world_model,
     SubmissionResponse,
     ensure_item_by_name,
     apply_account_type,
@@ -114,7 +116,8 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     debug_print(f"External session provided: {external_session is not None}")
 
     config_prefix = get_config_prefix(world_type)
-    is_seasonal = world_type == SEASONAL_WORLD_TYPE
+    # Seasonal or hardcore: mirror tables, main-only features skipped.
+    side_world = is_side_world(world_type)
     debug_test = False
     player_name = clog_data.get("player_name", clog_data.get("player", None))
     if player_name == "joelhalen":
@@ -147,7 +150,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     notice = ""
     item = await ensure_item_by_name(session, item_name, clog_data.get("item_id"))
 
-    dedup_type = "seasonal_clog" if is_seasonal else "clog"
+    dedup_type = f"{world_type}_clog" if side_world else "clog"
     if not await ensure_can_create(session, unique_id, dedup_type):
         print(
             f"Collection Log entry with Unique ID {unique_id} already exists in the database, aborting"
@@ -164,7 +167,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     if player_name is None:
         return
     player, authed, user_exists = await ensure_player_by_name_then_auth(
-        session, player_name, account_hash, auth_key
+        session, player_name, account_hash, auth_key, world_type=world_type
     )
     if not player:
         print(f"Player does not exist, and creating failed")
@@ -199,7 +202,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
 
     from db import CollectionLogEntry
 
-    clog_model = SeasonalCollectionLogEntry if is_seasonal else CollectionLogEntry
+    clog_model = get_world_model(world_type, "collection_log", CollectionLogEntry)
     # Multi-slot items (see MULTI_SLOT_CLOG_ITEM_NAMES) legitimately produce
     # several rows per (player_id, item_id) — one per slot — so never dedup
     # them by item_id; each new-unlock event is a genuinely new slot.
@@ -320,7 +323,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
         # doesn't trust. Non-drop types have no leaderboard, so this is
         # notification-only (no review queue).
         manual_suppressed = set()
-        if clog_data.get("intake_source") == "manual" and not is_seasonal:
+        if clog_data.get("intake_source") == "manual" and not side_world:
             try:
                 from .manual_policy import manual_notification_suppressed_groups
                 manual_suppressed = manual_notification_suppressed_groups(
@@ -340,7 +343,7 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                 "total_points_awarded": 0,
                 "awarded_members": [],
             }
-            if is_seasonal:
+            if side_world:
                 # TODO: award group points for seasonal collection log entries once
                 # award_points_in_leagues config key is supported.
                 pass

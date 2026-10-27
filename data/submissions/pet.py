@@ -5,6 +5,8 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 
 from .common import (
+    is_side_world,
+    get_world_model,
     SubmissionResponse,
     apply_account_type,
     ensure_player_by_name_then_auth,
@@ -35,7 +37,8 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     debug_print(f"External session provided: {external_session is not None}")
 
     config_prefix = get_config_prefix(world_type)
-    is_seasonal = world_type == SEASONAL_WORLD_TYPE
+    # Seasonal or hardcore: mirror tables, main-only features skipped.
+    side_world = is_side_world(world_type)
     session, use_external_session = select_session_and_flag(external_session)
     debug_print(f"Using external session: {use_external_session}")
 
@@ -69,7 +72,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     video_key = pet_data.get("video_key")
     plugin_version = pet_data.get("p_v", None)
     notice = ""
-    dedup_type = "seasonal_pet" if is_seasonal else "pet"
+    dedup_type = f"{world_type}_pet" if side_world else "pet"
     if not await ensure_can_create(session, unique_id, dedup_type):
         print(
             f"Pet entry with Unique ID {unique_id} already exists in the database, aborting"
@@ -82,7 +85,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     debug_print(f"Attachment URL: {attachment_url}, Type: {attachment_type}, Downloaded: {downloaded}")
 
     player, authed, user_exists = await ensure_player_by_name_then_auth(
-        session, player_name, account_hash, auth_key
+        session, player_name, account_hash, auth_key, world_type=world_type
     )
     if not player:
         debug_print("Player not found in the database, aborting")
@@ -123,7 +126,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
 
     from db import PlayerPet
 
-    pet_model = SeasonalPlayerPet if is_seasonal else PlayerPet
+    pet_model = get_world_model(world_type, "pet", PlayerPet)
     existing_pet = None
     new_pet = None
     if pet_item_id:
@@ -191,7 +194,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
             )
     elif downloaded:
         dl_path = image_url
-    if is_new_pet and not is_seasonal:
+    if is_new_pet and not side_world:
         # Site-wide ticker (rt:feed): pets are rare enough to always announce.
         try:
             from services.realtime import publish_feed_pet
@@ -206,7 +209,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
         except Exception as e:
             debug_print(f"Ticker pet publish failed: {e}")
 
-    if not is_seasonal:
+    if not side_world:
         # Event engine hook: fire-and-forget LPUSH — DUPLICATES INCLUDED.
         # `is_new_pet` answers "has DropTracker seen this pet for this player
         # before", NOT "did a pet drop just happen", and only the latter can
@@ -257,7 +260,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     # notification for a manual submission it doesn't trust. NB pet_data
     # ["source"] is the pet's NPC — the intake marker is "intake_source".
     manual_suppressed = set()
-    if pet_data.get("intake_source") == "manual" and not is_seasonal:
+    if pet_data.get("intake_source") == "manual" and not side_world:
         try:
             from .manual_policy import manual_notification_suppressed_groups
             manual_suppressed = manual_notification_suppressed_groups(
@@ -279,7 +282,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
             "total_points_awarded": 0,
             "awarded_members": [],
         }
-        if is_seasonal:
+        if side_world:
             # TODO: award group points for seasonal pets once award_points_in_leagues
             # config key is supported.
             pass

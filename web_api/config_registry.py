@@ -28,6 +28,9 @@ from typing import Any, Dict, List, Optional
 from utils.slayer_masters import DEFAULT_EXCLUDED_MASTER_IDS, SLAYER_MASTERS
 
 SEASONAL_PREFIX = "seasonal_"
+# Hardcore Worlds mirrors (web151a): read by hardcore submissions of a group
+# that set Hardcore Worlds up separately (utils/group_config._resolve_key).
+HARDCORE_PREFIX = "hardcore_"
 
 # Ordered category list (mirrors the TS CONFIG_CATEGORIES; TS calls the key
 # field `id`).
@@ -48,6 +51,7 @@ CONFIG_CATEGORIES: List[Dict[str, str]] = [
     {"key": "bank", "label": "Clan bank"},
     {"key": "clan_chat", "label": "Clan chat"},
     {"key": "voice", "label": "Voice channel counters"},
+    {"key": "hardcore", "label": "Hardcore Worlds"},
     {"key": "integration", "label": "WiseOldMan & API"},
 ]
 
@@ -1364,6 +1368,47 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
     },
 ]
 
+GROUP_CONFIG_FIELDS += [
+    {
+        "key": "track_hardcore_worlds",
+        "label": "Track Hardcore Worlds",
+        "category": "hardcore",
+        "type": "boolean",
+        "help": "Announce and track your members' Hardcore Worlds characters. A member links a hardcore character to their Discord with /claim-rsn, and it joins every group their main accounts are in.",
+        "default": False,
+    },
+    {
+        "key": "share_hardcore_settings",
+        "label": "Use main settings for Hardcore Worlds",
+        "category": "hardcore",
+        "type": "boolean",
+        "help": "Hardcore Worlds submissions use your main notification settings, channels and boards. Turn this off to set them up separately on the Hardcore Worlds tab.",
+        "default": False,
+    },
+]
+
+# Fields with a ``hardcore_`` mirror: every seasonal mirror, plus the drop
+# threshold, level minimum and the notification channels, so a group can send
+# Hardcore Worlds to channels of its own (an unset one falls back to the main
+# channel; services.notification_service).
+HARDCORE_MIRROR_KEYS = frozenset({
+    "minimum_value_to_notify",
+    "level_minimum_for_notifications",
+    "channel_id_to_post_loot",
+    "channel_id_to_post_levels",
+    "channel_id_to_post_pb",
+    "channel_id_to_post_ca",
+    "channel_id_to_post_pets",
+    "channel_id_to_post_quests",
+    "channel_id_to_post_clog",
+    "channel_id_to_post_diaries",
+    "channel_id_to_post_deaths",
+    "channel_id_to_post_slayer",
+})
+for _field in GROUP_CONFIG_FIELDS:
+    if _field.get("seasonal") or _field["key"] in HARDCORE_MIRROR_KEYS:
+        _field["hardcore"] = True
+
 _BY_KEY = {f["key"]: f for f in GROUP_CONFIG_FIELDS}
 
 #: Settings the bot writes itself: the id of the standing message it edits in
@@ -1414,20 +1459,23 @@ def _coerce_snowflake_list(key: str, value: Any) -> str:
 
 
 def all_config_keys() -> List[str]:
-    """All effective keys, including seasonal mirrors (mirrors TS allConfigKeys)."""
+    """All effective keys, including seasonal and hardcore mirrors (mirrors TS allConfigKeys)."""
     keys = [f["key"] for f in GROUP_CONFIG_FIELDS]
     seasonal = [f"{SEASONAL_PREFIX}{f['key']}" for f in GROUP_CONFIG_FIELDS if f.get("seasonal")]
-    return keys + seasonal
+    hardcore = [f"{HARDCORE_PREFIX}{f['key']}" for f in GROUP_CONFIG_FIELDS if f.get("hardcore")]
+    return keys + seasonal + hardcore
 
 
 def get_config_field(key: str) -> Optional[Dict[str, Any]]:
-    """Resolve a key (base or seasonal mirror) to its field, exact-match first."""
+    """Resolve a key (base or mirror) to its field, exact-match first."""
     exact = _BY_KEY.get(key)
     if exact:
         return exact
     if key.startswith(SEASONAL_PREFIX):
-        base = key[len(SEASONAL_PREFIX):]
-        return _BY_KEY.get(base)
+        return _BY_KEY.get(key[len(SEASONAL_PREFIX):])
+    if key.startswith(HARDCORE_PREFIX):
+        field = _BY_KEY.get(key[len(HARDCORE_PREFIX):])
+        return field if field and field.get("hardcore") else None
     return None
 
 
