@@ -100,7 +100,6 @@ async def build_help_components(bot=None):
     # sub-command carries the *base* command's ID — which is exactly what the
     # </submit drop:ID> mention syntax expects.
     submit_id          = await _cid("submit drop")
-    create_group_id    = await _cid("create-group")
     sync_wom_id        = await _cid("sync-wom")
     reset_points_id    = await _cid("reset-group-points")
     force_sync_id      = await _cid("force-group-sync")
@@ -109,6 +108,9 @@ async def build_help_components(bot=None):
     add_points_id      = await _cid("add-group-points")
     remove_points_id   = await _cid("remove-group-points")
     points_audit_id    = await _cid("group-points-audit")
+    settings_id        = await _cid("settings")
+    clan_log_id        = await _cid("clan-log")
+    group_setup_id     = await _cid("group-setup")
 
     return [
         ContainerComponent(
@@ -119,7 +121,7 @@ async def build_help_components(bot=None):
                         content="## Help Menu",
                     ),
                     TextDisplayComponent(
-                        content="-# You are suggested to check out the [Wiki](https://www.droptracker.io/wiki) for more information.\n"
+                        content=f"-# Guides for everything are in [our docs]({WEBSITE_URL}/docs).\n"
                     ),
                 ],
                 accessory=ThumbnailComponent(media=logo_media)
@@ -128,6 +130,7 @@ async def build_help_components(bot=None):
             TextDisplayComponent(
                 content=(
                     "**User Commands**\n"
+                    f"-# </settings:{settings_id}> - Your notifications and privacy, all in one panel.\n"
                     f"-# </accounts:{accounts_id}> - View your currently claimed in-game accounts.\n"
                     f"-# </claim-rsn:{claim_rsn_id}> - Claim an in-game character as belonging to your Discord account.\n"
                     f"-# </unclaim-rsn:{unclaim_rsn_id}> - Remove a RuneScape account from your Discord account.\n"
@@ -138,6 +141,7 @@ async def build_help_components(bot=None):
                     f"-# </my-points:{my_points_id}> - View your clan points: your rank, your accounts and your recent awards.\n"
                     f"-# </group-points:{group_points_id}> - Browse this server's points leaderboard, by period or season.\n"
                     f"-# </lookup:{lookup_id}> - Look up another player's clan points and DropTracker stats.\n"
+                    f"-# </clan-log:{clan_log_id}> - See which boss uniques your clan has, and what's still missing.\n"
                     f"-# </submit drop:{submit_id}> - Manually submit something you received, if the plugin missed it.\n"
                     "-# > Swap `drop` for `clog`, `pb`, `ca` or `pet` to submit any other achievement type.\n"
                 )
@@ -146,7 +150,7 @@ async def build_help_components(bot=None):
             TextDisplayComponent(
                 content=(
                     "**Group Leader / Admin Commands**\n"
-                    f"-# </create-group:{create_group_id}> - Create a new group in the DropTracker database.\n"
+                    f"-# </group-setup:{group_setup_id}> - Set up your clan's group, or change its settings, right here in Discord.\n"
                     f"-# </sync-wom:{sync_wom_id}> - Request an immediate WiseOldMan membership sync (1-hour cooldown).\n"
                     f"-# </force-group-sync:{force_sync_id}> - Force a WiseOldMan membership sync for your group.\n"
                     f"-# </toggle-split-tracking:{split_tracking_id}> - Enable or disable split GP tracking for your group.\n"
@@ -162,9 +166,9 @@ async def build_help_components(bot=None):
             SeparatorComponent(divider=True),
             ActionRow(
                 Button(
-                    label="Wiki",
+                    label="Docs",
                     style=ButtonStyle.URL,
-                    url="https://www.droptracker.io/wiki"
+                    url=f"{WEBSITE_URL}/docs"
                 ),
                 Button(
                     label="Join our Discord",
@@ -209,206 +213,135 @@ invite_components = [
 ]
 
 
-async def build_player_setup(bot=None):
-    """
-    Build the player FAQ/setup guide with dynamically-resolved command IDs.
+async def _command_mentions(bot, names):
+    """{name: "</name:id>"} for the given commands; plain `/name` when the id
+    can't be resolved (bot not connected, command not registered yet)."""
+    from utils.format import get_command_id
 
-    Args:
-        bot: The bot instance used for command ID resolution.
+    out = {}
+    for name in names:
+        cid = 0
+        if bot is not None:
+            try:
+                result = await get_command_id(bot, name)
+                if result and result != "`command not yet added`":
+                    cid = result
+            except Exception:
+                cid = 0
+        out[name] = f"</{name}:{cid}>" if cid else f"`/{name}`"
+    return out
+
+
+async def build_player_setup(bot=None, group_name=None):
+    """The members' getting-started guide (``/send_player_faq`` and the
+    "player setup" button), worded by ``utils.member_guide`` so it matches
+    the copy the website posts.
 
     Returns:
         List of components suitable for ctx.send(components=...).
     """
-    from utils.format import get_command_id
+    from utils import member_guide
 
-    async def _cid(name: str):
-        if bot is None:
-            return 0
-        result = await get_command_id(bot, name)
-        if result and result != "`command not yet added`":
-            return result
-        return 0
-
-    claim_rsn_id   = await _cid("claim-rsn")
-    unclaim_rsn_id = await _cid("unclaim-rsn")
-    dm_settings_id = await _cid("dm-settings")
-    hideme_id      = await _cid("hideme")
-    pingme_id      = await _cid("pingme")
-    submit_id      = await _cid("submit drop")
-
+    mentions = await _command_mentions(
+        bot, ["claim-rsn", "pingme", "hideme", "submit drop", "my-points", "settings"])
+    body = "\n\n".join(f"**{h}**\n{b}" for h, b in member_guide.sections(lambda n: mentions[n]))
     return [
         ContainerComponent(
-            SeparatorComponent(divider=True),
-            TextDisplayComponent(
-                content="## Player FAQs - DropTracker.io",
-            ),
-            SeparatorComponent(divider=True),
             SectionComponent(
                 components=[
-                    TextDisplayComponent(
-                        content="-# **What is the DropTracker?**\n" +
-                        "-# > A community-driven, all-in-one loot and achievement tracking system built for Old School RuneScape groups.\n" +
-                        "-# > We leverage the *[WiseOldMan](https://wiseoldman.net)* to manage group memberships, and provide group leaders a seamless way to configure their group's achievement notification settings.\n\n" +
-                        "-# **How do I get started?**\n" +
-                        "-# > 1. Install the **DropTracker** plugin on your RuneLite client, via the plugin hub.\n" +
-                        "-# > 2. Visit the plugin settings panel (gear tab on RuneLite side panel) to configure which achievements you *personally* want tracked.\n" +
-                        f"-# > 3. (Optionally) Claim your in-game-name using the </claim-rsn:{claim_rsn_id}> command to associate your Discord account with your character(s).\n\n" +
-                        "-# **How can I get pinged when my account(s) have notifications sent?**\n" +
-                        f"-# > Using the </claim-rsn:{claim_rsn_id}> command, entering your in-game-name **exactly as it appears**.\n\n" +
-                        "-# **What if the plugin missed something I received?**\n" +
-                        f"-# > Use the </submit drop:{submit_id}> command to send it in manually. Swap `drop` for `clog`, `pb`, `ca` or `pet` to submit any other achievement type.\n" +
-                        "-# > You can only submit for accounts you've claimed, and your group leaders may require a screenshot before it counts.\n\n" +
-                        "-# **How can I prevent my submissions from being shared to the global DropTracker discord channels?**\n" +
-                        f"-# > Using the </hideme:{hideme_id}> command, and selecting which account(s)/context(s) you want to be hidden from.\n\n" +
-                        "-# **How can I get (or not get) pinged by the <@1172933457010245762> bot when my account(s) have notifications sent?**\n" +
-                        f"-# > Using the </pingme:{pingme_id}> command, and selecting which account(s)/context(s) you do or do not want to receive pings for.\n\n" +
-                        "-# **How can I remove a previously claimed account from my Discord?**\n" +
-                        f"-# > Using the </unclaim-rsn:{unclaim_rsn_id}> command, and selecting the account you want to disassociate.\n\n" +
-                        "-# **How do I manage direct message notifications from the bot?**\n" +
-                        f"-# > Using the </dm-settings:{dm_settings_id}> command to enable or disable account-related DMs, such as name-change notifications for your claimed accounts.\n\n" +
-                        "-# **What types of information does the DropTracker store about me and my account(s)?**\n" +
-                        "-# 1. Your account(s) unique identifier, or 'account hash'. This is provided by Jagex, and is unique to each individual character; remaining consistent thru name changes.\n" +
-                        "-# 2. Your submitted achievements/drops.\n\n" +
-                        "-# 3. Your Discord ID (if you claim your account or execute commands through our bot)\n\n" +
-                        "-# **What can I do to support the continued development of the DropTracker project?**\n\n" +
-                        "-# This passion project began as something far more simple, and has continued to evolve into what you see before you today.\n" +
-                        "-# Without the continued support of our premium groups, the development work we do would be impossible.\n" +
-                        "-# If you feel as though we've provided a notable value to your OSRS experience, feel free to show support through our [Patreon](https://www.patreon.com/droptracker).\n" +
-                        "-# Players who have subscribed and then upgraded their groups using that subscription are provided early access to new features, alongside a few premium-only functionalities."
-                    )
+                    TextDisplayComponent(content=f"## {member_guide.TITLE}"),
+                    TextDisplayComponent(content=member_guide.intro(group_name)),
                 ],
-                accessory=ThumbnailComponent(
-                    media=logo_media
-                )
+                accessory=ThumbnailComponent(media=logo_media),
             ),
             SeparatorComponent(divider=True),
+            TextDisplayComponent(content=body),
+            SeparatorComponent(divider=True),
+            TextDisplayComponent(
+                content=(
+                    "-# **What do you store about me?** Your account's Jagex account hash (it stays the same "
+                    "through name changes), what you submit, and your Discord id once you link. "
+                    f"[Privacy policy]({WEBSITE_URL}/privacy)"
+                )
+            ),
+            ActionRow(
+                Button(label="Get the plugin", style=ButtonStyle.LINK, url=member_guide.PLUGIN_URL),
+                Button(label="Link your account", style=ButtonStyle.LINK, url=member_guide.REGISTER_URL),
+                Button(label="Docs", style=ButtonStyle.LINK, url=member_guide.DOCS_URL),
+            ),
         )
     ]
 
-async def build_clan_setup(bot=None):
-    """
-    Build the clan setup guide with dynamically-resolved command IDs.
 
-    Args:
-        bot: The bot instance used for command ID resolution.
+def _free_feature_lines() -> list:
+    from db.group_features import _FALLBACK_FREE_FEATURES, free_tier_features
+    from db.models import Session
+
+    s = Session()
+    try:
+        return free_tier_features(s)
+    except Exception:
+        return list(_FALLBACK_FREE_FEATURES)
+    finally:
+        s.close()
+
+
+async def build_clan_setup(bot=None):
+    """"What is DropTracker?": what a clan gets (free), and how to start.
+
+    The feature list is the Free plan's own list (``subscription_tiers``,
+    the same lines as the /premium Free card), so it can't drift from the
+    website. Points to ``/group-setup`` and the website wizard, the two
+    current ways in.
 
     Returns:
         List of components suitable for ctx.send(components=...).
     """
-    from utils.format import get_command_id
+    import asyncio
 
-    async def _cid(name: str):
-        if bot is None:
-            return 0
-        result = await get_command_id(bot, name)
-        if result and result != "`command not yet added`":
-            return result
-        return 0
-
-    create_group_id   = await _cid("create-group")
-    sync_wom_id       = await _cid("sync-wom")
-    reset_points_id   = await _cid("reset-group-points")
-    force_sync_id     = await _cid("force-group-sync")
-    player_faq_id     = await _cid("send_player_faq")
-    split_tracking_id = await _cid("toggle-split-tracking")
-    add_points_id     = await _cid("add-group-points")
-    remove_points_id  = await _cid("remove-group-points")
-    points_audit_id   = await _cid("group-points-audit")
-
+    lines = await asyncio.to_thread(_free_feature_lines)
+    mentions = await _command_mentions(bot, ["group-setup", "help"])
+    free = "\n".join(f"- {line}" for line in lines)
     return [
         ContainerComponent(
+            SectionComponent(
+                components=[
+                    TextDisplayComponent(content="## What is The DropTracker?"),
+                    TextDisplayComponent(
+                        content=(
+                            "Loot and achievement tracking for Old School RuneScape clans. Members install "
+                            "one RuneLite plugin, and their drops, personal bests, collection logs, pets "
+                            "and more show up here in Discord and on the website."
+                        )
+                    ),
+                ],
+                accessory=ThumbnailComponent(media=logo_media),
+            ),
+            SeparatorComponent(divider=True),
+            TextDisplayComponent(content=f"**Free for every clan**\n{free}"),
+            SeparatorComponent(divider=True),
             TextDisplayComponent(
-                content="## Clan Setup - DropTracker.io",
-            ),
-            SeparatorComponent(divider=True),
-            SectionComponent(
-                components=[
-                    TextDisplayComponent(
-                        content="-# There are a few pre-requisites to setting up a DropTracker group:\n"
-                        "-# 1. You must have a [WiseOldMan group](https://wiseoldman.net/groups) - if you don't have one, you can [create one here](https://wiseoldman.net/groups/create)\n"
-                        "-# 2. A Discord server where you are either the owner, or have the owner's permissions to set up our bot\n"
-                        "-# 3. Our Discord Bot invited to your server\n"),
-                ],
-                accessory=ThumbnailComponent(
-                    media=logo_media
-                )
-            ),
-            SeparatorComponent(divider=True),
-            SectionComponent(
-                components=[
-                    TextDisplayComponent(
-                        content=f"-# If you have all of these, grab your **WiseOldMan Group ID** (3-6 digits maximum, with no hyphens), and use </create-group:{create_group_id}> in your group's Discord server to get started.\n" +
-                        "-# Once you create a group, you should be DMed with a welcome message; and a link to configure your group settings.\n\n" +
-                        f"-# After creating a group, you can also [click here]({WEBSITE_URL}/dashboard), then click your group name to find your group config page."
-                    )
-                ],
-                accessory=ThumbnailComponent(
-                    media=UnfurledMediaItem(
-                        url="https://www.droptracker.io/img/wom-example.png"
-                    )
+                content=(
+                    "**Get started in about two minutes**\n"
+                    "You need a [Wise Old Man group](https://wiseoldman.net/groups) for your clan "
+                    "(we sync members from it) and Manage Server in this server.\n"
+                    f"- Run {mentions['group-setup']} right here, or\n"
+                    f"- use the [setup wizard on the website]({WEBSITE_URL}/groups/new)."
                 )
             ),
             SeparatorComponent(divider=True),
             TextDisplayComponent(
                 content=(
-                    "**Additional Admin Commands**\n"
-                    f"-# </sync-wom:{sync_wom_id}> - Request an immediate WiseOldMan membership sync for your group (1-hour cooldown).\n"
-                    f"-# </force-group-sync:{force_sync_id}> - Force a full WiseOldMan membership sync bypassing the cooldown (admin only).\n"
-                    f"-# </toggle-split-tracking:{split_tracking_id}> - Enable or disable split GP tracking, so raid loot is credited evenly among splitters.\n"
-                    f"-# </add-group-points:{add_points_id}> - Manually add points to one of your members' balances.\n"
-                    f"-# </remove-group-points:{remove_points_id}> - Manually remove points from one of your members' balances.\n"
-                    f"-# </group-points-audit:{points_audit_id}> - View a log of recent manual point adjustments in your group.\n"
-                    f"-# </reset-group-points:{reset_points_id}> - Reset all group points back to zero (irreversible).\n"
-                    f"-# </send_player_faq:{player_faq_id}> - Post a player FAQ/setup message to a channel in your server.\n"
-                    "-# > You can also right-click any drop notification the bot posted and choose **Modify Entry** "
-                    "to correct or delete it, or right-click a member and choose **Player Lookup** to see their tracked accounts.\n"
+                    f"-# Paid plans add a Hall of Fame, a clan website and faster lootboards. "
+                    f"[Compare plans]({PREMIUM_URL}). Every command: {mentions['help']}. "
+                    "Questions? [Join our Discord](https://discord.gg/droptracker)."
                 )
             ),
-            SeparatorComponent(divider=True),
-            SectionComponent(
-                components=[
-                    TextDisplayComponent(
-                        content="### Need more help?"
-                    ),
-                    TextDisplayComponent(
-                        content="-# You could:" + "\n" +
-                        "-# - Open a ticket in <#1210765301042380820>\n" +
-                        "-# - Check out the [Wiki on our website](https://www.droptracker.io/wiki)\n" +
-                        "-# - Send us a message in <#1374155512660103273>\n"
-                    ),
-                ],
-                accessory=ThumbnailComponent(
-                    media=logo_media
-                )
-            ),
-            SeparatorComponent(divider=True),
-            SectionComponent(
-                components=[
-                    TextDisplayComponent(
-                        content=f"-# We also offer some premium features for groups when they [upgrade their account]({PREMIUM_URL}).\n" +
-                        "-# Please consider subscribing to support the development of the project.",
-                    ),
-                ],
-                accessory=Button(
-                    label="Upgrade",
-                    style=ButtonStyle.LINK,
-                    emoji=app_partial_emoji("supporter"),
-                    url=PREMIUM_URL
-                )
-            ),
-            SeparatorComponent(divider=True),
             ActionRow(
-                Button(
-                    label="Invite our Discord bot",
-                    style=ButtonStyle.LINK,
-                    url=BOT_INVITE_URL
-                )
+                Button(label="Set up on the website", style=ButtonStyle.LINK, url=f"{WEBSITE_URL}/groups/new"),
+                Button(label="Docs", style=ButtonStyle.LINK, url=f"{WEBSITE_URL}/docs/create-group"),
+                Button(label="Invite the bot", style=ButtonStyle.LINK, url=BOT_INVITE_URL),
             ),
-            SeparatorComponent(divider=True),
-            TextDisplayComponent(
-                content="-# Powered by the [DropTracker](https://www.droptracker.io) - a project by <@528746710042804247>"
-            ),
-            SeparatorComponent(divider=True),
         )
     ]
 

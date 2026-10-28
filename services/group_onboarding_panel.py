@@ -183,11 +183,11 @@ def _user_id_for_discord(discord_id):
 
 
 async def _authorized(ctx, group_id=None) -> bool:
-    """ADMINISTRATOR in the server, or (for an existing group) on the
-    group's authed_users list."""
-    from commands.utils import is_admin, is_user_authorized
+    """Manage Server in the server (the website wizard's bar), or (for an
+    existing group) on the group's authed_users list."""
+    from commands.utils import can_manage_server, is_user_authorized
 
-    if await is_admin(ctx):
+    if await can_manage_server(ctx):
         return True
     if group_id is None:
         return False
@@ -507,10 +507,69 @@ def build_essentials_step(group_id: int, saved: str = ""):
         ActionRow(
             Button(style=ButtonStyle.SECONDARY, label="Minimum drop value…",
                    emoji="💰", custom_id=f"{PREFIX}ess:minval:{group_id}"),
-            Button(style=ButtonStyle.SUCCESS, label="Finish setup",
-                   custom_id=f"{PREFIX}finish:{group_id}"),
+            Button(style=ButtonStyle.SUCCESS, label="Continue",
+                   custom_id=f"{PREFIX}feat:{group_id}"),
         ),
     ]
+    return content, rows
+
+
+_STATUS_MARK = {"on": "✅", "off": "▫️", "locked": "🔒"}
+
+
+def build_features_step(group_id: int, saved: str = "", pick: str | None = None):
+    """"Turn things on": the shared feature catalog (db/group_features.py,
+    the same list the website wizard and admin Overview show). Toggle and
+    channel features switch on right here; the rest link to the website.
+    ``pick`` = a channel feature waiting for its channel."""
+    from db.group_features import feature_status, get_feature
+
+    s = Session()
+    try:
+        features = feature_status(s, group_id)
+    finally:
+        s.close()
+    lines = []
+    for f in features:
+        mark = _STATUS_MARK.get(f["status"], "▫️")
+        if f["status"] == "on":
+            lines.append(f"{mark} **{f['title']}**")
+        elif f["status"] == "locked":
+            lines.append(f"{mark} **{f['title']}** ({f['tier'] or 'paid plans'})")
+        else:
+            lines.append(f"{mark} **{f['title']}**: {f['blurb']}")
+    content = (
+        f"{saved}## ✨ Turn things on\n"
+        "Everything without a lock is free. Pick one below to switch it on now, "
+        f"or browse them all on [the website]({WEBSITE}/groups/{group_id}/admin).\n\n"
+        + "\n".join(lines)
+    )[:2000]
+    rows = []
+    if pick and get_feature(pick):
+        rows.append(ActionRow(ChannelSelectMenu(
+            channel_types=[ChannelType.GUILD_TEXT, ChannelType.GUILD_NEWS],
+            placeholder=f"Channel for {get_feature(pick)['title']}…",
+            custom_id=f"{PREFIX}feat:ch:{group_id}:{pick}",
+        )))
+    options = [
+        StringSelectOption(label=f["title"][:100], value=f["key"],
+                           description=f["blurb"][:100])
+        for f in features
+        if f["status"] == "off" and f["kind"] in ("toggle", "channel")
+    ]
+    if options and not pick:
+        rows.append(ActionRow(StringSelectMenu(
+            *options[:25], placeholder="Switch something on…",
+            custom_id=f"{PREFIX}feat:pick:{group_id}",
+        )))
+    rows.append(ActionRow(
+        Button(style=ButtonStyle.SECONDARY, label="← Back",
+               custom_id=f"{PREFIX}ess:{group_id}"),
+        Button(style=ButtonStyle.LINK, label="All features",
+               url=f"{WEBSITE}/groups/{group_id}/admin"),
+        Button(style=ButtonStyle.SUCCESS, label="Finish setup",
+               custom_id=f"{PREFIX}finish:{group_id}"),
+    ))
     return content, rows
 
 
@@ -531,17 +590,21 @@ def build_finish_step(group_id: int):
         head
         + "**Next steps for your members:**\n"
         "1. Install the **DropTracker** plugin from the RuneLite plugin hub.\n"
-        "2. Claim their RSN with `/claim-rsn` (links their drops to Discord).\n"
-        "3. Be in your Wise Old Man group, so their drops count for the clan.\n\n"
+        "2. Turn on **Use API** in its settings (events need it).\n"
+        "3. Link their account with `/claim-rsn` or on the website.\n"
+        "4. Be in your Wise Old Man group, so their drops count for the clan.\n\n"
+        "**Post member guide here** puts those steps in this channel for everyone.\n"
         f"Run `/group-setup` any time to change settings, or use "
-        f"[the website]({WEBSITE}/groups/{group_id}/settings) for advanced "
-        f"options (events, points, embeds, premium)."
+        f"[the website]({WEBSITE}/groups/{group_id}/admin) for everything else "
+        f"(events, points, embeds)."
     )
     buttons = []
     if not has_drops:
         buttons.append(Button(style=ButtonStyle.PRIMARY, label="Pick a drops channel",
                               custom_id=f"{PREFIX}chs:{group_id}"))
     buttons += [
+        Button(style=ButtonStyle.SUCCESS, label="Post member guide here",
+               custom_id=f"{PREFIX}guide:{group_id}"),
         Button(style=ButtonStyle.SECONDARY, label="Open group settings",
                custom_id=f"{PREFIX}home"),
         Button(style=ButtonStyle.LINK, label="Your group page",
@@ -606,7 +669,7 @@ async def dismiss_welcome_card(ctx) -> None:
     if ctx.guild_id:
         linked = group_for_guild(ctx.guild_id)
         if not await _authorized(ctx, linked[0] if linked else None):
-            await ctx.send("Only an **Administrator** here (or someone on the "
+            await ctx.send("Only someone with **Manage Server** here (or on the "
                            "group's authorized list) can remove this.",
                            ephemeral=True)
             return
@@ -622,7 +685,7 @@ class GroupOnboardingPanel(Extension):
     @slash_command(
         name="group-setup",
         description="Set up or configure your clan's DropTracker group — right here in Discord",
-        default_member_permissions=Permissions.ADMINISTRATOR,
+        default_member_permissions=Permissions.MANAGE_GUILD,
         dm_permission=False,
     )
     async def group_setup_cmd(self, ctx: SlashContext):
@@ -631,7 +694,7 @@ class GroupOnboardingPanel(Extension):
             return
         linked = group_for_guild(ctx.guild_id)
         if not await _authorized(ctx, linked[0] if linked else None):
-            await ctx.send("You need **Administrator** here (or to be on the "
+            await ctx.send("You need **Manage Server** here (or to be on the "
                            "group's authorized list) to configure DropTracker.",
                            ephemeral=True)
             return
@@ -707,7 +770,7 @@ class GroupOnboardingPanel(Extension):
             return
         linked = group_for_guild(ctx.guild_id)
         if not await _authorized(ctx, linked[0] if linked else None):
-            await ctx.send("You need **Administrator** here (or to be on the "
+            await ctx.send("You need **Manage Server** here (or to be on the "
                            "group's authorized list) to use this.", ephemeral=True)
             return
 
@@ -769,6 +832,39 @@ class GroupOnboardingPanel(Extension):
 
         elif action.startswith("ess:"):
             content, rows = build_essentials_step(int(action.rsplit(":", 1)[1]))
+
+        elif action.startswith("feat:pick:"):
+            gid = int(action.rsplit(":", 1)[1])
+            key = ctx.values[0]
+            from db.group_features import get_feature
+
+            feature = get_feature(key)
+            if feature is None:
+                return
+            if feature["kind"] == "channel":
+                content, rows = build_features_step(gid, pick=key)
+            else:
+                self._enable_feature(ctx, gid, key, None)
+                content, rows = build_features_step(gid, saved=f"✅ **{feature['title']}** is on.\n")
+
+        elif action.startswith("feat:ch:"):
+            _, _, gid, key = action.split(":", 3)
+            gid = int(gid)
+            from db.group_features import get_feature
+
+            feature = get_feature(key)
+            if feature is None or not feature.get("channel_key"):
+                return
+            self._enable_feature(ctx, gid, key, "pending")
+            note = await self._save_channel(ctx, gid, feature["channel_key"])
+            content, rows = build_features_step(gid, saved=note)
+
+        elif action.startswith("feat:"):
+            content, rows = build_features_step(int(action.rsplit(":", 1)[1]))
+
+        elif action.startswith("guide:"):
+            await self._post_member_guide(ctx, int(action.rsplit(":", 1)[1]))
+            return
 
         elif action.startswith("finish:"):
             content, rows = build_finish_step(int(action.rsplit(":", 1)[1]))
@@ -836,6 +932,46 @@ class GroupOnboardingPanel(Extension):
         else:
             return
         await ctx.edit_origin(content=content, components=rows)
+
+    def _enable_feature(self, ctx: ComponentContext, group_id: int, key: str,
+                        channel_id) -> None:
+        """Write a catalog feature's switches. A channel feature's channel is
+        saved separately by ``_save_channel`` (with its permission probe), so
+        a placeholder channel only satisfies ``enable_updates`` here."""
+        from db.group_features import POINTS_ENABLED_KEY, enable_updates, get_feature
+
+        updates = enable_updates(key, channel_id)
+        channel_key = get_feature(key).get("channel_key")
+        if channel_key:
+            updates.pop(channel_key, None)
+        if updates.pop(POINTS_ENABLED_KEY, None):
+            from db.point_standings import invalidate_points_active_cache
+
+            set_group_config(group_id, {POINTS_ENABLED_KEY: "1"},
+                             actor_discord_id=ctx.author.id)
+            invalidate_points_active_cache(group_id)
+        if updates:
+            set_group_config(group_id, validate_updates(updates),
+                             actor_discord_id=ctx.author.id)
+
+    async def _post_member_guide(self, ctx: ComponentContext, group_id: int) -> None:
+        """Post the members' getting-started guide publicly in this channel."""
+        from services.components import build_player_setup
+
+        s = Session()
+        try:
+            group = s.query(Group).filter(Group.group_id == group_id).first()
+            name = group.group_name if group else None
+        finally:
+            s.close()
+        try:
+            await ctx.channel.send(components=await build_player_setup(self.bot, group_name=name))
+        except Exception:
+            await ctx.send("⚠️ I couldn't post here. Check I can **Send Messages** and "
+                           "**Embed Links** in this channel, or run `/send_player_faq` "
+                           "in the channel you want.", ephemeral=True)
+            return
+        await ctx.send("✅ Posted the member guide in this channel.", ephemeral=True)
 
     async def _save_channel(self, ctx: ComponentContext, group_id: int,
                             key: str) -> str:

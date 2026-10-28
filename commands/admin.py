@@ -28,7 +28,8 @@ from db.models import (
 from services.components import build_player_setup
 from utils.format import get_command_id
 from utils.app_emojis import emoji as app_emoji
-from .utils import try_create_user, is_admin
+from .utils import try_create_user, is_admin, can_manage_server
+from utils.site_urls import WEBSITE_URL
 
 
 class ClanCommands(Extension):
@@ -41,7 +42,7 @@ class ClanCommands(Extension):
 
     @slash_command(name="create-group",
                     description="Create a new group with the DropTracker",
-                    default_member_permissions=Permissions.ADMINISTRATOR)
+                    default_member_permissions=Permissions.MANAGE_GUILD)
     @slash_option(name="group_name",
                   opt_type=OptionType.STRING,
                   description="How would you like your group's name to appear?",
@@ -73,7 +74,8 @@ class ClanCommands(Extension):
         if not ctx.guild_id:
             return await ctx.send(f"You must use this command in a Discord server")
 
-        if await is_admin(ctx):
+        # Manage Server: the same bar as the website wizard and /group-setup.
+        if await can_manage_server(ctx):
             user = session.query(User).filter(User.discord_id == ctx.author.id).first()
             if not user:
                 # Bot-side creation keeps the DM flow; the shared service
@@ -113,28 +115,25 @@ class ClanCommands(Extension):
                                     f"Please try again later or reach out in the DropTracker Discord server.",
                                     ephemeral=True)
 
+            new_id = result.get('group_id')
             embed = Embed(title="New group created",
-                        description=f"Your group has been created (ID: `{result.get('group_id')}`)!")
-            embed.add_field(name=f"WOM group `{result.get('wom_id')}` is now assigned to your Discord server `{result.get('guild_id')}`",
-                            value=f"{app_emoji('loading')} Please wait while we initialize some other things for you...",
+                          description=f"Your group has been created (ID: `{new_id}`), and its members are syncing "
+                                      f"from Wise Old Man group `{result.get('wom_id')}`.")
+            embed.add_field(name="Next: pick your channels",
+                            value="Nothing posts to Discord until you choose a drops channel. Run "
+                                  f"</group-setup:{await get_command_id(self.bot, 'group-setup')}> here, or "
+                                  f"[continue on the website]({WEBSITE_URL}/groups/new?group={new_id}&step=3).",
                             inline=False)
             embed.set_footer(f"https://discord.gg/droptracker")
-
-            await ctx.send(f"Success!\n", embed=embed, ephemeral=True)
+            await ctx.send(embed=embed, ephemeral=True)
 
             if "could not be applied" in (result.get("message") or ""):
-                await ctx.send(f"⚠️ Your group was created successfully, but there was an issue setting up default configurations.\n" +
-                              f"Please visit the website to configure your group settings manually: https://www.droptracker.io/login",
-                              ephemeral=True)
-
-            await ctx.send("To continue setting up — channels, notification "
-                           "toggles, thresholds — run `/group-setup` right here, "
-                           "or [sign in on the website](https://www.droptracker.io/login) "
-                           "for the full dashboard.",
-                           ephemeral=True)
+                await ctx.send("⚠️ Your group was created, but its default settings could not be applied. "
+                               f"Please check them on the website: {WEBSITE_URL}/groups/{new_id}/settings",
+                               ephemeral=True)
         else:
-            await ctx.send(f"You do not have the necessary permissions to use this command inside of this Discord server.\n" +
-                           "Please ask the server owner to execute this command.",
+            await ctx.send("You need the **Manage Server** permission in this Discord server to create its group.\n" +
+                           "Please ask the server owner or an admin.",
                            ephemeral=True)
 
     @slash_command(name="dm-broken-groups",

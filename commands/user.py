@@ -433,8 +433,8 @@ class UserCommands(Extension):
                           "1. Install the [DropTracker Plugin](https://www.droptracker.io/runelite) on RuneLite\n" +
                           "2. Receive some loot, or another achievement in-game with the plugin enabled\n" +
                           f"3. Then, try using </claim-rsn:{await get_command_id(self.bot, 'claim-rsn')}> again!\n\n" +
-                          "-# P.S.: It is highly recommended that you [enable API connections](https://www.droptracker.io/wiki/why-api) in our plugin's " +
-                          "configuration for the most robust tracking accuracy!")
+                          "-# P.S.: Turn on **Use API** (plugin settings, under Advanced) for the most reliable tracking. " +
+                          "[Why?](https://www.droptracker.io/docs/runelite-plugin#api-connections-recommended)")
             return await ctx.send(embeds=embed,ephemeral=True)
         joined_time = _time_since_iso(result.get("claimed_at"))
         if status == "claimed_by_other":

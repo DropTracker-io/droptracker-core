@@ -255,3 +255,44 @@ def test_delete_this_works_on_the_owner_dm_fallback(monkeypatch):
     ctx.message.delete.assert_awaited_once()
     authorized.assert_not_awaited()
     ctx.send.assert_not_awaited()
+
+
+# --- "Turn things on" step ----------------------------------------------------------
+def _fake_features():
+    from db.group_features import FEATURES
+
+    out = []
+    for i, f in enumerate(FEATURES):
+        status = "locked" if f.get("entitlement") == "hall_of_fame" else ("on" if f["key"] == "lootboard" else "off")
+        out.append({"key": f["key"], "title": f["title"], "blurb": f["blurb"], "kind": f["kind"],
+                    "status": status, "tier": "Supporter" if status == "locked" else None,
+                    "channel_key": f.get("channel_key"), "path": f["path"].format(id=5)})
+    return out
+
+
+def test_features_step_lists_every_feature_within_discord_limits(monkeypatch):
+    import db.group_features as gf
+
+    monkeypatch.setattr(gf, "feature_status", lambda _s, _gid: _fake_features())
+    content, rows = panel.build_features_step(5)
+    assert len(content) <= 2000
+    for f in gf.FEATURES:
+        assert f["title"] in content
+    assert "(Supporter)" in content
+
+
+def test_essentials_continue_leads_to_the_features_step():
+    import inspect
+
+    src = inspect.getsource(panel.build_essentials_step)
+    assert 'feat:{group_id}' in src
+    assert 'finish:{group_id}' not in src
+
+
+def test_panel_and_create_group_use_manage_server():
+    import inspect
+
+    assert "can_manage_server" in inspect.getsource(panel._authorized)
+    src = open(os.path.join(_ROOT, "commands", "admin.py")).read()
+    block = src[src.index('name="create-group"'):src.index("async def create_group_cmd")]
+    assert "MANAGE_GUILD" in block

@@ -185,6 +185,18 @@ async def is_admin(ctx: BaseContext):
     return False
 
 
+async def can_manage_server(ctx: BaseContext):
+    """True for Manage Server (or Administrator) in the current guild: the
+    bar the website wizard and ``/group-setup`` use to create a group."""
+    try:
+        perms = getattr(ctx, 'author_permissions', None)
+        if perms is not None and int(perms) & (0x00000008 | 0x00000020):
+            return True
+    except (AttributeError, TypeError):
+        pass
+    return False
+
+
 def is_user_authorized(user_id, group: Group):
     """
     Check if a user is authorized to perform actions for a specific group.

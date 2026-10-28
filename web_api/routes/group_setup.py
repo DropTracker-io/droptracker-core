@@ -226,3 +226,145 @@ async def setup_status(group_id: int):
             return _status(s, group)
 
     return private_no_store(jsonify(await asyncio.to_thread(_run)))
+
+
+# --------------------------------------------------------------------------- #
+# Features: what the group can switch on (db/group_features.py)
+#
+#   GET  /groups/{id}/features                 group admins
+#   POST /groups/{id}/features/{key}           {channel_id?} switch one on
+#   POST /groups/{id}/member-guide             {channel_id}  post the guide
+# --------------------------------------------------------------------------- #
+def _load_group_or_404(s, group_id: int):
+    from db import Group
+    from web_api.common import abort_problem
+
+    group = s.query(Group).filter(Group.group_id == group_id).first()
+    if group is None:
+        abort_problem(404, "Not found", "No such group.")
+    return group
+
+
+@group_setup_bp.get("/groups/<int:group_id>/features")
+async def group_features(group_id: int):
+    user_id = current_user_id()
+
+    def _run():
+        from db.group_features import feature_status
+
+        with db_session() as s:
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id))
+            _load_group_or_404(s, group_id)
+            features = feature_status(s, group_id)
+            return {
+                "group_id": group_id,
+                "features": features,
+                "summary": {
+                    "on": sum(1 for f in features if f["status"] == "on"),
+                    "total": len(features),
+                },
+            }
+
+    return private_no_store(jsonify(await asyncio.to_thread(_run)))
+
+
+def enable_group_feature(user_id: int, group_id: int, key: str, channel_id) -> None:
+    """Switch one catalog feature on, through the same writer the settings
+    page (or, for clan points, the points page) uses. Raises ProblemException."""
+    from db.group_features import POINTS_ENABLED_KEY, enable_updates, get_feature
+    from web_api.common import abort_problem
+
+    if get_feature(key) is None:
+        abort_problem(404, "Unknown feature", f"'{key}' is not a feature.")
+    try:
+        updates = enable_updates(key, channel_id)
+    except ValueError as e:
+        abort_problem(422, "Can't switch this on here", str(e))
+
+    if POINTS_ENABLED_KEY in updates:
+        from db.point_standings import invalidate_points_active_cache
+        from web_api.routes.points import _admin_ctx, _assert_group_exists, _audit, _write_config
+
+        with db_session() as s:
+            user = _admin_ctx(s, user_id, group_id, entitlement=True)
+            group = _assert_group_exists(s, group_id)
+            _write_config(s, group_id, POINTS_ENABLED_KEY, "1")
+            _audit(s, action="settings_update", actor=user, group=group,
+                   message=f"Points settings updated for {group.group_name}",
+                   details={"changed": {"behavior": {POINTS_ENABLED_KEY: True}}, "via": "features"})
+            s.commit()
+        invalidate_points_active_cache(group_id)
+        updates = {k: v for k, v in updates.items() if k != POINTS_ENABLED_KEY}
+
+    if updates:
+        from web_api.routes.config import apply_group_config_patch
+
+        apply_group_config_patch(user_id, group_id, updates)
+
+
+@group_setup_bp.post("/groups/<int:group_id>/features/<key>")
+async def post_group_feature(group_id: int, key: str):
+    from web_api.deps import json_body
+
+    user_id = current_user_id()
+    body = await json_body(required=False)
+    channel_id = (body or {}).get("channel_id")
+    await asyncio.to_thread(enable_group_feature, user_id, group_id, key, channel_id)
+
+    def _reload():
+        from db.group_features import feature_status
+
+        with db_session() as s:
+            return next((f for f in feature_status(s, group_id) if f["key"] == key), None)
+
+    return private_no_store(jsonify({"ok": True, "feature": await asyncio.to_thread(_reload)}))
+
+
+@group_setup_bp.post("/groups/<int:group_id>/member-guide")
+async def post_member_guide(group_id: int):
+    """Queue the members' getting-started guide for a channel. The bot sends
+    it from the outbox (web_api never talks to Discord)."""
+    from web_api.common import abort_problem
+    from web_api.config_registry import parse_channel_ref
+    from web_api.deps import json_body
+
+    user_id = current_user_id()
+    body = await json_body(required=False)
+    channel_id = parse_channel_ref((body or {}).get("channel_id"))
+    if not channel_id:
+        abort_problem(422, "Pick a channel", "Choose the channel to post the guide in.")
+
+    def _run():
+        from services.discord_outbox import enqueue
+        from utils.member_guide import guide_buttons, guide_embed
+
+        with db_session() as s:
+            assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id))
+            group = _load_group_or_404(s, group_id)
+            # Only a channel in one of the group's own servers: an admin of
+            # this group must not be able to make the bot post elsewhere.
+            from db import Guild
+
+            conn = _redis()
+            guild_ids = {str(r.guild_id) for r in s.query(Guild.guild_id).filter(Guild.group_id == group_id)}
+            if group.guild_id:
+                guild_ids.add(str(group.guild_id))
+            known = [c for g in guild_ids if (c := _channel_cache(conn, g))]
+            if not known:
+                abort_problem(409, "Channels not loaded yet",
+                              "We couldn't load your server's channels. Try again in a minute.")
+            if not any(str(channel_id) in c for c in known):
+                abort_problem(422, "Not your channel", "That channel isn't in your clan's Discord server.")
+            enqueue(
+                s,
+                channel_id=str(channel_id),
+                embed=guide_embed(group.group_name),
+                components=guide_buttons(group_id),
+                kind="message",
+                ref_type="member_guide",
+                ref_id=group_id,
+                actor_user_id=user_id,
+            )
+            return {"ok": True, "channel_id": str(channel_id)}
+
+    return private_no_store(jsonify(await asyncio.to_thread(_run)))
