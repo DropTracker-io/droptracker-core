@@ -30,8 +30,9 @@ def sections(mention: Optional[Callable[[str], str]] = None) -> List[Tuple[str, 
         ("1. Install the plugin",
          f"Search **DropTracker** in the [RuneLite Plugin Hub]({PLUGIN_URL}). "
          "Tracking starts as soon as it's on."),
-        ("2. Turn on \"Use API\"",
-         "In the plugin's settings, under **Advanced**. Events, live boards and lookups need it."),
+        ("2. Optional: turn on \"Use API\"",
+         "In the plugin's settings, under **Advanced**. It adds live boards, lookups and "
+         "in-game event updates to the plugin."),
         ("3. Link your account",
          f"[Sign in on the website]({REGISTER_URL}) or use {m('claim-rsn')} here. "
          "Your drops then ping you and show on your profile."),

@@ -590,7 +590,7 @@ def build_finish_step(group_id: int):
         head
         + "**Next steps for your members:**\n"
         "1. Install the **DropTracker** plugin from the RuneLite plugin hub.\n"
-        "2. Turn on **Use API** in its settings (events need it).\n"
+        "2. Optional: turn on **Use API** in its settings for live boards and in-game event updates.\n"
         "3. Link their account with `/claim-rsn` or on the website.\n"
         "4. Be in your Wise Old Man group, so their drops count for the clan.\n\n"
         "**Post member guide here** puts those steps in this channel for everyone.\n"

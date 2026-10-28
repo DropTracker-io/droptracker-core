@@ -145,8 +145,8 @@ GETTING_STARTED_EDITS = [
    to your Discord identity. See [linking your account](/docs/link-account).""",
         """1. **Install the DropTracker plugin** from the RuneLite Plugin Hub and play.
    Your account is created automatically the first time the plugin tracks
-   something for it. Turn on **Use API** in its settings (under Advanced) for
-   events and live boards.
+   something for it. Optionally, turn on **Use API** in its settings (under
+   Advanced) for live boards and in-game event updates.
 2. **Claim your account** [on the website](/register) or with `/claim-rsn` in
    Discord, so it's tied to you. See [linking your account](/docs/link-account).""",
     ),
@@ -156,6 +156,12 @@ RUNELITE_PLUGIN_EDITS = [
     (
         "In the plugin's **API Configuration** section, enable **Use API Connections**.",
         "In the plugin's **Advanced** section, turn on **Use API**.",
+    ),
+    (
+        """- **Event participation** — the API is required to take part in
+  [events](/docs/events-players).""",
+        """- Your [events](/docs/events-players) in game: progress in the side panel,
+  pop-ups and team indicators. Events count your submissions either way.""",
     ),
 ]
 

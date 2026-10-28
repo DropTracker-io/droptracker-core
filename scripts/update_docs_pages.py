@@ -153,8 +153,8 @@ you:
 
 - The most accurate and robust tracking.
 - Live data in the plugin's side panel.
-- **Event participation** — the API is required to take part in
-  [events](/docs/events).
+- Your [events](/docs/events-players) in game: progress in the side panel,
+  pop-ups and team indicators. Events count your submissions either way.
 
 RuneLite shows a standard warning when enabling third-party API connections —
 that's expected for any Plugin Hub plugin that talks to an external server.
