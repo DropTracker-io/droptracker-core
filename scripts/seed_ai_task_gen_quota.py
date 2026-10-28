@@ -17,12 +17,12 @@ import json
 import sys
 
 # tier key -> daily generations. "free" is intentionally absent: the registry
-# default (5) supplies it, so an operator lowering the default doesn't get
+# default (25) supplies it, so an operator lowering the default doesn't get
 # silently overridden by a row written here.
 TARGETS = {
-    "basic": 25,
-    "t2": 75,
-    "t3": 200,
+    "basic": 100,
+    "t2": 250,
+    "t3": 500,
 }
 
 KEY = "ai_task_gen_daily"

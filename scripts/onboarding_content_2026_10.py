@@ -10,6 +10,10 @@ are the rows only the database holds:
   ``link-account`` described the 2024 flow (``/create-group`` first, claim only
   in Discord); ``getting-started`` and ``runelite-plugin`` named the wrong
   plugin setting ("Use API Connections" is "Use API", under Advanced).
+* **Task generation from text** (2026-10-28 follow-up): new daily limits on
+  every group plan (Free 25, Supporter 100, Sponsor 250, Patron 500; they were
+  5/25/75/200), and the plan cards call it "Generate event tasks from plain
+  text" rather than "Build event tasks by describing them".
 * **Free plan card**: one more line, so the free features the bot's "What is
   DropTracker?" explainer and the /premium page list (both read this row)
   include the Clan Log, recaps, the clan chat bridge and the Activity.
@@ -37,6 +41,15 @@ REDIRECTS = [
     ("/login", "/dashboard", False, True),
 ]
 REDIRECT_NOTE = "2026-10-28 onboarding review: dead link in old plugin/bot copy"
+
+#: tier key -> ai_task_gen_daily (stored on subscription_tiers.entitlements).
+TASK_GEN_LIMITS = {"free": 25, "basic": 100, "t2": 250, "t3": 500}
+TASK_GEN_OLD_PREFIX = "Build event tasks by describing them:"
+
+
+def task_gen_line(limit: int) -> str:
+    return f"Generate event tasks from plain text: {limit} a day"
+
 
 FREE_TIER_LINE = "**Clan Log**, monthly recaps, the clan chat bridge and the Discord Activity"
 
@@ -237,6 +250,27 @@ def main(argv=None) -> int:
                     lines.insert(at, FREE_TIER_LINE)
                     tier.features = json.dumps(lines)
 
+        print("Task generation limits:")
+        for tier_key, limit in TASK_GEN_LIMITS.items():
+            t = s.query(SubscriptionTier).filter(SubscriptionTier.key == tier_key).first()
+            if t is None:
+                print(f"  {tier_key}: no tier row (skip)")
+                continue
+            ents = json.loads(t.entitlements) if t.entitlements else {}
+            lines = json.loads(t.features) if t.features else []
+            new_lines = [task_gen_line(limit) if str(l).startswith(TASK_GEN_OLD_PREFIX)
+                         or str(l).startswith("Generate event tasks from plain text:") else l
+                         for l in lines]
+            before = ents.get("ai_task_gen_daily")
+            if before == limit and new_lines == lines:
+                print(f"  {tier_key}: already {limit} (skip)")
+                continue
+            print(f"  {tier_key}: {before} -> {limit} a day; card line updated: {new_lines != lines}")
+            if args.apply:
+                ents["ai_task_gen_daily"] = limit
+                t.entitlements = json.dumps(ents)
+                t.features = json.dumps(new_lines)
+
         if not args.apply:
             print("\nDry run. Re-run with --apply to write.")
             s.rollback()
@@ -252,6 +286,12 @@ def main(argv=None) -> int:
         for row in new_redirects:
             s.add(row)
         s.commit()
+        try:
+            from db.entitlements import invalidate_entitlement_cache
+
+            invalidate_entitlement_cache()
+        except Exception as e:  # services reload it within their cache TTL anyway
+            print(f"(entitlement cache not invalidated here: {e})")
         print("Applied.")
         return 0
     finally:

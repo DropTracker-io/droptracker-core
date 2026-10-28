@@ -32,12 +32,12 @@ ENTITLEMENT_KEY = "ai_task_gen_daily"
 
 #: Per-user daily sub-cap, applied on top of the group allowance so a single
 #: member cannot consume the entire group's day. Env-tunable; 0 disables it.
-USER_DAILY_CAP = int(os.getenv("AI_TASK_GEN_USER_DAILY_CAP", "15"))
+USER_DAILY_CAP = int(os.getenv("AI_TASK_GEN_USER_DAILY_CAP", "50"))
 
 #: Site-wide daily ceiling — the circuit breaker. Sized well above the sum of
 #: realistic group demand; it exists to bound a pathological day, not to shape
 #: normal use. 0 disables it.
-GLOBAL_DAILY_CAP = int(os.getenv("AI_TASK_GEN_GLOBAL_DAILY_CAP", "2000"))
+GLOBAL_DAILY_CAP = int(os.getenv("AI_TASK_GEN_GLOBAL_DAILY_CAP", "5000"))
 
 _WINDOW_SECONDS = 86400
 
@@ -136,7 +136,7 @@ def consume(s, group_id: Optional[int], user_id: int, *, is_superadmin: bool = F
     if limit <= 0:
         raise QuotaExceeded(
             "ai_gen_not_available",
-            "AI task generation isn't included on this group's subscription tier.",
+            "Task generation isn't included on this group's plan.",
         )
 
     conn = _rc()
@@ -148,17 +148,17 @@ def consume(s, group_id: Optional[int], user_id: int, *, is_superadmin: bool = F
         if group_id is not None and _read(conn, _group_key(group_id)) >= limit:
             raise QuotaExceeded(
                 "ai_gen_group_quota",
-                f"This group has used all {limit} AI task generations for today.",
+                f"This group has used all {limit} task generations for today.",
             )
         if USER_DAILY_CAP and _read(conn, _user_key(user_id)) >= USER_DAILY_CAP:
             raise QuotaExceeded(
                 "ai_gen_user_quota",
-                f"You've used your {USER_DAILY_CAP} AI task generations for today.",
+                f"You've used your {USER_DAILY_CAP} task generations for today.",
             )
         if GLOBAL_DAILY_CAP and _read(conn, _GLOBAL_KEY) >= GLOBAL_DAILY_CAP:
             raise QuotaExceeded(
                 "ai_gen_busy",
-                "AI task generation is temporarily unavailable site-wide. Please try again later.",
+                "Task generation is temporarily unavailable. Please try again later.",
             )
 
         used = _bump(conn, _group_key(group_id)) if group_id is not None else 0

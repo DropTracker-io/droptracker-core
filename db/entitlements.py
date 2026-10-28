@@ -96,11 +96,11 @@ ENTITLEMENT_FIELDS: List[Dict[str, Any]] = [
         # default is a small taste rather than nothing, because the constraint
         # is shared machine capacity, not per-request billing.
         "key": "ai_task_gen_daily",
-        "label": "AI task generations / day",
+        "label": "Task generations from text / day",
         "category": "features",
-        "help": "How many event tasks a group may generate per day by describing them in plain English (the 'try describing a task instead' panel in the task builder). 0 disables the feature for the tier.",
+        "help": "How many event tasks a group may generate per day from a plain-text description (the 'try describing a task instead' panel in the task builder). 0 disables the feature for the tier.",
         "kind": "int",
-        "default": 5,
+        "default": 25,
     },
     {
         "key": "custom_site",

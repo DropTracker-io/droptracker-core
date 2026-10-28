@@ -24,7 +24,7 @@ class TestEntitlementsRegistry:
             "lootboard_refresh_minutes": 30,
             "lootboard_instant": False,
             "custom_points": True,
-            "ai_task_gen_daily": 5,
+            "ai_task_gen_daily": 25,
             "custom_site": False,
             "custom_bot_profile": False,
             "custom_footer": False,
