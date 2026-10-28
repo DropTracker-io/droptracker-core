@@ -82,14 +82,32 @@ RUNELITE_EVENT_SOURCES = [
     ])
 ]
 
+# Boss variants the wiki lookup cannot mint. The kill-count line names the
+# awakened Whisperer "Whisperer (awakened)" (suggestion #199); the other three
+# awakened DT2 bosses already have rows (13969, 13971, 13976). Own id block so
+# the list above can keep appending.
+BOSS_VARIANT_SOURCES = [
+    ("Whisperer (Awakened)", 900201),
+]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Seed npc_list rows for plugin activity sources.")
     parser.add_argument("--apply", action="store_true", help="Write the rows (default: dry run)")
+    parser.add_argument("--only", action="append", metavar="NAME",
+                        help="Seed only these names (repeatable; default: all)")
     args = parser.parse_args()
 
+    sources = ACTIVITY_SOURCES + RUNELITE_EVENT_SOURCES + BOSS_VARIANT_SOURCES
+    if args.only:
+        wanted = {name.casefold() for name in args.only}
+        sources = [(name, npc_id) for name, npc_id in sources if name.casefold() in wanted]
+        if len(sources) != len(wanted):
+            print(f"ABORT unknown --only name(s): {sorted(wanted - {n.casefold() for n, _ in sources})}")
+            return 1
+
     to_create = []
-    for name, npc_id in ACTIVITY_SOURCES + RUNELITE_EVENT_SOURCES:
+    for name, npc_id in sources:
         existing = session.query(NpcList).filter(NpcList.npc_name == name).first()
         if existing:
             print(f"SKIP  {name!r}: already exists as npc_id={existing.npc_id}")
