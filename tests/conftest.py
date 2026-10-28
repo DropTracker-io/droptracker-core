@@ -5,8 +5,9 @@ BEFORE any app code is imported, so tests can run without a live DB/Redis/Discor
 
 import os
 import sys
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, NonCallableMock
 
+import _pytest.monkeypatch as _pytest_monkeypatch
 import pytest
 
 # ── Environment variables (must come before any app imports) ──────────────────
@@ -688,6 +689,36 @@ _ops_stub.get_point_divisor = MagicMock(return_value=1000000)
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
+
+class _MockSafeMonkeyPatch(pytest.MonkeyPatch):
+    """``monkeypatch`` that restores attributes on the MagicMock stubs.
+
+    pytest 9.2 records an instance attribute's old value from ``__dict__``
+    (pytest #10644). A MagicMock keeps its child attributes in
+    ``_mock_children`` instead, so patching ``sys.modules["db.models"].EventTask``
+    looked like patching a missing attribute, and undo DELETED it. A deleted
+    mock attribute raises AttributeError for the rest of the run, which turned
+    one test's patch into hundreds of failures later in the suite (CI,
+    2026-10-28). For mock targets, keep the pre-9.2 rule: the old value is
+    whatever ``getattr`` returns, and undo puts it back.
+    """
+
+    def setattr(self, target, name, value=_pytest_monkeypatch.NOTSET, raising=True):
+        if not (isinstance(target, NonCallableMock) and isinstance(name, str)
+                and value is not _pytest_monkeypatch.NOTSET):
+            return super().setattr(target, name, value, raising=raising)
+        old = getattr(target, name, _pytest_monkeypatch.NOTSET)
+        super().setattr(target, name, value, raising=raising)
+        recorded_target, recorded_name, _ = self._setattr[-1]
+        self._setattr[-1] = (recorded_target, recorded_name, old)
+
+
+@pytest.fixture
+def monkeypatch():
+    mp = _MockSafeMonkeyPatch()
+    yield mp
+    mp.undo()
+
 
 @pytest.fixture
 def mock_session():
