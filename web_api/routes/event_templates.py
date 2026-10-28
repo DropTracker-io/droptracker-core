@@ -7,21 +7,31 @@ shared ``public`` (every clan's picker) or ``private`` (owning group only),
 and instantiate it later as a fresh standard draft.
 
   POST   /api/v1/events/{id}/save-template   { name, description?,
-                                               visibility?, include_teams? }
+                                               visibility?, include_teams?,
+                                               include_discord? }
          -> { id }                    (upserts per group by lower-cased name)
   GET    /api/v1/event-templates?query=&groupId=&page=  -> EventTemplateSummary[]
          (session + any group admin / superadmin; public ∪ own-group private;
           groupId switches to that group's own templates for management)
   GET    /api/v1/event-templates/{id}          -> EventTemplateDetail (+ preview)
   POST   /api/v1/event-templates/{id}/instantiate
-         { group_id, name?, description?, starts_at?, ends_at?, include_teams? }
-         -> { id, skipped_tasks }     (a fresh draft event; bumps times_used)
+         { group_id, name?, description?, starts_at?, ends_at?, include_teams?,
+           include_discord? }
+         -> { id, skipped_tasks, discord }  (a fresh draft; bumps times_used.
+            discord = {applied, reason?, dropped} or null)
   PATCH  /api/v1/event-templates/{id}          { name?, description?, visibility? }
   DELETE /api/v1/event-templates/{id}          -> { ok }   (soft: active=false)
 
 Semantics:
 - Snapshots capture structure only — never dates, rosters, ledger/progress,
-  scores, join codes, Discord config or clan-vs-clan participants. A
+  scores, join codes or clan-vs-clan participants. Discord config is opt-in
+  (``include_discord`` on save, suggestion #197): the host scope's server,
+  channels, scheduled-event policy, ping roles and event-wide team channel
+  settings go in a ``discord`` block. Instantiation applies it only when the
+  new event lands on that same server (the group's linked guild, or one the
+  caller may target), drops channels/roles the bot cache says are gone, and
+  reports the outcome. Previews show counts, never ids (templates can be
+  public). A
   clan_vs_clan event saves its team *names* and re-runs as a standard draft
   (clan bindings and invites are inherently per-run).
 - Skill/Boss of the Week events save their race config (metric, ranking,
@@ -73,6 +83,8 @@ from web_api.routes.events import (
     _bump,
     _dt,
     _load_event_or_404,
+    _event_pings,
+    _parse_ping_config,
     _sync_event_guilds,
     _ts,
 )
@@ -492,6 +504,154 @@ def _instantiate_competition(s, ev: Event, kind: str, spec, skipped: list[dict])
 # --------------------------------------------------------------------------- #
 # Auth / serialization helpers
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Optional Discord settings (suggestion #197)
+# --------------------------------------------------------------------------- #
+_TEAM_DISCORD_KEYS = ("channels_enabled", "roles_enabled", "voice_enabled",
+                      "forum_channel_id", "category_channel_id", "retention",
+                      "captain_config")
+
+
+def snapshot_discord(s, ev: Event) -> dict | None:
+    """The host scope's Discord settings, or None when the event posts
+    nowhere. Per-clan scopes (clan-vs-clan) and per-team switches stay
+    behind: both belong to one run's participants."""
+    from db import EventChannel
+    from services.event_team_discord import effective_team_discord_config
+
+    guild_id = str(ev.discord_guild_id) if ev.discord_guild_id else None
+    if not guild_id:
+        return None
+    rows = (s.query(EventChannel)
+            .filter(EventChannel.event_id == ev.id)
+            .all())
+    channels = {r.kind: str(r.channel_id) for r in rows
+                if r.channel_id and (getattr(r, "group_id", None) or None) is None}
+    team = effective_team_discord_config(getattr(ev, "team_discord_config", None))
+    return {
+        "guild_id": guild_id,
+        "channels": channels,
+        "discord_event_policy": getattr(ev, "discord_event_policy", None) or "on_activate",
+        "pings": _event_pings(ev),
+        "team": {k: team.get(k) for k in _TEAM_DISCORD_KEYS},
+    }
+
+
+def discord_preview(spec) -> dict | None:
+    """What a template's Discord block holds, without any ids."""
+    if not isinstance(spec, dict) or not spec.get("guild_id"):
+        return None
+    team = spec.get("team") or {}
+    return {
+        "channels": len(spec.get("channels") or {}),
+        "pings": sum(len(v or []) for v in (spec.get("pings") or {}).values()),
+        "team_channels": bool(team.get("channels_enabled") or team.get("roles_enabled")
+                              or team.get("voice_enabled")),
+    }
+
+
+def apply_template_discord(s, ev: Event, spec, *, user_id: int) -> dict | None:
+    """Apply a template's Discord block to a freshly instantiated draft.
+
+    Returns a report for the UI: ``{"applied": bool, "reason"?: str,
+    "dropped": int}``, or None when the template carries no Discord block.
+    Never raises for stale data; a server the caller can't post to skips the
+    whole block, a channel or role the warm bot cache no longer lists is
+    dropped (a cold cache keeps everything, like the manual-id PUT path).
+    """
+    if not isinstance(spec, dict) or not spec.get("guild_id"):
+        return None
+    from db import (
+        EVENT_CHANNEL_KINDS,
+        EVENT_DISCORD_POLICIES,
+        EVENT_TEAM_DISCORD_RETENTIONS,
+        EventChannel,
+    )
+    from services.event_team_discord import config_enabled, effective_team_discord_config
+    from web_api.routes.event_discord import (
+        _assert_can_target_guild,
+        _guild_channels,
+        _guild_roles,
+        _request_channel_refresh,
+    )
+
+    guild_id = str(spec["guild_id"]).strip()
+    if not guild_id.isdigit():
+        return {"applied": False, "reason": "The saved server id is invalid.", "dropped": 0}
+    if str(ev.discord_guild_id or "") != guild_id:
+        try:
+            _assert_can_target_guild(s, user_id, guild_id)
+        except ProblemException:
+            return {"applied": False, "dropped": 0,
+                    "reason": "The saved settings are for a Discord server you can't post to."}
+        ev.discord_guild_id = guild_id
+
+    cached_channels = _guild_channels(guild_id)
+    if cached_channels is None:
+        _request_channel_refresh(guild_id)
+    known = ({str(c.get("id")): c for c in cached_channels}
+             if cached_channels is not None else None)
+
+    def _channel_ok(cid, *types) -> bool:
+        if known is None:
+            return True
+        entry = known.get(str(cid))
+        if entry is None:
+            return False
+        return entry.get("type") in types if types else entry.get("type") != "forum"
+
+    dropped = 0
+    for kind, cid in (spec.get("channels") or {}).items():
+        cid = str(cid or "").strip()
+        if kind not in EVENT_CHANNEL_KINDS or not cid.isdigit():
+            continue
+        if not _channel_ok(cid):
+            dropped += 1
+            continue
+        s.add(EventChannel(event_id=ev.id, kind=kind, channel_id=cid, group_id=None))
+
+    policy = spec.get("discord_event_policy")
+    if policy in EVENT_DISCORD_POLICIES:
+        ev.discord_event_policy = policy
+
+    pings = spec.get("pings")
+    if isinstance(pings, dict) and pings:
+        roles = _guild_roles(guild_id)
+        role_ids = {str(r.get("id")) for r in roles} if roles is not None else None
+        kept = {}
+        for key, ids in pings.items():
+            ids = [str(i) for i in (ids or []) if role_ids is None or str(i) in role_ids]
+            dropped += len(pings.get(key) or []) - len(ids)
+            if ids:
+                kept[key] = ids
+        try:
+            ev.ping_config = _parse_ping_config(kept)
+        except ProblemException:
+            ev.ping_config = None
+
+    team_spec = spec.get("team")
+    if isinstance(team_spec, dict):
+        team = effective_team_discord_config(None)
+        for key in ("channels_enabled", "roles_enabled", "voice_enabled", "captain_config"):
+            if isinstance(team_spec.get(key), bool):
+                team[key] = team_spec[key]
+        if team_spec.get("retention") in EVENT_TEAM_DISCORD_RETENTIONS:
+            team["retention"] = team_spec["retention"]
+        for key, kind in (("forum_channel_id", "forum"), ("category_channel_id", "category")):
+            cid = str(team_spec.get(key) or "").strip()
+            if cid.isdigit():
+                if _channel_ok(cid, kind):
+                    team[key] = cid
+                else:
+                    dropped += 1
+        if (ev.formation_mode or "") == "solo" and config_enabled(team):
+            for key in ("channels_enabled", "roles_enabled", "voice_enabled"):
+                team[key] = False
+        ev.team_discord_config = json.dumps(team)
+
+    return {"applied": True, "dropped": dropped}
+
+
 def _viewer_admin_group_ids(s, user_id: int) -> set[int]:
     """Group ids the user administers (web grants ∪ MANAGE_GUILD on linked
     guilds) — lazy import so this module stays importable under the pytest
@@ -565,6 +725,8 @@ def _detail(tmpl: EventTemplate) -> dict:
         "kind": spec.get("kind") or "standard",
         # SOTW/BOTW race config (metric, ranking, bonus rules); None otherwise.
         "competition": payload.get("competition"),
+        # Saved Discord settings (#197) as counts only; None when not saved.
+        "discord": discord_preview(payload.get("discord")),
     }
     return base
 
@@ -614,6 +776,9 @@ async def save_event_template(event_id: int):
     name = _clean_template_name(body, required=True)
     visibility = _clean_template_visibility(body, default="private")
     include_teams = bool(body.get("include_teams", True))
+    include_discord = body.get("include_discord", False)
+    if not isinstance(include_discord, bool):
+        abort_problem(422, "Invalid include_discord", "include_discord must be a boolean.")
     description = body.get("description")
     if description is not None and not isinstance(description, str):
         abort_problem(422, "Invalid description", "description must be a string or null.")
@@ -634,6 +799,8 @@ async def save_event_template(event_id: int):
             payload = snapshot_event(s, ev)
             if not include_teams:
                 payload["teams"] = []
+            if include_discord:
+                payload["discord"] = snapshot_discord(s, ev)
 
             group_match = (
                 EventTemplate.group_id == ev.group_id
@@ -673,7 +840,7 @@ async def save_event_template(event_id: int):
                 after=json.dumps({
                     "event_id": ev.id, "name": name, "visibility": visibility,
                     "tasks": tmpl.task_count, "teams": tmpl.team_count,
-                    "created": created,
+                    "created": created, "discord": bool(payload.get("discord")),
                 }),
             ))
             s.commit()
@@ -768,6 +935,9 @@ async def instantiate_event_template(template_id: int):
         abort_problem(422, "Invalid group_id", "'group_id' must be an integer or null.")
     name = _clean_template_name(body, required=False)
     include_teams = bool(body.get("include_teams", True))
+    include_discord = body.get("include_discord", True)
+    if not isinstance(include_discord, bool):
+        abort_problem(422, "Invalid include_discord", "include_discord must be a boolean.")
     description = body.get("description")
     if description is not None and not isinstance(description, str):
         abort_problem(422, "Invalid description", "description must be a string or null.")
@@ -796,6 +966,13 @@ async def instantiate_event_template(template_id: int):
                 superadmin=superadmin,
             )
             tmpl.times_used = int(tmpl.times_used or 0) + 1
+            discord = (apply_template_discord(s, ev, payload.get("discord"), user_id=user_id)
+                       if include_discord else None)
+            if discord and discord.get("applied"):
+                s.flush()
+                from services.event_team_discord import sync_event_team_discord
+
+                sync_event_team_discord(s, ev)
             if ev.discord_guild_id:
                 # Desired-state rows for the scheduled-event mirror — a no-op
                 # for on_activate drafts, kept for parity with POST /events.
@@ -809,15 +986,15 @@ async def instantiate_event_template(template_id: int):
                 before=None,
                 after=json.dumps({
                     "template_id": tmpl.id, "name": ev.name,
-                    "skipped_tasks": len(skipped),
+                    "skipped_tasks": len(skipped), "discord": discord,
                 }),
             ))
             s.commit()
-            return ev.id, skipped
+            return ev.id, skipped, discord
 
-    ev_id, skipped = await asyncio.to_thread(_apply)
+    ev_id, skipped, discord = await asyncio.to_thread(_apply)
     _bump(ev_id)
-    return jsonify({"id": ev_id, "skipped_tasks": skipped})
+    return jsonify({"id": ev_id, "skipped_tasks": skipped, "discord": discord})
 
 
 @event_templates_bp.patch("/event-templates/<int:template_id>")

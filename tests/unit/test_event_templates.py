@@ -775,3 +775,61 @@ class TestCompetitionTemplates:
         assert "Not in the NPC database" in skip["reason"]
         cfg = scaffold[0][1]
         assert cfg == {"kind": "competition", "metric_kind": "boss", "format": "individual"}
+
+
+# ── Optional Discord settings (suggestion #197) ──────────────────────────────
+
+class TestTemplateDiscord:
+    async def test_save_without_flag_has_no_discord(self, client, monkeypatch):
+        s = _S([_event(has_bingo=False)], [], [], [], [])
+        _wire(monkeypatch, s)
+        monkeypatch.setattr(etr, "snapshot_discord",
+                            lambda *a: pytest.fail("snapshot without include_discord"))
+        r = await client.post("/api/v1/events/1/save-template", json={"name": "T"})
+        assert r.status_code == 200
+        tmpl = next(a for a in s.added if isinstance(a, FakeTemplate))
+        assert "discord" not in json.loads(tmpl.payload)
+
+    async def test_save_with_flag_stores_block(self, client, monkeypatch):
+        s = _S([_event(has_bingo=False)], [], [], [], [])
+        _wire(monkeypatch, s)
+        monkeypatch.setattr(etr, "snapshot_discord", lambda s_, ev: {"guild_id": "777"})
+        r = await client.post("/api/v1/events/1/save-template",
+                              json={"name": "T", "include_discord": True})
+        assert r.status_code == 200
+        tmpl = next(a for a in s.added if isinstance(a, FakeTemplate))
+        assert json.loads(tmpl.payload)["discord"] == {"guild_id": "777"}
+
+    async def test_save_bad_flag_422(self, client, monkeypatch):
+        _wire(monkeypatch, _S())
+        r = await client.post("/api/v1/events/1/save-template",
+                              json={"name": "T", "include_discord": "yes"})
+        assert r.status_code == 422
+
+    async def test_instantiate_reports_discord(self, client, monkeypatch):
+        payload = _payload()
+        payload["discord"] = {"guild_id": "777"}
+        group = SimpleNamespace(group_id=42, guild_id="777")
+        s = _S([_template(payload=json.dumps(payload))], [group])
+        _wire(monkeypatch, s)
+        seen = []
+        monkeypatch.setattr(etr, "apply_template_discord",
+                            lambda s_, ev, spec, user_id: seen.append(spec) or
+                            {"applied": False, "reason": "x", "dropped": 0})
+        r = await client.post("/api/v1/event-templates/33/instantiate", json={"group_id": 42})
+        assert r.status_code == 200
+        assert (await r.get_json())["discord"]["applied"] is False
+        assert seen == [{"guild_id": "777"}]
+
+    async def test_instantiate_can_skip_discord(self, client, monkeypatch):
+        payload = _payload()
+        payload["discord"] = {"guild_id": "777"}
+        s = _S([_template(payload=json.dumps(payload))],
+               [SimpleNamespace(group_id=42, guild_id="777")])
+        _wire(monkeypatch, s)
+        monkeypatch.setattr(etr, "apply_template_discord",
+                            lambda *a, **k: pytest.fail("applied despite include_discord=false"))
+        r = await client.post("/api/v1/event-templates/33/instantiate",
+                              json={"group_id": 42, "include_discord": False})
+        assert r.status_code == 200
+        assert (await r.get_json())["discord"] is None
