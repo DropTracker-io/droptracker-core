@@ -317,6 +317,11 @@ def spec_names(spec: dict) -> tuple[set[str], set[str]]:
     return items, npcs
 
 
+# Metrics art is named after WOM's metric keys, which differ from the in-game
+# skill name in one place: RuneLite says "Runecraft", WOM says "runecrafting".
+_METRIC_ALIASES = {"runecraft": "runecrafting"}
+
+
 def icon_asset_path(icon: dict) -> str | None:
     """Relative ``/img`` asset path for one resolved tile icon, or ``None`` when
     it can't map to an image (unresolved item/npc id, or a nameless skill).
@@ -333,7 +338,8 @@ def icon_asset_path(icon: dict) -> str | None:
     if kind == "npc" and icon.get("id"):
         return f"npcdb/{int(icon['id'])}.png"
     if kind == "skill" and icon.get("name"):
-        return f"metrics/{_norm(icon['name']).replace(' ', '_')}.png"
+        key = _norm(icon["name"]).replace(" ", "_")
+        return f"metrics/{_METRIC_ALIASES.get(key, key)}.png"
     return None
 
 

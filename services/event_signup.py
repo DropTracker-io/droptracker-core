@@ -1118,6 +1118,96 @@ def signup_all_members(session, ev, group_id: Optional[int] = None) -> dict:
     }
 
 
+# Clan roster sync (web152a). A removal pass that would take out more than this
+# share of the roster (and more than CLAN_SYNC_REMOVAL_FLOOR players) is held:
+# a clan sync that briefly comes back short must never empty a live event.
+CLAN_SYNC_MAX_REMOVED_SHARE = 0.5
+CLAN_SYNC_REMOVAL_FLOOR = 5
+
+
+def plan_clan_sync_removals(entrants: set, members: set) -> tuple:
+    """Pure: which entrants a clan sync takes out. ``entrants`` are the player
+    ids signed up or on a (non-whole-clan) team; ``members`` the participating
+    clans' current members. Returns ``(to_remove, held)``; ``held`` is true
+    when the cut looks like a failed membership read rather than people
+    leaving (no members at all, or most of the roster gone at once), and then
+    nobody is removed."""
+    departed = set(entrants) - set(members)
+    if not departed:
+        return set(), False
+    if not members:
+        return set(), True
+    if (len(departed) > CLAN_SYNC_REMOVAL_FLOOR
+            and len(departed) > len(entrants) * CLAN_SYNC_MAX_REMOVED_SHARE):
+        return set(), True
+    return departed, False
+
+
+def sync_clan_roster(session, ev) -> dict:
+    """Keep the roster equal to the clan (``Event.roster_clan_sync``, web152a).
+
+    Two passes, run by the lifecycle sweep every tick and once when a manager
+    turns the setting on:
+
+    - **leave**: anyone signed up or on a team who is no longer a member of a
+      participating clan is withdrawn (:func:`remove_signup` — their completed
+      work stays on the standings, exactly as when a manager removes them).
+      Whole-clan (``auto_clan``) teams are left to
+      ``event_lifecycle.sync_auto_clan_rosters``. Guarded by
+      :func:`plan_clan_sync_removals`.
+    - **join**: :func:`signup_all_members` — every current member not yet in
+      is entered under the usual rules (one account per person, pool / solo /
+      balanced placement by formation mode).
+
+    Returns ``{"added", "removed", "removal_held"}``. Caller owns the commit."""
+    from db.models import EventSignup, EventTeam, EventTeamMember
+    from db.models.associations import user_group_association
+
+    result = {"added": 0, "removed": 0, "removal_held": False}
+    groups = participating_group_ids(session, ev)
+    if not groups:
+        return result
+
+    members = {
+        pid for (pid,) in
+        session.query(user_group_association.c.player_id)
+        .filter(user_group_association.c.group_id.in_(groups),
+                user_group_association.c.player_id.isnot(None))
+        .distinct()
+        .all()
+    }
+    entrants = {
+        pid for (pid,) in
+        session.query(EventSignup.player_id).filter(EventSignup.event_id == ev.id).all()
+    }
+    entrants |= {
+        pid for (pid,) in
+        session.query(EventTeamMember.player_id)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeam.event_id == ev.id,
+                EventTeam.auto_clan.is_(False))
+        .all()
+    }
+    to_remove, held = plan_clan_sync_removals(entrants, members)
+    result["removal_held"] = held
+    for pid in sorted(to_remove):
+        remove_signup(session, ev, pid)
+    result["removed"] = len(to_remove)
+    if to_remove:
+        session.flush()
+
+    try:
+        added = signup_all_members(session, ev)
+    except SignupError:
+        # No teams yet, or every clan already follows a whole-clan team:
+        # nothing to enter this tick.
+        added = None
+    if added:
+        result["added"] = added["added"]
+        result["placed"] = added["placed"]
+    return result
+
+
 def _plan_bulk_placement(ev, teams, player_ids, clan_of, session) -> list:
     """Balanced placement for :func:`signup_all_members`: clan_vs_clan players
     go to their clan's teams, everyone else shares the event's teams. Teams

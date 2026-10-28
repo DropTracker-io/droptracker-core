@@ -539,6 +539,15 @@ class Event(Base):
     clan_roster_locked_at_start = Column(
         Boolean, nullable=False, default=True, server_default="1"
     )
+    # Clan roster sync (web152a): while on, the lifecycle sweep keeps the
+    # roster equal to the clan — current members are entered (same rules as
+    # "Sign up all clan members") and players who left the clan are taken out.
+    # See services.event_signup.sync_clan_roster. Clan events only.
+    roster_clan_sync = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Clan-chat team badges (web152a): off withholds the roster from the
+    # plugin, so nobody's name is tagged in clan chat (free-for-all events,
+    # where every player is their own team).
+    team_chat_tags = Column(Boolean, nullable=False, default=True, server_default="1")
     activated_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)

@@ -327,6 +327,9 @@ def _summary(ev: Event) -> dict:
         # join panel and the sign-up post both read — sign-ups close when the
         # event starts unless allow_late_signups is on.
         "allow_late_signups": bool(getattr(ev, "allow_late_signups", False)),
+        # web152a: roster follows the clan; clan-chat team tags in the plugin.
+        "roster_clan_sync": bool(getattr(ev, "roster_clan_sync", False)),
+        "team_chat_tags": getattr(ev, "team_chat_tags", True) is not False,
         "signups_open": _signups_open(ev),
         "signups_close_at": _ts(_signup_close_at(ev)),
         # Recurring schedule (web82a) — the cheap, query-free half: whether
@@ -4729,6 +4732,7 @@ async def create_event():
                 tasks_visibility=_tasks_visibility_value(
                     body.get("tasks_visibility")),
                 allow_late_signups=bool(body.get("allow_late_signups")),
+                team_chat_tags=body.get("team_chat_tags") is not False,
                 submission_policy=submission_policy,
                 join_code=join_code or None,
                 discord_guild_id=discord_guild_id,
@@ -4887,6 +4891,8 @@ def _event_settings_snapshot(ev) -> dict:
         "effort_visibility": getattr(ev, "effort_visibility", None) or "public",
         "tasks_visibility": getattr(ev, "tasks_visibility", None) or "public",
         "allow_late_signups": bool(getattr(ev, "allow_late_signups", False)),
+        "roster_clan_sync": bool(getattr(ev, "roster_clan_sync", False)),
+        "team_chat_tags": getattr(ev, "team_chat_tags", True) is not False,
         "starts_at": starts_at.isoformat() if starts_at else None,
         "ends_at": ends_at.isoformat() if ends_at else None,
         # web82a — a schedule change moves when submissions count, which is
@@ -5162,6 +5168,24 @@ async def update_event(event_id: int):
                 # ON mid-event reopens sign-ups; the retired prompt is not
                 # re-posted (post a fresh one from Event → Discord).
                 ev.allow_late_signups = bool(body.get("allow_late_signups"))
+            if "team_chat_tags" in body:
+                # web152a: off stops the plugin badging teammates in clan chat
+                # (a free-for-all has a team per player). Takes effect on the
+                # next /event_state poll — the roster stamp goes away and the
+                # client clears its badges.
+                ev.team_chat_tags = body.get("team_chat_tags") is not False
+            if "roster_clan_sync" in body:
+                # web152a: keep the roster equal to the clan. Needs a host
+                # clan — a staff-hosted event's per-clan rosters are picked
+                # by hand within their limits.
+                want = bool(body.get("roster_clan_sync"))
+                if want and not ev.group_id:
+                    abort_problem(422, "No host clan",
+                                  "Only a clan's own events can follow the clan's members.")
+                if want and _effective_status(ev) == "past":
+                    abort_problem(409, "Event is over",
+                                  "The roster can no longer be changed.")
+                ev.roster_clan_sync = want
             if "submission_policy" in body:
                 # null = reset to the default (manual submissions need review).
                 policy = body.get("submission_policy") or "confirm_non_api"
@@ -5308,6 +5332,16 @@ async def update_event(event_id: int):
                         abort_problem(e.status, e.title, e.detail)
                     if solo_split.get("new_teams"):
                         _mark_team_discord_dirty(s, event_id)
+            roster_sync = None
+            if getattr(ev, "roster_clan_sync", False) and not _settings_before.get("roster_clan_sync"):
+                # Turned on: bring the roster in line now rather than on the
+                # sweep's next tick, so the manager sees the result.
+                from services.event_signup import sync_clan_roster
+
+                s.flush()
+                roster_sync = sync_clan_roster(s, ev)
+                if roster_sync["added"] or roster_sync["removed"]:
+                    _mark_team_discord_dirty(s, event_id)
             # Audit only the scoring/config fields that actually changed — a
             # no-op PATCH (or one touching non-tracked keys) writes no row.
             _settings_after = _event_settings_snapshot(ev)
@@ -5319,6 +5353,8 @@ async def update_event(event_id: int):
             if _changed:
                 if solo_split and solo_split.get("split_teams"):
                     _changed["solo_split"] = solo_split
+                if roster_sync:
+                    _changed["roster_sync"] = roster_sync
                 s.add(AuditLog(
                     actor_user_id=user_id, group_id=ev.group_id, event_id=event_id,
                     action="event.settings.update",
@@ -6601,7 +6637,7 @@ async def resolve_meta_names():
     names = [n.strip() for n in (request.args.get("names") or "").split("|") if n.strip()]
     if not names:
         return jsonify([])
-    names = names[:100]
+    names = names[:250]
 
     def _resolve():
         from db import ItemList, NpcList

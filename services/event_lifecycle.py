@@ -2263,6 +2263,38 @@ def run_lifecycle_sweep(session, redis_conn=None, now: Optional[datetime] = None
             log.error("Sweep: auto-clan roster reconcile failed for event %s",
                       event.id, exc_info=True)
 
+    # Clan roster sync (web152a): events set to follow their clan enter new
+    # members and withdraw departed ones every tick, before and during the
+    # event. Clan events only — a staff-hosted event has no host clan and its
+    # per-clan roster limits are picked by hand.
+    for event in rows:
+        if event.id in due["end"] or not getattr(event, "roster_clan_sync", False):
+            continue
+        if not event.group_id:
+            continue
+        try:
+            from services.event_signup import sync_clan_roster
+
+            changed = sync_clan_roster(session, event)
+            if changed.get("removal_held"):
+                log.warning("Sweep: clan roster sync for event %s held its removals "
+                            "(membership read looks short)", event.id)
+            if changed["added"] or changed["removed"]:
+                try:
+                    from services.event_team_discord import mark_team_members_dirty
+
+                    mark_team_members_dirty(session, event.id)
+                except ImportError:  # unit-test stubs
+                    pass
+                session.commit()
+                summary.setdefault("roster_synced", []).append(event.id)
+                log.info("Sweep: clan roster sync for event %s: +%s -%s",
+                         event.id, changed["added"], changed["removed"])
+        except Exception:
+            session.rollback()
+            log.error("Sweep: clan roster sync failed for event %s",
+                      event.id, exc_info=True)
+
     # Team races that average per member: a roster change moves a team's
     # ranked score without any ledger row, so re-derive it when the rosters
     # changed since the last tick (a Redis digest skips the unchanged ones).

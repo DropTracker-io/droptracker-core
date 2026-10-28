@@ -52,6 +52,7 @@ OSRS_SKILLS = (
     "Runecraft", "Hitpoints", "Crafting", "Mining", "Smithing", "Fishing",
     "Cooking", "Firemaking", "Woodcutting", "Agility", "Herblore",
     "Thieving", "Fletching", "Slayer", "Farming", "Construction", "Hunter",
+    "Sailing",
 )
 _SKILL_BY_NORM = {s.lower(): s for s in OSRS_SKILLS}
 
@@ -63,7 +64,7 @@ _SKILL_BY_NORM = {s.lower(): s for s in OSRS_SKILLS}
 ITEM_CONFIG_KINDS = ("any_of", "any_of_distinct", "all_of", "point_collection",
                      "assembly", "groups", "any_path")
 
-MAX_CONFIG_ITEMS = 100
+MAX_CONFIG_ITEMS = 250
 MAX_CONFIG_GROUPS = 10
 # Abuse backstop only — real path counts are bounded by MAX_CONFIG_ITEMS
 # across the whole task ("one set of each Barrows brother's gear" = 6 paths).

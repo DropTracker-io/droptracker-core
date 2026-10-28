@@ -1274,8 +1274,11 @@ def compose_event_state(session, player_id) -> dict:
             "standings": standings,
             # Version-gate for GET /event_roster (web103a). Additive: older
             # plugins ignore it, newer ones refetch the roster only when it
-            # changes rather than polling a payload this size.
-            "roster_version": _roster_version(session, event.id, teams),
+            # changes rather than polling a payload this size. Absent when the
+            # event has clan-chat team tags turned off (web152a): every plugin
+            # build reads a missing stamp as "no badges" and clears them.
+            **({"roster_version": _roster_version(session, event.id, teams)}
+               if getattr(event, "team_chat_tags", True) is not False else {}),
         })
 
     screenshot_item_ids: list = []
@@ -1364,6 +1367,7 @@ def rostered_event_ids(session, player_id) -> list:
     This is the roster gate for /event_roster: an event absent from this list
     is not merely filtered from the response, it is not acknowledged to exist —
     private events are invisible to the plugin's identity model otherwise.
+    Events with clan-chat team tags turned off are left out the same way.
     """
     from db.models import Event, EventTeam, EventTeamMember
 
@@ -1372,7 +1376,10 @@ def rostered_event_ids(session, player_id) -> list:
         .join(EventTeamMember, EventTeamMember.team_id == EventTeam.id)
         .join(Event, Event.id == EventTeam.event_id)
         .filter(EventTeamMember.player_id == int(player_id),
-                Event.status == "active")
+                Event.status == "active",
+                # web152a: an event with clan-chat team tags off serves no
+                # roster at all, so nothing can badge from a stale fetch.
+                Event.team_chat_tags.isnot(False))
         .order_by(Event.id.desc())
         .all()
     )

@@ -429,3 +429,28 @@ class TestSolo:
             sus.perform_signup(None, _ev(formation_mode="admin_assign"),
                                SimpleNamespace(player_id=3), 7)
         assert exc.value.status == 403
+
+
+class TestClanSyncRemovals:
+    """web152a: the leave half of the clan roster sync, and its guard."""
+
+    def test_departed_entrants_are_removed(self):
+        remove, held = sus.plan_clan_sync_removals({1, 2, 3, 4}, {1, 2, 3, 9})
+        assert remove == {4} and held is False
+
+    def test_nothing_to_remove(self):
+        assert sus.plan_clan_sync_removals({1, 2}, {1, 2, 3}) == (set(), False)
+        assert sus.plan_clan_sync_removals(set(), set()) == (set(), False)
+
+    def test_an_empty_membership_read_never_empties_the_event(self):
+        assert sus.plan_clan_sync_removals({1, 2, 3}, set()) == (set(), True)
+
+    def test_most_of_the_roster_leaving_at_once_is_held(self):
+        entrants = set(range(20))
+        members = set(range(5))          # 15 of 20 "gone"
+        assert sus.plan_clan_sync_removals(entrants, members) == (set(), True)
+
+    def test_a_small_roster_can_lose_a_majority(self):
+        # Under the floor, a real exodus from a tiny event still applies.
+        remove, held = sus.plan_clan_sync_removals({1, 2, 3}, {1, 7})
+        assert remove == {2, 3} and held is False

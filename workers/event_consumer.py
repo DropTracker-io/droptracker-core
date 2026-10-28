@@ -626,6 +626,8 @@ async def run_consumer() -> None:
                     summary = {}
                     log.error("Lifecycle sweep failed:\n%s", traceback.format_exc())
                 last_sweep = time.time()
+                if summary.get("roster_synced"):
+                    bumped = True  # rosters followed their clans
                 if summary.get("held"):
                     log.info("Lifecycle sweep: holding end of %s for intake recovery",
                              summary.get("held"))
