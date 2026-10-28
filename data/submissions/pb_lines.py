@@ -29,8 +29,11 @@ import re
 
 _I = re.IGNORECASE | re.ASCII
 
+# The key admits parentheses for the awakened DT2 bosses, whose count line
+# reads "Your Vardorvis (awakened) kill count is: 3." (suggestion #199).
 BOSS_COUNT_PATTERN = re.compile(
-    r"Your (?P<key>[\w\s:'-]+) (?P<type>kill|chest|completion|success) count is:? (?P<value>[\d,]+)", _I)
+    r"Your (?P<key>[\w\s:'()-]+) (?P<type>kill|chest|completion|success) count is:? (?P<value>[\d,]+)", _I)
+AWAKENED_SUFFIX = re.compile(r"\s*\(awakened\)$", _I)
 SECONDARY_BOSS_PATTERN = re.compile(
     r"Your (?P<type>completed|subdued) (?P<key>[\w\s:]+) count is:?[ \t]*(?P<value>[\d,]+)", _I)
 TIME_WITH_PB_PATTERN = re.compile(
@@ -115,7 +118,10 @@ def _primary_boss(boss, kind):
         if boss.lower() == CG_NAME.lower():
             return CG_BOSS
         return None
-    return boss if kind in ("kill", "success") else None
+    if kind not in ("kill", "success"):
+        return None
+    # The game prints "(awakened)"; npc_list spells it "(Awakened)".
+    return AWAKENED_SUFFIX.sub(" (Awakened)", boss)
 
 
 def _secondary_boss(boss):

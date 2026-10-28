@@ -42,6 +42,7 @@ def time_match(message):
     ("Your Barrows chest count is: 42", "Barrows", "chest", "42"),
     ("Your Wintertodt success count is: 300", "Wintertodt", "success", "300"),
     ("Your Vet'ion kill count is: 69", "Vet'ion", "kill", "69"),
+    ("Your Vardorvis (awakened) kill count is: 3.", "Vardorvis (awakened)", "kill", "3"),
 ])
 def test_boss_count_pattern(message, key, kind, value):
     m = pl.BOSS_COUNT_PATTERN.search(message)
@@ -235,6 +236,26 @@ def test_a_boss_kill_becomes_the_fields_the_plugin_sent():
     # The client's own hints never reach the processor; the base fields do.
     assert "source" not in kill and "chat_line_1" not in kill
     assert kill["player_name"] == "P" and kill["guid"] == "g"
+
+
+@pytest.mark.parametrize("game_name,boss", [
+    ("Vardorvis (awakened)", "Vardorvis (Awakened)"),
+    ("Duke Sucellus (awakened)", "Duke Sucellus (Awakened)"),
+    ("Leviathan (awakened)", "Leviathan (Awakened)"),
+    ("Whisperer (awakened)", "Whisperer (Awakened)"),
+])
+def test_awakened_dt2_kills_are_recorded_under_the_awakened_boss(game_name, boss):
+    # Suggestion #199: the parenthesised name used to fail the count pattern,
+    # so every awakened kill was dropped.
+    out = pl.expand(submission(line(f"Your {game_name} kill count is: 7."),
+                               line("Fight duration: 2:05.40. Personal best: 1:58.20")), no_dupes)
+    assert [(k["boss_name"], k["killcount"], k["best_time"]) for k in out] == [(boss, "7", "01:58")]
+
+
+def test_normal_dt2_kills_stay_on_the_normal_boss():
+    out = pl.expand(submission(line("Your Vardorvis kill count is: 120."),
+                               line("Fight duration: 1:05.40. Personal best: 0:58.20")), no_dupes)
+    assert [k["boss_name"] for k in out] == ["Vardorvis"]
 
 
 def test_raid_team_size_comes_from_the_party_the_client_saw():
