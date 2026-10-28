@@ -122,6 +122,9 @@ class TestRegistry:
         # Unset shapes all normalize to "".
         for empty in (None, "", "[]", []):
             assert reg.coerce_to_storage("death_message_variants", empty) == ""
+        # A full list of max-length messages fits under the raw size cap.
+        full = json.dumps(["x" * 200] * 100)
+        assert reg.coerce_to_storage("death_message_variants", full) == full
 
     def test_coerce_to_storage_messagelist_rejects_bad(self):
         for bad in (
@@ -130,7 +133,8 @@ class TestRegistry:
             '[1, 2]',              # non-string entries
             '["  "]',              # blank entry
             '["' + "x" * 201 + '"]',   # entry over the per-message cap
-            json.dumps([str(i) for i in range(31)]),  # too many entries
+            json.dumps([str(i) for i in range(101)]),  # too many entries
+            '["' + "x" * 24000 + '"]',  # over the raw size cap
             '["hi @everyone"]',    # content pings for real
             '["hey <@&123>"]',
         ):

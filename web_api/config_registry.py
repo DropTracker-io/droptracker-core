@@ -1543,9 +1543,10 @@ class ConfigValidationError(ValueError):
 
 # Limits for `messagelist` fields — the TS registry
 # (packages/api-types/src/group-config.ts) enforces the same.
-MESSAGE_LIST_MAX_ENTRIES = 30
+MESSAGE_LIST_MAX_ENTRIES = 100
 MESSAGE_LIST_MAX_ENTRY_LENGTH = 200
-MESSAGE_LIST_MAX_RAW_LENGTH = 8000
+# Room for a full list of max-length entries plus JSON quoting.
+MESSAGE_LIST_MAX_RAW_LENGTH = 24000
 # Message content pings for real (embed text doesn't), so mention syntax is
 # rejected outright rather than trusting the placement checkbox's state.
 MESSAGE_LIST_MENTION_RE = re.compile(r"@everyone|@here|<@[&!]?\d+>")
