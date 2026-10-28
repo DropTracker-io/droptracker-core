@@ -60,6 +60,34 @@ RAID_VARIANT_TO_CANONICAL: Dict[str, str] = {
     for variant in variants
 }
 
+# Awakened DT2 bosses are separate NpcList rows ("Vardorvis (Awakened)") with
+# their own PBs. A group can keep them as bosses of their own (the default) or
+# fold each into its parent boss's message as an "Awakened" mode
+# (``hof_group_awakened_bosses``, suggestion #199). Keyed by the parent's
+# plan_dedupe_key; the value is the parent's NpcList spelling.
+AWAKENED_PARENTS: Dict[str, str] = {
+    "duke sucellus": "Duke Sucellus",
+    "leviathan": "The Leviathan",
+    "vardorvis": "Vardorvis",
+    "whisperer": "The Whisperer",
+}
+AWAKENED_MODE = "Awakened"
+_AWAKENED_RE = re.compile(r"^(.*?)\s*\(awakened\)$", re.IGNORECASE)
+
+
+def awakened_parent(boss_name: str) -> str | None:
+    """The parent boss of an awakened DT2 variant name, else None."""
+    match = _AWAKENED_RE.match((boss_name or "").strip())
+    if not match:
+        return None
+    return AWAKENED_PARENTS.get(plan_dedupe_key(match.group(1)))
+
+
+def is_awakened_parent(display_name: str) -> bool:
+    """Whether a plan display name is one of the four awakened-capable bosses."""
+    return plan_dedupe_key(display_name or "") in AWAKENED_PARENTS
+
+
 # Discord Components V2: total rendered text per message is capped at 4000
 # characters.  Leave headroom for the header/footer when fitting lists.
 MAX_MESSAGE_TEXT_CHARS = 4000
@@ -198,24 +226,31 @@ class BossPlanEntry:
     grouped: bool = False
 
 
-def build_boss_plan(boss_names: List[str]) -> List[BossPlanEntry]:
+def build_boss_plan(boss_names: List[str], group_awakened: bool = False) -> List[BossPlanEntry]:
     """Collapse configured boss names into display entries, sorted alphabetically.
 
     Raid variants (and Hallowed Sepulchre floors) collapse into one grouped
     entry per canonical name; everything else becomes an individual entry.
+    With ``group_awakened`` an awakened DT2 boss joins its parent's entry,
+    which then renders grouped (Normal / Awakened modes).
     """
     entries: Dict[str, BossPlanEntry] = {}
     for boss in boss_names:
         display = canonical_display_name(boss)
         grouped = display in RAID_GROUPS or display == SEPULCHRE_CANONICAL
+        parent = awakened_parent(boss) if group_awakened else None
+        if parent:
+            display, grouped = parent, True
         # Merge spelling variants of the same boss ('Whisperer' + 'The
         # Whisperer') into one entry; the first-seen display name is the label.
         key = plan_dedupe_key(display)
         entry = entries.get(key)
         if entry is None:
             entries[key] = BossPlanEntry(display, [boss], grouped)
-        elif boss not in entry.variant_names:
-            entry.variant_names.append(boss)
+        else:
+            if boss not in entry.variant_names:
+                entry.variant_names.append(boss)
+            entry.grouped = entry.grouped or grouped
     return sorted(entries.values(), key=lambda e: e.display_name.casefold())
 
 

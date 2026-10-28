@@ -105,6 +105,7 @@ def _config(s, group_id: int) -> dict:
                 "personal_best_embed_boss_list",
                 "number_of_pbs_to_display",
                 "hof_managed_by_core",
+                "hof_group_awakened_bosses",
             ]),
         )
         .all()
@@ -119,7 +120,12 @@ def _boss_names(config: dict) -> list[str]:
     if row is None:
         return []
     names = parse_boss_list(row.config_value, row.long_value)
-    return [e.display_name for e in build_boss_plan(names)]
+    return [e.display_name for e in build_boss_plan(names, _group_awakened(config))]
+
+
+def _group_awakened(config: dict) -> bool:
+    row = config.get("hof_group_awakened_bosses")
+    return row is not None and str(row.config_value).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _pb_entries(config: dict) -> int:
@@ -328,8 +334,9 @@ def _render_preview(s, group_id: int, layout: dict, boss: str, hl) -> dict:
 
     config_row = config.get("personal_best_embed_boss_list")
     configured = parse_boss_list(config_row.config_value, config_row.long_value) if config_row else []
-    plan = [e for e in build_boss_plan(configured or [name]) if e.display_name == name]
-    entry = plan[0] if plan else build_boss_plan([name])[0]
+    awakened = _group_awakened(config)
+    plan = [e for e in build_boss_plan(configured or [name], awakened) if e.display_name == name]
+    entry = plan[0] if plan else build_boss_plan([name], awakened)[0]
 
     npcs = []
     for variant in entry.variant_names:

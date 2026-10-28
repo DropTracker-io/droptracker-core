@@ -40,7 +40,15 @@ from db.models import (
 from services.hof_layout import HofEntry, Row, Scope
 from utils.doom_delve import DOOM_NPC_ID, format_level
 from utils.format import NPC_IMG_DIR, convert_from_ms, format_number
-from utils.hof import RAID_GROUPS, SEPULCHRE_CANONICAL, canonical_display_name, npc_name_candidates
+from utils.hof import (
+    AWAKENED_MODE,
+    RAID_GROUPS,
+    SEPULCHRE_CANONICAL,
+    awakened_parent,
+    canonical_display_name,
+    is_awakened_parent,
+    npc_name_candidates,
+)
 from utils.pb_time import board_sort_key
 from utils.site_urls import WEBSITE_URL, npc_url
 
@@ -62,6 +70,7 @@ _MODE_ORDER = {
     "Phosani's Nightmare": 1,
     "Crystalline": 0,
     "Corrupted": 1,
+    AWAKENED_MODE: 2,
 }
 
 
@@ -115,6 +124,8 @@ def variant_mode_name(canonical_name: str, npc_name: str) -> str:
         floor_match = re.search(r"Floor\s+(\d+)", npc_name)
         if floor_match:
             return f"Floor {floor_match.group(1)}"
+    if is_awakened_parent(canonical_name):
+        return AWAKENED_MODE if awakened_parent(npc_name) else "Normal"
     return npc_name
 
 
@@ -145,6 +156,10 @@ def group_thumbnail_npc(canonical_name: str, npcs: List[NpcList]) -> NpcList:
         for npc in npcs:
             if npc.npc_name == variant_name:
                 return npc
+    if is_awakened_parent(canonical_name):
+        for npc in npcs:
+            if not awakened_parent(npc.npc_name):
+                return npc
     return npcs[0]
 
 
@@ -158,7 +173,9 @@ def npc_image_url(session, npc: NpcList) -> str:
     if _image_exists(npc.npc_id):
         return f"https://www.droptracker.io/img/npcdb/{npc.npc_id}.png"
     canonical = canonical_display_name(npc.npc_name)
-    for variant_name in RAID_GROUPS.get(canonical) or []:
+    # An awakened boss without its own art borrows its parent's.
+    parent = awakened_parent(npc.npc_name)
+    for variant_name in ([parent] if parent else RAID_GROUPS.get(canonical) or []):
         for candidate in npc_name_candidates(variant_name):
             other = session.query(NpcList).filter(NpcList.npc_name == candidate).first()
             if other and other.npc_id != npc.npc_id and _image_exists(other.npc_id):

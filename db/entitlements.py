@@ -177,6 +177,7 @@ HALL_OF_FAME_CONFIG_KEYS = frozenset({
     "number_of_pbs_to_display",
     "channel_id_to_send_pb_embeds",
     "hof_individual_boss_messages",
+    "hof_group_awakened_bosses",
 })
 
 

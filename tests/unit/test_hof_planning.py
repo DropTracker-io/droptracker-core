@@ -312,3 +312,62 @@ class TestSpellingVariantMerging:
         from utils.hof import build_boss_plan
         plan = build_boss_plan(["Zulrah", "Vorkath", "The Whisperer"])
         assert len(plan) == 3
+
+
+class TestAwakenedGrouping:
+    """Suggestion #199: awakened DT2 bosses can share their parent's message."""
+
+    NAMES = ["Vardorvis", "Vardorvis (Awakened)", "Leviathan (Awakened)", "The Leviathan",
+             "Duke Sucellus (Awakened)", "Zulrah"]
+
+    def test_separate_by_default(self):
+        plan = build_boss_plan(self.NAMES)
+        assert [e.display_name for e in plan] == [
+            "Duke Sucellus (Awakened)", "Leviathan (Awakened)", "The Leviathan",
+            "Vardorvis", "Vardorvis (Awakened)", "Zulrah"]
+        assert not any(e.grouped for e in plan)
+
+    def test_grouped_under_the_parent(self):
+        plan = {e.display_name: e for e in build_boss_plan(self.NAMES, group_awakened=True)}
+        assert sorted(plan) == ["Duke Sucellus", "The Leviathan", "Vardorvis", "Zulrah"]
+        assert plan["Vardorvis"].variant_names == ["Vardorvis", "Vardorvis (Awakened)"]
+        assert plan["Vardorvis"].grouped
+        # Awakened listed before its parent still lands in one entry.
+        assert plan["The Leviathan"].variant_names == ["Leviathan (Awakened)", "The Leviathan"]
+        # An awakened boss configured alone still gets the parent's message.
+        assert plan["Duke Sucellus"].variant_names == ["Duke Sucellus (Awakened)"]
+        assert not plan["Zulrah"].grouped
+
+    def test_parent_spelling_variants_merge(self):
+        plan = build_boss_plan(["Whisperer", "The Whisperer (Awakened)"], group_awakened=True)
+        assert len(plan) == 1 and plan[0].display_name == "Whisperer"
+        assert plan[0].grouped
+
+    def test_awakened_parent(self):
+        from utils.hof import awakened_parent
+
+        assert awakened_parent("Vardorvis (awakened)") == "Vardorvis"
+        assert awakened_parent("Whisperer (Awakened)") == "The Whisperer"
+        assert awakened_parent("Leviathan (Awakened)") == "The Leviathan"
+        assert awakened_parent("Vardorvis") is None
+        assert awakened_parent("Zulrah (Awakened)") is None
+
+    def test_mode_names_and_order(self):
+        import importlib.util
+        import sys
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        # ``services`` is stubbed by conftest; load the real module from its file.
+        path = Path(__file__).resolve().parents[2] / "services" / "hof_data.py"
+        spec = importlib.util.spec_from_file_location("_real_hof_data_awakened", path)
+        hof_data = importlib.util.module_from_spec(spec)
+        sys.modules["_real_hof_data_awakened"] = hof_data
+        spec.loader.exec_module(hof_data)
+        group_thumbnail_npc, mode_npcs = hof_data.group_thumbnail_npc, hof_data.mode_npcs
+
+        awake = SimpleNamespace(npc_id=13976, npc_name="Vardorvis (Awakened)")
+        normal = SimpleNamespace(npc_id=12223, npc_name="Vardorvis")
+        assert [(m, n.npc_id) for m, n in mode_npcs("Vardorvis", [awake, normal])] == [
+            ("Normal", 12223), ("Awakened", 13976)]
+        assert group_thumbnail_npc("Vardorvis", [awake, normal]) is normal

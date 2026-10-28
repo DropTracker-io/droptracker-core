@@ -80,6 +80,7 @@ from utils.hof import (
     DIRECTORY_BOTTOM_KEY,
     DIRECTORY_KEY,
     BossPlanEntry,
+    awakened_parent,
     build_boss_plan,
     build_message_plan,
     canonical_display_name,
@@ -212,6 +213,8 @@ class GroupHOFConfig:
     # the old implicit default were given explicit '1' rows when this flipped.
     individual_messages: bool = False
     pb_entries: int = 5
+    # Fold awakened DT2 bosses into their parent's message (suggestion #199).
+    group_awakened: bool = False
 
 
 @dataclass
@@ -939,13 +942,15 @@ class HallOfFame(Extension):
                     cfg = self._load_group_config(gid)
                     if not cfg.individual_messages or not cfg.boss_names:
                         continue
-                    plan_names = {e.display_name for e in build_boss_plan(cfg.boss_names)}
+                    plan_names = {e.display_name for e in build_boss_plan(cfg.boss_names, cfg.group_awakened)}
                     # The group's plan key may be a spelling variant of the
                     # NpcList name ('Leviathan' vs 'The Leviathan') — match on
                     # candidates and target the PLAN's key, since that is what
                     # group_personal_best_message.boss_name stores.
+                    # A grouped awakened boss lives in its parent's message.
+                    target = (awakened_parent(display_name) if cfg.group_awakened else None) or display_name
                     matched = next(
-                        (c for c in npc_name_candidates(display_name) if c in plan_names),
+                        (c for c in npc_name_candidates(target) if c in plan_names),
                         None,
                     )
                     if matched:
@@ -965,7 +970,7 @@ class HallOfFame(Extension):
         cfg = self._load_group_config(group_id)
         if not cfg.channel_id or not cfg.individual_messages:
             return
-        resolved = await self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
+        resolved = await self._resolve_entries(group_id, build_boss_plan(cfg.boss_names, cfg.group_awakened))
         match = next(((e, npcs) for e, npcs in resolved if e.display_name == display_name), None)
         if match is None:
             return
@@ -1059,6 +1064,7 @@ class HallOfFame(Extension):
                 "personal_best_embed_boss_list",
                 "hof_individual_boss_messages",
                 "number_of_pbs_to_display",
+                "hof_group_awakened_bosses",
             ]),
         ).all()
         for row in rows:
@@ -1068,6 +1074,8 @@ class HallOfFame(Extension):
                 cfg.boss_names = parse_boss_list(row.config_value, row.long_value)
             elif row.config_key == "hof_individual_boss_messages":
                 cfg.individual_messages = str(row.config_value).strip().lower() not in ("0", "false", "no", "off")
+            elif row.config_key == "hof_group_awakened_bosses":
+                cfg.group_awakened = str(row.config_value).strip().lower() in ("1", "true", "yes", "on")
             elif row.config_key == "number_of_pbs_to_display":
                 # Legacy sentinel: nearly every group carries '0' (cloned from
                 # the template group), which has always meant "unset — use the
@@ -1155,7 +1163,7 @@ class HallOfFame(Extension):
             # request to tear the channel down — leave existing messages alone.
             log.warning("HOF: group %d has no bosses configured, skipping", group_id)
             return
-        resolved = await self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
+        resolved = await self._resolve_entries(group_id, build_boss_plan(cfg.boss_names, cfg.group_awakened))
         if not resolved:
             log.error("HOF: group %d — none of %d configured bosses resolved, skipping",
                       group_id, len(cfg.boss_names))
@@ -1709,7 +1717,7 @@ class HallOfFame(Extension):
                 await ctx.send("This group no longer exists.", ephemeral=True)
                 return
             cfg = self._load_group_config(group_id)
-            resolved = await self._resolve_entries(group_id, build_boss_plan(cfg.boss_names))
+            resolved = await self._resolve_entries(group_id, build_boss_plan(cfg.boss_names, cfg.group_awakened))
             match = next(
                 ((entry, npcs) for entry, npcs in resolved if entry.display_name == selection),
                 None,

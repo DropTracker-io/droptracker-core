@@ -749,6 +749,14 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Post one Hall of Fame message per boss. When off, only the directory message is posted and members use its drop-down to view each boss's leaderboard.",
         "default": False,
     },
+    {
+        "key": "hof_group_awakened_bosses",
+        "label": "Show awakened bosses with their normal boss",
+        "category": "pbs",
+        "type": "boolean",
+        "help": "Show awakened Duke Sucellus, The Leviathan, Vardorvis and The Whisperer times in the same Hall of Fame message as the normal boss, as an Awakened section. When off, each awakened boss is its own entry.",
+        "default": False,
+    },
 
     # --- Combat achievements ---
     {
