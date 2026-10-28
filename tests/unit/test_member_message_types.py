@@ -16,7 +16,7 @@ import pytest
 
 from web_api.config_registry import get_config_field
 
-mm = sys.modules["db.member_messages"]
+mm = importlib.import_module("db.member_messages")
 
 for _name in ("services.contribution_notifications", "services.event_notifications"):
     if _name not in sys.modules:

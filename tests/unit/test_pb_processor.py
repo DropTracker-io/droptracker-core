@@ -22,7 +22,20 @@ import asyncio
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 import db
+
+
+@pytest.fixture(autouse=True)
+def _spy_pb_models(monkeypatch):
+    """Record PersonalBestEntry / PersonalBestLoadout constructor calls while
+    still building the real rows (pb.py imports both lazily, from db and
+    db.models), so a kwarg that isn't a column fails here."""
+    for name in ("PersonalBestEntry", "PersonalBestLoadout"):
+        spy = MagicMock(wraps=getattr(db.models, name))
+        monkeypatch.setattr(db, name, spy)
+        monkeypatch.setattr(db.models, name, spy)
 
 
 class _FakePlayer:

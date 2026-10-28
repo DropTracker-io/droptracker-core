@@ -5,6 +5,7 @@ send-time sanitizer, which template wins and how it renders, and the storage
 helpers' fail-closed behaviour. conftest loads the real module by path under
 the stubbed ``db`` package, so these exercise the rule every surface uses.
 """
+import importlib
 import json
 import random
 import sys
@@ -13,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-mm = sys.modules["db.member_messages"]
+mm = importlib.import_module("db.member_messages")
 
 
 def _issue(messages):

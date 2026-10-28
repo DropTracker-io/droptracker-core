@@ -404,7 +404,7 @@ python -m lootboard._board_generator  # lootboard generator
 ./venv/bin/python -m pytest tests/integration -q   # needs live MySQL + Redis
 ```
 
-`tests/conftest.py` stubs `db` and `services` as MagicMocks — route modules must lazy-import `services.*` **inside** handlers, and enum/tuple `in` checks against stubbed values silently fail (monkeypatch real tuples in endpoint tests).
+`tests/conftest.py` loads the **real** ORM models: `db` is registered as a real package without running `db/__init__.py`, so every `db.*` submodule imports normally and a new model or column needs no test setup. Only side-effecting modules stay MagicMocks (`db.ops`, `db.app_logger`, `db.clan_sync`, `db.group_creation`, `db.xf`), and the session factories (`Session`, `session`, `db_session`) are mocks, so no unit test can reach a database. **Never run DB I/O at model import time** (`Table.create(engine)` and the like); `tests/unit/test_orm_models.py` checks mappers and MySQL DDL for every model. To record rows a route builds, use the `model_spy` fixture (real rows, recorded kwargs) instead of a hand-made fake class. `services` is still a stub package: route modules must lazy-import `services.*` **inside** handlers, and enum/tuple `in` checks against stubbed `services` values silently fail (monkeypatch real tuples in endpoint tests).
 
 Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=dev` in `.env` uses `DEV_TOKEN` instead of `BOT_TOKEN` (prod is `STATE="live"`). Dev API port is 31324 (`droptracker-api-dev`).
 

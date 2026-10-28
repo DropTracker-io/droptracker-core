@@ -35,38 +35,6 @@ os.environ.setdefault("IMG_B2_OFFLOAD", "false")
 # replacing them with MagicMock prevents import failures in unit tests.
 _STUBS = [
     # Database layer
-    "db",
-    "db.models",
-    "db.models.base",
-    "db.models.drop",
-    "db.models.player",
-    "db.models.user",
-    "db.models.group",
-    "db.models.guild",
-    "db.models.notification_queue",
-    "db.models.notified_submission",
-    "db.models.group_configuration",
-    "db.models.collection",
-    "db.models.personal_best",
-    "db.models.combat_achievement",
-    "db.models.player_pet",
-    "db.models.quest_completion",
-    "db.models.recap",
-    "db.models.seasonal_drop",
-    "db.models.seasonal_personal_best",
-    "db.models.seasonal_collection",
-    "db.models.seasonal_combat_achievement",
-    "db.models.seasonal_player_pet",
-    "db.models.seasonal_quest_completion",
-    "db.models.group_points",
-    "db.models.premium_features",
-    "db.models.analytics",
-    "db.models.embed",
-    "db.models.webhooks",
-    "db.models.associations",
-    "db.models.drop_split",
-    "db.models.video_upload",
-    "db.models.user_config",
     "db.ops",
     "db.app_logger",
     "db.clan_sync",
@@ -130,24 +98,76 @@ _STUBS = [
     "monitor.sdnotifier",
 ]
 
+# ── The real ORM models ───────────────────────────────────────────────────────
+# `db` is registered as a real package (its true __path__) WITHOUT running
+# db/__init__.py, which pulls in db.ops (Discord, Redis). Every `db.*`
+# submodule then imports for real, and `db.models` is the real model registry:
+# a new model or column needs no stub, and a test can no longer pass against a
+# name the code base doesn't have. Importing the models never touches a
+# database (engines connect lazily); the session factories are swapped for
+# mocks below so nothing in the unit suite can reach one either.
+import types as _types
+from pathlib import Path as _Path
+
+_REPO = _Path(__file__).resolve().parent.parent
+if "db" not in sys.modules:
+    _db_pkg = _types.ModuleType("db")
+    _db_pkg.__path__ = [str(_REPO / "db")]
+    _db_pkg.__file__ = str(_REPO / "db" / "__init__.py")
+    sys.modules["db"] = _db_pkg
+
+import db.models.base as _real_base  # noqa: E402
+
+# Unit tests get mock sessions, exactly as before the models were real. The
+# real engines stay (lazy, never connected) so model modules import cleanly.
+_mock_session = MagicMock(name="db.session")
+_mock_Session = MagicMock(name="db.Session", return_value=_mock_session)
+_mock_xf_Session = MagicMock(name="db.XenforoSession")
+
+
+def _mock_db_session():
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        yield _mock_Session()
+
+    return _cm()
+
+
+for _name, _value in (("Session", _mock_Session), ("session", _mock_session),
+                      ("XenforoSession", _mock_xf_Session), ("db_session", _mock_db_session),
+                      ("get_fresh_session", _mock_Session),
+                      ("get_fresh_xenforo_session", _mock_xf_Session)):
+    setattr(_real_base, _name, _value)
+
+import db.models as _real_models  # noqa: E402
+
+for _name in ("Session", "session", "XenforoSession", "db_session"):
+    if hasattr(_real_models, _name):
+        setattr(_real_models, _name, getattr(_real_base, _name))
+
+# What db/__init__.py would export: the models and the session surface.
+for _name in dir(_real_models):
+    if not _name.startswith("_"):
+        setattr(sys.modules["db"], _name, getattr(_real_models, _name))
+sys.modules["db"].models = _real_models
+sys.modules["db"].engine = _real_base.engine
+sys.modules["db"].xenforo_engine = _real_base.xenforo_engine
+
 for _stub_name in _STUBS:
     if _stub_name not in sys.modules:
         sys.modules[_stub_name] = MagicMock()
+    _parent, _, _leaf = _stub_name.rpartition(".")
+    if _parent == "db":
+        setattr(sys.modules["db"], _leaf, sys.modules[_stub_name])
+sys.modules["db"].get_xf_option = sys.modules["db.ops"].get_xf_option
 
 # ── Real modules that live under stubbed packages ─────────────────────────────
-# db/entitlements.py is pure logic (stdlib-only module imports; DB access is
-# lazy inside functions), but `import db.entitlements` would execute the real
-# db/__init__.py. Load it by file path under its dotted name so unit tests can
-# exercise the entitlement registry (web_api.entitlements_registry re-exports it).
+# Only `services` is still a stub package, so its pure modules are loaded by
+# file path under their dotted names. (`db.*` needs none of this any more:
+# `db` is a real package above, so its submodules import normally.)
 import importlib.util as _importlib_util
-from pathlib import Path as _Path
-
-_ENTITLEMENTS_PATH = _Path(__file__).resolve().parent.parent / "db" / "entitlements.py"
-if "db.entitlements" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.entitlements", _ENTITLEMENTS_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.entitlements"] = _mod
-    _spec.loader.exec_module(_mod)
 
 # services/notification_text.py — message text + footer resolution. Module
 # imports are stdlib-only (DB, entitlement and formatting imports are lazy), so
@@ -160,107 +180,6 @@ if "services.notification_text" not in sys.modules:
     sys.modules["services.notification_text"] = _mod
     _spec.loader.exec_module(_mod)
     sys.modules["services"].notification_text = _mod
-
-# db/item_sources.py — the item -> source-NPC queries, shared by the item page
-# and the events worker's effort resolver. Module imports are SQLAlchemy-only
-# and the ORM models are lazy-imported inside functions, so load the real
-# module: web_api.routes.items re-exports its helpers and the source tests
-# assert on the queries it issues.
-_ITEM_SOURCES_PATH = _Path(__file__).resolve().parent.parent / "db" / "item_sources.py"
-if "db.item_sources" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.item_sources", _ITEM_SOURCES_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.item_sources"] = _mod
-    _spec.loader.exec_module(_mod)
-
-# db/event_rate_limits.py (web65a) — same shape: stdlib-only module imports,
-# lazy DB access, fail-closed grant helpers. deps/lifecycle import it lazily,
-# so route tests need it resolvable under the stubbed ``db`` package.
-_RATE_LIMITS_PATH = _Path(__file__).resolve().parent.parent / "db" / "event_rate_limits.py"
-if "db.event_rate_limits" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.event_rate_limits", _RATE_LIMITS_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.event_rate_limits"] = _mod
-    _spec.loader.exec_module(_mod)
-
-# db/notification_blacklist.py — the shared item/NPC blacklist matcher. Same
-# shape (stdlib + utils.npc_names at module level, ORM model lazy-imported
-# inside the query), and it is the single rule the enqueue gate, the send-side
-# guard and the web API all match by, so unit tests must exercise the real one.
-_BLACKLIST_PATH = _Path(__file__).resolve().parent.parent / "db" / "notification_blacklist.py"
-if "db.notification_blacklist" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.notification_blacklist", _BLACKLIST_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.notification_blacklist"] = _mod
-    _spec.loader.exec_module(_mod)
-
-# db/notification_always_list.py — the always-announce twin of the blacklist.
-# Imports its normalizers FROM db.notification_blacklist (loaded above), model
-# lazy-imported inside the query; the drop processor and the web API match by
-# this one rule, so tests must exercise the real one.
-_ALWAYS_LIST_PATH = _Path(__file__).resolve().parent.parent / "db" / "notification_always_list.py"
-if "db.notification_always_list" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.notification_always_list", _ALWAYS_LIST_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.notification_always_list"] = _mod
-    _spec.loader.exec_module(_mod)
-
-# db/death_filter.py — the shared safe-death rule. Same shape again (stdlib +
-# utils.death_regions at module level, group_config lazy-imported inside the
-# lookup), and like the blacklist it is one rule read by the enqueue gate, the
-# send-side guard and the death processor, so the tests must exercise the real
-# one rather than a mock that agrees with whatever they assert.
-_DEATH_FILTER_PATH = _Path(__file__).resolve().parent.parent / "db" / "death_filter.py"
-if "db.death_filter" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.death_filter", _DEATH_FILTER_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.death_filter"] = _mod
-    _spec.loader.exec_module(_mod)
-
-# db/member_messages.py — members' own death messages: validation, which line
-# wins and how it renders. Stdlib-only at module level (models and group_config
-# lazy-imported in the storage helpers), and the sender, both APIs and the
-# Discord panel all read this one rule, so tests must exercise the real one.
-_MEMBER_MESSAGES_PATH = _Path(__file__).resolve().parent.parent / "db" / "member_messages.py"
-if "db.member_messages" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.member_messages", _MEMBER_MESSAGES_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.member_messages"] = _mod
-    _spec.loader.exec_module(_mod)
-
-# db/group_rename.py — the shared "rename a group everywhere" service. Same
-# shape again (SQLAlchemy-only module imports, sessions passed in), and the
-# config + admin-data routes import it at module level, so it must resolve
-# under the stubbed ``db`` package.
-_GROUP_RENAME_PATH = _Path(__file__).resolve().parent.parent / "db" / "group_rename.py"
-if "db.group_rename" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.group_rename", _GROUP_RENAME_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.group_rename"] = _mod
-    _spec.loader.exec_module(_mod)
-
-# db/ca_points.py — the one writer of a player's combat achievement total, and
-# the rule for which reading wins. SQLAlchemy-core only with the session passed
-# in, so the real module runs here: tests/unit/test_ca_points.py drives its
-# UPDATE against SQLite, and the CA processor and sync route import it.
-_CA_POINTS_PATH = _Path(__file__).resolve().parent.parent / "db" / "ca_points.py"
-if "db.ca_points" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.ca_points", _CA_POINTS_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.ca_points"] = _mod
-    _spec.loader.exec_module(_mod)
-
-# db/point_standings.py — who stands where on a clan's points board: the
-# current-members-only rule and the combine-accounts toggle. Same shape as
-# ca_points (SQLAlchemy-core text(), session passed in, no ORM-model imports),
-# and the website, the bot and the award engine all read totals through it, so
-# tests/unit/test_point_standings.py runs its real SQL against SQLite.
-_POINT_STANDINGS_PATH = _Path(__file__).resolve().parent.parent / "db" / "point_standings.py"
-if "db.point_standings" not in sys.modules:
-    _spec = _importlib_util.spec_from_file_location("db.point_standings", _POINT_STANDINGS_PATH)
-    _mod = _importlib_util.module_from_spec(_spec)
-    sys.modules["db.point_standings"] = _mod
-    _spec.loader.exec_module(_mod)
 
 # services/event_effort.py — the Bingo EHB scoring core. Pure by design
 # (stdlib-only module imports, injected lookups), so load the real module: the
@@ -634,24 +553,6 @@ class _ModelMock(MagicMock):
 
 
 # ── Wire up commonly-accessed attributes on stubs ─────────────────────────────
-# The db stub must expose a usable scoped session and model classes.
-_db_stub = sys.modules["db"]
-_db_stub.session = MagicMock()
-_db_stub.models = sys.modules["db.models"]
-
-# Model classes referenced via `from db import Player, Drop, ...`
-for _model_name in [
-    "Player", "User", "Group", "Drop", "NpcList", "ItemList",
-    "GroupConfiguration", "UserConfiguration", "NotificationQueue",
-    "NotifiedSubmission", "CollectionLogEntry", "PersonalBestEntry",
-    "CombatAchievementEntry", "PlayerPet", "QuestCompletionEntry",
-    "FeatureActivation", "SeasonalDrop", "SeasonalPersonalBestEntry",
-    "SeasonalCollectionLogEntry", "SeasonalCombatAchievementEntry",
-    "SeasonalPlayerPet", "SeasonalQuestCompletionEntry",
-    "user_group_association",
-]:
-    setattr(_db_stub, _model_name, _ModelMock(name=_model_name))
-
 # api.core stub needs a logger attribute
 sys.modules["api.core"].logger = MagicMock()
 
@@ -718,6 +619,37 @@ def monkeypatch():
     mp = _MockSafeMonkeyPatch()
     yield mp
     mp.undo()
+
+
+class ModelSpy:
+    """Stands in for a real ORM model and records what gets built.
+
+    Class-level reads (``Model.group_id`` in a filter) go to the real model,
+    and every call builds a REAL row, so a kwarg that isn't a column fails the
+    test instead of production. ``calls`` holds each call's kwargs.
+    """
+
+    def __init__(self, model):
+        self._model = model
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append(kwargs)
+        return self._model(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+
+@pytest.fixture
+def model_spy(monkeypatch):
+    """``spy = model_spy(module, "EventGroup")`` swaps the model a module uses
+    for a ModelSpy for the rest of the test; ``spy.calls`` lists the rows built."""
+    def install(target, name):
+        spy = ModelSpy(getattr(target, name))
+        monkeypatch.setattr(target, name, spy)
+        return spy
+    return install
 
 
 @pytest.fixture

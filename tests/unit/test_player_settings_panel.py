@@ -67,7 +67,7 @@ def test_modal_boxes_come_back_in_order_with_blanks():
 def test_modal_boxes_feed_the_shared_rules():
     # Blank boxes are dropped and names lowercased by the one rule every
     # surface saves through, not by the panel.
-    mm = sys.modules["db.member_messages"]
+    mm = importlib.import_module("db.member_messages")
     boxes = panel.death_messages_from_modal({"m1": " {Killer} got me ", "m2": "", "m4": "{killer} got me"})
     assert mm.normalize_messages(boxes) == ["{killer} got me"]
 

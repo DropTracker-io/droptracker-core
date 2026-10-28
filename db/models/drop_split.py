@@ -2,7 +2,7 @@ from sqlalchemy import BigInteger, Column, Integer, ForeignKey, DateTime, event
 from sqlalchemy import func
 from sqlalchemy.orm import relationship
 
-from .base import Base, engine
+from .base import Base
 
 
 class DropSplit(Base):
@@ -27,6 +27,3 @@ class DropSplit(Base):
     player = relationship("Player")
     drop   = relationship("Drop")
 
-
-# Create the table on first import if it doesn't exist yet.
-DropSplit.__table__.create(engine, checkfirst=True)

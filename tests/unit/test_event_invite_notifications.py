@@ -106,23 +106,17 @@ class TestInviteNotifies:
 
 class TestBulkInviteNotifies:
     async def test_one_announcement_per_newly_invited_clan(
-        self, client, monkeypatch, calls
+        self, client, monkeypatch, calls, model_spy
     ):
         """Each clan gets its OWN thread and DM fan-out — the multi-clan case
         must not collapse into one shared conversation."""
-        real = epr.EventGroup  # reuse real columns so `.in_()` filters work
-
-        class _Rec(_RecEventGroup):
-            group_id = real.group_id
-            event_id = real.event_id
-
         s = _S(
             [_cvc()],
             [],  # none already on the roster
             [(20, "Clan B"), (21, "Clan C")],  # id -> name lookup
         )
         _wire(monkeypatch, s)
-        monkeypatch.setattr(epr, "EventGroup", _Rec)
+        model_spy(epr, "EventGroup")
 
         r = await client.post(
             "/api/v1/events/1/participants/bulk", json={"group_ids": [20, 21]}
@@ -134,20 +128,14 @@ class TestBulkInviteNotifies:
         names = {k["invited_group_name"] for _, k in calls}
         assert names == {"Clan B", "Clan C"}
 
-    async def test_skipped_clans_are_not_announced(self, client, monkeypatch, calls):
-        real = epr.EventGroup
-
-        class _Rec(_RecEventGroup):
-            group_id = real.group_id
-            event_id = real.event_id
-
+    async def test_skipped_clans_are_not_announced(self, client, monkeypatch, calls, model_spy):
         s = _S(
             [_cvc()],
             [(20,)],            # 20 already on the roster
             [(20, "Clan B"), (21, "Clan C")],
         )
         _wire(monkeypatch, s)
-        monkeypatch.setattr(epr, "EventGroup", _Rec)
+        model_spy(epr, "EventGroup")
 
         r = await client.post(
             "/api/v1/events/1/participants/bulk", json={"group_ids": [20, 21]}

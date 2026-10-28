@@ -9,6 +9,8 @@ are MagicMocks under the stubbed ``db`` package and are not what is under test.
 """
 from __future__ import annotations
 
+import importlib
+
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -229,7 +231,7 @@ def two_clans(monkeypatch, clan):
     Viewer user 50 owns Fan, who is only in OTHER_GROUP."""
     import sys
 
-    standings = sys.modules["db.point_standings"]
+    standings = importlib.import_module("db.point_standings")
     monkeypatch.setattr(
         standings, "group_points_active",
         lambda gid, session=None: standings.points_enabled(session, gid),

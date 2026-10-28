@@ -8,6 +8,8 @@ plugin endpoint resolves the account by hash and speaks the same rules.
 """
 from __future__ import annotations
 
+import importlib
+
 import json
 import sys
 from datetime import datetime
@@ -18,7 +20,7 @@ from quart import Quart
 
 import web_api.routes.member_messages as routes
 
-mm = sys.modules["db.member_messages"]
+mm = importlib.import_module("db.member_messages")
 
 NOW = datetime(2026, 9, 14, 12, 0, 0)
 

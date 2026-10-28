@@ -8,6 +8,8 @@ what its merged bits are worth.
 """
 from __future__ import annotations
 
+import importlib
+
 import asyncio
 import sys
 from contextlib import ExitStack
@@ -21,7 +23,7 @@ from sqlalchemy.exc import OperationalError
 # The real module conftest registered — patch.object on it reaches the callers'
 # ``from db.ca_points import ...``; a dotted patch("db.ca_points...") would
 # land on the stubbed ``db`` package's mock attribute instead.
-CA_POINTS = sys.modules["db.ca_points"]
+CA_POINTS = importlib.import_module("db.ca_points")
 
 PLAYER_ID = 4137
 

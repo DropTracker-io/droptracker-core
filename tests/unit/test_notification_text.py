@@ -1,5 +1,6 @@
 """Group-editable message text and footers (services/notification_text.py, web140a)."""
 
+import importlib
 import sys
 from types import SimpleNamespace
 
@@ -162,7 +163,7 @@ def test_pick_footer_fallback_types():
 
 def _entitled(monkeypatch, value):
     monkeypatch.setattr(
-        sys.modules["db.entitlements"], "group_has_entitlement",
+        importlib.import_module("db.entitlements"), "group_has_entitlement",
         lambda gid, key: value if key == nt.FOOTER_ENTITLEMENT else False,
     )
 

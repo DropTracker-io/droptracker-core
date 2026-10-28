@@ -318,7 +318,7 @@ class TestMirrorsOfSpecialKeys:
     def test_death_filter_reads_hardcore_mirrors(self, monkeypatch):
         # conftest loads the real db/death_filter.py under its dotted name
         # (the ``db`` package itself is a stub, so not ``from db import``).
-        death_filter = sys.modules["db.death_filter"]
+        death_filter = importlib.import_module("db.death_filter")
         from utils import group_config
         asked = []
         monkeypatch.setattr(group_config, "get", lambda s, g, key, default=None: asked.append(key) or "true")

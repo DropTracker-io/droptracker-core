@@ -478,21 +478,10 @@ class TestInviteEndpoint:
 
 
 class TestBulkInvite:
-    def _rec(self, monkeypatch):
-        created = []
-        real = epr.EventGroup  # reuse real columns so `.in_()` filters work
+    def _rec(self, model_spy):
+        return model_spy(epr, "EventGroup").calls
 
-        class _RecEventGroup:
-            event_id = real.event_id
-            group_id = real.group_id
-
-            def __init__(self, **kw):
-                created.append(kw)
-
-        monkeypatch.setattr(epr, "EventGroup", _RecEventGroup)
-        return created
-
-    async def test_invites_new_and_reports_each_skip(self, client, monkeypatch):
+    async def test_invites_new_and_reports_each_skip(self, client, monkeypatch, model_spy):
         # requested: 20 new, 30 already on roster, 10 host, 99 missing.
         s = _S(
             [_cvc()],                            # event (host group_id=10)
@@ -501,7 +490,7 @@ class TestBulkInvite:
         )
         _wire_participants(monkeypatch, s)
         monkeypatch.setattr(epr, "_assert_event_admin", lambda *a, **k: None)
-        created = self._rec(monkeypatch)
+        created = self._rec(model_spy)
         r = await client.post(
             "/api/v1/events/1/participants/bulk",
             json={"group_ids": [20, 30, 10, 99]},

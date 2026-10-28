@@ -5,6 +5,7 @@ Jagex prints "from X" only for some sources, so lines like "Burning claw
 pin the decision rule in ``db.item_sources.pick_sole_source`` and the cached
 wrapper the processor calls.
 """
+import importlib
 import sys
 from types import SimpleNamespace
 
@@ -123,7 +124,7 @@ class _Redis:
 def _wire(monkeypatch, answer):
     # Patched through sys.modules: conftest stubs the ``db`` package, so an
     # attribute import would hand back a MagicMock child instead.
-    item_sources = sys.modules["db.item_sources"]
+    item_sources = importlib.import_module("db.item_sources")
 
     fake = _Redis()
     monkeypatch.setattr(cb.redis_client, "client", fake, raising=False)

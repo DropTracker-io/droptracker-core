@@ -113,7 +113,7 @@ def _send_fixture(monkeypatch, death_rows, member_templates=None):
     # From sys.modules, not ``import db.member_messages``: conftest stubs the
     # ``db`` package with a MagicMock, whose attribute access would hand back
     # a fresh mock instead of the real module the sender imports from.
-    member_messages = sys.modules["db.member_messages"]
+    member_messages = importlib.import_module("db.member_messages")
 
     seen_lookups = []
 
@@ -336,7 +336,7 @@ class TestMemberDeathDm:
         return ns.NotificationService(MagicMock(), MagicMock())
 
     def test_uses_the_members_own_message(self, monkeypatch):
-        member_messages = sys.modules["db.member_messages"]
+        member_messages = importlib.import_module("db.member_messages")
 
         monkeypatch.setattr(
             member_messages, "load_member_messages",
@@ -349,7 +349,7 @@ class TestMemberDeathDm:
         assert line.endswith(" to Zulrah")
 
     def test_nothing_usable_means_the_standard_dm(self, monkeypatch):
-        member_messages = sys.modules["db.member_messages"]
+        member_messages = importlib.import_module("db.member_messages")
 
         monkeypatch.setattr(
             member_messages, "load_member_messages",
@@ -360,7 +360,7 @@ class TestMemberDeathDm:
             MagicMock(), {"player_id": 9, "player_name": "Alice"}) == ""
 
     def test_player_id_zero_is_still_a_player(self, monkeypatch):
-        member_messages = sys.modules["db.member_messages"]
+        member_messages = importlib.import_module("db.member_messages")
 
         asked = []
         monkeypatch.setattr(

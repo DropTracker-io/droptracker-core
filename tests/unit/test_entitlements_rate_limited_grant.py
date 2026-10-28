@@ -13,6 +13,8 @@ inside the resolver hits the same module instance we pre-warm here.
 """
 from __future__ import annotations
 
+import importlib
+
 import sys
 import time
 from types import SimpleNamespace
@@ -22,8 +24,8 @@ import pytest
 # `import db.entitlements as ent` would bind the stub package's MagicMock
 # attribute (PEP 328 binds via getattr on the parent); go to sys.modules,
 # where the conftest installed the real path-loaded modules.
-ent = sys.modules["db.entitlements"]
-erl = sys.modules["db.event_rate_limits"]
+ent = importlib.import_module("db.entitlements")
+erl = importlib.import_module("db.event_rate_limits")
 
 GROUP_ID = 42
 S = object()  # never touched: pool resolution is patched, rules cache is warm

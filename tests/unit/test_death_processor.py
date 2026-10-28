@@ -25,6 +25,17 @@ import pytest
 import db
 
 CASTLE_WARS = 9520
+
+
+@pytest.fixture(autouse=True)
+def _spy_player_death(monkeypatch):
+    """Record PlayerDeath(...) calls while still building the real row, so a
+    kwarg that isn't a column fails here instead of in production."""
+    import data.submissions.death as death
+
+    spy = MagicMock(wraps=db.models.PlayerDeath)
+    monkeypatch.setattr(db, "PlayerDeath", spy)
+    monkeypatch.setattr(death, "PlayerDeath", spy)
 VORKATH = 9023
 
 

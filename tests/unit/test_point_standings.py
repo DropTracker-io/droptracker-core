@@ -12,6 +12,8 @@ a real engine -- SQLite -- rather than a scripted session:
 """
 from __future__ import annotations
 
+import importlib
+
 from datetime import datetime
 
 import pytest
@@ -520,7 +522,7 @@ class TestPointsEnabledSwitch:
 
         ent = {"on": True}
         monkeypatch.setattr(
-            sys.modules["db.entitlements"], "group_has_entitlement",
+            importlib.import_module("db.entitlements"), "group_has_entitlement",
             lambda gid, key: ent["on"] and key == "custom_points", raising=False,
         )
         invalidate_points_active_cache()

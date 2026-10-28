@@ -1,3 +1,7 @@
-pytest>=8.0
-pytest-asyncio>=0.23
-pytest-mock>=3.12
+# CI installs these fresh on every run, so a new release lands with no commit
+# of ours. pytest 9.1 -> 9.2 (a minor release) broke the suite overnight on
+# 2026-10-28, so pytest only takes patch releases here; move it deliberately,
+# with the suite green on the new version. The plugins are held to their major.
+pytest~=9.2.0
+pytest-asyncio>=0.23,<2
+pytest-mock>=3.12,<4

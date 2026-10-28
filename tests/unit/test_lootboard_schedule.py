@@ -7,6 +7,8 @@ debounces a burst of drops without losing the last one.
 """
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from lootboard import schedule as sch
@@ -141,7 +143,7 @@ class TestInstantDebounce:
 
         importlib.import_module("db.entitlements")
         monkeypatch.setattr(
-            sys.modules["db.entitlements"], "group_has_entitlement",
+            importlib.import_module("db.entitlements"), "group_has_entitlement",
             lambda gid, key: gid == 10 and key == "lootboard_instant", raising=False,
         )
         assert sch.mark_dirty(10) is True

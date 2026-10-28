@@ -12,6 +12,8 @@ Reuses the boost/split harness, which stubs everything except the pipeline.
 """
 from __future__ import annotations
 
+import importlib
+
 import json
 import sys
 from types import SimpleNamespace
@@ -23,7 +25,7 @@ import data.submissions.point_awards as pa
 # conftest stubs ``db`` with a MagicMock -- patching THAT would leave the
 # engine's lazy import untouched and let the assertions below pass or fail for
 # the wrong reason.
-standings = sys.modules["db.point_standings"]
+standings = importlib.import_module("db.point_standings")
 
 from tests.unit.test_point_awards_boost_split import (
     GROUP_ID,
