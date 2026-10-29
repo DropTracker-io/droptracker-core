@@ -83,7 +83,12 @@ class EventSignupButtons(Extension):
 
     @listen(Component)
     async def on_event_signup_component(self, event: Component):
-        ctx = event.ctx
+        await self.handle_component(event.ctx)
+
+    async def handle_component(self, ctx):
+        """One click on a sign-up component. Also the entry point for clicks a
+        relay integration's bot forwards (services/discord_relay.py), whose
+        ``ctx`` is a ``RelayComponentContext`` answering through the token."""
         custom_id = getattr(ctx, "custom_id", "") or ""
         try:
             if custom_id.startswith(_PROMPT):

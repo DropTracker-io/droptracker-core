@@ -126,7 +126,10 @@ async def close_signup_prompts(bot, session, event) -> int:
         context = _closed_context(event)
         for row in rows:
             try:
-                channel = await bot.fetch_channel(channel_id=row.channel_id)
+                from services.discord_relay import fetch_channel as relay_fetch_channel
+
+                channel = await relay_fetch_channel(bot, row.channel_id, feature="events",
+                                                    ref=f"event_signup_prompt:{event.id}")
             except Exception:
                 channel = None
             if channel is None:

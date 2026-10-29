@@ -401,7 +401,12 @@ async def _refresh_event_board_locked(bot, session, event, *,
             ):
                 continue
 
-            channel = await bot.fetch_channel(channel_id=row.channel_id)
+            # A relay-owned server (web153a) answers with a RelayChannel: the
+            # post/edit below is queued for the group's own bot.
+            from services.discord_relay import fetch_channel as relay_fetch_channel
+
+            channel = await relay_fetch_channel(bot, row.channel_id, feature="events",
+                                                ref=f"event_board:{event.id}")
             if channel is None or not callable(getattr(channel, "send", None)):
                 continue
             # Standings edited in place freeze once Discord auto-archives the

@@ -551,6 +551,14 @@ def sync_event_team_discord(session, event) -> None:
     if getattr(event, "status", None) == "past":
         return
     desired = _desired_rows(session, event)
+    if desired:
+        # No auto-created team roles/channels in a server whose events a relay
+        # integration delivers (web153a) — our bot does not act there.
+        from services.discord_relay import relay_owned_guild_ids
+
+        relayed = relay_owned_guild_ids(session, "events")
+        if relayed:
+            desired = {k: v for k, v in desired.items() if str(k[1]) not in relayed}
     existing = {(r.team_id, str(r.guild_id)): r for r in rows}
     for key, scope_group_id in desired.items():
         row = existing.get(key)

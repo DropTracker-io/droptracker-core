@@ -37,6 +37,7 @@ def create_app() -> Quart:
     from data_api.routes.meta import meta_bp
     from data_api.routes.players import players_bp
     from data_api.routes.reference import reference_bp
+    from data_api.routes.relay import relay_bp
     from data_api.routes.submissions import submissions_bp
 
     app.register_blueprint(health_bp, url_prefix=API_PREFIX)
@@ -46,6 +47,7 @@ def create_app() -> Quart:
     app.register_blueprint(events_bp, url_prefix=API_PREFIX)
     app.register_blueprint(reference_bp, url_prefix=API_PREFIX)
     app.register_blueprint(submissions_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(relay_bp, url_prefix=API_PREFIX)
 
     @app.before_request
     async def _authenticate():

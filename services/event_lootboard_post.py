@@ -117,7 +117,10 @@ async def _retire(bot, conn, row, state) -> bool:
     if not msg_id:
         return False
     try:
-        channel = await bot.fetch_channel(int(row.channel_id))
+        from services.discord_relay import fetch_channel as relay_fetch_channel
+
+        channel = await relay_fetch_channel(bot, int(row.channel_id), feature="events",
+                                            ref="event_lootboard")
         if channel is not None:
             await _delete_bot_message(channel, msg_id)
     finally:
@@ -155,7 +158,10 @@ async def _refresh_row(bot, conn, event, row, path: str, title: str) -> bool:
         _save_state(conn, row.id, mtime=png_mtime)
         return False
 
-    channel = await bot.fetch_channel(int(row.channel_id))
+    from services.discord_relay import fetch_channel as relay_fetch_channel
+
+    channel = await relay_fetch_channel(bot, int(row.channel_id), feature="events",
+                                        ref=f"event_lootboard:{event.id}")
     if channel is None or not callable(getattr(channel, "send", None)):
         _save_state(conn, row.id, mtime=png_mtime)  # rotate, don't hammer
         return True

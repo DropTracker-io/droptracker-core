@@ -1009,11 +1009,16 @@ class NotificationService:
                 kwargs["allowed_mentions"] = mentions
         elif not member_pings and kwargs.get("allowed_mentions") is not None:
             kwargs["allowed_mentions"] = self._without_user_pings(kwargs["allowed_mentions"])
-        if scope is not None and "nonce" not in kwargs:
+        relayed = bool(getattr(channel, "relayed", False))
+        if scope is not None and "nonce" not in kwargs and not relayed:
             kwargs["nonce"] = scope.nonce_for(getattr(channel, "id", None))
             kwargs["enforce_nonce"] = True
         started_ms = time.time() * 1000
         result = await channel.send(*args, **kwargs)
+        if relayed:
+            # Queued for a relay integration's bot (web153a). The outbox
+            # dedupes by lease + ack, so the nonce scheme doesn't apply.
+            return result
         if result is None:
             raise SendRateLimited(
                 "channel.send returned None — the library exhausted its 429 retries"
@@ -1493,7 +1498,17 @@ class NotificationService:
         A hasattr-based guard keeps this working across channel classes.
         """
         channel_id = _HARDCORE_CHANNEL.get() or channel_id
-        channel = await self.bot.fetch_channel(channel_id=channel_id)
+        # A server whose messages a relay integration delivers (web153a) gets
+        # a RelayChannel: every send/edit below is queued for the customer's
+        # own bot instead of posted by ours. Plain bot.fetch_channel otherwise.
+        from services.discord_relay import fetch_channel as relay_fetch_channel
+        from services.discord_relay_core import feature_for_notification_type
+
+        scope = _send_scope.get()
+        notification_type = getattr(scope, "notification_type", None)
+        channel = await relay_fetch_channel(
+            self.bot, channel_id, feature=feature_for_notification_type(notification_type),
+            ref=notification_type)
         if channel is None:
             return None, f"Channel {channel_id} not found"
         if not callable(getattr(channel, "send", None)):

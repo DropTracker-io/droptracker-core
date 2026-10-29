@@ -873,6 +873,13 @@ async def _reconcile_pass(bot, session_factory, redis_client) -> None:
                     session.commit()
                     continue
 
+                # A relay integration owns this server's events (web153a):
+                # provisioning is the customer's bot's business, not ours.
+                # (Teardown above still runs — it removes what we created.)
+                from services.discord_relay import guild_relayed
+
+                if guild_relayed(row.guild_id, "events"):
+                    continue
                 event = session.query(Event).filter(Event.id == row.event_id).first()
                 team = (session.query(EventTeam)
                         .filter(EventTeam.id == row.team_id).first())

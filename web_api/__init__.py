@@ -25,6 +25,7 @@ from web_api.routes.admin import admin_bp
 from web_api.routes.announcements import announcements_bp
 from web_api.routes.auth import auth_bp
 from web_api.routes.api_keys import api_keys_bp
+from web_api.routes.discord_relay_admin import discord_relay_admin_bp
 from web_api.routes.badges import badges_bp
 from web_api.routes.chat import chat_bp
 from web_api.routes.config import config_bp
@@ -217,6 +218,7 @@ def create_app() -> Quart:
     app.register_blueprint(auth_bp, url_prefix=API_PREFIX)
     app.register_blueprint(data_removal_bp, url_prefix=API_PREFIX)
     app.register_blueprint(api_keys_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(discord_relay_admin_bp, url_prefix=API_PREFIX)
     app.register_blueprint(badges_bp, url_prefix=API_PREFIX)
     app.register_blueprint(chat_bp, url_prefix=API_PREFIX)
     app.register_blueprint(config_bp, url_prefix=API_PREFIX)

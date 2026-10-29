@@ -130,6 +130,7 @@ from .api_key_reveals import ApiKeyReveal
 from .group_verification_code import GroupVerificationCode
 from .plugin_admin_session import PluginAdminSession
 from .api_keys import ApiKey, ApiKeyTier, ApiSubmission
+from .discord_relay import DiscordRelayIntegration, DiscordRelayGuild
 from .badge import Badge, PlayerBadge
 from .recap import (
     RecapSnapshot,
@@ -272,6 +273,8 @@ def get_current_partition() -> int:
     return now.year * 100 + now.month
 
 __all__ = [
+    "DiscordRelayIntegration",
+    "DiscordRelayGuild",
     "DataRemovalRequest",
     "Base",
     "session",
