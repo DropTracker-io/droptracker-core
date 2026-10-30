@@ -196,9 +196,37 @@ class RelayClient:
                 pass
 
 
+#: Pristine INTERACTION_CREATE payloads by interaction id. interactions.py
+#: hands its own processor and raw listeners only SHALLOW copies, and its
+#: member parser pops ``member.user`` out of the shared nested dict — so by
+#: the time a raw listener runs, the clicker's id is gone. Capture a deep copy
+#: before the library touches it. (py-cord: ``on_socket_raw_receive`` gives
+#: the untouched JSON.)
+_PRISTINE: dict = {}
+
+
+def _capture_raw_interactions() -> None:
+    import copy
+
+    from interactions.api.gateway.gateway import GatewayClient
+
+    original = GatewayClient.dispatch_event
+
+    async def dispatch_event(self, data, seq, event):
+        if event == "INTERACTION_CREATE" and isinstance(data, dict) and data.get("id"):
+            _PRISTINE[str(data["id"])] = copy.deepcopy(data)
+            while len(_PRISTINE) > 200:
+                _PRISTINE.pop(next(iter(_PRISTINE)))
+        return await original(self, data, seq, event)
+
+    GatewayClient.dispatch_event = dispatch_event
+
+
 async def main_async(args) -> None:
     import interactions
     from interactions.api.events import RawGatewayEvent
+
+    _capture_raw_interactions()
 
     client = RelayClient(args.api, Path(args.key_file).expanduser().read_text().strip(),
                          Path(args.token_file).expanduser().read_text().strip())
@@ -207,7 +235,8 @@ async def main_async(args) -> None:
     @interactions.listen("raw_interaction_create")
     async def _raw(event: RawGatewayEvent):
         try:
-            await client.on_interaction(event.data or {})
+            data = event.data or {}
+            await client.on_interaction(_PRISTINE.pop(str(data.get("id")), data))
         except Exception:
             log.exception("interaction relay failed")
 
