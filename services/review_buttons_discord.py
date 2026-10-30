@@ -38,10 +38,13 @@ _NOT_ALLOWED = ("You can't review submissions for this group. Group admins can, 
 
 
 def _facts(data: dict) -> dict:
+    from utils.interaction_payload import interaction_user_id
+
     member = data.get("member") or {}
-    user = member.get("user") or data.get("user") or {}
     return {
-        "discord_id": str(user.get("id") or ""),
+        # Not member["user"] directly: interactions.py may already have popped
+        # it from this shared dict (utils/interaction_payload.py).
+        "discord_id": interaction_user_id(data) or "",
         "guild_id": data.get("guild_id"),
         "permissions": member.get("permissions"),
         "roles": member.get("roles") or [],
@@ -194,6 +197,25 @@ def decide(parsed: dict, facts: dict):
         s.close()
 
 
+class _BotResponder:
+    """Answers an interaction our own app received, through its HTTP client
+    (same calls as before the relay; ``InteractionResponder`` is the twin)."""
+
+    def __init__(self, bot, interaction_id, token):
+        self.bot, self.interaction_id, self.token = bot, interaction_id, token
+
+    async def initial(self, payload: dict):
+        return await self.bot.http.post_initial_response(
+            payload, self.interaction_id, self.token)
+
+    async def followup(self, payload: dict):
+        return await self.bot.http.post_followup(payload, self.bot.app.id, self.token)
+
+    async def edit_original(self, payload: dict):
+        return await self.bot.http.edit_interaction_message(
+            payload, self.bot.app.id, self.token)
+
+
 class ReviewButtons(Extension):
     def __init__(self, bot):
         self.bot = bot
@@ -211,18 +233,21 @@ class ReviewButtons(Extension):
         except Exception:
             log.exception("[ReviewButtons] click failed")
 
-    async def _handle(self, data: dict, parsed: dict) -> None:
+    async def _handle(self, data: dict, parsed: dict, responder=None) -> None:
+        """``responder`` answers the interaction — by default through our own
+        app's HTTP client. A click forwarded by a relay integration's bot
+        passes a ``discord_relay.InteractionResponder``: that bot already
+        deferred it, and the token belongs to the customer's application."""
         interaction_id, token = data.get("id"), data.get("token")
         if not interaction_id or not token:
             return
+        responder = responder or _BotResponder(self.bot, interaction_id, token)
         # Acknowledge first (3 s limit): the decision can take a moment.
-        await self.bot.http.post_initial_response(
-            {"type": _CALLBACK_DEFERRED_UPDATE}, interaction_id, token)
+        await responder.initial({"type": _CALLBACK_DEFERRED_UPDATE})
         facts = _facts(data)
         ok, text, undo_id = await asyncio.to_thread(decide, parsed, facts)
         if not ok:
-            await self.bot.http.post_followup(
-                {"content": text, "flags": _FLAG_EPHEMERAL}, self.bot.app.id, token)
+            await responder.followup({"content": text, "flags": _FLAG_EPHEMERAL})
             return
         message = data.get("message") or {}
         if parsed["action"] == "undo":
@@ -231,7 +256,7 @@ class ReviewButtons(Extension):
             edit = core.decided_message(message, text, undo_id)
         edit["allowed_mentions"] = {"parse": []}
         try:
-            await self.bot.http.edit_interaction_message(edit, self.bot.app.id, token)
+            await responder.edit_original(edit)
         except Exception:
             # The decision stands; only the card couldn't be updated.
             log.warning("[ReviewButtons] couldn't update the review message", exc_info=True)

@@ -244,8 +244,15 @@ def sync_event_guilds(session, event) -> None:
 
     rows = session.query(EventGuild).filter(EventGuild.event_id == event.id).all()
     by_guild = {r.guild_id: r for r in rows}
+    desired = desired_guild_ids(event, _participant_guild_ids(session, event))
+    if desired:
+        # A server whose events a relay integration delivers (web153a) gets
+        # no scheduled event from our bot — only the customer's bot acts there.
+        from services.discord_relay import relay_owned_guild_ids
+
+        desired -= relay_owned_guild_ids(session, "events")
     plan = guild_sync_plan(
-        desired_guild_ids(event, _participant_guild_ids(session, event)),
+        desired,
         {gid: r.sync_status for gid, r in by_guild.items()},
     )
     for gid in plan["create"]:

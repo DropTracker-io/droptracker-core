@@ -155,13 +155,11 @@ def parse_launch_custom_id(custom_id) -> "str | None":
 
 def interaction_user_id(data: dict) -> "str | None":
     """The clicking user's Discord id from a raw interaction — ``member.user``
-    in a guild, top-level ``user`` in a DM."""
-    if not isinstance(data, dict):
-        return None
-    member = data.get("member") or {}
-    user = member.get("user") or data.get("user") or {}
-    uid = user.get("id")
-    return str(uid) if uid else None
+    in a guild, top-level ``user`` in a DM, or the ``member.id`` interactions.py
+    leaves after popping ``member.user`` (see utils/interaction_payload.py)."""
+    from utils.interaction_payload import interaction_user_id as _uid
+
+    return _uid(data)
 
 
 def intent_key(discord_user_id) -> str:

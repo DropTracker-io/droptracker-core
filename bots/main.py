@@ -1095,6 +1095,13 @@ async def create_tasks():
     bot_profile_requests.start()
     bot_profile_sweep.start()
     rank_role_sync.start()
+    # Discord delivery relay (web153a): answer the button clicks a group's own
+    # bot forwards, and its "resync" requests. Both block on Redis lists and
+    # never raise, so they sit with the interval tasks.
+    from services.discord_relay import run_interaction_consumer, run_resync_consumer
+
+    asyncio.create_task(run_interaction_consumer(bot), name="relay_interactions")
+    asyncio.create_task(run_resync_consumer(bot), name="relay_resync")
     # Cheap and independent — run this first among the warm-ups so the Web
     # API's channel picker has data within seconds of startup instead of
     # waiting behind the slow WOM-sync pass below.

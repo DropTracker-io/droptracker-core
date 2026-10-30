@@ -237,6 +237,27 @@ if "services.activity_launch_core" not in sys.modules:
     sys.modules["services.activity_launch_core"] = _mod
     _spec.loader.exec_module(_mod)
 
+# services/discord_relay_core.py + services/discord_relay.py — the Discord
+# delivery relay (web153a). Every send site that a relay may take over
+# lazy-imports ``services.discord_relay.fetch_channel`` (and the web API's
+# desired-state writers ``relay_owned_guild_ids``), so a MagicMock there would
+# break every Discord-path test. Both modules import only stdlib + the core at
+# module level; the real ones are loaded with routing pinned to "no active
+# integrations", which makes ``fetch_channel`` exactly ``bot.fetch_channel`` —
+# the behaviour those tests were written against. tests/unit/test_discord_relay.py
+# loads its own copies to exercise the relay itself.
+for _name in ("discord_relay_core", "discord_relay"):
+    _full = f"services.{_name}"
+    if _full not in sys.modules:
+        _spec = _importlib_util.spec_from_file_location(
+            _full, _Path(__file__).resolve().parent.parent / "services" / f"{_name}.py")
+        _mod = _importlib_util.module_from_spec(_spec)
+        sys.modules[_full] = _mod
+        _spec.loader.exec_module(_mod)
+        setattr(sys.modules["services"], _name, _mod)
+sys.modules["services.discord_relay"].routes = lambda force=False: {}
+sys.modules["services.discord_relay"].relay_owned_guild_ids = lambda session, feature="events": set()
+
 # services/channel_name_render.py — the pure half of the vc_to_display_* voice
 # channel counters (same shape as activity_launch_core: no `interactions`
 # import, no DB access). The counter tests assert on its channel-id parsing and
