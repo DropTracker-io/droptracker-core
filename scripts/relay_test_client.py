@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
 import aiohttp
@@ -137,6 +138,7 @@ class RelayClient:
 
     async def poll_forever(self) -> None:
         while True:
+            began = time.monotonic()
             try:
                 status, out = await self.dt("GET", "/relay/messages?wait=20&limit=20")
             except Exception as exc:
@@ -147,6 +149,10 @@ class RelayClient:
                 log.warning("poll: %s %s", status, out)
                 await asyncio.sleep(10)
                 continue
+            if not out.get("messages") and time.monotonic() - began < 2:
+                # An instant empty answer (old server, or paused without a
+                # wait) must never turn the loop into a hot spin.
+                await asyncio.sleep(5)
             for msg in out.get("messages") or []:
                 log.info("deliver %s %s -> channel %s", msg["id"], msg["op"], msg["channel_id"])
                 try:

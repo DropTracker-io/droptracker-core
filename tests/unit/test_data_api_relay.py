@@ -116,6 +116,19 @@ def test_paused_integration_receives_nothing(env):
     assert status == 409
 
 
+def test_paused_still_honours_the_long_poll(env, monkeypatch):
+    app, _r, state = env
+    state["integration"] = dict(INTEGRATION, status="paused")
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(relay_routes.asyncio, "sleep", fake_sleep)
+    status, body = _run(_call(app, "get", "/v2/relay/messages?wait=20"))
+    assert status == 200 and body["status"] == "paused" and slept == [20]
+
+
 def test_long_poll_returns_as_soon_as_something_arrives(env, monkeypatch):
     app, r, _s = env
     sleeps = []

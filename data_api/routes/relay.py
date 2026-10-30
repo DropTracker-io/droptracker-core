@@ -155,14 +155,18 @@ async def messages():
     integ, conn, err = await _guard()
     if err:
         return err
-    if integ["status"] != "active":
-        _record("relay_messages", 200, started)
-        return jsonify({"status": integ["status"], "messages": []})
     try:
         limit = int(request.args.get("limit", 20))
         wait = min(max(int(request.args.get("wait", 0)), 0), WAIT_MAX_SECONDS)
     except ValueError:
         return jsonify({"error": "bad_request", "detail": "limit and wait are integers"}), 400
+    if integ["status"] != "active":
+        # Still honour the long-poll: a bot set up before staff activate it
+        # would otherwise spin on instant empty answers into the ceiling.
+        if wait:
+            await asyncio.sleep(wait)
+        _record("relay_messages", 200, started)
+        return jsonify({"status": integ["status"], "messages": []})
     deadline = time.time() + wait
     while True:
         batch = await asyncio.to_thread(core.claim, conn, integ["id"], limit,
