@@ -179,9 +179,16 @@ class RelayClient:
                 f"{DISCORD}/interactions/{payload['id']}/{payload['token']}/callback",
                 json=callback, headers={"User-Agent": UA}) as resp:
             log.info("deferred %s as %s -> %s", custom_id, mode, resp.status)
-        status, out = await self.dt("POST", "/relay/interactions", json=payload)
+        try:
+            # Gateway libraries hand over the raw event with a few non-JSON
+            # values mixed in (snowflake objects, timestamps): stringify them.
+            body = json.loads(json.dumps(payload, default=str))
+            status, out = await self.dt("POST", "/relay/interactions", json=body)
+        except Exception as exc:
+            status, out = 0, repr(exc)
         log.info("forwarded %s -> %s %s", custom_id, status, out)
         if status != 202:
+            # Never leave the user on "thinking…": we deferred, so say so.
             async with self.http.post(
                     f"{DISCORD}/webhooks/{payload['application_id']}/{payload['token']}",
                     json={"content": "That button isn't available right now.", "flags": 64},
