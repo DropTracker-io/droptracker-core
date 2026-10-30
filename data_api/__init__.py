@@ -31,6 +31,7 @@ def create_app() -> Quart:
     app = Quart(__name__)
     app.config["JSON_SORT_KEYS"] = False
 
+    from data_api.routes.event_standings import event_standings_bp
     from data_api.routes.events import events_bp
     from data_api.routes.groups import groups_bp
     from data_api.routes.health import health_bp
@@ -45,6 +46,7 @@ def create_app() -> Quart:
     app.register_blueprint(players_bp, url_prefix=API_PREFIX)
     app.register_blueprint(groups_bp, url_prefix=API_PREFIX)
     app.register_blueprint(events_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(event_standings_bp, url_prefix=API_PREFIX)
     app.register_blueprint(reference_bp, url_prefix=API_PREFIX)
     app.register_blueprint(submissions_bp, url_prefix=API_PREFIX)
     app.register_blueprint(relay_bp, url_prefix=API_PREFIX)
