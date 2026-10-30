@@ -457,13 +457,13 @@ class RelayComponentContext:
     use (``defer`` / ``send`` / ``edit_origin`` / ``user`` / ``values``)."""
 
     def __init__(self, payload: dict, defer_mode: str, responder: InteractionResponder):
+        from utils.interaction_payload import interaction_user_id
+
         data = payload.get("data") or {}
-        member = payload.get("member") or {}
-        user = member.get("user") or payload.get("user") or {}
         self.payload = payload
         self.custom_id = str(data.get("custom_id") or "")
         self.values = list(data.get("values") or [])
-        self.user = self.author = _User(user.get("id"))
+        self.user = self.author = _User(interaction_user_id(payload))
         self.guild_id = int(payload.get("guild_id") or 0)
         self.channel_id = int(payload.get("channel_id") or 0)
         self.defer_mode = defer_mode

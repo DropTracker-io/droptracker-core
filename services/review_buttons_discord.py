@@ -38,10 +38,13 @@ _NOT_ALLOWED = ("You can't review submissions for this group. Group admins can, 
 
 
 def _facts(data: dict) -> dict:
+    from utils.interaction_payload import interaction_user_id
+
     member = data.get("member") or {}
-    user = member.get("user") or data.get("user") or {}
     return {
-        "discord_id": str(user.get("id") or ""),
+        # Not member["user"] directly: interactions.py may already have popped
+        # it from this shared dict (utils/interaction_payload.py).
+        "discord_id": interaction_user_id(data) or "",
         "guild_id": data.get("guild_id"),
         "permissions": member.get("permissions"),
         "roles": member.get("roles") or [],

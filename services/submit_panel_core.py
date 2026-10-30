@@ -256,10 +256,9 @@ def interaction_user_id(payload: dict) -> Optional[str]:
     ``Member._process_dict`` pops ``member["user"]`` and leaves ``member["id"]``
     behind. Which listener runs first is not fixed, so read both shapes.
     """
-    member = (payload or {}).get("member") or {}
-    user = member.get("user") or (payload or {}).get("user") or {}
-    found = user.get("id") or member.get("id")
-    return str(found) if found else None
+    from utils.interaction_payload import interaction_user_id as _uid
+
+    return _uid(payload)
 
 
 def has_label_components(components) -> bool:

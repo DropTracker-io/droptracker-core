@@ -635,9 +635,9 @@ def interaction_defer(custom_id) -> Optional[str]:
 
 
 def interaction_facts(payload: dict) -> dict:
+    from utils.interaction_payload import interaction_user_id
+
     data = payload.get("data") or {}
-    member = payload.get("member") or {}
-    user = member.get("user") or payload.get("user") or {}
     return {
         "id": str(payload.get("id") or ""),
         "token": str(payload.get("token") or ""),
@@ -647,7 +647,8 @@ def interaction_facts(payload: dict) -> dict:
         "channel_id": str(payload.get("channel_id") or
                           (payload.get("channel") or {}).get("id") or ""),
         "custom_id": str(data.get("custom_id") or ""),
-        "user_id": str(user.get("id") or ""),
+        # A relaying bot's library may have popped member.user already.
+        "user_id": interaction_user_id(payload) or "",
     }
 
 
