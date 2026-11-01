@@ -986,6 +986,9 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "type": "text",
         "help": "Short description shown on the public group page.",
         "default": "",
+        # An editable view of groups.description (db/group_profile.py);
+        # max_length matches that VARCHAR(255) column.
+        "max_length": 255,
     },
     {
         "key": "clan_chat_name",

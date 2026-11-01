@@ -28,6 +28,7 @@ import json
 from quart import Blueprint, jsonify
 
 from db import AuditLog, Group, GroupConfiguration, LootboardStyle, NpcList, PersonalBestEntry
+from db.group_profile import GROUP_DESCRIPTION_CONFIG_KEY, set_group_description
 from db.group_rename import (
     GROUP_NAME_CONFIG_KEY,
     GroupRenameError,
@@ -158,8 +159,15 @@ def load_group_config(user_id: int, group_id: int) -> dict:
         # the name the site actually displays. Most groups have no config
         # row at all (the field rendered blank); those that do may hold a
         # value from before renaming was wired up (see db/group_rename.py).
-        group_name = s.query(Group.group_name).filter(Group.group_id == group_id).scalar()
-        stored[GROUP_NAME_CONFIG_KEY] = group_name or ""
+        # `group_description` is the same kind of view, over
+        # groups.description (db/group_profile.py).
+        names = (
+            s.query(Group.group_name, Group.description)
+            .filter(Group.group_id == group_id)
+            .first()
+        )
+        stored[GROUP_NAME_CONFIG_KEY] = (names[0] if names else None) or ""
+        stored[GROUP_DESCRIPTION_CONFIG_KEY] = (names[1] if names else None) or ""
 
         out = {}
         for key in all_config_keys():
@@ -273,6 +281,12 @@ def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
                         )
                     )
                     continue
+
+                # `group_description` is shown from groups.description, so
+                # write the column too. The config row and audit entry below
+                # still happen, keeping the row equal to the column.
+                if key == GROUP_DESCRIPTION_CONFIG_KEY:
+                    set_group_description(s, group_id, new_value)
 
                 row = (
                     s.query(GroupConfiguration)

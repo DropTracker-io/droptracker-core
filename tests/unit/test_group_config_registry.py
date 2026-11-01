@@ -111,7 +111,7 @@ class TestRegistry:
 
     def test_coerce_to_storage_leaves_unbounded_strings_alone(self):
         # Only fields that declare max_length get the trim treatment.
-        assert reg.coerce_to_storage("group_description", " padded ") == " padded "
+        assert reg.coerce_to_storage("vc_to_display_monthly_loot_text", " padded ") == " padded "
 
     def test_coerce_to_storage_messagelist(self):
         # Accepts a JSON string or a real list; stores normalized JSON.
