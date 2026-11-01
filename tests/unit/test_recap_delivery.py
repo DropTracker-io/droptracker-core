@@ -700,3 +700,136 @@ class TestFlags:
     def test_blank_test_target_is_no_test_target(self, monkeypatch):
         monkeypatch.setenv(delivery.ENV_TEST_TARGET, "   ")
         assert delivery.test_target() is None
+
+
+class TestBlankImageReprobe:
+    """Discord stores an embed image it couldn't fetch at post time as 0x0, and
+    the card then shows no image anywhere (8 of the 2026-10 clan posts). The
+    run reads each card back and re-edits those to a URL Discord hasn't seen."""
+
+    URL = "https://www.droptracker.io/img/clans/227/recap/group-2026-10.png"
+
+    def _msg(self, width, url=None):
+        return {"embeds": [{"title": "t", "image": {"url": url or self.URL, "width": width, "height": width}}]}
+
+    def test_zero_width_image_is_blank(self):
+        assert not delivery.image_was_probed(self._msg(0))
+        assert delivery.image_was_probed(self._msg(2200))
+
+    def test_message_without_image_is_not_blank(self):
+        assert delivery.image_was_probed({"embeds": [{"title": "t"}]})
+        assert delivery.image_was_probed({})
+
+    def test_probe_param_replaces_a_previous_attempt(self):
+        assert delivery.with_probe_param(self.URL, 1) == self.URL + "?v=1"
+        assert delivery.with_probe_param(self.URL + "?v=1", 2) == self.URL + "?v=2"
+
+    def test_reprobe_keeps_the_embed_and_does_not_mutate_it(self):
+        sent = [{"title": "t", "footer": {"text": "f"}, "image": {"url": self.URL}}]
+        out = delivery.reprobe_embeds(sent, 1)
+        assert out == [{"title": "t", "footer": {"text": "f"}, "image": {"url": self.URL + "?v=1"}}]
+        assert sent[0]["image"]["url"] == self.URL
+
+    class _Writer:
+        async def write(self, bucket, factory, expect_result=False):
+            return await factory()
+
+    class _Rest:
+        """Discord stand-in: a message reads as probed after N edits."""
+
+        def __init__(self, fixed_after):
+            self.fixed_after = dict(fixed_after)  # message_id -> edits needed (None = never)
+            self.edits = []
+
+        async def get_message(self, channel_id, message_id):
+            done = sum(1 for _, m, _ in self.edits if m == message_id)
+            need = self.fixed_after[message_id]
+            width = 2200 if need is not None and done >= need else 0
+            return {"embeds": [{"image": {"url": "u", "width": width}}]}
+
+        async def edit_message(self, channel_id, message_id, message):
+            self.edits.append((channel_id, message_id, message))
+
+    def _run(self, rest):
+        sent = [
+            delivery.SentImage(channel_id="c", message_id=m, label=m,
+                               embeds=[{"title": m, "image": {"url": self.URL}}])
+            for m in rest.fixed_after
+        ]
+
+        async def no_sleep(_):
+            return None
+
+        return asyncio.run(delivery.reprobe_blank_images(
+            rest, self._Writer(), sent, log=lambda *_: None, sleep=no_sleep,
+        ))
+
+    def test_loaded_images_are_left_alone(self):
+        rest = self._Rest({"a": 0, "b": 0})
+        assert self._run(rest) == (0, 0)
+        assert rest.edits == []
+
+    def test_blank_image_is_re_edited_with_embeds_only(self):
+        rest = self._Rest({"a": 0, "b": 1})
+        assert self._run(rest) == (1, 0)
+        assert rest.edits == [("c", "b", {"embeds": [{"title": "b", "image": {"url": self.URL + "?v=1"}}]})]
+
+    def test_second_attempt_uses_a_new_url_then_gives_up(self):
+        rest = self._Rest({"a": 2, "b": None})
+        assert self._run(rest) == (1, 1)
+        urls = [(m, e["embeds"][0]["image"]["url"][-4:]) for _, m, e in rest.edits]
+        assert urls == [("a", "?v=1"), ("b", "?v=1"), ("a", "?v=2"), ("b", "?v=2")]
+
+    def test_unreadable_message_is_skipped(self):
+        class Gone(self._Rest):
+            async def get_message(self, channel_id, message_id):
+                raise RuntimeError("404")
+
+        rest = Gone({"a": 0})
+        assert self._run(rest) == (0, 0)
+        assert rest.edits == []
+
+    def _deliver(self, monkeypatch, target, image_url):
+        monkeypatch.setattr(delivery, "record_delivery", lambda *a, **k: None)
+        monkeypatch.setattr(delivery, "set_dm_delivery_issue", lambda *a, **k: None)
+        # conftest stubs `interactions` as a plain module; deliver_one imports
+        # its two error types from the real package path.
+        import types
+
+        errors = types.ModuleType("interactions.client.errors")
+        errors.Forbidden = type("Forbidden", (Exception,), {})
+        errors.NotFound = type("NotFound", (Exception,), {})
+        monkeypatch.setitem(sys.modules, "interactions.client.errors", errors)
+
+        class Session:
+            def commit(self):
+                pass
+
+        class Rest:
+            async def post_message(self, channel_id, message):
+                return "m1"
+
+            async def send_dm(self, discord_id, message):
+                return "m2"
+
+            async def open_dm(self, discord_id):
+                return f"dm-{discord_id}"
+
+        collected = []
+        status = asyncio.run(delivery.deliver_one(
+            Session(), target, rest=Rest(), writer=self._Writer(),
+            payload={}, image_url=image_url, test_discord_id=None, apply=True,
+            sent_images=collected,
+        ))
+        return status, collected
+
+    def test_deliver_one_collects_sent_cards_with_images(self, monkeypatch):
+        group = delivery.GroupTarget(group_id=227, name="Renatus", channel_id="707", period="2026-10")
+        status, collected = self._deliver(monkeypatch, group, self.URL)
+        assert status == "sent"
+        assert [(c.channel_id, c.message_id) for c in collected] == [("707", "m1")]
+        assert collected[0].embeds[0]["image"] == {"url": self.URL}
+
+    def test_deliver_one_skips_cards_without_an_image(self, monkeypatch):
+        group = delivery.GroupTarget(group_id=227, name="Renatus", channel_id="707", period="2026-10")
+        assert self._deliver(monkeypatch, group, None)[1] == []

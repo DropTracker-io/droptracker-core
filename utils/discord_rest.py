@@ -126,6 +126,10 @@ class DiscordRest:
         data = await self._request("POST", f"/channels/{channel_id}/messages", payload)
         return str((data or {}).get("id") or "") or None
 
+    async def get_message(self, channel_id: str, message_id: str) -> dict:
+        data = await self._request("GET", f"/channels/{channel_id}/messages/{message_id}")
+        return data if isinstance(data, dict) else {}
+
     async def edit_message(self, channel_id: str, message_id: str, message: dict) -> None:
         payload = {k: v for k, v in (message or {}).items() if v not in (None, [], "")}
         await self._request(

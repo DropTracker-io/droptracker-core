@@ -1381,6 +1381,116 @@ def _describe(target) -> str:
     return f"<@{target.discord_id}> (**{target.player_name}**)"
 
 
+# --------------------------------------------------------------------------- #
+# Image check after sending
+# --------------------------------------------------------------------------- #
+# Discord reads an embed image's size once, when the message is posted. If its
+# fetch of our URL fails or is too slow, it stores the image as 0x0 and every
+# client draws nothing, for good. Only an edit to a URL Discord hasn't seen yet
+# makes it look again. 8 of the 2026-10 clan posts went out like that (7 in one
+# burst while the image server shared the busy core bot's event loop, and one
+# where Discord never fetched the image at all).
+REPROBE_SETTLE_SECONDS = 15
+REPROBE_ATTEMPTS = 2
+
+
+@dataclass
+class SentImage:
+    """A sent card whose image Discord should have read by now."""
+
+    channel_id: str
+    message_id: str
+    embeds: list
+    label: str
+
+
+def image_was_probed(message: dict) -> bool:
+    """False only when the message has an embed image Discord stored as 0x0."""
+    for embed in (message or {}).get("embeds") or []:
+        image = embed.get("image") or {}
+        if image.get("url") and not image.get("width"):
+            return False
+    return True
+
+
+def with_probe_param(url: str, attempt: int) -> str:
+    """``url`` under a query string Discord hasn't seen. Recap image URLs carry
+    no query of their own, so any existing one is a previous attempt's."""
+    return f"{url.split('?', 1)[0]}?v={attempt}"
+
+
+def reprobe_embeds(embeds: list, attempt: int) -> list:
+    """The embeds as sent, with each image pointed at a fresh URL."""
+    out = []
+    for embed in embeds or []:
+        embed = dict(embed)
+        image = embed.get("image")
+        if isinstance(image, dict) and image.get("url"):
+            embed["image"] = {**image, "url": with_probe_param(image["url"], attempt)}
+        out.append(embed)
+    return out
+
+
+async def reprobe_blank_images(
+    rest,
+    writer,
+    sent: list[SentImage],
+    *,
+    log,
+    settle_seconds: float = REPROBE_SETTLE_SECONDS,
+    attempts: int = REPROBE_ATTEMPTS,
+    sleep=asyncio.sleep,
+) -> tuple[int, int]:
+    """Re-edit any sent card whose image Discord stored as 0x0.
+
+    Returns ``(repaired, still_blank)``. Edits send only ``embeds``, so the
+    buttons and heading stay as they are. Best effort: a message we can't read
+    back (deleted, or access lost since the send) is left alone, and the
+    ledger is never touched, because the card was delivered either way.
+    """
+
+    async def blank_of(items: list[SentImage]) -> list[SentImage]:
+        out = []
+        for item in items:
+            try:
+                message = await writer.write(
+                    f"channel:{item.channel_id}",
+                    lambda i=item: rest.get_message(i.channel_id, i.message_id),
+                )
+            except Exception as e:
+                log(f"  image check skipped for {item.label}: {e}")
+                continue
+            if not image_was_probed(message):
+                out.append(item)
+        return out
+
+    if not sent:
+        return 0, 0
+    await sleep(settle_seconds)
+    blank = await blank_of(sent)
+    found = len(blank)
+    for attempt in range(1, attempts + 1):
+        if not blank:
+            break
+        for item in blank:
+            log(f"  image blank, re-editing {item.label} (attempt {attempt})")
+            embeds = reprobe_embeds(item.embeds, attempt)
+            try:
+                await writer.write(
+                    f"channel:{item.channel_id}",
+                    lambda i=item, e=embeds: rest.edit_message(
+                        i.channel_id, i.message_id, {"embeds": e}
+                    ),
+                )
+            except Exception as e:
+                log(f"  image re-edit failed for {item.label}: {e}")
+        await sleep(settle_seconds)
+        blank = await blank_of(blank)
+    for item in blank:
+        log(f"  image still blank: {item.label} (message {item.message_id})")
+    return found - len(blank), len(blank)
+
+
 async def deliver_one(
     session,
     target,
@@ -1391,12 +1501,16 @@ async def deliver_one(
     image_url: Optional[str],
     test_discord_id: Optional[str],
     apply: bool,
+    sent_images: Optional[list] = None,
 ) -> str:
     """Send one card and record what happened. Returns a status string.
 
     Every exit path writes a ledger row except the dry run, because a send we
     can't account for is worse than one we didn't make: the next cycle would
     either repeat it or skip someone who never got theirs.
+
+    Pass ``sent_images`` to collect each sent card that has an image, for
+    ``reprobe_blank_images`` to check once the run's sends are done.
     """
     is_group = isinstance(target, GroupTarget)
     scope = SCOPE_GROUP if is_group else SCOPE_PLAYER
@@ -1473,6 +1587,19 @@ async def deliver_one(
     if user_id and not test_discord_id:
         set_dm_delivery_issue(session, user_id, False)
     session.commit()
+    if sent_images is not None and image_url and message_id:
+        try:
+            if is_group and not test_discord_id:
+                channel_id = target.channel_id
+            else:
+                # Cached by the send above, so this makes no request.
+                channel_id = await rest.open_dm(test_discord_id or target.discord_id)
+            sent_images.append(SentImage(
+                channel_id=str(channel_id), message_id=str(message_id),
+                embeds=message.get("embeds") or [], label=_describe(target),
+            ))
+        except Exception:
+            pass  # the card was delivered; it just won't be re-checked
     return "sent"
 
 
@@ -1605,6 +1732,8 @@ async def run_delivery(
         bucket_max_calls=1, bucket_period=1.0,
     )
 
+    sent_images: list[SentImage] = []
+
     async def _run(rest):
         for target in targets:
             is_group = isinstance(target, GroupTarget)
@@ -1631,6 +1760,7 @@ async def run_delivery(
             status = await deliver_one(
                 session, target, rest=rest, writer=writer, payload=payload,
                 image_url=image_url, test_discord_id=test_id, apply=apply,
+                sent_images=sent_images,
             )
             if status == "sent":
                 outcome.sent += 1
@@ -1641,6 +1771,15 @@ async def run_delivery(
             else:
                 outcome.failed += 1
             log(f"  {status:9} {_describe(target)}")
+
+        if apply and sent_images:
+            repaired, blank = await reprobe_blank_images(
+                rest, writer, sent_images, log=log
+            )
+            if repaired or blank:
+                outcome.notes.append(
+                    f"blank card images: {repaired} re-edited, {blank} still blank"
+                )
 
     if apply:
         async with DiscordRest(token) as rest:
