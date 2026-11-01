@@ -344,7 +344,7 @@ def test_spec_slugs_are_unique(spec_sections):
 def test_spec_fixes_the_suggestion_207_gaps(spec_sections):
     assert "Tiny tempor" not in _names(_section(spec_sections, "Tormented Demons"))
     assert "Tiny tempor" in _names(_section(spec_sections, "Tempoross"))
-    assert {"Eclipse moon helm", "Eclipse moon chestplate", "Eclipse moon tassets",
+    assert {"Eclipse Moon helm", "Eclipse Moon chestplate", "Eclipse Moon tassets",
             "Eclipse atlatl"} == _names(_section(spec_sections, "Eclipse Moon"))
     for boss in ("Corporeal Beast", "Yama", "Doom of Mokhaiotl", "Maggot King"):
         assert _section(spec_sections, boss)["category"] == "bosses"
@@ -356,9 +356,28 @@ def test_spec_fixes_the_suggestion_207_gaps(spec_sections):
     assert "Mystic hat (dusk)" in _names(_section(spec_sections, "Slayer (non-boss)"))
 
 
+def test_spec_lists_the_fractured_archive_rares(spec_sections):
+    archive = _section(spec_sections, "The Fractured Archive")
+    assert archive["category"] == "raids"
+    assert archive["npc_keys"] == ["fractured-archive"]
+    assert _names(archive) == {
+        "Orion", "Obligator (uncharged)", "Ascension crossbows",
+        "Zorya's tome (uncharged)", "Rondache", "Horn of Bran",
+    }
+
+
+def test_spec_name_lists_ignore_the_caches_casing(spec_sections):
+    # The cache renamed "Pet Chaos Elemental" to "Pet chaos elemental"; the
+    # Fanatic's page must still not repeat the Elemental's pet.
+    assert not any("chaos elemental" in n.casefold()
+                   for n in _names(_section(spec_sections, "Chaos Fanatic")))
+    assert "Blue Moon spear" in _names(_section(spec_sections, "Blue Moon"))
+
+
 def test_spec_never_lists_an_excluded_slot(spec_sections):
     for section in spec_sections:
-        assert not (_names(section) & catalog_spec.EXCLUDE), section["label"]
+        excluded = {n.casefold() for n in catalog_spec.EXCLUDE}
+        assert not ({n.casefold() for n in _names(section)} & excluded), section["label"]
 
 
 def test_spec_marks_pets_and_clog_only_slots_non_attributable(spec_sections):

@@ -61,7 +61,7 @@ EXCLUDE = frozenset({
     "Torn prayer scroll", "Dark relic", "Vial of blood", "Cache of runes",
     "Masori crafting kit", "Onyx", "Revenant ether",
     "Bracelet of ethereum (uncharged)", "Abyssal whip", "Coagulated venom",
-    "Charged ice", "Zalcano shard",
+    "Charged ice", "Zalcano shard", "Ascension shards",
     # quest tablets, near-guaranteed on early kills
     "Frozen tablet", "Scarred tablet", "Strangled tablet", "Sirenic tablet",
     "Slepey tablet",
@@ -78,6 +78,13 @@ EXCLUDE = frozenset({
     "Icthlarin's shroud (tier 1)", "Icthlarin's shroud (tier 2)",
     "Icthlarin's shroud (tier 3)", "Icthlarin's shroud (tier 4)",
     "Icthlarin's shroud (tier 5)",
+    # The Fractured Archive: the folio arrives by about the 4th chest and the
+    # four fragments never repeat for a player, so none of them is a rare.
+    "Archivist's folio (inert)", "Fragment of living earth",
+    "Fragment of deep water", "Fragment of whispering wind",
+    "Fragment of burning fire",
+    "Living record (tier 1)", "Living record (tier 2)", "Living record (tier 3)",
+    "Living record (tier 4)", "Living record (tier 5)",
 })
 
 # Notable slots that never arrive as a drop. Shown, credited from the
@@ -211,6 +218,10 @@ CLUE_PAGES = [
 ]
 
 
+def _folded(names) -> frozenset:
+    return frozenset(n.casefold() for n in names)
+
+
 def load_structure(path: Optional[str] = None) -> dict:
     with open(path or STRUCTURE_PATH) as fh:
         return json.load(fh)
@@ -231,11 +242,19 @@ def build_sections(structure: dict) -> list[dict]:
             if page["name"] in ("All Pets", "Skilling Pets"):
                 pets.update(page["names"])
 
+    # The cache re-cases slot names between builds ("Pet Chaos Elemental"
+    # became "Pet chaos elemental" in October 2026), so every name list here
+    # is compared case-insensitively.
+    exclude = _folded(EXCLUDE)
+    clog_only = _folded(CLOG_ONLY)
+
     def page(name: str, only=None, drop=frozenset()) -> list[tuple[int, str]]:
         if name not in pages:
             raise KeyError(f"collection log has no page {name!r}")
+        drop, only = _folded(drop), None if only is None else _folded(only)
         return [(i, n) for i, n in pages[name]
-                if n not in EXCLUDE and n not in drop and (only is None or n in only)]
+                if n.casefold() not in exclude and n.casefold() not in drop
+                and (only is None or n.casefold() in only)]
 
     out: list[dict] = []
 
@@ -253,8 +272,8 @@ def build_sections(structure: dict) -> list[dict]:
                 "item_id": int(item_id),
                 "item_name": name,
                 "source_hint": SOURCE_PET if pet else (
-                    SOURCE_CLOG if name in CLOG_ONLY else SOURCE_DROP),
-                "attributable": not pet and name not in CLOG_ONLY,
+                    SOURCE_CLOG if name.casefold() in clog_only else SOURCE_DROP),
+                "attributable": not pet and name.casefold() not in clog_only,
             })
         out.append({
             "slug": slugify(f"{category} {label}"),
@@ -264,7 +283,8 @@ def build_sections(structure: dict) -> list[dict]:
             "items": rows,
         })
 
-    for raid in ("Chambers of Xeric", "Theatre of Blood", "Tombs of Amascut"):
+    for raid in ("Chambers of Xeric", "Theatre of Blood", "Tombs of Amascut",
+                 "The Fractured Archive"):
         add("raids", raid, page(raid))
 
     for general in ("Kree'arra", "General Graardor", "Commander Zilyana",
@@ -300,7 +320,7 @@ def build_sections(structure: dict) -> list[dict]:
         prefix = moon.split()[0].lower() + " moon "
         add("group_bosses", moon,
             [(i, n) for i, n in page("Moons of Peril")
-             if n == weapon or n.lower().startswith(prefix)],
+             if n.casefold() == weapon.casefold() or n.casefold().startswith(prefix)],
             source_page="Lunar Chest")
 
     for boss in ("Wintertodt", "Tempoross", "Zalcano"):
