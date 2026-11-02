@@ -4097,7 +4097,8 @@ async def preview_wom_competition():
         abort_problem(404, "Competition not found",
                       f"No WiseOldMan competition {comp_id}.")
 
-    metric_kind = wom_metric_kind(comp.get("metric"))
+    kinds = {wom_metric_kind(m) for m in comp.get("metrics") or ()}
+    metric_kind = kinds.pop() if len(kinds) == 1 else None
     problems = competition_link_problems(
         comp, event_kind or ("sotw" if metric_kind == "skill" else "botw"),
         race_format=race_format)
@@ -4133,10 +4134,19 @@ async def preview_wom_competition():
                             "skill": comp.get("metric"),
                             "display": str(comp.get("metric") or "").title()}
             elif metric_kind == "boss":
-                name, npc_id = _npc_display_for_boss_slug(s, comp.get("metric"))
-                mappable = {"event_kind": "botw", "npc": name,
-                            "npc_id": npc_id,
-                            "display": name or str(comp.get("metric") or "").title()}
+                # Every boss of a multi-metric comp; ``npc``/``npc_id`` stay
+                # the first one for clients that pre-fill a single boss.
+                bosses = []
+                for slug in comp.get("metrics") or ():
+                    name, npc_id = _npc_display_for_boss_slug(s, slug)
+                    bosses.append({"slug": slug, "name": name, "npc_id": npc_id})
+                first = bosses[0] if bosses else {}
+                mappable = {"event_kind": "botw", "npc": first.get("name"),
+                            "npc_id": first.get("npc_id"),
+                            "npcs": bosses,
+                            "display": ", ".join(
+                                b["name"] or b["slug"].replace("_", " ").title()
+                                for b in bosses)}
             return linked_event_id, group_matches, mappable
 
     linked_event_id, group_matches, mappable = await asyncio.to_thread(_load_extras)
@@ -4147,6 +4157,7 @@ async def preview_wom_competition():
         "title": comp["title"],
         "url": f"https://wiseoldman.net/competitions/{comp['id']}",
         "metric": comp["metric"],
+        "metrics": comp["metrics"],
         "metric_kind": metric_kind,
         "multi_metric": comp["multi_metric"],
         "type": comp["type"],
@@ -4288,13 +4299,30 @@ async def link_wom_competition(event_id: int):
                         f"this event races '{config.skill}'.",
                         extra={"problems": ["metric_mismatch"]})
             else:
-                slugs = set(_task_wom_slugs(task))
-                if comp.get("metric") not in slugs:
+                # The race's WOM-tracked bosses must be exactly the
+                # competition's, or the two standings would disagree.
+                plan = _task_boss_plan(task)
+                ours, theirs = set(plan["slugs"]), set(comp.get("metrics") or ())
+                if ours != theirs:
+                    missing = sorted(theirs - ours)
+                    extra = sorted(ours - theirs)
+                    parts = []
+                    if missing:
+                        parts.append("the competition also tracks "
+                                     + _slug_list(missing)
+                                     + ", which this event doesn't race")
+                    if extra:
+                        parts.append("this event races "
+                                     + _slug_list(extra)
+                                     + ", which the competition doesn't track")
                     abort_problem(
-                        422, "Metric mismatch",
-                        f"The competition tracks '{comp.get('metric')}', which "
-                        "isn't one of this event's bosses.",
-                        extra={"problems": ["metric_mismatch"]})
+                        422, "Bosses don't match",
+                        "The event's bosses must match the competition's: "
+                        + "; ".join(parts) + ".",
+                        extra={"problems": ["metric_mismatch"],
+                               "missing": missing, "extra": extra})
+                if plan["unsupported"] and not body.get("allow_partial"):
+                    _abort_partial_wom(plan, linking=True)
 
             row = competition_row(s, event_id)
             if row is None:
@@ -4338,11 +4366,15 @@ async def link_wom_competition(event_id: int):
 async def create_wom_competition_route(event_id: int):
     """Create the WiseOldMan competition for a DRAFT sotw/botw event
     (source mode ``created``): a group-linked classic competition matching
-    the event's metric and window. DropTracker keeps the returned
-    competition verification code — the only edit/delete credential — and
-    from here the event behaves like ``linked`` plus write mirroring.
-    Idempotent: an event that already has its competition is a no-op."""
+    the event's metric(s) and window. A multi-boss race makes a multi-metric
+    competition; bosses WOM doesn't track need ``allow_partial`` (the
+    organiser agreed DropTracker tracks them alone). DropTracker keeps the
+    returned competition verification code — the only edit/delete
+    credential — and from here the event behaves like ``linked`` plus write
+    mirroring. Idempotent: an event that already has its competition is a
+    no-op."""
     user_id = current_user_id()
+    body = await json_body(required=False) or {}
 
     def _prepare():
         with db_session() as s:
@@ -4386,21 +4418,27 @@ async def create_wom_competition_route(event_id: int):
             if config.party_gated:
                 abort_problem(409, "Clan-only race", _PARTY_WOM_DETAIL,
                               extra={"code": "wom_party_locked"})
-            from utils.wiseoldman import wom_boss_metric, wom_skill_metric
+            from utils.wiseoldman import wom_skill_metric
 
             if config.metric_kind == "skill":
-                slug = wom_skill_metric(config.skill)
+                skill_slug = wom_skill_metric(config.skill)
+                slugs = [skill_slug] if skill_slug else []
+                if not slugs:
+                    abort_problem(422, "No WOM metric",
+                                  "This skill isn't on the WiseOldMan hiscores, "
+                                  "so the race runs on DropTracker alone.")
             else:
-                if len(config.npcs) != 1:
+                plan = _task_boss_plan(task)
+                slugs = plan["slugs"]
+                if not slugs:
                     abort_problem(
-                        422, "Single boss required",
-                        "A WiseOldMan competition measures one boss — a "
-                        "multi-boss race can only run DropTracker-hosted.")
-                slug = wom_boss_metric(config.npcs[0])
-            if not slug:
-                abort_problem(422, "No WOM metric",
-                              "This metric isn't on the WiseOldMan hiscores — "
-                              "the race can only run DropTracker-hosted.")
+                        422, "No bosses on WiseOldMan",
+                        "WiseOldMan doesn't track any of this race's bosses, "
+                        "so it can't host a competition for it. The race "
+                        "still runs on DropTracker alone, tracked from the "
+                        "plugin.", extra={"code": "wom_no_supported_bosses"})
+                if plan["unsupported"] and not body.get("allow_partial"):
+                    _abort_partial_wom(plan, linking=False)
             from db import Group, GroupConfiguration
 
             g = s.query(Group.wom_id).filter(
@@ -4455,7 +4493,7 @@ async def create_wom_competition_route(event_id: int):
                         extra={"code": "wom_teams_empty"})
             return {
                 "title": ev.name,
-                "slug": slug,
+                "slugs": slugs,
                 "starts_at": ev.starts_at,
                 "ends_at": ev.ends_at,
                 "wom_group_id": wom_group_id,
@@ -4471,7 +4509,7 @@ async def create_wom_competition_route(event_id: int):
 
     wom_errors: list = []
     created = await create_wom_competition(
-        prep["title"], prep["slug"], prep["starts_at"], prep["ends_at"],
+        prep["title"], prep["slugs"], prep["starts_at"], prep["ends_at"],
         prep["wom_group_id"], prep["group_code"],
         teams=prep["teams"], errors=wom_errors)
     if created is None:
@@ -4584,22 +4622,42 @@ async def unlink_wom_competition(event_id: int):
     return jsonify(payload)
 
 
-def _task_wom_slugs(task) -> list:
-    """The WOM boss slugs a competition task's NPC set maps to."""
+def _task_boss_plan(task) -> dict:
+    """``wom_boss_plan`` over a competition task's bosses, with the names as
+    the organiser typed them (CompetitionConfig lower-cases its copy)."""
     import json as _json
 
-    from utils.wiseoldman import wom_boss_metric
+    from services.competition_wom import wom_boss_plan
 
     try:
         config = _json.loads(task.config or "{}") if task is not None else {}
     except (TypeError, ValueError):
         config = {}
-    slugs = []
-    for npc in config.get("npcs") or ():
-        slug = wom_boss_metric(npc)
-        if slug:
-            slugs.append(slug)
-    return slugs
+    return wom_boss_plan(config.get("npcs") or ())
+
+
+def _slug_list(slugs) -> str:
+    return ", ".join(str(s).replace("_", " ").title() for s in slugs)
+
+
+def _abort_partial_wom(plan: dict, *, linking: bool) -> None:
+    """Some of the race's bosses aren't on the WiseOldMan hiscores. Don't
+    decide for the organiser: say which, and offer both ways forward — keep
+    the race on DropTracker alone, or confirm (``allow_partial``) and let
+    WiseOldMan track the bosses it can while the plugin tracks the rest."""
+    unsupported = plan["unsupported"]
+    supported = plan["supported"]
+    names = ", ".join(unsupported)
+    verb = "link the competition" if linking else "create the competition"
+    abort_problem(
+        409, "Some bosses aren't on WiseOldMan",
+        f"WiseOldMan doesn't track {names}. You can run this race on "
+        f"DropTracker alone, without WiseOldMan, or {verb} for the "
+        f"{len(supported)} boss{'es' if len(supported) != 1 else ''} it does "
+        f"track and DropTracker will count {names} itself from the plugin. "
+        f"WiseOldMan's own standings won't include {names}.",
+        extra={"code": "wom_partial_bosses", "supported": supported,
+               "unsupported": unsupported})
 
 
 @events_bp.post("/events")
@@ -4910,6 +4968,8 @@ def _event_settings_snapshot(ev) -> dict:
 async def update_event(event_id: int):
     user_id = current_user_id()
     body = await json_body()
+    # Set inside _apply when a created-mode race's WOM metrics changed.
+    wom_metric_mirror: dict = {}
 
     def _apply():
         with db_session() as s:
@@ -5137,6 +5197,9 @@ async def update_event(event_id: int):
                 cfg = validated_competition_config(s, ev.kind, comp_body)
                 _competition_format_guard(s, ev, cfg)
                 _competition_party_guard(s, ev, cfg)
+                mirror_metrics = _competition_metric_guard(s, ev, cfg)
+                if mirror_metrics:
+                    wom_metric_mirror["metrics"] = mirror_metrics
                 participation = _competition_participation_input(comp_body)
                 ensure_competition_scaffold(s, ev, cfg, participation)
             if "requires_confirmation" in body:
@@ -5400,14 +5463,81 @@ async def update_event(event_id: int):
     # Created-mode competitions mirror name/date edits out to WiseOldMan
     # (best-effort — a WOM hiccup stamps wom_sync_error, never blocks the
     # edit; the admin sees the sync state on the event page).
-    if any(k in body for k in ("name", "starts_at", "ends_at")):
-        await _mirror_competition_edit(event_id)
+    if (wom_metric_mirror
+            or any(k in body for k in ("name", "starts_at", "ends_at"))):
+        await _mirror_competition_edit(
+            event_id, metrics=wom_metric_mirror.get("metrics"))
+        if wom_metric_mirror:
+            # Re-read: the response should show any mirror failure.
+            def _reload():
+                with db_session() as s:
+                    ev = s.query(Event).filter(Event.id == event_id).first()
+                    return _detail(s, ev, viewer_id=user_id) if ev else payload
+            payload = await asyncio.to_thread(_reload)
     _bump(event_id)
     return private_no_store(jsonify(payload))
 
 
-async def _mirror_competition_edit(event_id: int) -> None:
-    """Push a DT-side name/date edit out to a created-mode WOM competition."""
+def _competition_metric_guard(s, ev, cfg: dict) -> Optional[list]:
+    """A metric edit on a race that mirrors a WiseOldMan competition.
+
+    Linked: WOM owns the competition, so the skill/bosses can't change here
+    (the organiser unlinks first). Created: DropTracker owns it, so the edit
+    goes out to WOM — returns the new WOM metric slugs when they changed
+    (None when there is nothing to send). A boss race must keep at least one
+    boss WOM tracks; the rest race plugin-only."""
+    from services.competition import CompetitionConfig
+    from services.competition_setup import competition_row, competition_task
+
+    row = competition_row(s, ev.id)
+    if row is None or not row.wom_competition_id:
+        return None
+    task = competition_task(s, ev.id)
+    old = CompetitionConfig(task.config if task is not None else None)
+    new = CompetitionConfig(cfg)
+    if (old.metric_kind, old.skill, set(old.npcs)) == (
+            new.metric_kind, new.skill, set(new.npcs)):
+        return None
+    if row.source_mode != "created":
+        abort_problem(
+            409, "Unlink WiseOldMan first",
+            "This race mirrors a WiseOldMan competition, so its "
+            f"{'bosses follow' if new.metric_kind == 'boss' else 'skill follows'} "
+            "that competition. Unlink it to change them here.",
+            extra={"code": "wom_linked_metric_locked"})
+
+    from services.competition_wom import wom_boss_plan
+    from utils.wiseoldman import wom_skill_metric
+
+    def _slugs(config, raw_npcs):
+        if config.metric_kind == "skill":
+            slug = wom_skill_metric(config.skill) if config.skill else None
+            return [slug] if slug else []
+        return wom_boss_plan(raw_npcs)["slugs"]
+
+    import json as _json
+
+    try:
+        old_raw = _json.loads(task.config or "{}") if task is not None else {}
+    except (TypeError, ValueError):
+        old_raw = {}
+    new_slugs = _slugs(new, cfg.get("npcs") or ())
+    if not new_slugs:
+        abort_problem(
+            409, "WiseOldMan can't track this",
+            "WiseOldMan doesn't track "
+            + ("any of these bosses" if new.metric_kind == "boss" else "this skill")
+            + ", so the WiseOldMan competition can't follow this change. "
+            "Delete the WiseOldMan competition to run the race on DropTracker "
+            "alone, or keep at least one boss WiseOldMan tracks.",
+            extra={"code": "wom_no_supported_bosses"})
+    old_slugs = _slugs(old, old_raw.get("npcs") or ())
+    return new_slugs if set(new_slugs) != set(old_slugs) else None
+
+
+async def _mirror_competition_edit(event_id: int, metrics: Optional[list] = None) -> None:
+    """Push a DT-side name/date (and, when given, metric) edit out to a
+    created-mode WOM competition."""
     def _peek():
         with db_session() as s:
             ev = s.query(Event).filter(Event.id == event_id).first()
@@ -5431,7 +5561,14 @@ async def _mirror_competition_edit(event_id: int) -> None:
 
     ok = await edit_wom_competition(
         info["competition_id"], info["code"], title=info["title"],
-        starts_at=info["starts_at"], ends_at=info["ends_at"])
+        starts_at=info["starts_at"], ends_at=info["ends_at"], metrics=metrics)
+    if ok and metrics:
+        try:
+            from utils.wiseoldman import invalidate_competition_cache
+
+            invalidate_competition_cache(info["competition_id"])
+        except Exception:
+            pass
 
     def _stamp():
         with db_session() as s:
@@ -5445,8 +5582,9 @@ async def _mirror_competition_edit(event_id: int) -> None:
                 row.wom_ends_at = info["ends_at"]
                 row.wom_sync_error = None
             else:
-                row.wom_sync_error = ("edit mirror failed — WOM didn't accept "
-                                      "the title/date update")[:255]
+                row.wom_sync_error = (
+                    "edit mirror failed — WOM didn't accept the "
+                    + ("boss/skill" if metrics else "title/date") + " update")[:255]
             s.commit()
 
     await asyncio.to_thread(_stamp)

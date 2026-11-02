@@ -12,10 +12,15 @@ keeps flowing live in between; the absolute-value baselines/watermarks make
 double-counting structurally impossible.
 
 The competition detail is fetched RAW (``utils.wiseoldman.get_competition_raw``)
-because the pinned wom.py fork's typed model predates multi-metric
-competitions — the validator must SEE the modern ``metrics`` array to refuse
-what it can't mirror (multi-metric, team-type) instead of silently racing
-only the primary metric.
+— the validator must SEE the ``metrics`` array (and its weights) to refuse
+what it can't mirror instead of silently racing only the primary metric.
+
+Multi-boss BOTW races mirror multi-metric WOM competitions (WOM shipped those
+2026-10-07). WOM's ``progress`` is then the COMBINED total, so emission reads
+the per-metric ``deltas`` and credits every boss separately. Bosses WOM has no
+hiscores metric for stay in the race plugin-only; the organiser agrees to
+that explicitly when linking/creating (``wom_boss_plan``). Multi-skill SOTW is
+not a thing in DropTracker, so a multi-metric comp still can't back a SOTW.
 
 Dates are coupled WOM→DT: at link time the event adopts the competition's
 window, and every poll re-syncs drift (a window disagreeing with the comp
@@ -73,15 +78,24 @@ def _parse_wom_ts_dt(value) -> Optional[datetime]:
 def parse_competition(raw) -> Optional[dict]:
     """Normalize a raw ``GET /competitions/:id`` response.
 
-    Returns ``{id, title, type, metric, metrics, multi_metric, group_id,
-    participant_count, starts_at, ends_at (naive-UTC datetimes),
-    participations: [{wom_player_id, username, display_name, updated_at,
-    start, end, gained, player_raw}]}`` or None for garbage. Values the
+    Returns ``{id, title, type, metric, metrics, metric_weights,
+    multi_metric, group_id, participant_count, starts_at, ends_at (naive-UTC
+    datetimes), participations: [{wom_player_id, username, display_name,
+    updated_at, start, end, gained, by_metric, team_name, player_raw}]}`` or
+    None for garbage. ``start``/``end``/``gained`` are the ranked progress (the
+    combined total on a multi-metric comp); ``by_metric`` is
+    ``{slug: {start, end, gained}}`` from the per-metric deltas. Values the
     response lacks come back None/empty — callers decide what is fatal."""
     if not isinstance(raw, dict) or raw.get("id") is None:
         return None
-    metrics = [m.get("metric") for m in (raw.get("metrics") or ())
-               if isinstance(m, dict) and m.get("metric")]
+    metrics, weights = [], {}
+    for m in raw.get("metrics") or ():
+        if isinstance(m, dict) and m.get("metric") and m["metric"] not in weights:
+            metrics.append(m["metric"])
+            try:
+                weights[m["metric"]] = float(m.get("weight", 1))
+            except (TypeError, ValueError):
+                weights[m["metric"]] = 1.0
     primary = raw.get("metric") or (metrics[0] if metrics else None)
     participations = []
     for p in raw.get("participations") or ():
@@ -89,19 +103,29 @@ def parse_competition(raw) -> Optional[dict]:
             continue
         player = p.get("player") or {}
         progress = p.get("progress") if isinstance(p.get("progress"), dict) else {}
+        deltas = [d for d in (p.get("deltas") or ()) if isinstance(d, dict)]
         if not progress:
-            # Modern shape: per-metric deltas; the first entry mirrors the
-            # ranked metric for a single-metric comp (the only kind we link).
-            deltas = p.get("deltas") or ()
-            first = deltas[0] if deltas and isinstance(deltas[0], dict) else {}
+            # No ranked progress: the first delta is the ranked row (the
+            # metric itself on a single-metric comp, "total" on a multi).
+            first = deltas[0] if deltas else {}
             progress = first.get("values") if isinstance(first.get("values"), dict) else {}
 
-        def _num(key):
+        def _num(values, key):
             try:
-                value = progress.get(key)
+                value = values.get(key)
                 return int(value) if value is not None else None
             except (TypeError, ValueError):
                 return None
+
+        by_metric = {}
+        for d in deltas:
+            slug = d.get("metric")
+            values = d.get("values")
+            if not slug or slug == "total" or not isinstance(values, dict):
+                continue
+            by_metric[slug] = {"start": _num(values, "start"),
+                               "end": _num(values, "end"),
+                               "gained": _num(values, "gained") or 0}
 
         team_name = p.get("teamName")
         participations.append({
@@ -109,9 +133,10 @@ def parse_competition(raw) -> Optional[dict]:
             "username": player.get("username"),
             "display_name": player.get("displayName") or player.get("username"),
             "updated_at": player.get("updatedAt"),
-            "start": _num("start"),
-            "end": _num("end"),
-            "gained": _num("gained") or 0,
+            "start": _num(progress, "start"),
+            "end": _num(progress, "end"),
+            "gained": _num(progress, "gained") or 0,
+            "by_metric": by_metric,
             # Team competitions only (None on classic ones).
             "team_name": (str(team_name).strip() or None) if team_name else None,
             "player_raw": player,
@@ -122,6 +147,7 @@ def parse_competition(raw) -> Optional[dict]:
         "type": raw.get("type"),
         "metric": primary,
         "metrics": metrics or ([primary] if primary else []),
+        "metric_weights": weights,
         "multi_metric": len(metrics) > 1,
         "group_id": raw.get("groupId"),
         "participant_count": (raw.get("participantCount")
@@ -152,7 +178,10 @@ def competition_link_problems(comp: Optional[dict], event_kind: str,
     Reasons are short machine codes; the routes turn them into copy.
 
     An individual race needs a classic competition; a team race needs a WOM
-    team competition (its teams become the event's teams)."""
+    team competition (its teams become the event's teams). A BOTW can mirror
+    a multi-metric comp when every metric is a boss and weighted 1 (a kill is
+    a kill in a DropTracker race, so other weights would rank differently);
+    a SOTW races one skill, so it needs a single-metric comp."""
     from utils.wiseoldman import wom_metric_kind
 
     now = now or datetime.now()
@@ -164,19 +193,50 @@ def competition_link_problems(comp: Optional[dict], event_kind: str,
             problems.append("classic_competition")
     elif comp.get("type") == "team":
         problems.append("team_competition")
-    if comp.get("multi_metric"):
+    slugs = comp.get("metrics") or ([comp["metric"]] if comp.get("metric") else [])
+    kinds = {wom_metric_kind(slug) for slug in slugs}
+    if comp.get("multi_metric") and event_kind != "botw":
         problems.append("multi_metric")
-    kind_for_metric = wom_metric_kind(comp.get("metric"))
-    if kind_for_metric is None:
+    if not slugs or None in kinds:
         problems.append("unsupported_metric")
-    elif event_kind == "sotw" and kind_for_metric != "skill":
+    elif event_kind == "sotw" and kinds != {"skill"}:
         problems.append("metric_kind_mismatch")
-    elif event_kind == "botw" and kind_for_metric != "boss":
+    elif event_kind == "botw" and kinds != {"boss"}:
         problems.append("metric_kind_mismatch")
+    if comp.get("multi_metric") and any(
+            w != 1 for w in (comp.get("metric_weights") or {}).values()):
+        problems.append("weighted_metrics")
     ends_at = comp.get("ends_at")
     if ends_at is not None and ends_at <= now:
         problems.append("finished")
     return problems
+
+
+def wom_boss_plan(npcs) -> dict:
+    """Split a race's boss names into what a WOM competition can measure.
+
+    Returns ``{"slugs": [...], "supported": [names], "unsupported": [names]}``
+    in race order. ``slugs`` is de-duplicated (two DT names can share one WOM
+    metric, e.g. both Gauntlet bosses); names keep the organiser's casing.
+    Unsupported bosses can still be raced — plugin-only — but WOM's standings
+    won't include them, so callers make the organiser agree to that."""
+    from utils.wiseoldman import wom_boss_metric
+
+    slugs, supported, unsupported, seen = [], [], [], set()
+    for name in npcs or ():
+        label = " ".join(str(name or "").split())
+        key = label.lower()
+        if not label or key in seen:
+            continue
+        seen.add(key)
+        slug = wom_boss_metric(label)
+        if slug:
+            supported.append(label)
+            if slug not in slugs:
+                slugs.append(slug)
+        else:
+            unsupported.append(label)
+    return {"slugs": slugs, "supported": supported, "unsupported": unsupported}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -762,17 +822,36 @@ def _new_stats() -> dict:
             "players_stale": 0, "players_no_metrics": 0, "drifted": 0}
 
 
-def _participation_row(p: dict, slug) -> dict:
+def _participation_row(p: dict, slugs) -> dict:
     """Adapt one parsed participation into the bulk-gained row shape the
-    group reconciler's ``_emit_for_row`` consumes — one metric entry whose
-    start is the COMPETITION-window opening value (the authoritative WOM
-    baseline the folds seed from). ``endDate`` stays None so the snap epoch
-    falls back to the player's own updatedAt (then window-clamps)."""
+    group reconciler's ``_emit_for_row`` consumes — one metric entry per
+    competition metric, whose start is the COMPETITION-window opening value
+    (the authoritative WOM baseline the folds seed from). ``endDate`` stays
+    None so the snap epoch falls back to the player's own updatedAt (then
+    window-clamps).
+
+    Per-metric deltas win; the ranked ``start``/``end`` stand in only for a
+    single-metric comp without them (on a multi-metric comp they are the
+    combined total, which no single boss may be credited with)."""
+    if isinstance(slugs, str):
+        slugs = [slugs]
+    slugs = list(slugs or ())
+    by_metric = p.get("by_metric") or {}
+    data = []
+    for slug in slugs:
+        values = by_metric.get(slug)
+        if values is None:
+            if len(slugs) != 1:
+                continue
+            values = p
+        if values.get("end") is None:
+            continue
+        data.append({"metric": slug, "start": values.get("start") or 0,
+                     "end": values.get("end") or 0})
     return {
         "player": p.get("player_raw") or {},
         "endDate": None,
-        "data": [{"metric": slug, "start": p.get("start") or 0,
-                  "end": p.get("end") or 0}],
+        "data": data,
     }
 
 
@@ -807,13 +886,14 @@ async def _poll_target(redis_conn, target: CompetitionTarget, *, now: datetime,
         clamp_lo = int(bounds[0].timestamp())
         clamp_hi = int(bounds[1].timestamp())
 
-    slug = comp.get("metric")
+    slugs = comp.get("metrics") or [comp.get("metric")]
     for p in comp.get("participations") or ():
-        if p.get("end") is None:
+        row = _participation_row(p, slugs)
+        if not row["data"]:
             stats["players_no_metrics"] += 1
             continue
         stats["envelopes"] += _emit_for_row(
-            redis_conn, target.recon, _participation_row(p, slug),
+            redis_conn, target.recon, row,
             clamp_epoch=clamp_hi, clamp_lo=clamp_lo, force=force, stats=stats)
 
     result = await asyncio.to_thread(

@@ -1222,12 +1222,12 @@ from wom import routes as _wom_routes
 
 _BULK_GAINED_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-gained")
 _BULK_HISCORES_ROUTE = _wom_routes.Route("GET", "/groups/{}/bulk-hiscores")
-# Competition detail — RAW deliberately: the fork's typed Competition model
-# predates multi-metric competitions (single legacy ``metric`` field; msgspec
-# silently drops the modern ``metrics`` array), and the SOTW/BOTW link
-# validator must SEE that array to refuse multi-metric comps rather than
-# silently mirroring only the primary metric. Response: {..., participations:
-# [{player: {...}, progress: {start, end, gained}, ...}]}.
+# Competition detail — RAW: the SOTW/BOTW poller and link validator work on
+# plain dicts (services/competition_wom.parse_competition), and the shared
+# Redis cache stores the JSON as-is. The fork's typed models know the
+# multi-metric shape too since 82e6d58, but nothing here needs them. Response:
+# {..., metrics: [{metric, weight}], participations: [{player: {...},
+# progress: {start, end, gained}, deltas: [{metric, values}], ...}]}.
 _COMPETITION_ROUTE = _wom_routes.Route("GET", "/competitions/{}")
 # Per-player gains. wom.py does wrap this one, but its model layer decodes
 # metric keys as enums (see the fork note above), and the recap harvest wants a
@@ -1393,20 +1393,32 @@ async def get_competition_raw(competition_id: int) -> Optional[dict]:
         route, f"{_REDIS_COMPETITION_PREFIX}{int(competition_id)}", expect=dict)
 
 
+def invalidate_competition_cache(competition_id: int) -> None:
+    """Drop the cached ``GET /competitions/:id`` after a write changed it."""
+    try:
+        redis_client.client.delete(f"{_REDIS_COMPETITION_PREFIX}{int(competition_id)}")
+    except Exception:
+        pass
+
+
 # ── Competition writes (SOTW/BOTW ``created`` mode) ──────────────────────────
 # All through the typed client — the request side of the fork is current; only
 # competition RESPONSES need the raw route (see _COMPETITION_ROUTE). Each is
 # best-effort: None/False means "didn't happen" and the caller stamps
 # wom_sync_error / retries later, never blocks the DT-side action.
 
-def _wom_metric_enum(slug):
-    """The fork's ``wom.Metric`` member for a slug, or None (a brand-new
-    metric the pinned fork hasn't learned yet — creation must fail readable
-    rather than 500 on an enum miss)."""
-    try:
-        return wom.Metric(str(slug or "").strip().lower())
-    except (ValueError, KeyError):
-        return None
+def _wom_metric_slugs(metric_slugs) -> list:
+    """Clean, de-duplicated WOM metric slugs from one slug or a list. The fork
+    sends raw slugs, so a metric newer than its enum still works; WOM itself
+    validates them."""
+    if isinstance(metric_slugs, str):
+        metric_slugs = [metric_slugs]
+    out = []
+    for slug in metric_slugs or ():
+        value = str(slug or "").strip().lower()
+        if value and value not in out:
+            out.append(value)
+    return out
 
 
 # WiseOldMan's own limits (server/src/api/util/validation.ts and the
@@ -1435,20 +1447,22 @@ def wom_team_payload(teams) -> list:
     return out
 
 
-async def create_wom_competition(title: str, metric_slug: str, starts_at,
+async def create_wom_competition(title: str, metric_slugs, starts_at,
                                  ends_at, wom_group_id: int,
                                  group_verification_code: str,
                                  teams: Optional[list] = None,
                                  errors: Optional[list] = None) -> Optional[dict]:
     """POST /competitions — a group-linked classic competition, or (``teams``
     given, in :func:`wom_team_payload` shape) a group-linked TEAM
-    competition. Returns ``{"competition_id", "verification_code"}`` (the
+    competition. ``metric_slugs`` is one slug or a list (several make a
+    multi-metric competition; WOM needs them all of one type). Returns
+    ``{"competition_id", "verification_code"}`` (the
     COMPETITION's own code — the caller must persist it; it is the only
     edit/delete credential) or None; WiseOldMan's error message is appended to
     ``errors`` when given. A bad group verification code is remembered (same
     negative cache as update-all) so callers stop retrying it."""
-    metric = _wom_metric_enum(metric_slug)
-    if metric is None or not group_verification_code:
+    metrics = _wom_metric_slugs(metric_slugs)
+    if not metrics or not group_verification_code:
         return None
     if teams is not None and not teams:
         # See WOM_TITLE_MAX's note: an empty list would create a classic comp.
@@ -1460,9 +1474,10 @@ async def create_wom_competition(title: str, metric_slug: str, starts_at,
     await client.start()
     try:
         _log_wom_call("competitions.create_competition", group=wom_group_id,
-                      metric=str(metric_slug), teams=len(teams or ()))
+                      metrics=",".join(metrics), teams=len(teams or ()))
         result = await client.competitions.create_competition(
-            str(title).strip()[:WOM_TITLE_MAX], metric, starts_at, ends_at,
+            str(title).strip()[:WOM_TITLE_MAX], None, starts_at, ends_at,
+            metrics=metrics,
             group_id=int(wom_group_id),
             group_verification_code=str(group_verification_code),
             teams=([wom.Team(name=t["name"], participants=list(t["participants"]))
@@ -1488,11 +1503,10 @@ async def create_wom_competition(title: str, metric_slug: str, starts_at,
                    wom_group_id, status, message)
     if errors is not None and message:
         errors.append(message)
-    # A team competition's 400 is usually about its rosters (an opted-out
-    # player, a duplicate name) — only a message naming the code condemns the
-    # group's code there. A classic create keeps the original rule.
-    bad_code = (status in (400, 403) if not teams
-                else "verification code" in message.lower())
+    # A 400 is often about the payload (a team roster, an opted-out player,
+    # mixed metric types) — only a 403 or a message naming the code condemns
+    # the group's code.
+    bad_code = status == 403 or "verification code" in message.lower()
     if bad_code:
         try:
             redis_client.client.setex(
@@ -1545,9 +1559,11 @@ async def push_wom_competition_teams(competition_id: int, verification_code: str
 
 async def edit_wom_competition(competition_id: int, verification_code: str, *,
                                title: Optional[str] = None,
-                               starts_at=None, ends_at=None) -> bool:
+                               starts_at=None, ends_at=None,
+                               metrics=None) -> bool:
     """PUT /competitions/:id — mirror a DT-side title/date edit out to a
-    created-mode competition."""
+    created-mode competition. ``metrics`` (a slug list) replaces WOM's whole
+    metric set — send it only when the race's metrics actually changed."""
     if not verification_code or not await limiter.wait():
         return False
     await client.start()
@@ -1556,7 +1572,8 @@ async def edit_wom_competition(competition_id: int, verification_code: str, *,
         result = await client.competitions.edit_competition(
             int(competition_id), str(verification_code),
             title=(str(title).strip()[:WOM_TITLE_MAX] if title else title),
-            starts_at=starts_at, ends_at=ends_at)
+            starts_at=starts_at, ends_at=ends_at,
+            metrics=_wom_metric_slugs(metrics) or None)
     except Exception as e:
         logger.warning("WOM competition edit errored (%s): %s",
                        competition_id, e)

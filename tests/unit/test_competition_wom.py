@@ -123,9 +123,9 @@ class TestLinkProblems:
 
     def test_team_multi_metric_and_unsupported(self):
         comp = cw.parse_competition({**COMP_RAW, "type": "team",
-                                     "metrics": [{"metric": "zulrah"},
-                                                 {"metric": "vorkath"}]})
-        problems = cw.competition_link_problems(comp, "botw", now=self.NOW)
+                                     "metrics": [{"metric": "mining"},
+                                                 {"metric": "smithing"}]})
+        problems = cw.competition_link_problems(comp, "sotw", now=self.NOW)
         assert "team_competition" in problems and "multi_metric" in problems
         ehb = cw.parse_competition({**COMP_RAW, "metric": "ehb", "metrics": []})
         assert "unsupported_metric" in cw.competition_link_problems(
@@ -140,6 +140,109 @@ class TestLinkProblems:
         comp = cw.parse_competition({**COMP_RAW, "metric": "mining",
                                      "metrics": [{"metric": "mining"}]})
         assert cw.competition_link_problems(comp, "sotw", now=self.NOW) == []
+
+
+# ── multi-metric (multi-boss BOTW) ───────────────────────────────────────────
+
+def _multi_raw(weights=(1, 1), metrics=("nightmare", "phosanis_nightmare")):
+    player = dict(COMP_RAW["participations"][0]["player"])
+    return {
+        **COMP_RAW,
+        "metric": metrics[0],
+        "metrics": [{"metric": m, "weight": w} for m, w in zip(metrics, weights)],
+        "participations": [{
+            "player": player,
+            "teamName": None,
+            "progress": {"start": 872, "end": 918, "gained": 46},
+            "deltas": [
+                {"metric": "total",
+                 "values": {"start": 872, "end": 918, "gained": 46}},
+                {"metric": metrics[0],
+                 "values": {"start": 476, "end": 476, "gained": 0}},
+                {"metric": metrics[1],
+                 "values": {"start": 396, "end": 442, "gained": 46}},
+            ],
+        }],
+    }
+
+
+class TestMultiMetric:
+    NOW = datetime(2026, 8, 22, 12, 0)
+
+    def test_parse_reads_per_metric_deltas(self):
+        comp = cw.parse_competition(_multi_raw())
+        assert comp["multi_metric"] is True
+        assert comp["metrics"] == ["nightmare", "phosanis_nightmare"]
+        assert comp["metric_weights"] == {"nightmare": 1.0, "phosanis_nightmare": 1.0}
+        p = comp["participations"][0]
+        # Ranked progress is WOM's combined total...
+        assert (p["start"], p["end"], p["gained"]) == (872, 918, 46)
+        # ...and the per-boss split excludes the "total" row.
+        assert p["by_metric"] == {
+            "nightmare": {"start": 476, "end": 476, "gained": 0},
+            "phosanis_nightmare": {"start": 396, "end": 442, "gained": 46}}
+
+    def test_multi_boss_links_for_botw_not_sotw(self):
+        comp = cw.parse_competition(_multi_raw())
+        assert cw.competition_link_problems(comp, "botw", now=self.NOW) == []
+        assert "multi_metric" in cw.competition_link_problems(
+            comp, "sotw", now=self.NOW)
+
+    def test_weighted_metrics_refused(self):
+        comp = cw.parse_competition(_multi_raw(weights=(1, 2)))
+        assert "weighted_metrics" in cw.competition_link_problems(
+            comp, "botw", now=self.NOW)
+
+    def test_mixed_kinds_refused(self):
+        comp = cw.parse_competition(_multi_raw(metrics=("zulrah", "mining")))
+        assert "metric_kind_mismatch" in cw.competition_link_problems(
+            comp, "botw", now=self.NOW)
+
+    def test_row_credits_each_boss_never_the_total(self):
+        comp = cw.parse_competition(_multi_raw())
+        row = cw._participation_row(comp["participations"][0], comp["metrics"])
+        assert row["data"] == [
+            {"metric": "nightmare", "start": 476, "end": 476},
+            {"metric": "phosanis_nightmare", "start": 396, "end": 442}]
+        # A metric missing from the deltas is skipped, not given the total.
+        p = dict(comp["participations"][0], by_metric={})
+        assert cw._participation_row(p, comp["metrics"])["data"] == []
+
+    def test_emits_one_wom_kc_per_boss(self):
+        r = _FakeRedis()
+        target = _recon_target()
+        target.boss_metrics = {"nightmare", "phosanis_nightmare"}
+        stats = cw._new_stats()
+        comp = cw.parse_competition(_multi_raw())
+        recon._emit_for_row(r, target,
+                            cw._participation_row(comp["participations"][0],
+                                                  comp["metrics"]),
+                            clamp_epoch=None, clamp_lo=None, force=True,
+                            stats=stats)
+        kc = {e["data"]["boss_metric"]: (e["data"]["kc_start"], e["data"]["kc"])
+              for _q, e in r.pushed}
+        assert kc == {"nightmare": (476, 476), "phosanis_nightmare": (396, 442)}
+
+
+class TestBossPlan:
+    @pytest.fixture(autouse=True)
+    def _real_boss_metric(self, monkeypatch):
+        stub_wom = sys.modules.get("utils.wiseoldman")
+        if stub_wom is not None:
+            monkeypatch.setattr(stub_wom, "wom_boss_metric",
+                                womutils.wom_boss_metric, raising=False)
+
+    def test_splits_supported_and_unsupported(self):
+        plan = cw.wom_boss_plan(["Zulrah", "Crystalline Hunllef", "The Gauntlet",
+                                 "zulrah", "Definitely Not A Boss"])
+        # Both Gauntlet names share one WOM metric; duplicates fold.
+        assert plan["slugs"] == ["zulrah", "the_gauntlet"]
+        assert plan["supported"] == ["Zulrah", "Crystalline Hunllef", "The Gauntlet"]
+        assert plan["unsupported"] == ["Definitely Not A Boss"]
+
+    def test_empty(self):
+        assert cw.wom_boss_plan(None) == {"slugs": [], "supported": [],
+                                         "unsupported": []}
 
 
 # ── emission through the real reconciler helper ──────────────────────────────

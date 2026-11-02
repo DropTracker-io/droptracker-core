@@ -322,21 +322,35 @@ group alone.
   Unmatched participants land in the `wom_standings` cache (greyed
   display rows; no bonuses — bonuses need plugin data). **WOM owns the
   window**: link copies the comp's dates onto the event, each poll
-  re-syncs drift, and the DT-side date PATCH 422s. The raw JSON fetch
-  (`utils/wiseoldman.get_competition_raw`) is deliberate: the pinned
-  wom.py fork's typed model predates multi-metric comps, and the link
-  validator must SEE the `metrics` array to refuse multi-metric and
-  team-type comps (v1 races one classic metric).
+  re-syncs drift, and the DT-side date PATCH 422s. The competition is
+  read as raw JSON (`utils/wiseoldman.get_competition_raw`) so the
+  validator sees the `metrics` array and its weights.
+  **Multi-boss (since 2026-11-02):** a botw can mirror a multi-metric WOM
+  comp when every metric is a boss weighted 1 (`weighted_metrics` refuses
+  others: a DT kill is a kill). WOM's `progress` is then the combined
+  total, so `parse_competition` keeps per-metric `by_metric` from the
+  `deltas` and `_participation_row` emits one entry per boss, never the
+  total. The race's WOM-tracked bosses (`wom_boss_plan` slugs) must equal
+  the comp's metrics exactly. A sotw still needs a single-metric comp.
+  Linked races lock their metric (PATCH 409 `wom_linked_metric_locked`).
 - **created** — DropTracker creates the WOM competition
   (`POST /events/{id}/competition/wom-create`, draft-only, idempotent;
-  needs `Group.wom_id` + the `wom_verification_code` group config; single
-  WOM-ranked boss / one skill). The returned competition code is stored
-  and buys write mirroring: DT-side name/date edits push out
-  (`edit_wom_competition`), delete/kind-switch/unlink delete the comp,
+  needs `Group.wom_id` + the `wom_verification_code` group config; one
+  skill, or every boss WOM tracks as one multi-metric comp). The returned
+  competition code is stored and buys write mirroring: DT-side name/date
+  edits push out (`edit_wom_competition`), and so does a changed metric
+  set (`_competition_metric_guard`; WOM replaces its whole metric list, so
+  it is sent only when the slugs changed). Delete/kind-switch/unlink delete the comp,
   a DT-side end closes it (`mirror_competition_end` — web route + sweep),
   and the poller fires competition-scoped `update-all` inside the lead
   window before start/end (`_womcompupdall` flags). Then it behaves like
   linked.
+- **Bosses WOM doesn't track** never block a race: link and create answer
+  409 `wom_partial_bosses` with the `supported`/`unsupported` names, and
+  the wizard offers "run on DropTracker only" or retry with
+  `allow_partial` (WOM races the supported bosses, the plugin counts the
+  rest, WOM's own standings exclude them). No supported boss at all →
+  422/409 `wom_no_supported_bosses`.
 - End-of-event: the consumer drains `pending_final_competition_ids` →
   `final_competition_poll` (cache-busting, force) BEFORE the lifecycle
   sweep ends the event, so the frozen result includes WOM's last word.
@@ -529,8 +543,8 @@ safe: a task rule's points come from the rule at fold time, so it would rewrite
 history) · sotw drop bonuses (no item→skill dataset exists) ·
 clan_vs_clan races (clan-locked by decision) · auto-splitting a whole clan
 into balanced teams · "overall" as a sotw metric
-(mixed-baseline double-count trap needs its own design) · multi-metric
-comps · recurring-window competitions (blocked at activation) ·
+(mixed-baseline double-count trap needs its own design) · multi-skill
+sotw (WOM supports it; DT races one skill) · recurring-window competitions (blocked at activation) ·
 `/event standings` slash command · overtake/milestone messages
 (`event_lead_change` emission from `_apply_competition` has rank/leader
 ready; `event_competition_milestone` reserved) · duplicate-pet bonus ·
