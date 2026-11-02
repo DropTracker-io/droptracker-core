@@ -594,3 +594,217 @@ class TestActivityHistograms:
         out = recap.activity_histograms(s, [], "2026-09")
         assert s.sql is None
         assert out == {"by_hour": [0] * 24, "by_weekday": [0] * 7}
+
+
+class TestItemFloorRule:
+    """Suggestion #225: a clan's recap can count only items worth its floor,
+    by the lootboard's rule (average value per item, not the stack)."""
+
+    def test_no_floor_counts_everything(self):
+        assert recap.passes_item_floor(15_000_000, 15_000_000, 0)
+
+    def test_a_coin_stack_never_passes(self):
+        # 15M coins is 15M GP of loot but 1 GP per item.
+        assert not recap.passes_item_floor(15_000_000, 15_000_000, 1_000_000)
+
+    def test_the_floor_is_inclusive(self):
+        assert recap.passes_item_floor(2, 2_000_000, 1_000_000)
+        assert not recap.passes_item_floor(2, 1_999_999, 1_000_000)
+
+    def test_zero_quantity_never_passes_a_floor(self):
+        assert not recap.passes_item_floor(0, 5_000_000, 1_000_000)
+
+    @pytest.mark.parametrize("raw", [None, "", "0", "-5", "abc", " "])
+    def test_unset_values_parse_to_no_floor(self, raw):
+        assert recap.parse_item_floor(raw) == 0
+
+    def test_a_set_value_parses(self):
+        assert recap.parse_item_floor("1000000") == 1_000_000
+        assert recap.parse_item_floor(" 2500000 ") == 2_500_000
+
+
+# (item_id, item_name, player_id, qty, loot, drops), one member's month of one item
+_ROLLUP_ROWS = [
+    (995, "Coins", 1, 15_000_000, 15_000_000, 300),
+    (565, "Blood rune", 1, 40_000, 14_000_000, 120),
+    (28323, "Siren's staff", 1, 1, 100_000_000, 1),
+    (26243, "Virtus robe top", 2, 2, 63_000_000, 2),
+    (995, "Coins", 2, 1_000_000, 1_000_000, 80),
+]
+
+
+class TestItemRollupFloor:
+    def _rollup(self, monkeypatch, floor):
+        monkeypatch.setattr(recap, "_item_player_rows", lambda s, pids, period: list(_ROLLUP_ROWS))
+        monkeypatch.setattr(
+            recap, "activity_histograms",
+            lambda s, pids, period: {"by_hour": [0] * 24, "by_weekday": [0] * 7},
+        )
+        monkeypatch.setattr(recap, "_player_names", lambda s, pids: {1: "Antelic", 2: "Mebi"})
+        return recap._item_rollup(None, [1, 2], "2026-10", floor)
+
+    def test_without_a_floor_every_item_counts(self, monkeypatch):
+        out = self._rollup(monkeypatch, 0)
+        assert out["unique_items"] == 4
+        assert out["drops"] == out["all_drops"] == 503
+        assert out["player_loot"] == {1: 129_000_000, 2: 64_000_000}
+
+    def test_a_floor_drops_items_below_it(self, monkeypatch):
+        out = self._rollup(monkeypatch, 1_000_000)
+        assert [i["name"] for i in out["top_items"]] == ["Siren's staff", "Virtus robe top"]
+        assert out["loot"] == 163_000_000
+        assert out["drops"] == 3
+        assert out["unique_items"] == 2
+
+    def test_the_activity_count_stays_unfiltered(self, monkeypatch):
+        assert self._rollup(monkeypatch, 1_000_000)["all_drops"] == 503
+
+    def test_member_loot_follows_the_floor(self, monkeypatch):
+        out = self._rollup(monkeypatch, 1_000_000)
+        assert out["player_loot"] == {1: 100_000_000, 2: 63_000_000}
+        assert out["kept_pairs"] == {(28323, 1), (26243, 2)}
+
+
+class _Result:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+
+class _Session:
+    """Answers every execute() with the same rows, and counts the calls."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = 0
+
+    def execute(self, *a, **kw):
+        self.calls += 1
+        return _Result(self.rows)
+
+
+class TestFlooredNpcRollup:
+    def test_nothing_kept_reads_nothing(self):
+        session = _Session([])
+        out = recap._floored_npc_rollup(session, set(), "2026-10")
+        assert out == {"unique_npcs": 0, "top_npcs": [], "available": True}
+        assert session.calls == 0
+
+    def test_only_kept_pairs_count_toward_a_boss(self):
+        # (npc_id, npc_name, item_id, player_id, loot, drops). The narrowed read
+        # still returns an item a member received that DIDN'T pass for them
+        # (item 26243 for player 1); it must not count.
+        session = _Session([
+            (12204, "The Whisperer", 28323, 1, 100_000_000, 1),
+            (12204, "The Whisperer", 26243, 1, 30_000_000, 1),
+            (12077, "Duke Sucellus", 26243, 2, 63_000_000, 2),
+            (None, None, 28323, 1, 5, 1),
+        ])
+        out = recap._floored_npc_rollup(session, {(28323, 1), (26243, 2)}, "2026-10")
+        assert [(n["name"], n["loot"], n["drops"]) for n in out["top_npcs"]] == [
+            ("The Whisperer", 100_000_000, 1),
+            ("Duke Sucellus", 63_000_000, 2),
+        ]
+        assert out["unique_npcs"] == 2
+
+
+class TestGroupMonthFloor:
+    def _compute(self, monkeypatch, *, floor, floored_drops=3, all_drops=503):
+        monkeypatch.setattr(recap, "_visible_group_player_ids", lambda s, gid: [1, 2, 3])
+        monkeypatch.setattr(recap, "group_item_floor", lambda s, gid: floor)
+        seen = {}
+
+        def base(session, pids, period, item_floor=0):
+            seen["floor"] = item_floor
+            return {
+                "totals": {"drops": floored_drops if item_floor else all_drops,
+                           "loot_rollup": 1},
+                "top_items": [], "top_npcs": [], "achievements": {},
+                "_all_drops": all_drops,
+                "_player_loot": {1: 100_000_000, 2: 63_000_000},
+            }
+
+        monkeypatch.setattr(recap, "_base_month_payload", base)
+        monkeypatch.setattr(recap, "_redis_totals",
+                            lambda pids, partition: {1: 129_000_000, 2: 64_000_000, 3: 5})
+        monkeypatch.setattr(
+            recap, "_item_player_rows",
+            lambda s, pids, period: [(28323, "x", 2, 1, 40_000_000, 1), (995, "Coins", 1, 9, 9, 1)],
+        )
+        monkeypatch.setattr(recap, "_player_names", lambda s, pids: {1: "Antelic", 2: "Mebi", 3: "Z"})
+        monkeypatch.setattr(recap, "_group_rank", lambda gid, partition: (5, 200, 999))
+        monkeypatch.setattr(recap, "_ehb_gains", lambda s, pids, period: {})
+        monkeypatch.setattr(recap, "_group_superlatives", lambda *a: {})
+        monkeypatch.setattr(recap, "_finalize", lambda payload, period: payload)
+        out = recap.compute_group_month(_Session([("Restricted",)]), 97, "2026-10")
+        return out, seen
+
+    def test_the_clan_floor_reaches_the_payload_builder(self, monkeypatch):
+        _, seen = self._compute(monkeypatch, floor=1_000_000)
+        assert seen["floor"] == 1_000_000
+
+    def test_a_floored_card_ranks_members_on_floored_loot(self, monkeypatch):
+        out, _ = self._compute(monkeypatch, floor=1_000_000)
+        assert [(m["name"], m["loot"]) for m in out["top_members"]] == [
+            ("Antelic", 100_000_000), ("Mebi", 63_000_000),
+        ]
+        assert out["totals"]["loot"] == 163_000_000
+        assert out["item_floor"] == 1_000_000
+
+    def test_last_month_is_floored_the_same_way(self, monkeypatch):
+        out, _ = self._compute(monkeypatch, floor=1_000_000)
+        assert out["rank"]["previous_loot"] == 40_000_000
+
+    def test_few_big_drops_still_get_a_card(self, monkeypatch):
+        # 3 drops pass the floor, but the clan logged 503: it played, so it
+        # gets a card.
+        out, _ = self._compute(monkeypatch, floor=1_000_000, floored_drops=3)
+        assert out is not None
+
+    def test_an_idle_clan_still_gets_none(self, monkeypatch):
+        out, _ = self._compute(monkeypatch, floor=1_000_000, all_drops=recap.MIN_DROPS_FOR_RECAP - 1)
+        assert out is None
+
+    def test_no_floor_keeps_the_redis_headline(self, monkeypatch):
+        out, _ = self._compute(monkeypatch, floor=0)
+        assert out["totals"]["loot"] == 193_000_005
+        assert "item_floor" not in out
+
+    def test_private_keys_never_reach_the_payload(self, monkeypatch):
+        for floor in (0, 1_000_000):
+            out, _ = self._compute(monkeypatch, floor=floor)
+            assert not [k for k in out if k.startswith("_")]
+
+
+class TestAnnualFloorLabel:
+    def _fold(self, monkeypatch, floors):
+        months = {}
+        for i, floor in enumerate(floors, start=1):
+            m = _month(f"2027-{i:02d}", 100, 10)
+            if floor:
+                m["item_floor"] = floor
+            months[m["period"]] = m
+        monkeypatch.setattr(
+            recap, "load_snapshot",
+            lambda session, scope, subject_id, period: months.get(period),
+        )
+        return recap.compute_year(None, "group", 97, 2027)
+
+    def test_a_shared_floor_is_labelled(self, monkeypatch):
+        out = self._fold(monkeypatch, [1_000_000, 1_000_000])
+        assert out["item_floor"] == 1_000_000
+        assert "item_floor_mixed" not in out
+
+    def test_a_changed_floor_is_flagged_mixed(self, monkeypatch):
+        out = self._fold(monkeypatch, [0, 1_000_000])
+        assert out.get("item_floor_mixed") is True
+        assert "item_floor" not in out
+
+    def test_no_floor_says_nothing(self, monkeypatch):
+        out = self._fold(monkeypatch, [0, 0])
+        assert "item_floor" not in out and "item_floor_mixed" not in out

@@ -75,6 +75,13 @@ MAX_ROSTER_FOR_RECAP = 1500
 # change and are GP-weighted; nothing may mix or display those as activity.
 ACTIVITY_WEIGHT = "active_hours"
 
+# A clan's per-card item floor, set under Recaps in the group settings (empty or
+# 0 = count every item). Same rule as the lootboard's "Hide items below minimum
+# value" (lootboard/generator.get_drops_for_group): a member's month of an item
+# counts only when its average value per item, total_value // quantity, reaches
+# the floor. Group cards only; a player card is not one clan's to filter.
+ITEM_FLOOR_KEY = "recap_minimum_item_value"
+
 
 class RosterTooLarge(RuntimeError):
     """Raised instead of issuing a query that would read-timeout. Callers skip
@@ -310,7 +317,49 @@ def _apply_ehb(totals: dict, current: dict, previous: dict,
 # --------------------------------------------------------------------------- #
 # Rollup reads — composition (top items, top bosses, activity)
 # --------------------------------------------------------------------------- #
-def _item_rollup(session, player_ids: list[int], period: str) -> dict:
+def passes_item_floor(quantity, loot, floor: int) -> bool:
+    """Whether one member's month of one item counts under ``floor``.
+
+    The lootboard's rule exactly: the average value per item, not the stack's
+    total, so 15M coins never pass a 1M floor and a 1.2M item always does.
+    """
+    if not floor:
+        return True
+    quantity = int(quantity or 0)
+    if quantity <= 0:
+        return False
+    return int(loot or 0) // quantity >= floor
+
+
+def _item_player_rows(session, player_ids: list[int], period: str) -> list:
+    """``(item_id, item_name, player_id, qty, loot, drops)`` per member per item."""
+    lo, hi = month_hour_bounds(period)
+    return session.execute(
+        text(
+            "SELECT r.item_id, i.item_name, r.player_id, "
+            "       SUM(r.quantity) AS qty, SUM(r.total_value) AS loot, "
+            "       SUM(r.drop_count) AS drops "
+            "FROM player_item_hourly_totals r "
+            "LEFT JOIN items i ON i.item_id = r.item_id "
+            "WHERE r.player_id IN :pids AND r.date_hour BETWEEN :lo AND :hi "
+            "GROUP BY r.item_id, i.item_name, r.player_id"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": player_ids, "lo": lo, "hi": hi},
+    ).fetchall()
+
+
+def _floored_player_loot(rows, floor: int) -> dict[int, int]:
+    """Each member's loot from the items that pass ``floor``."""
+    totals: dict[int, int] = {}
+    for item_id, _name, player_id, qty, loot, _drops in rows:
+        if item_id is None or player_id is None:
+            continue
+        if passes_item_floor(qty, loot, floor):
+            totals[int(player_id)] = totals.get(int(player_id), 0) + int(loot or 0)
+    return totals
+
+
+def _item_rollup(session, player_ids: list[int], period: str, item_floor: int = 0) -> dict:
     """Totals, top items and the activity histograms, in two ranged reads.
 
     The hour-of-day and day-of-week histograms come out of the same index range
@@ -323,27 +372,25 @@ def _item_rollup(session, player_ids: list[int], period: str) -> dict:
     was happening anyway (measured 0.3s for a 269-member clan month). Folding to
     per-item totals then happens in Python, which also yields the receiver count
     for free.
+
+    With ``item_floor`` set, (item, member) rows below it are dropped before the
+    fold, so every figure here (loot, drops, unique items, top items) counts only
+    what passes. ``all_drops`` is the unfiltered count, for the activity floor:
+    a clan that played all month must not lose its card because few drops were
+    big. ``player_loot`` and ``kept_pairs`` feed the member ranking and the
+    floored boss read.
     """
     if not player_ids:
         return {
-            "loot": 0, "drops": 0, "unique_items": 0,
+            "loot": 0, "drops": 0, "unique_items": 0, "all_drops": 0,
             "top_items": [], "by_hour": [0] * 24, "by_weekday": [0] * 7,
+            "player_loot": {}, "kept_pairs": set(),
         }
-    lo, hi = month_hour_bounds(period)
-    params = {"pids": player_ids, "lo": lo, "hi": hi}
-
-    rows = session.execute(
-        text(
-            "SELECT r.item_id, i.item_name, r.player_id, "
-            "       SUM(r.quantity) AS qty, SUM(r.total_value) AS loot, "
-            "       SUM(r.drop_count) AS drops "
-            "FROM player_item_hourly_totals r "
-            "LEFT JOIN items i ON i.item_id = r.item_id "
-            "WHERE r.player_id IN :pids AND r.date_hour BETWEEN :lo AND :hi "
-            "GROUP BY r.item_id, i.item_name, r.player_id"
-        ).bindparams(bindparam("pids", expanding=True)),
-        params,
-    ).fetchall()
+    rows = _item_player_rows(session, player_ids, period)
+    all_drops = sum(int(r[5] or 0) for r in rows if r[0] is not None)
+    if item_floor:
+        rows = [r for r in rows if passes_item_floor(r[3], r[4], item_floor)]
+    kept_pairs = {(int(r[0]), int(r[2])) for r in rows if r[0] is not None and r[2] is not None}
 
     activity = activity_histograms(session, player_ids, period)
 
@@ -391,9 +438,12 @@ def _item_rollup(session, player_ids: list[int], period: str) -> dict:
         "loot": sum(i["loot"] for i in items),
         "drops": sum(i["drops"] for i in items),
         "unique_items": len(items),
+        "all_drops": all_drops,
         "top_items": top,
         "by_hour": activity["by_hour"],
         "by_weekday": activity["by_weekday"],
+        "player_loot": _floored_player_loot(rows, 0),
+        "kept_pairs": kept_pairs,
     }
 
 
@@ -499,6 +549,54 @@ def _npc_rollup(session, player_ids: list[int], period: str) -> dict:
     return {"unique_npcs": len(npcs), "top_npcs": npcs[:TOP_N], "available": True}
 
 
+def _floored_npc_rollup(session, kept_pairs: set, period: str) -> dict:
+    """Top bosses counting only the items that passed the clan's item floor.
+
+    ``player_npc_hourly_totals`` has no item dimension, so a floored boss total
+    has to come from ``drops``. The read is narrowed to the members and items in
+    ``kept_pairs`` (the (item, member) pairs the floored item rollup kept), then
+    filtered to exactly those pairs here, so the boss totals add up to the same
+    loot as the item list. Narrowing is what makes it cheap: the whole roster's
+    month measured 5.8s (group 97) and 13s (group 14) under load, the narrowed
+    read 0.3s and 1.0s.
+    """
+    if not kept_pairs:
+        return {"unique_npcs": 0, "top_npcs": [], "available": True}
+    start, end = month_bounds(period)
+    rows = session.execute(
+        text(
+            "SELECT d.npc_id, n.npc_name, d.item_id, d.player_id, "
+            "       SUM(d.value * d.quantity) AS loot, COUNT(*) AS drops "
+            "FROM drops d FORCE INDEX (ix_drops_player_id_date_added) "
+            "LEFT JOIN npc_list n ON n.npc_id = d.npc_id "
+            "WHERE d.player_id IN :pids "
+            "  AND d.date_added >= :start AND d.date_added < :end "
+            "  AND d.hidden = 0 AND d.item_id IN :items "
+            "GROUP BY d.npc_id, n.npc_name, d.item_id, d.player_id"
+        ).bindparams(
+            bindparam("pids", expanding=True), bindparam("items", expanding=True)
+        ),
+        {
+            "pids": sorted({pid for _, pid in kept_pairs}),
+            "items": sorted({iid for iid, _ in kept_pairs}),
+            "start": start,
+            "end": end,
+        },
+    ).fetchall()
+    merged: dict[int, dict] = {}
+    for npc_id, name, item_id, player_id, loot, drops in rows:
+        if npc_id is None or (item_id, player_id) not in kept_pairs:
+            continue
+        entry = merged.setdefault(
+            int(npc_id),
+            {"npc_id": int(npc_id), "name": name or f"NPC {npc_id}", "loot": 0, "drops": 0},
+        )
+        entry["loot"] += int(loot or 0)
+        entry["drops"] += int(drops or 0)
+    npcs = sorted(merged.values(), key=lambda x: x["loot"], reverse=True)
+    return {"unique_npcs": len(npcs), "top_npcs": npcs[:TOP_N], "available": True}
+
+
 # --------------------------------------------------------------------------- #
 # `drops` reads — the one source that carries a single row's identity
 # --------------------------------------------------------------------------- #
@@ -541,7 +639,9 @@ def _public_image_url(raw: Optional[str]) -> Optional[str]:
     return None
 
 
-def _biggest_drop(session, player_ids: list[int], period: str) -> Optional[dict]:
+def _biggest_drop(
+    session, player_ids: list[int], period: str, item_floor: int = 0
+) -> Optional[dict]:
     """The period's single largest drop, with the evidence attached.
 
     Only ``drops`` can answer this: no rollup carries a single-row maximum, and
@@ -556,10 +656,14 @@ def _biggest_drop(session, player_ids: list[int], period: str) -> Optional[dict]
 
     ``kill_count`` is populated from web76a onward and is NULL for everything
     before it, and for sources that don't report one.
+
+    ``item_floor`` is checked per drop (``d.value`` is the value of one item),
+    so a stack of 15M coins can't win a card that only counts 1M+ items.
     """
     if not player_ids:
         return None
     start, end = month_bounds(period)
+    floor_sql = "  AND d.value >= :floor " if item_floor else ""
     row = session.execute(
         text(
             "SELECT d.drop_id, d.player_id, p.player_name, d.item_id, i.item_name, "
@@ -573,9 +677,10 @@ def _biggest_drop(session, player_ids: list[int], period: str) -> Optional[dict]
             "WHERE d.player_id IN :pids "
             "  AND d.date_added >= :start AND d.date_added < :end "
             "  AND d.hidden = 0 "
-            "ORDER BY total_value DESC LIMIT 1"
+            + floor_sql
+            + "ORDER BY total_value DESC LIMIT 1"
         ).bindparams(bindparam("pids", expanding=True)),
-        {"pids": player_ids, "start": start, "end": end},
+        {"pids": player_ids, "start": start, "end": end, "floor": int(item_floor or 0)},
     ).first()
     if not row:
         return None
@@ -710,6 +815,28 @@ def _visible_group_player_ids(session, group_id: int) -> list[int]:
     return sorted(ids)
 
 
+def parse_item_floor(raw) -> int:
+    """A stored ``recap_minimum_item_value`` as GP. Empty, '0' (the legacy
+    "unset" sentinel), negative or junk all mean "count every item"."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def group_item_floor(session, group_id: int) -> int:
+    """The clan's recap item floor in GP, 0 when it counts every item."""
+    row = session.execute(
+        text(
+            "SELECT config_value FROM group_configurations "
+            "WHERE group_id = :gid AND config_key = :key LIMIT 1"
+        ),
+        {"gid": group_id, "key": ITEM_FLOOR_KEY},
+    ).first()
+    return parse_item_floor(row[0]) if row else 0
+
+
 # Groups 1 and 2 are infrastructure, not clans — 1 is the config template and 2
 # holds every tracked player. Neither belongs in a player's clan line.
 _NON_CLAN_GROUP_IDS = (1, 2)
@@ -768,11 +895,23 @@ def _player_names(session, player_ids: list[int]) -> dict[int, str]:
 # --------------------------------------------------------------------------- #
 # Compute
 # --------------------------------------------------------------------------- #
-def _base_month_payload(session, player_ids: list[int], period: str) -> dict:
+def _base_month_payload(
+    session, player_ids: list[int], period: str, item_floor: int = 0
+) -> dict:
     """The parts of a card that are identical for a player and a group — one
-    subject is just a player_id list of length one."""
-    items = _item_rollup(session, player_ids, period)
-    npcs = _npc_rollup(session, player_ids, period)
+    subject is just a player_id list of length one.
+
+    With ``item_floor`` set (group cards only) every loot figure counts only the
+    items that pass it, and two private keys ride along for the caller to pop:
+    ``_all_drops`` (the unfiltered count, for the activity floor) and
+    ``_player_loot`` (each member's floored loot, for the member ranking).
+    """
+    items = _item_rollup(session, player_ids, period, item_floor)
+    npcs = (
+        _floored_npc_rollup(session, items["kept_pairs"], period)
+        if item_floor
+        else _npc_rollup(session, player_ids, period)
+    )
     kills = _true_kills(
         session, player_ids, period, [n["npc_id"] for n in npcs["top_npcs"]]
     )
@@ -795,8 +934,10 @@ def _base_month_payload(session, player_ids: list[int], period: str) -> dict:
             "by_weekday": items["by_weekday"],
             "weight": ACTIVITY_WEIGHT,
         },
-        "biggest_drop": _biggest_drop(session, player_ids, period),
+        "biggest_drop": _biggest_drop(session, player_ids, period, item_floor),
         "achievements": _achievements(session, player_ids, period),
+        "_all_drops": items["all_drops"],
+        "_player_loot": items["player_loot"],
     }
 
 
@@ -808,6 +949,8 @@ def compute_player_month(session, player_id: int, period: str) -> Optional[dict]
 
     partition = period_partition(period)
     payload = _base_month_payload(session, [player_id], period)
+    payload.pop("_all_drops", None)
+    payload.pop("_player_loot", None)
     if payload["totals"]["drops"] < MIN_DROPS_FOR_RECAP:
         return None
 
@@ -878,14 +1021,28 @@ def compute_group_month(session, group_id: int, period: str) -> Optional[dict]:
             f"(> {MAX_ROSTER_FOR_RECAP}); this is a synthetic group, not a clan"
         )
 
-    payload = _base_month_payload(session, player_ids, period)
-    if payload["totals"]["drops"] < MIN_DROPS_FOR_RECAP:
+    item_floor = group_item_floor(session, group_id)
+    payload = _base_month_payload(session, player_ids, period, item_floor)
+    all_drops = payload.pop("_all_drops", None)
+    floored_loot = payload.pop("_player_loot", None) or {}
+    # The activity floor reads the unfiltered count: it asks whether the clan
+    # played, not whether it pulled anything big.
+    if (all_drops if item_floor else payload["totals"]["drops"]) < MIN_DROPS_FOR_RECAP:
         return None
 
-    member_totals = _redis_totals(player_ids, partition)
     prev_period = previous_month_period(period)
     prev_partition = period_partition(prev_period)
-    prev_totals = _redis_totals(player_ids, prev_partition)
+    if item_floor:
+        # Redis only holds every-item totals, so a floored card ranks members
+        # (and compares with last month) on the same floored rollup as its items.
+        member_totals = floored_loot
+        prev_totals = _floored_player_loot(
+            _item_player_rows(session, player_ids, prev_period), item_floor
+        )
+        payload["item_floor"] = item_floor
+    else:
+        member_totals = _redis_totals(player_ids, partition)
+        prev_totals = _redis_totals(player_ids, prev_partition)
     names = _player_names(session, player_ids)
     rank, ranked, board_loot = _group_rank(group_id, partition)
 
@@ -1137,6 +1294,14 @@ def compute_year(session, scope: str, subject_id: int, year: int) -> Optional[di
         # The best month is the card people screenshot; it falls out of the fold.
         "peak_month": max(by_month, key=lambda m: m["loot"]) if by_month else None,
     }
+    # A clan that changed its item floor mid-year folds months counted on
+    # different terms. Stated, never averaged: one shared floor is labelled as
+    # such, anything else is flagged mixed so the card can say so.
+    floors = {int(snap.get("item_floor") or 0) for _, snap in months}
+    if len(floors) > 1:
+        payload["item_floor_mixed"] = True
+    elif floors and next(iter(floors)) > 0:
+        payload["item_floor"] = next(iter(floors))
     return _finalize(payload, str(year))
 
 

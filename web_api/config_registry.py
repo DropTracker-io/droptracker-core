@@ -1159,6 +1159,19 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Where the monthly recap card is posted. Leave empty to use your lootboard channel.",
         "default": None,
     },
+    # Item floor for the clan card (services/recap.ITEM_FLOOR_KEY). Same rule as
+    # the lootboard's only_include_items_over_minimum, but its own number: the
+    # lootboard's comes from minimum_value_to_notify, which also gates Discord
+    # drop alerts. Read when a card is built, so it applies from the next card.
+    {
+        "key": "recap_minimum_item_value",
+        "label": "Minimum item value",
+        "category": "recaps",
+        "type": "int",
+        "help": "Only count items worth at least this much GP each on your clan's recap card: its loot total, top items, top bosses, member ranking and drop of the month. 0 counts every item. To match a lootboard that hides items below your minimum value, use the same number here. Applies from the next card.",
+        "default": 0,
+        "min": 0,
+    },
     # Local hour (0-23) on the 1st. Combined with recap_timezone below, which is
     # seeded from the browser of the first admin who opens this page, so the
     # default is "noon, their time" rather than a number someone has to reason
