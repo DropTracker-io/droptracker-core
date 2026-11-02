@@ -13,6 +13,7 @@ the ``services`` package, so tests load this file by path.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
 # Re-declared locally (not imported from db.models) so this module stays
@@ -44,6 +45,11 @@ _TRANSITIONS = {
 }
 
 TOP_DONORS_LIMIT = 10
+
+# A backdated entry can't predate Old School itself (launched 2013-02-22), and
+# can't be in the future beyond a little clock slack between browser and server.
+EARLIEST_ENTRY_DATE = datetime(2013, 2, 22)
+ENTRY_DATE_SLACK = timedelta(minutes=10)
 
 # --- In-game coffer sync (web144a) ------------------------------------------
 # Relayed "X has deposited N coins into the coffer." lines become bank rows
@@ -164,11 +170,29 @@ def clean_text(value, field: str, limit: int = 255) -> Optional[str]:
     return value or None
 
 
+def entry_date(value, now: datetime) -> datetime:
+    """When an entry happened, from a unix timestamp a person picked (to
+    backdate a record). Returned naive UTC, like every ledger column."""
+    if not _is_int(value):
+        raise BankRuleError("Invalid date", "'created_at' must be a unix timestamp in seconds.")
+    try:
+        when = datetime.utcfromtimestamp(value)
+    except (OverflowError, OSError, ValueError):
+        raise BankRuleError("Invalid date", "'created_at' is out of range.")
+    if when < EARLIEST_ENTRY_DATE:
+        raise BankRuleError("Invalid date", "The date can't be before Old School launched (2013-02-22).")
+    if when > now + ENTRY_DATE_SLACK:
+        raise BankRuleError("Invalid date", "The date can't be in the future.")
+    return when
+
+
 def totals_from_kind_sums(kind_sums: Iterable) -> dict:
     """Headline numbers from ``(kind, SUM(amount), COUNT(*))`` over confirmed rows.
 
-    ``paid_out`` is reported as a positive number; ``adjustments`` keeps its
-    sign. ``balance`` is everything added together.
+    ``paid_out`` is every outflow, reported as a positive number, and
+    ``withdrawn`` / ``payouts`` / ``transferred`` split it by kind (a coffer
+    withdrawal is not a prize payout, and the page says which is which).
+    ``adjustments`` keeps its sign. ``balance`` is everything added together.
     """
     donated = paid_out = adjustments = 0
     donation_count = 0
@@ -187,6 +211,9 @@ def totals_from_kind_sums(kind_sums: Iterable) -> dict:
         "balance": donated - paid_out + adjustments,
         "donated": donated,
         "paid_out": paid_out,
+        "withdrawn": -by_kind.get("withdrawal", 0),
+        "payouts": -by_kind.get("payout", 0),
+        "transferred": -by_kind.get("event_transfer", 0),
         "adjustments": adjustments,
         "donation_count": donation_count,
         "by_kind": by_kind,

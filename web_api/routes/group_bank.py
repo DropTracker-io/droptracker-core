@@ -5,16 +5,20 @@
          ?status=pending|confirmed|rejected|void|all&before_id=&limit=
   POST   /api/v1/groups/{id}/bank/entries  { kind, amount, player_id?|rsn?,
                                              note?, proof_key?, event_id?,
-                                             status? }          -> { id }
+                                             status?, created_at? } -> { id }
   PATCH  /api/v1/groups/{id}/bank/entries/{eid} { amount?, status?, note?,
                                                   review_note?, proof_key?,
-                                                  player_id?, rsn? } -> { ok }
+                                                  player_id?, rsn?,
+                                                  created_at? } -> { ok }
   DELETE /api/v1/groups/{id}/bank/entries/{eid}       -> { ok, voided }
   POST   /api/v1/groups/{id}/bank/transfer { event_id, amount, note? } -> { id }
 
 Amounts are entered as positive GP; the kind decides the sign stored (see
 ``services/group_bank.signed_amount``). Adjustments carry their own sign.
 The balance is the sum of confirmed rows.
+
+``created_at`` (unix seconds) backdates an entry to when the GP actually
+moved, so a clan can enter its history; the ledger is ordered by it.
 
 A **transfer** moves GP from the bank into one of the group's own event prize
 pots: it writes a confirmed ``event_transfer`` row here and a paid donation in
@@ -32,7 +36,7 @@ import json
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 
 from db import AuditLog, Event, EventBuyin, Group, GroupBankEntry, Player, User
 from services.group_bank import (
@@ -41,6 +45,7 @@ from services.group_bank import (
     BankRuleError,
     check_transition,
     clean_text,
+    entry_date,
     merge_donors,
     signed_amount,
     totals_from_kind_sums,
@@ -103,6 +108,7 @@ def _snapshot(e: GroupBankEntry) -> str:
         "proof_url": e.proof_url,
         "event_id": e.event_id,
         "event_buyin_id": e.event_buyin_id,
+        "created_at": _ts(e.created_at),
     })
 
 
@@ -300,6 +306,9 @@ async def get_bank(group_id: int):
                 "balance": money(totals["balance"]),
                 "donated_total": money(totals["donated"]),
                 "paid_out_total": money(totals["paid_out"]),
+                "withdrawn_total": money(totals["withdrawn"]),
+                "payout_total": money(totals["payouts"]),
+                "transferred_total": money(totals["transferred"]),
                 "adjustment_total": money(totals["adjustments"]),
                 "donation_count": totals["donation_count"],
                 "donor_count": summary["donor_count"],
@@ -320,8 +329,11 @@ async def get_bank(group_id: int):
 
 @group_bank_bp.get("/groups/<int:group_id>/bank/entries")
 async def list_bank_entries(group_id: int):
-    """One page of the ledger, newest first, for the admin Bank tab. Also
-    carries the pending count and the events a transfer can target."""
+    """One page of the ledger, newest first by when the GP moved (so a
+    backdated entry sits in its place), for the admin Bank tab. Also carries
+    the pending count and the events a transfer can target. ``before_id`` is
+    the last row of the previous page; the next page continues from its
+    ``(created_at, id)``."""
     user_id = current_user_id()
     manage_ids = manageable_guild_ids(user_id)
     status = (request.args.get("status") or "all").strip().lower()
@@ -346,8 +358,22 @@ async def list_bank_entries(group_id: int):
             if status != "all":
                 q = q.filter(GroupBankEntry.status == status)
             if before_id is not None:
-                q = q.filter(GroupBankEntry.id < before_id)
-            rows = q.order_by(GroupBankEntry.id.desc()).limit(limit + 1).all()
+                cursor = (
+                    s.query(GroupBankEntry.created_at)
+                    .filter(GroupBankEntry.id == before_id, GroupBankEntry.group_id == group_id)
+                    .scalar()
+                )
+                if cursor is None:
+                    abort_problem(422, "Invalid cursor", f"No bank entry {before_id} in this group.")
+                q = q.filter(or_(
+                    GroupBankEntry.created_at < cursor,
+                    and_(GroupBankEntry.created_at == cursor, GroupBankEntry.id < before_id),
+                ))
+            rows = (
+                q.order_by(GroupBankEntry.created_at.desc(), GroupBankEntry.id.desc())
+                .limit(limit + 1)
+                .all()
+            )
             more = len(rows) > limit
             rows = rows[:limit]
             events = (
@@ -400,6 +426,8 @@ async def record_bank_entry(group_id: int):
     event_id = body.get("event_id")
     if event_id is not None and not _is_id(event_id):
         abort_problem(422, "Invalid event_id", "'event_id' must be an integer or null.")
+    raw_date = body.get("created_at")
+    created_at = None if raw_date is None else _rule(entry_date, raw_date, datetime.utcnow())
 
     def _apply():
         with db_session() as s:
@@ -425,6 +453,7 @@ async def record_bank_entry(group_id: int):
                 event_id=event_id,
                 created_by_user_id=user_id,
                 acted_by_user_id=user_id,
+                created_at=created_at or now,
                 confirmed_at=now if status == "confirmed" else None,
             )
             s.add(row)
@@ -442,7 +471,9 @@ async def record_bank_entry(group_id: int):
 async def update_bank_entry(group_id: int, entry_id: int):
     """Edit an entry, or review it: confirm or reject a pending one, or take a
     decision back (to pending). A transfer's amount and status belong to the
-    prize-pot row it wrote, so only its note and screenshot are editable."""
+    prize-pot row it wrote, so only its note and screenshot are editable.
+    ``created_at`` re-dates an entry (a backdated record, or a coffer line
+    seen late)."""
     user_id = current_user_id()
     manage_ids = manageable_guild_ids(user_id)
     body = await json_body()
@@ -454,7 +485,7 @@ async def update_bank_entry(group_id: int, entry_id: int):
             if row.status == "void":
                 abort_problem(409, "Entry removed", "A removed entry can't be edited.")
             if row.kind == "event_transfer" and any(
-                k in body for k in ("amount", "status", "player_id", "rsn")
+                k in body for k in ("amount", "status", "player_id", "rsn", "created_at")
             ):
                 abort_problem(
                     409, "Transfers are fixed",
@@ -465,6 +496,8 @@ async def update_bank_entry(group_id: int, entry_id: int):
                 row.amount = _rule(signed_amount, row.kind, body.get("amount"))
             if "note" in body:
                 row.note = _rule(clean_text, body.get("note"), "note")
+            if "created_at" in body:
+                row.created_at = _rule(entry_date, body.get("created_at"), datetime.utcnow())
             if "review_note" in body:
                 row.review_note = _rule(clean_text, body.get("review_note"), "review_note")
             if "player_id" in body or "rsn" in body:
@@ -604,6 +637,7 @@ async def transfer_to_event(group_id: int):
                 event_buyin_id=buyin.id,
                 created_by_user_id=user_id,
                 acted_by_user_id=user_id,
+                created_at=now,
                 confirmed_at=now,
             )
             s.add(row)

@@ -110,6 +110,15 @@ class TestTotals:
         t = gbs.totals_from_kind_sums([])
         assert t["balance"] == 0 and t["by_kind"] == {}
 
+    def test_outflows_split_by_kind(self):
+        # A coffer withdrawal is not a prize payout; the page shows each.
+        t = gbs.totals_from_kind_sums([
+            ("withdrawal", -2_000, 1), ("payout", -1_000, 1), ("event_transfer", -500, 1),
+        ])
+        assert (t["withdrawn"], t["payouts"], t["transferred"]) == (2_000, 1_000, 500)
+        assert t["paid_out"] == 3_500
+        assert gbs.totals_from_kind_sums([])["withdrawn"] == 0
+
     def test_can_go_negative(self):
         # A payout recorded before the opening balance is allowed; the page
         # shows the negative balance rather than the ledger refusing it.
@@ -134,6 +143,38 @@ class TestMergeDonors:
         top, count = gbs.merge_donors(rows, [], {}, limit=5)
         assert len(top) == 5 and count == 20
         assert top[0]["player_id"] == 19
+
+
+class TestEntryDate:
+    NOW = datetime(2026, 11, 2, 21, 0, 0)
+
+    def _ts(self, dt):
+        from calendar import timegm
+
+        return timegm(dt.utctimetuple())
+
+    def test_backdated_date_round_trips_as_naive_utc(self):
+        when = datetime(2024, 5, 1, 12, 0, 0)
+        assert gbs.entry_date(self._ts(when), self.NOW) == when
+
+    def test_clock_slack_is_allowed(self):
+        soon = datetime(2026, 11, 2, 21, 5, 0)
+        assert gbs.entry_date(self._ts(soon), self.NOW) == soon
+
+    @pytest.mark.parametrize("value", [
+        "2024-05-01", 1.5, True, None, 10 ** 15,
+    ])
+    def test_not_a_timestamp(self, value):
+        with pytest.raises(gbs.BankRuleError):
+            gbs.entry_date(value, self.NOW)
+
+    def test_future_refused(self):
+        with pytest.raises(gbs.BankRuleError):
+            gbs.entry_date(self._ts(datetime(2026, 11, 3)), self.NOW)
+
+    def test_before_old_school_refused(self):
+        with pytest.raises(gbs.BankRuleError):
+            gbs.entry_date(self._ts(datetime(2012, 12, 31)), self.NOW)
 
 
 class TestCofferRules:
@@ -352,6 +393,37 @@ class TestRecordEntry:
         assert r.status_code == 403
         assert not s.committed
 
+    async def test_backdated_entry_keeps_its_date(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "donation", "amount": 10, "rsn": "x", "created_at": 1_714_564_800},
+        )
+        assert r.status_code == 200, await r.get_data()
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert row.created_at == datetime(2024, 5, 1, 12, 0, 0)
+        # Confirmed now, whatever day the GP moved.
+        assert row.confirmed_at > row.created_at
+
+    async def test_undated_entry_is_dated_now(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        await client.post(
+            "/api/v1/groups/42/bank/entries", json={"kind": "donation", "amount": 10, "rsn": "x"},
+        )
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert row.created_at is not None and row.created_at == row.confirmed_at
+
+    async def test_future_date_rejected_before_touching_the_db(self, client, monkeypatch):
+        s = _S()
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "donation", "amount": 10, "rsn": "x", "created_at": 4_102_444_800},
+        )
+        assert r.status_code == 422
+
     async def test_event_must_belong_to_group(self, client, monkeypatch):
         s = _S([_GROUP], [_event(group_id=99)])
         _wire(monkeypatch, s)
@@ -454,6 +526,28 @@ class TestUpdateEntry:
         _wire(monkeypatch, s)
         r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"note": "Top-up"})
         assert r.status_code == 200 and row.note == "Top-up"
+
+    async def test_date_edit_redates_and_is_audited(self, client, monkeypatch):
+        row = _entry(status="confirmed", created_at=datetime(2026, 11, 2, 21, 0, 0))
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch(
+            "/api/v1/groups/42/bank/entries/9", json={"created_at": 1_714_564_800},
+        )
+        assert r.status_code == 200, await r.get_data()
+        assert row.created_at == datetime(2024, 5, 1, 12, 0, 0)
+        audit = next(a for a in s.added if isinstance(a, _RecAudit))
+        assert '"created_at": 1714564800' in audit.after
+        assert '"created_at": 1714564800' not in audit.before
+
+    async def test_transfer_date_is_fixed(self, client, monkeypatch):
+        row = _entry(kind="event_transfer", amount=-100, status="confirmed", event_buyin_id=3)
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch(
+            "/api/v1/groups/42/bank/entries/9", json={"created_at": 1_714_564_800},
+        )
+        assert r.status_code == 409
 
     async def test_void_row_is_frozen(self, client, monkeypatch):
         row = _entry(status="void", confirmed_at=datetime.utcnow())
@@ -582,6 +676,8 @@ class TestGetBank:
         assert body["visible"] is True and body["can_manage"] is False
         assert body["balance"]["value"] == 8_000
         assert body["paid_out_total"]["value"] == 1_000
+        assert body["payout_total"]["value"] == 1_000
+        assert body["withdrawn_total"]["value"] == 0
         assert body["top_donors"][0]["total"]["value"] == 9_000
         # Staff notes and the queue size never reach the public.
         assert body["recent"][0]["note"] is None
@@ -607,6 +703,48 @@ class TestGetBank:
         body = await (await client.get("/api/v1/groups/42/bank")).get_json()
         assert body["can_manage"] is True and body["pending_count"] == 4
         assert body["recent"][0]["note"] == "staff only"
+
+
+class _QS(_Q):
+    def scalar(self):
+        return self._r[0] if self._r else None
+
+
+class _SS(_S):
+    def query(self, *a, **k):
+        assert self._batches, "unexpected extra query"
+        return _QS(self._batches.pop(0))
+
+
+class TestListEntries:
+    def _wire_list(self, monkeypatch, s):
+        _wire(monkeypatch, s)
+        # The ledger orders and pages on columns: real column expressions, so
+        # the keyset filter really builds (the scripted query ignores it).
+        from sqlalchemy import column
+
+        monkeypatch.setattr(gb, "GroupBankEntry", SimpleNamespace(
+            id=column("id"), group_id=column("group_id"), status=column("status"),
+            created_at=column("created_at"),
+        ))
+        monkeypatch.setattr(gb, "_pending_count", lambda s, gid: 0)
+
+    async def test_page_continues_from_the_cursor_rows_date(self, client, monkeypatch):
+        rows = [_entry(id=5, status="confirmed"), _entry(id=4, status="confirmed")]
+        # group, the page query (built first), cursor row's created_at, transfer events
+        s = _SS([_GROUP], rows, [datetime(2024, 5, 1)], [])
+        self._wire_list(monkeypatch, s)
+        r = await client.get("/api/v1/groups/42/bank/entries?before_id=9&limit=5")
+        assert r.status_code == 200, await r.get_data()
+        body = await r.get_json()
+        assert [e["id"] for e in body["entries"]] == [5, 4]
+        assert body["next_before_id"] is None
+
+    async def test_unknown_cursor_is_422(self, client, monkeypatch):
+        s = _SS([_GROUP], [], [])
+        self._wire_list(monkeypatch, s)
+        r = await client.get("/api/v1/groups/42/bank/entries?before_id=9")
+        assert r.status_code == 422
 
 
 # --------------------------------------------------------------------------- #
