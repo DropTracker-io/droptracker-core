@@ -31,6 +31,7 @@ and events — applies identically to Discord and web submissions.
 
 import asyncio
 import os
+import time
 
 import httpx
 from interactions import (
@@ -56,6 +57,7 @@ from data.submissions.manual_discord import (
     build_manual_payload,
     parse_kill_time_ms,
     payload_to_form,
+    resolve_pet_input,
     summarize_submission,
 )
 from data.submissions.manual_proof import (
@@ -122,6 +124,47 @@ _NPC_AC_SQL = text(
     "FROM npc_list n WHERE n.npc_name LIKE :pat "
     "ORDER BY tracked DESC, n.npc_name ASC, n.npc_id ASC LIMIT 100"
 )
+
+
+# Pets the plugin has recorded at least a few times: catches pets the
+# hand-kept catalogue (utils/osrs_pets) hasn't caught up with yet, while a
+# one-off junk name stays out.
+_RECORDED_PETS_SQL = text(
+    "SELECT pet_name FROM player_pets GROUP BY pet_name HAVING COUNT(*) >= 3"
+)
+_ITEM_EXACT_SQL = text("SELECT item_name FROM items WHERE item_name = :name LIMIT 1")
+_RECORDED_PETS_TTL = 3600.0
+_recorded_pets_cache: tuple[float, tuple[str, ...]] = (0.0, ())
+
+
+def recorded_pet_names() -> tuple[str, ...]:
+    global _recorded_pets_cache
+    loaded_at, names = _recorded_pets_cache
+    now = time.monotonic()
+    if names and now - loaded_at < _RECORDED_PETS_TTL:
+        return names
+    try:
+        rows = session.execute(_RECORDED_PETS_SQL).fetchall()
+        names = tuple(r[0] for r in rows if r[0])
+        _recorded_pets_cache = (now, names)
+    except Exception:
+        session.rollback()
+    return names
+
+
+def _exact_item_name(name: str):
+    try:
+        row = session.execute(_ITEM_EXACT_SQL, {"name": name}).first()
+    except Exception:
+        session.rollback()
+        return None
+    return row[0] if row else None
+
+
+def resolve_pet_field(raw: str, source: str | None):
+    """``(pet_name, error, candidates)``: see manual_discord.resolve_pet_input."""
+    return resolve_pet_input(raw, source, recorded=recorded_pet_names(),
+                             exact_item=_exact_item_name)
 
 
 def _account_option(required: bool = False):
@@ -350,6 +393,12 @@ class SubmissionCommands(Extension):
                 embed=self._error_embed("You're submitting too fast — wait a minute and try again."),
                 ephemeral=True,
             )
+
+        if sub_type == "pet" and fields.get("item_name"):
+            pet_name, pet_err, _ = resolve_pet_field(fields["item_name"], fields.get("npc_name"))
+            if pet_err:
+                return await ctx.send(embed=self._error_embed(pet_err), ephemeral=True)
+            fields["item_name"] = pet_name
 
         try:
             payload = build_manual_payload(sub_type, player.player_name, **fields)
@@ -936,7 +985,11 @@ class SubmissionCommands(Extension):
 
     @submit_pet.autocomplete("pet")
     async def pet_autocomplete(self, ctx: AutocompleteContext):
-        await self._send_name_choices(ctx, _ITEM_AC_SQL)
+        from utils.osrs_pets import pet_name_choices
+
+        self._refresh_session()
+        names = pet_name_choices(ctx.input_text, extra_names=recorded_pet_names())
+        await ctx.send(choices=[{"name": n[:100], "value": n[:100]} for n in names[:25]])
 
     @submit_drop.autocomplete("npc")
     @submit_pb.autocomplete("boss")

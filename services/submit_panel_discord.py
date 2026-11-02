@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import functools
 import logging
+import secrets
+import time
 
 import httpx
 from interactions import (
@@ -43,10 +45,28 @@ _INTERACTION_MODAL_SUBMIT = 5
 
 _COLOR_SUCCESS = 0x2ECC71
 _COLOR_ERROR = 0xE74C3C
+_COLOR_QUESTION = 0x3498DB
 
 #: Flipped off for the life of the process if Discord ever refuses the File
 #: Upload component, so every later modal goes straight to the plain version.
 _upload_supported = True
+
+#: Submissions waiting on a "which pet did you mean?" button, by token:
+#: ``(expires_at, discord_id, sub_type, values, attachments, candidates)``.
+#: In memory on purpose: a restart only means the member submits again.
+_PENDING_PET_PICKS: dict = {}
+_PET_PICK_TTL = 600.0
+
+
+def _stash_pet_pick(discord_id, sub_type, values, attachments, candidates) -> str:
+    now = time.monotonic()
+    for key in [k for k, v in _PENDING_PET_PICKS.items() if v[0] < now]:
+        _PENDING_PET_PICKS.pop(key, None)
+    token = secrets.token_urlsafe(8)
+    _PENDING_PET_PICKS[token] = (now + _PET_PICK_TTL, str(discord_id), sub_type,
+                                 dict(values), list(attachments), tuple(candidates))
+    return token
+
 
 _LINK_HINT = (
     "Link your RuneScape account first: sign in at https://www.droptracker.io and "
@@ -258,6 +278,8 @@ class SubmitPanel(Extension):
                 await self._open(ctx)
             elif custom_id == core.TYPE_SELECT_ID:
                 await self._open_modal(ctx)
+            elif custom_id.startswith(core.PET_PICK_PREFIX):
+                await self._pet_picked(ctx, custom_id)
         except Exception:
             log.exception("[SubmitPanel] component failed: %s", custom_id)
             try:
@@ -339,10 +361,11 @@ class SubmitPanel(Extension):
             {"type": _CALLBACK_DEFERRED_MESSAGE, "data": {"flags": _FLAG_EPHEMERAL}},
             interaction_id, token)
 
-        async def reply(title, text, color):
+        async def reply(title, text, color, components=None):
             try:
                 await self.bot.http.edit_interaction_message(
-                    {"embeds": [_embed(title, text, color)]}, self.bot.app.id, token)
+                    {"embeds": [_embed(title, text, color)], "components": components or []},
+                    self.bot.app.id, token)
             except Exception:
                 log.exception("[SubmitPanel] couldn't edit the deferred reply")
 
@@ -360,8 +383,47 @@ class SubmitPanel(Extension):
                       _COLOR_ERROR)
         await reply(*result)
 
+    async def _pet_picked(self, ctx, custom_id: str) -> None:
+        """A "which pet did you mean?" button: finish the waiting submission
+        with the chosen pet, in place of the question."""
+        from interactions import Embed
+
+        parsed = core.parse_pet_pick(custom_id)
+        pending = _PENDING_PET_PICKS.get(parsed[0]) if parsed else None
+        if pending is None or pending[0] < time.monotonic():
+            await ctx.edit_origin(
+                embeds=[Embed(title="That expired",
+                              description="Tap Submit again to send your pet.",
+                              color=_COLOR_ERROR)],
+                components=[])
+            return
+        token, index = parsed
+        _expires, discord_id, sub_type, values, attachments, candidates = pending
+        if str(ctx.author.id) != discord_id or index >= len(candidates):
+            await ctx.send("That button isn't for you.", ephemeral=True)
+            return
+        # One submission per question, however many times it's tapped.
+        _PENDING_PET_PICKS.pop(token, None)
+        await ctx.defer(edit_origin=True)
+        values = {**values, "item": candidates[index]}
+        try:
+            result = await self._process_values(sub_type, values, attachments, discord_id,
+                                                pet_confirmed=True)
+        except Exception:
+            log.exception("[SubmitPanel] pet pick submit failed")
+            result = ("Couldn't submit that", "Something went wrong. Please try again.",
+                      _COLOR_ERROR)
+        title, text, color = result[:3]
+        await ctx.edit_origin(embeds=[Embed(title=title, description=text[:4000], color=color)],
+                              components=[])
+
     async def _process(self, sub_type: str, modal_data: dict, discord_id):
-        """``(title, text, color)`` for the member's reply."""
+        values, attachments = core.parse_modal_submit(modal_data)
+        return await self._process_values(sub_type, values, attachments, discord_id)
+
+    async def _process_values(self, sub_type: str, values: dict, attachments: list,
+                              discord_id, *, pet_confirmed: bool = False):
+        """``(title, text, color[, components])`` for the member's reply."""
         from commands.submissions import (
             _ITEM_AC_SQL,
             _NPC_AC_SQL,
@@ -369,6 +431,7 @@ class SubmitPanel(Extension):
             forward_to_intake,
             policy_notices,
             rate_limited,
+            resolve_pet_field,
         )
         from data.submissions.manual_discord import (
             build_manual_payload,
@@ -379,7 +442,6 @@ class SubmitPanel(Extension):
         from utils.format import pick_player_by_rsn
 
         failed = "Couldn't submit that"
-        values, attachments = core.parse_modal_submit(modal_data)
         session.expire_all()
         players, err = claimed_players(discord_id)
         if err:
@@ -397,6 +459,17 @@ class SubmitPanel(Extension):
             return failed, "You're submitting too fast. Wait a minute and try again.", _COLOR_ERROR
         try:
             fields = core.payload_fields(sub_type, values, parse_kill_time_ms)
+            if sub_type == "pet" and fields.get("item_name") and not pet_confirmed:
+                pet_name, pet_err, candidates = resolve_pet_field(
+                    fields["item_name"], fields.get("npc_name"))
+                if pet_err:
+                    if 0 < len(candidates) <= core.PET_PICK_MAX:
+                        token = _stash_pet_pick(discord_id, sub_type, values,
+                                                attachments, candidates)
+                        return ("Which pet?", f"{pet_err} Pick it below.", _COLOR_QUESTION,
+                                core.pet_pick_components(token, candidates))
+                    return failed, pet_err, _COLOR_ERROR
+                fields["item_name"] = pet_name
             if fields.get("item_name"):
                 fields["item_name"] = _canonical_name(_ITEM_AC_SQL, fields["item_name"])
             if fields.get("npc_name"):

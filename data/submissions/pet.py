@@ -103,6 +103,17 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     else:
         pet_item_id = pet_item.item_id
         debug_print(f"Pet item validated - ID: {pet_item_id}, Name: {pet_name}")
+    if pet_item_id is None and pet_data.get("intake_source") == "manual":
+        # Nothing can be recorded without the item (no player_pets row, no
+        # duplicate check), so a typed name we can't place is refused rather
+        # than announced and reported as a success (ticket 505). Plugin pets
+        # carry the game's own name and still go through.
+        return SubmissionResponse(
+            success=False,
+            message=f"We don't know a pet called \"{pet_name}\". Use its in-game name, "
+                    "like Smol heredit or Pet chaos elemental.",
+            notice="",
+        )
 
     npc_id = None
     npc_name = source

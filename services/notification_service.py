@@ -5352,6 +5352,11 @@ class NotificationService:
             notification.error_message = channel_error or f"Channel not found for group {group_id}"
             db_session.commit()
             return
+        except interactions.errors.Forbidden:
+            # process_notification_with_session tells the group's admins the
+            # bot can't post there; swallowing it here kept pets silent
+            # (ticket 505).
+            raise
         except Exception as e:
             notification.status = 'failed'
             notification.error_message = f"Failed to send pet notification: {e}"

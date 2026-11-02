@@ -275,3 +275,39 @@ def summarize_submission(sub_type: str, payload: dict) -> str:
         base = f"**{payload['pet_name']}** (pet)"
         return f"{base} from **{src}**" if src else base
     return "your submission"
+
+
+def resolve_pet_input(raw, source=None, *, recorded=(), exact_item=None):
+    """``(pet_name, error, candidates)`` for the pet a member typed.
+
+    ``pet_name`` is the canonical spelling when the input points at one pet
+    (``error`` is then None). Otherwise ``error`` is a member-facing sentence
+    and ``candidates`` the pets it might have meant, for a picker.
+    ``recorded`` are pet names the plugin has recorded (pets the catalogue
+    may not list yet); ``exact_item(name)`` returns the catalog spelling of
+    an exact item name or None, so a brand-new pet still gets through.
+    """
+    from utils.osrs_pets import resolve_pet_name
+
+    raw = (raw or "").strip()
+    match, candidates = resolve_pet_name(raw, source, extra_names=recorded)
+    if match:
+        return match, None, candidates
+    if not candidates:
+        known = exact_item(raw) if exact_item and raw else None
+        if known:
+            return known, None, ()
+        return None, (
+            f"We don't know a pet called \"{raw}\". Use its in-game name, "
+            "like Smol heredit or Pet chaos elemental."
+        ), ()
+    if len(candidates) == 1:
+        return None, f"Did you mean {candidates[0]}?", candidates
+    if len(candidates) <= 5:
+        listed = ", ".join(candidates[:-1]) + f" or {candidates[-1]}"
+        return None, f"Which pet did you mean? \"{raw}\" could be {listed}.", candidates
+    shown = ", ".join(candidates[:8]) + (", ..." if len(candidates) > 8 else "")
+    return None, (
+        f"\"{raw}\" matches several pets ({shown}). "
+        "Use the pet's full name, or say where it came from."
+    ), candidates

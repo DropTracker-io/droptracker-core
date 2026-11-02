@@ -51,6 +51,10 @@ TYPE_LABELS = {key: label for key, label, _d in TYPE_CHOICES}
 
 CA_TIERS = ("easy", "medium", "hard", "elite", "master", "grandmaster")
 
+#: "Which pet did you mean?" buttons: ``dtsubmit:petpick:<token>:<index>``.
+PET_PICK_PREFIX = "dtsubmit:petpick:"
+PET_PICK_MAX = 5
+
 PROOF_FIELD = "proof"
 ACCOUNT_FIELD = "account"
 
@@ -137,8 +141,10 @@ def _type_fields(sub_type: str) -> list:
         ]
     if sub_type == "pet":
         return [
-            _text("item", "Pet", required=True, placeholder="Pet chaos elemental"),
-            _text("npc", "Where it came from", required=False, placeholder="Chaos Elemental"),
+            _text("item", "Pet", required=True, placeholder="Smol heredit",
+                  description="Its in-game name. A short name like \"smol\" works too."),
+            _text("npc", "Where it came from", required=False, placeholder="Sol Heredit",
+                  description="The boss, skill or activity. Helps us pick the right pet."),
             _text("kc", "Kill count", required=False, max_length=10),
         ]
     raise ValueError(f"unknown submission type {sub_type!r}")
@@ -247,6 +253,26 @@ def payload_fields(sub_type: str, values: dict, parse_kill_time_ms) -> dict:
             raise ValueError("Pick the task's tier.")
         return {"task": (values.get("task") or "").strip() or None, "tier": tier}
     raise ValueError("Unknown submission type.")
+
+
+def pet_pick_components(token: str, candidates) -> list:
+    """One button per candidate pet (at most PET_PICK_MAX), as raw components."""
+    buttons = [
+        {"type": 2, "style": 2, "label": str(name)[:80],
+         "custom_id": f"{PET_PICK_PREFIX}{token}:{i}"}
+        for i, name in enumerate(list(candidates)[:PET_PICK_MAX])
+    ]
+    return [{"type": 1, "components": buttons}] if buttons else []
+
+
+def parse_pet_pick(custom_id: str) -> Optional[tuple[str, int]]:
+    """``(token, index)`` from a pet-pick button id, else None."""
+    if not isinstance(custom_id, str) or not custom_id.startswith(PET_PICK_PREFIX):
+        return None
+    token, _, index = custom_id[len(PET_PICK_PREFIX):].rpartition(":")
+    if not token or not index.isdigit():
+        return None
+    return token, int(index)
 
 
 def interaction_user_id(payload: dict) -> Optional[str]:

@@ -152,3 +152,80 @@ def pet_matches(pet_name: str, categories=None) -> bool:
     if not categories:
         return n in ALL_PETS
     return any(n in PET_CATEGORIES.get(c, frozenset()) for c in categories)
+
+
+# ── typed-name resolution (manual submissions) ───────────────────────────────
+
+def _loose(value) -> str:
+    """``_norm`` plus punctuation folded away, so ``lil zik``, ``Lil' zik`` and
+    ``lil'zik`` meet: apostrophes and dots vanish, hyphens become spaces."""
+    text = _norm(value).replace("-", " ")
+    text = "".join(ch for ch in text if ch.isalnum() or ch == " ")
+    return " ".join(text.split())
+
+
+def _source_words(source) -> set:
+    # "pet" is in many pet names and says nothing about which one.
+    return {w for w in _loose(source).split() if len(w) >= 3 and w != "pet"}
+
+
+def resolve_pet_name(raw, source=None, extra_names=()):
+    """``(match, candidates)`` for a pet name a member typed.
+
+    ``match`` is the display spelling when the input points at exactly one
+    pet, else None; ``candidates`` are the pets it might mean (empty when
+    nothing comes close). Tried in order: an exact name, then names that
+    contain what was typed ("Smol", "graardor"), then near spellings
+    ("Olmet"). Several hits are narrowed by ``source`` (the boss, skill or
+    activity), so "Smol" from "Sol Heredit" is Smol heredit, not Smolcano.
+    ``extra_names`` adds pets this catalogue doesn't list yet (names the
+    plugin has already recorded).
+    """
+    import difflib
+
+    names = {}
+    for name in PET_DISPLAY_BY_NORM.values():
+        names.setdefault(_loose(name), name)
+    for name in extra_names or ():
+        if name and str(name).strip():
+            names.setdefault(_loose(name), str(name).strip())
+    key = _loose(raw)
+    if not key:
+        return None, ()
+    if key in names:
+        return names[key], (names[key],)
+
+    hits = [k for k in names if key in k or k.replace(" ", "") == key.replace(" ", "")]
+    fuzzy = False
+    if not hits:
+        hits = difflib.get_close_matches(key, list(names), n=5, cutoff=0.75)
+        fuzzy = True
+    if len(hits) > 1 and source:
+        words = _source_words(source)
+        skill = _loose(source)
+        narrowed = [k for k in hits
+                    if words & set(k.split())
+                    or _loose(SKILLING_PET_SKILL.get(_norm(names[k])) or "") == skill]
+        if narrowed:
+            hits = narrowed
+    candidates = tuple(sorted({names[k] for k in hits}, key=str.lower))
+    if len(hits) == 1:
+        # A near spelling is only taken on its own when it is very close;
+        # anything looser is offered back as a suggestion.
+        if not fuzzy or difflib.SequenceMatcher(None, key, hits[0]).ratio() >= 0.85:
+            return names[hits[0]], candidates
+        return None, candidates
+    return None, candidates
+
+
+def pet_name_choices(typed, extra_names=()):
+    """Pet names for an autocomplete box: names containing what was typed,
+    those starting with it first. Empty input lists every pet."""
+    names = {}
+    for name in list(PET_DISPLAY_BY_NORM.values()) + list(extra_names or ()):
+        if name and str(name).strip():
+            names.setdefault(_loose(name), str(name).strip())
+    key = _loose(typed)
+    hits = [k for k in names if key in k]
+    hits.sort(key=lambda k: (not k.startswith(key), k))
+    return [names[k] for k in hits]
