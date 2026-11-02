@@ -249,6 +249,22 @@ def test_pet_xp_milestone_unit():
     assert parsed.extra == {"milestone_count": 12000000, "milestone_unit": "XP"}
 
 
+def test_pet_line_naming_its_source_instead_of_a_count():
+    # The Hueycoatl's line has no count; the whole tail used to become the
+    # pet's name, so no item matched and the notification read as unknown.
+    parsed = parse_broadcast(
+        "Tookez has a funny feeling like she's being followed: Huberte from Hueycoatl."
+    )
+    assert parsed.kind == "pet"
+    assert parsed.item_name == "Huberte"
+    assert parsed.extra == {"source": "Hueycoatl"}
+    dup = parse_broadcast(
+        "Wont Take Me has a funny feeling like he would have been followed: Huberte from Hueycoatl."
+    )
+    assert dup.item_name == "Huberte"
+    assert dup.extra == {"duplicate": True, "source": "Hueycoatl"}
+
+
 # --- collection_log --------------------------------------------------------
 
 def test_collection_log():

@@ -1654,7 +1654,7 @@ async def _process_chat_pet(
 
     from utils.osrs_pets import skilling_pet_source
 
-    source = skilling_pet_source(parsed.item_name)
+    source = parsed.extra.get("source") or skilling_pet_source(parsed.item_name)
     from utils.pet_notifications import group_announces_duplicate, is_duplicate
 
     # The broadcast line itself says whether it is a duplicate.

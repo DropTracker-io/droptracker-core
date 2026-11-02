@@ -144,3 +144,23 @@ def test_combat_achievement_varps_are_not_a_contiguous_range():
 @pytest.mark.parametrize("key", ["combat_achievement_varps", "quest_ids", "sync"])
 def test_every_default_section_documents_itself(key):
     assert DEFAULT_SECTIONS[key].get("description"), f"{key} needs a description"
+
+
+def test_manifest_pets_cover_every_pet_the_game_has():
+    # Plugin 6.1.15 only reads a pet's name from chat if the manifest lists
+    # it; the 8 pets missing here went out as "Unknown Pet".
+    import json
+    import os
+
+    from services.plugin_manifest import DEFAULT_SECTIONS
+
+    pets = {n.lower() for n in DEFAULT_SECTIONS["pets"]["payload"]}
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "scripts",
+                        "collection_log_structure.json")
+    with open(path) as fh:
+        structure = json.load(fh)
+    game = [n for tab in structure["tabs"] for page in tab["pages"]
+            if page["name"] == "All Pets" for n in page["names"]]
+    assert game
+    assert [n for n in game if n.lower() not in pets] == []
+    assert DEFAULT_SECTIONS["pets"]["payload"]["Dom"] == "Doom of Mokhaiotl"

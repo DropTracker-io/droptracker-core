@@ -257,13 +257,15 @@ _CLOG_RE = re.compile(
 # pronoun segment rather than enumerating Jagex's choices (the plugin's own
 # PetHandler.CLAN_REGEX does the same). The trailing count+unit ("at 194
 # kills", "at 12,000,000 XP") is absent on some skilling pets, so it is
-# optional.
+# optional. Some lines name the source instead: "...: Huberte from
+# Hueycoatl." No pet's name contains " from ".
 _PET_RE = re.compile(
     r"^(?P<player>.+?) "
     r"(?:has a funny feeling like .+? followed|"
     r"feels something weird sneaking into .+? backpack|"
     r"feels like .+? acquired something special): "
     r"(?P<pet>.+?)"
+    r"(?: from (?P<source>.+?))?"
     r"(?: at (?P<count>[\d,]+) (?P<unit>.+?))?\.?$"
 )
 
@@ -320,6 +322,7 @@ def _pet(m) -> ParsedBroadcast:
     # "...would have been followed" is the game's duplicate-pet line.
     if "would have been followed" in m.group(0):
         extra["duplicate"] = True
+    extra.update(_source_extra(m))
     return ParsedBroadcast(
         kind="pet", player=m["player"], item_name=m["pet"], extra=extra
     )
