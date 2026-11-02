@@ -1190,6 +1190,18 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "min": 0,
         "max": 23,
     },
+    # Whether the card waits for the clan's admins (services/recap_delivery
+    # CFG_REVIEW). Read by the delivery sweep each tick; the design itself is
+    # edited in the recap designer (/groups/{id}/recaps), not here.
+    {
+        "key": "recap_review_mode",
+        "label": "Review before posting",
+        "category": "recaps",
+        "type": "select",
+        "help": "Post the card automatically, message your admins on Discord first so they can change it before it goes out, or hold it until an admin approves it.",
+        "default": "off",
+        "options": ["off", "notify", "approve"],
+    },
     # IANA name (e.g. "America/New_York"). Empty means UTC.
     {
         "key": "recap_timezone",

@@ -36,7 +36,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.mysql import LONGTEXT
+from sqlalchemy.dialects.mysql import LONGTEXT, MEDIUMTEXT
 
 from .base import Base
 
@@ -136,6 +136,38 @@ class RecapWomGain(Base):
     ehb_gained = Column(Float, nullable=False, default=0.0, server_default="0")
     source = Column(String(16), nullable=False, default="bulk", server_default="bulk")
     fetched_at = Column(DateTime, nullable=False, server_default=func.now())
+    # Every metric gained in the month, ``{"metric": [gained, start, end]}``,
+    # non-zero gains only (web154a). NULL = harvested before the column existed;
+    # see ``services.recap_ehb.stored_metrics``.
+    metrics = Column(MEDIUMTEXT, nullable=True)
+
+
+class RecapDesign(Base):
+    """A clan's recap layout (web154a, suggestion #224).
+
+    ``period = ''`` is the clan default; a ``'YYYY-MM'`` row overrides it for
+    one month. ``design`` is the JSON validated by
+    ``services.recap_design.normalize_design`` — the stored form is always the
+    normalised one, so a reader never has to re-validate.
+
+    ``approved_at`` only means something on a month row: it is the admin
+    approval a clan holding recaps for review needs before the post goes out.
+    """
+
+    __tablename__ = "recap_designs"
+    __table_args__ = (
+        UniqueConstraint("group_id", "period", name="uq_recap_design_group_period"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(Integer, nullable=False)
+    period = Column(String(7), nullable=False, default="", server_default="")
+    design = Column(Text, nullable=False)
+    updated_by = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, nullable=False, server_default=func.now())
+    approved_at = Column(DateTime, nullable=True)
+    approved_by = Column(Integer, nullable=True)
 
 
 class RecapDelivery(Base):

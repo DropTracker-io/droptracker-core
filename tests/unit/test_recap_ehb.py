@@ -171,6 +171,9 @@ class _Session:
 
     def execute(self, statement, params=None):
         sql = str(statement)
+        if "SHOW COLUMNS FROM recap_wom_gains" in sql:
+            # Post-web154a: the metrics column exists.
+            return _Result([("metrics",)])
         if "INSERT INTO recap_wom_gains" in sql:
             self.written.extend(params or [])
             return None
@@ -267,7 +270,7 @@ class TestHarvest:
         # The delivery sweep fires every 15 minutes for three days. Only the
         # first tick may cost anything.
         conn = _FakeRedis()
-        ehb._mark_attempted(conn, "g", 14, "2026-07")
+        ehb._mark_attempted(conn, "gm", 14, "2026-07")
         session = _Session(coverage=[], groups=[(14, 500)],
                            rosters={14: [(795, 1, "Buzzyn")]})
         stats, calls = _harvest(session, monkeypatch, bulk=[], conn=conn,
@@ -295,7 +298,7 @@ class TestHarvest:
         stats, _ = _harvest(session, monkeypatch, bulk=None, conn=conn,
                             group_ids=[14])
         assert stats["fetch_failures"] == 1
-        assert not ehb._attempted(conn, "g", 14, "2026-07")
+        assert not ehb._attempted(conn, "gm", 14, "2026-07")
 
     def test_a_fetch_that_matched_nobody_is_still_an_answer(self, monkeypatch):
         # Otherwise a clan whose members we don't track gets re-fetched on every
@@ -306,7 +309,54 @@ class TestHarvest:
         stats, _ = _harvest(session, monkeypatch, bulk=[], conn=conn,
                             group_ids=[14])
         assert stats["rows_written"] == 0
+        assert ehb._attempted(conn, "gm", 14, "2026-07")
+
+    def test_an_ehb_only_marker_does_not_block_the_full_metric_fetch(self, monkeypatch):
+        # Attempts recorded before web154a ("g") fetched EHB alone; the clan
+        # stats page needs every metric, so those must not count.
+        conn = _FakeRedis()
+        ehb._mark_attempted(conn, "g", 14, "2026-07")
+        session = _Session(coverage=[], groups=[(14, 500)],
+                           rosters={14: [(795, 1, "Buzzyn")]})
+        _stats, calls = _harvest(session, monkeypatch, bulk=[], conn=conn,
+                                 group_ids=[14])
+        assert len(calls["bulk"]) == 1
+
+    def test_before_the_migration_the_old_marker_is_kept(self, monkeypatch):
+        # Until web154a adds the column a harvest stores EHB only, so it must
+        # not set the 30-day "gm" marker that would block the full fetch.
+        monkeypatch.setattr(ehb, "_METRICS_COLUMN", False)
+        conn = _FakeRedis()
+        session = _Session(coverage=[], groups=[(14, 500)],
+                           rosters={14: [(795, 1, "Buzzyn")]})
+        _harvest(session, monkeypatch, bulk=[], conn=conn, group_ids=[14])
         assert ehb._attempted(conn, "g", 14, "2026-07")
+        assert not ehb._attempted(conn, "gm", 14, "2026-07")
+
+    def test_every_metric_is_kept_with_the_ehb(self, monkeypatch):
+        session = _Session(
+            coverage=[], groups=[(14, 500)],
+            rosters={14: [(795, 2188996, "Buzzyn")]},
+        )
+        row = {
+            "player": {"id": 2188996, "displayName": "Buzzyn"},
+            "data": [
+                {"metric": "overall", "gained": 1915772, "start": 108050294, "end": 109966066},
+                {"metric": "zulrah", "gained": 12, "start": 100, "end": 112},
+                {"metric": "attack", "gained": 0, "start": 5, "end": 5},
+                {"metric": "ehb", "gained": 0.5, "start": 10.0, "end": 10.5},
+            ],
+        }
+        _harvest(session, monkeypatch, bulk=[row], group_ids=[14])
+        (written,) = session.written
+        assert written["ehb"] == 0.5
+        import json as _json
+
+        assert _json.loads(written["metrics"]) == {
+            "overall": [1915772, 108050294, 109966066],
+            "zulrah": [12, 100, 112],
+            "ehb": [0.5, 10, 10.5],
+        }
 
     def test_a_group_with_no_wom_link_is_never_called(self, monkeypatch):
         session = _Session(coverage=[], groups=[], rosters={})
@@ -335,7 +385,7 @@ class TestHarvest:
         assert calls["player"] == ["Uncovered"]
         assert session.written == [
             {"player_id": 796, "period": "2026-07", "ehb": 2.5,
-             "source": ehb.SOURCE_PLAYER}
+             "source": ehb.SOURCE_PLAYER, "metrics": None}
         ]
 
     def test_the_player_cap_reports_what_it_dropped(self, monkeypatch):

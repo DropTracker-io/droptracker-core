@@ -81,6 +81,7 @@ from web_api.routes.plugin_config import plugin_config_bp
 from web_api.routes.realtime import realtime_bp
 from web_api.routes.clan_log import clan_log_bp
 from web_api.routes.recaps import recaps_bp
+from web_api.routes.group_stats import group_stats_bp
 from web_api.routes.redirects import redirects_bp
 from web_api.routes.status import status_bp
 from web_api.routes.community_listings import community_listings_bp
@@ -270,6 +271,7 @@ def create_app() -> Quart:
     app.register_blueprint(clan_log_bp, url_prefix=API_PREFIX)
     app.register_blueprint(player_state_bp, url_prefix=API_PREFIX)
     app.register_blueprint(recaps_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(group_stats_bp, url_prefix=API_PREFIX)
     app.register_blueprint(redirects_bp, url_prefix=API_PREFIX)
     app.register_blueprint(status_bp, url_prefix=API_PREFIX)
     app.register_blueprint(community_listings_bp, url_prefix=API_PREFIX)

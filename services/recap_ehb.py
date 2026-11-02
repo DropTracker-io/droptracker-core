@@ -29,6 +29,7 @@ means the player was measured and bossed nothing.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -107,6 +108,43 @@ def _extract_ehb(row) -> Optional[float]:
     return None
 
 
+def _extract_metrics(row) -> dict:
+    """Every non-zero gain in one ``bulk-gained`` row, as
+    ``{"metric": [gained, start, end]}``.
+
+    Kept compact because it is stored per member per month: of the 114 metrics
+    an active member typically moves 20-40, and a zero gain is recoverable as
+    "absent". Values stay as WOM sent them (XP and KC are ints, EHP/EHB floats);
+    ``start`` is -1 where the player was unranked at the window's start, which
+    readers must treat as "unknown", never as a level or a count.
+    """
+    out: dict = {}
+    if not isinstance(row, dict):
+        return out
+    for entry in row.get("data") or ():
+        if not isinstance(entry, dict):
+            continue
+        metric = entry.get("metric")
+        gained = entry.get("gained")
+        if not metric or not gained:
+            continue
+        try:
+            values = [entry.get("gained"), entry.get("start"), entry.get("end")]
+            values = [
+                (int(v) if float(v).is_integer() else round(float(v), 4))
+                if v is not None else None
+                for v in values
+            ]
+        except (TypeError, ValueError):
+            continue
+        if values[0] is None or values[0] <= 0:
+            # A negative gain is a hiscore rollback or a reused name; see
+            # _extract_ehb.
+            continue
+        out[str(metric)] = values
+    return out
+
+
 def _norm_name(name) -> str:
     from utils.format import normalize_player_display_equivalence
 
@@ -149,6 +187,21 @@ def match_rows(rows, by_wom: dict, by_name: dict) -> dict:
         # A player in two harvested clans arrives twice with the same figure;
         # last write wins and they agree, so no reconciliation is needed.
         out[int(pid)] = ehb
+    return out
+
+
+def match_metric_rows(rows, by_wom: dict, by_name: dict) -> dict:
+    """``{player_id: (ehb_gained, metrics)}`` — :func:`match_rows` plus every
+    other metric the same row carries (see :func:`_extract_metrics`)."""
+    out: dict[int, tuple] = {}
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        matched = match_rows([row], by_wom, by_name)
+        if not matched:
+            continue
+        pid, ehb = next(iter(matched.items()))
+        out[int(pid)] = (ehb, _extract_metrics(row))
     return out
 
 
@@ -197,6 +250,29 @@ def stored_gains(session, player_ids: Iterable[int], period: str) -> dict:
     return {int(r[0]): float(r[1] or 0.0) for r in rows}
 
 
+# Whether ``recap_wom_gains.metrics`` exists (web154a). Probed once per process
+# so code deployed ahead of the migration keeps harvesting EHB exactly as
+# before instead of failing every write.
+_METRICS_COLUMN: Optional[bool] = None
+
+
+def metrics_column_ready(session) -> bool:
+    global _METRICS_COLUMN
+    if _METRICS_COLUMN is None:
+        try:
+            row = session.execute(
+                text("SHOW COLUMNS FROM recap_wom_gains LIKE 'metrics'")
+            ).first()
+            _METRICS_COLUMN = row is not None
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            return False
+    return _METRICS_COLUMN
+
+
 def _already_bulk_harvested(session, player_ids, period: str) -> bool:
     """Whether a clan's roster already carries rows from a group fetch.
 
@@ -208,10 +284,15 @@ def _already_bulk_harvested(session, player_ids, period: str) -> bool:
     ids = sorted(int(p) for p in player_ids)
     if not ids:
         return False
+    # ``metrics IS NOT NULL``: a row from before web154a carries EHB only, and
+    # the clan stats page needs the rest, so such a month counts as not done
+    # and is fetched once more.
+    metrics_sql = "  AND metrics IS NOT NULL " if metrics_column_ready(session) else ""
     row = session.execute(
         text(
             "SELECT 1 FROM recap_wom_gains "
             "WHERE period = :period AND source = :source AND player_id IN :ids "
+            + metrics_sql +
             "LIMIT 1"
         ).bindparams(bindparam("ids", expanding=True)),
         {"period": period, "source": SOURCE_BULK, "ids": ids},
@@ -220,25 +301,105 @@ def _already_bulk_harvested(session, player_ids, period: str) -> bool:
 
 
 def _write_gains(session, gains: dict, period: str, source: str) -> int:
+    """Upsert ``{player_id: ehb}`` or ``{player_id: (ehb, metrics)}``.
+
+    A row written without metrics never clears metrics already stored (the
+    per-player fallback only knows EHB), hence the COALESCE.
+    """
     if not gains:
         return 0
-    session.execute(
-        text(
+    params = []
+    for pid, value in gains.items():
+        if isinstance(value, tuple):
+            ehb, metrics = value
+        else:
+            ehb, metrics = value, None
+        params.append({
+            "player_id": int(pid), "period": period, "ehb": float(ehb),
+            "source": source,
+            "metrics": json.dumps(metrics, separators=(",", ":")) if metrics is not None else None,
+        })
+    if metrics_column_ready(session):
+        sql = (
+            "INSERT INTO recap_wom_gains "
+            "  (player_id, period, ehb_gained, source, fetched_at, metrics) "
+            "VALUES (:player_id, :period, :ehb, :source, NOW(), :metrics) "
+            "ON DUPLICATE KEY UPDATE "
+            "  ehb_gained = VALUES(ehb_gained), source = VALUES(source), "
+            "  fetched_at = NOW(), "
+            "  metrics = COALESCE(VALUES(metrics), metrics)"
+        )
+    else:
+        sql = (
             "INSERT INTO recap_wom_gains "
             "  (player_id, period, ehb_gained, source, fetched_at) "
             "VALUES (:player_id, :period, :ehb, :source, NOW()) "
             "ON DUPLICATE KEY UPDATE "
             "  ehb_gained = VALUES(ehb_gained), source = VALUES(source), "
             "  fetched_at = NOW()"
-        ),
-        [
-            {"player_id": int(pid), "period": period, "ehb": float(ehb),
-             "source": source}
-            for pid, ehb in gains.items()
-        ],
-    )
+        )
+    session.execute(text(sql), params)
     session.commit()
     return len(gains)
+
+
+def stored_metrics(session, player_ids: Iterable[int], periods) -> dict:
+    """``{player_id: {metric: [gained, start, end]}}`` summed over ``periods``.
+
+    ``periods`` is one ``'YYYY-MM'`` or a list of them (a year view folds its
+    twelve months). Gains add; ``start`` keeps the earliest month's value and
+    ``end`` the latest, so levels gained across a year still come out right.
+    Players with no harvested row are absent: unknown, not zero.
+    """
+    ids = [int(p) for p in player_ids]
+    if isinstance(periods, str):
+        periods = [periods]
+    periods = sorted(set(periods))
+    if not ids or not periods or not metrics_column_ready(session):
+        return {}
+    rows = session.execute(
+        text(
+            "SELECT player_id, period, metrics FROM recap_wom_gains "
+            "WHERE period IN :periods AND player_id IN :ids "
+            "  AND metrics IS NOT NULL "
+            "ORDER BY period"
+        ).bindparams(bindparam("ids", expanding=True), bindparam("periods", expanding=True)),
+        {"periods": periods, "ids": ids},
+    ).fetchall()
+    out: dict[int, dict] = {}
+    for player_id, _period, raw in rows:
+        try:
+            metrics = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            continue
+        merged = out.setdefault(int(player_id), {})
+        for metric, values in (metrics or {}).items():
+            if not isinstance(values, list) or len(values) != 3:
+                continue
+            held = merged.get(metric)
+            if held is None:
+                merged[metric] = list(values)
+            else:
+                held[0] = (held[0] or 0) + (values[0] or 0)
+                held[2] = values[2]
+    return out
+
+
+def harvested_periods(session, player_ids: Iterable[int], periods) -> set:
+    """Which of ``periods`` have full-metric rows for anyone in the roster."""
+    ids = [int(p) for p in player_ids]
+    if isinstance(periods, str):
+        periods = [periods]
+    if not ids or not periods or not metrics_column_ready(session):
+        return set()
+    rows = session.execute(
+        text(
+            "SELECT DISTINCT period FROM recap_wom_gains "
+            "WHERE period IN :periods AND player_id IN :ids AND metrics IS NOT NULL"
+        ).bindparams(bindparam("ids", expanding=True), bindparam("periods", expanding=True)),
+        {"periods": sorted(set(periods)), "ids": ids},
+    ).fetchall()
+    return {r[0] for r in rows}
 
 
 # --------------------------------------------------------------------------- #
@@ -411,20 +572,25 @@ async def _harvest_period(
 
     start_dt, end_dt = _month_window(period)
     calls = 0
+    # "gm", not the original "g": attempts recorded before web154a fetched EHB
+    # only, and must not stop the full-metric fetch. Until the migration has
+    # added the column a harvest still only stores EHB, so it keeps the old
+    # marker; otherwise its 30-day "gm" marker would block the real fetch.
+    mark = "gm" if metrics_column_ready(session) else "g"
 
     for group_id, wom_id, _rank in candidates:
-        if _attempted(conn, "g", group_id, period):
+        if _attempted(conn, mark, group_id, period):
             stats["groups_skipped"] += 1
             continue
 
         by_wom, by_name = _roster_maps(session, group_id)
         if not by_wom and not by_name:
-            _mark_attempted(conn, "g", group_id, period)
+            _mark_attempted(conn, mark, group_id, period)
             continue
         roster = set(by_wom.values()) | set(by_name.values())
         if _already_bulk_harvested(session, roster, period):
             stats["groups_skipped"] += 1
-            _mark_attempted(conn, "g", group_id, period)
+            _mark_attempted(conn, mark, group_id, period)
             continue
 
         # Checked here rather than at the top of the loop so the caps bound
@@ -448,10 +614,10 @@ async def _harvest_period(
             continue
 
         stats["rows_written"] += _write_gains(
-            session, match_rows(rows, by_wom, by_name), period, SOURCE_BULK
+            session, match_metric_rows(rows, by_wom, by_name), period, SOURCE_BULK
         )
         stats["groups_done"] += 1
-        _mark_attempted(conn, "g", group_id, period)
+        _mark_attempted(conn, mark, group_id, period)
 
     if wanted:
         await _harvest_stragglers(
@@ -534,6 +700,224 @@ async def ensure_player_ehb(player_id: int, period: str) -> dict:
         )
     finally:
         try:
+            session.close()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# Clan stats (suggestion #224): on-demand reads for one clan
+# --------------------------------------------------------------------------- #
+# The open month cannot be stored (it is still moving), so its gains are read
+# live and cached here for an hour. A clan's stats page is the only reader, and
+# an hour-old XP figure on a month-to-date view is fine.
+_LIVE_PREFIX = "gstats:wom:live:"
+_LIVE_TTL = int(os.getenv("GROUP_STATS_LIVE_WOM_TTL", "3600"))
+# Current totals for the all-time view: levels, total XP, lifetime KC.
+_HISCORES_PREFIX = "gstats:wom:hiscores:"
+_HISCORES_TTL = int(os.getenv("GROUP_STATS_HISCORES_TTL", str(6 * 3600)))
+# A failed live/hiscore read is remembered briefly so a page refresh storm
+# against a WOM outage costs one call, not one per visitor.
+_FAIL_TTL = 300
+
+
+def _group_wom_id(session, group_id: int) -> Optional[int]:
+    row = session.execute(
+        text("SELECT wom_id FROM groups WHERE group_id = :gid"), {"gid": int(group_id)}
+    ).first()
+    try:
+        wom_id = int(row[0]) if row and row[0] else None
+    except (TypeError, ValueError):
+        return None
+    return wom_id if wom_id and wom_id > 0 else None
+
+
+def _cache_get_json(conn, key: str):
+    if conn is None:
+        return None
+    try:
+        raw = conn.get(key)
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _cache_set_json(conn, key: str, value, ttl: int) -> None:
+    if conn is None:
+        return
+    try:
+        conn.setex(key, ttl, json.dumps(value, separators=(",", ":")))
+    except Exception:
+        pass
+
+
+async def ensure_group_month(group_id: int, period: str) -> None:
+    """Harvest a closed month's full metrics for one clan, if not done yet.
+
+    The lazy path behind the stats page for months before web154a. Bounded like
+    the player card's: one group call, the short time budget, and the attempt
+    marker stops a second try for the marker's lifetime.
+    """
+    from db import Session
+
+    session = Session()
+    try:
+        await harvest_month_ehb(
+            session,
+            period,
+            group_ids=[int(group_id)],
+            player_ids=[],
+            fetch_prev=False,
+            group_cap=1,
+            player_cap=0,
+            time_budget=LAZY_TIME_BUDGET,
+            log=lambda message: logger.debug("%s", message),
+        )
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+async def live_group_gains(group_id: int, period: str, now: Optional[datetime] = None) -> Optional[dict]:
+    """``{player_id: metrics}`` for the month in progress, or None if WOM can't say.
+
+    The window ends on the hour so every visitor in that hour shares one cache
+    entry (and one WOM call).
+    """
+    from db import Session
+
+    conn = _redis()
+    key = f"{_LIVE_PREFIX}{int(group_id)}:{period}"
+    cached = _cache_get_json(conn, key)
+    if cached is not None:
+        return None if cached == "fail" else {int(k): v for k, v in cached.items()}
+
+    session = Session()
+    try:
+        wom_id = _group_wom_id(session, group_id)
+        if not wom_id:
+            return None
+        start_dt, _end = _month_window(period)
+        now = now or datetime.utcnow()
+        end_dt = now.replace(minute=0, second=0, microsecond=0)
+        if end_dt <= start_dt:
+            end_dt = now
+        from utils.wiseoldman import get_group_bulk_gained
+
+        rows = await get_group_bulk_gained(wom_id, start_dt, end_dt)
+        if rows is None:
+            _cache_set_json(conn, key, "fail", _FAIL_TTL)
+            return None
+        by_wom, by_name = _roster_maps(session, group_id)
+        matched = {pid: metrics for pid, (_ehb, metrics) in
+                   match_metric_rows(rows, by_wom, by_name).items()}
+        _cache_set_json(conn, key, {str(k): v for k, v in matched.items()}, _LIVE_TTL)
+        return matched
+    except Exception as e:
+        logger.warning("live WOM gains failed for group %s: %s", group_id, e)
+        return None
+    finally:
+        try:
+            session.rollback()
+            session.close()
+        except Exception:
+            pass
+
+
+def _hiscore_entry(row) -> Optional[dict]:
+    """One member's current totals out of a ``bulk-hiscores`` row, compacted.
+
+    ``skills`` -> ``{metric: [xp, level]}``, ``bosses``/``activities`` ->
+    ``{metric: count}`` for non-zero counts only (WOM reports -1 for unranked,
+    which here is simply absent), plus ``ehp``/``ehb``.
+    """
+    if not isinstance(row, dict):
+        return None
+    data = row.get("data")
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        data = data["data"]
+    if not isinstance(data, dict):
+        return None
+    out: dict = {"skills": {}, "bosses": {}, "activities": {}}
+    for metric, entry in (data.get("skills") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            xp = int(entry.get("experience") or 0)
+            level = int(entry.get("level") or 0)
+        except (TypeError, ValueError):
+            continue
+        if xp > 0:
+            out["skills"][metric] = [xp, level]
+    for kind, field in (("bosses", "kills"), ("activities", "score")):
+        for metric, entry in (data.get(kind) or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                value = int(entry.get(field) or 0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                out[kind][metric] = value
+    for metric, entry in (data.get("computed") or {}).items():
+        if isinstance(entry, dict):
+            try:
+                out[metric] = round(float(entry.get("value") or 0), 2)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def group_hiscores(group_id: int) -> Optional[dict]:
+    """``{player_id: totals}`` (see :func:`_hiscore_entry`) for a clan's members,
+    cached six hours. None when the clan has no WOM group or WOM can't answer."""
+    from db import Session
+
+    conn = _redis()
+    key = f"{_HISCORES_PREFIX}{int(group_id)}"
+    cached = _cache_get_json(conn, key)
+    if cached is not None:
+        return None if cached == "fail" else {int(k): v for k, v in cached.items()}
+
+    session = Session()
+    try:
+        wom_id = _group_wom_id(session, group_id)
+        if not wom_id:
+            return None
+        from utils.wiseoldman import get_group_bulk_hiscores
+
+        rows = await get_group_bulk_hiscores(wom_id)
+        if rows is None:
+            _cache_set_json(conn, key, "fail", _FAIL_TTL)
+            return None
+        by_wom, by_name = _roster_maps(session, group_id)
+        out: dict[int, dict] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            player = row.get("player") or {}
+            pid = None
+            try:
+                pid = by_wom.get(int(player.get("id")))
+            except (TypeError, ValueError):
+                pid = None
+            if pid is None:
+                pid = by_name.get(_norm_name(player.get("displayName")))
+            if pid is None:
+                continue
+            entry = _hiscore_entry(row)
+            if entry:
+                out[int(pid)] = entry
+        _cache_set_json(conn, key, {str(k): v for k, v in out.items()}, _HISCORES_TTL)
+        return out
+    except Exception as e:
+        logger.warning("WOM hiscores failed for group %s: %s", group_id, e)
+        return None
+    finally:
+        try:
+            session.rollback()
             session.close()
         except Exception:
             pass

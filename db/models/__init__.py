@@ -135,6 +135,7 @@ from .badge import Badge, PlayerBadge
 from .recap import (
     RecapSnapshot,
     RecapDelivery,
+    RecapDesign,
     RECAP_SCHEMA_VERSION,
     RECAP_SCOPES,
     DELIVERY_KINDS,
@@ -437,6 +438,7 @@ __all__ = [
     "Badge",
     "RecapSnapshot",
     "RecapDelivery",
+    "RecapDesign",
     "RECAP_SCHEMA_VERSION",
     "RECAP_SCOPES",
     "DELIVERY_KINDS",

@@ -401,6 +401,21 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                     sent += 1
                     continue
 
+                if row.kind == "recap_refresh":
+                    # A clan admin changed their recap's design after it was
+                    # posted (web154a): re-render the card and edit the post.
+                    # embed_json carries {"group_id", "period"}.
+                    from services.recap_delivery import refresh_posted_card
+
+                    ask = json.loads(row.embed_json or "{}")
+                    result = await refresh_posted_card(int(ask["group_id"]), str(ask["period"]))
+                    row.status = "sent"
+                    if result.get("status") != "updated":
+                        row.error = str(result)[:500]
+                    row.processed_at = datetime.now()
+                    sent += 1
+                    continue
+
                 if row.kind in ("rsn_nickname", "nickname_backfill"):
                     # Only starts the job: a backfill can run for minutes and
                     # must not hold up the rest of the queue.

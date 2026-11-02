@@ -1093,7 +1093,80 @@ def compute_group_month(session, group_id: int, period: str) -> Optional[dict]:
     }
     payload["top_members"] = ranked_members[:TOP_N]
     payload["superlatives"] = _group_superlatives(session, player_ids, period, names)
+    _apply_clan_stats(session, payload, player_ids, period, names,
+                      floored_loot if item_floor else None)
     return _finalize(payload, period)
+
+
+# How many skill / boss rows the card carries (the designer picks how many show).
+CARD_SKILLS_N = 8
+CARD_BOSSES_N = 8
+CARD_PETS_N = 12
+
+
+def _apply_clan_stats(session, payload: dict, player_ids: list[int], period: str,
+                      names: dict, floored_loot: Optional[dict]) -> None:
+    """The clan-stats additions (suggestion #224): ranked standouts in every
+    category, the clan's XP by skill, kill counts by boss and the month's pets.
+
+    Read from stored data only (``recap_wom_gains.metrics``, harvested before
+    generation), so it adds no external call. Best-effort: a failure here
+    leaves the card exactly as it was before this existed, never without one.
+    """
+    try:
+        from services import group_stats as gs
+        from services.recap_ehb import stored_metrics
+
+        window = gs.parse_period(period)
+        if window is None:
+            return
+        wom = gs.WomInputs(gains=stored_metrics(session, player_ids, period))
+        table = gs.member_table(session, player_ids, window, wom, with_items=False)
+        members = table["members"]
+        if floored_loot is not None:
+            for member in members:
+                member["loot"] = int(floored_loot.get(member["player_id"], 0))
+        biggest = payload.get("biggest_drop")
+        big = [{"player_id": biggest["player_id"], "value": biggest["total_value"],
+                "name": biggest.get("item_name"), "item_id": biggest.get("item_id")}] if biggest else []
+        standouts = gs.build_standouts(members, big, table["skills"], table["bosses"])
+        # `drops` needs the item rollup, which member_table skipped (the card
+        # already read it once); the existing top_members carries loot.
+        standouts["categories"] = [c for c in standouts["categories"] if c["key"] != "drops"]
+        for group in (standouts["categories"], standouts["skills"], standouts["bosses"]):
+            for row in group:
+                for entry in row["entries"]:
+                    entry["name"] = names.get(entry["player_id"])
+        standouts["skills"] = standouts["skills"][:CARD_SKILLS_N]
+        standouts["bosses"] = standouts["bosses"][:CARD_BOSSES_N]
+        payload["standouts"] = standouts
+
+        totals = table["totals"]
+        if table["wom_available"]:
+            for key in ("xp", "levels", "kills", "ehp", "clues"):
+                if totals.get(key) is not None:
+                    payload["totals"][key] = totals[key]
+        for key in ("slayer_tasks", "pvp_kills"):
+            if totals.get(key):
+                payload["achievements"][key] = totals[key]
+
+        feeds = gs._feeds(session, player_ids, window) if player_ids else {}
+        pets = feeds.get("pets") or []
+        payload["new_pets"] = [
+            {"player_id": p["player_id"], "name": names.get(p["player_id"]),
+             "item_id": p.get("item_id"), "pet": p.get("name"), "date": p.get("date")}
+            for p in pets[:CARD_PETS_N]
+        ]
+    except Exception as e:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        import logging
+
+        logging.getLogger("services.recap").warning(
+            "recap clan-stats extras failed for %s: %s", period, e, exc_info=True
+        )
 
 
 def _group_superlatives(session, player_ids: list[int], period: str, names: dict) -> dict:

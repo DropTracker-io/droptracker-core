@@ -769,3 +769,56 @@ class UserCommands(Extension):
         if file is not None:
             return await ctx.send(content=text, files=file, components=components)
         return await ctx.send(content=text, components=components)
+
+    @slash_command(name="clan-stats",
+                   description="Your clan's stats and standout members for a month, a year or all time")
+    @slash_option(name="period",
+                  description="a month like 2026-10, a year like 2026, or all (default: this month)",
+                  required=False,
+                  opt_type=OptionType.STRING)
+    async def clan_stats_cmd(self, ctx: SlashContext, period: str = ""):
+        """Post the clan's stats card (suggestion #224).
+
+        Public, like /clan-log: standouts are something a clan shows each
+        other. The payload is the website's stats page, cached server-side,
+        so a repeat costs a Redis read; the first view of a month can take a
+        few seconds, hence the defer.
+        """
+        self._refresh_session()
+
+        from interactions import ActionRow, Button, ButtonStyle
+        from services.group_stats import get_group_stats, parse_period
+        from services.group_stats_discord import build_embed, stats_url
+
+        period = (period or "").strip().lower()
+        window = parse_period(period or None)
+        if window is None:
+            return await ctx.send(
+                "That period doesn't look right. Use a month like `2026-10`, "
+                "a year like `2026`, or `all`.",
+                ephemeral=True,
+            )
+
+        group = self._get_group_for_guild(ctx.guild_id)
+        if not group:
+            return await ctx.send(
+                "This Discord server isn't linked to a DropTracker clan yet.",
+                ephemeral=True,
+            )
+
+        await ctx.defer()
+        payload = await get_group_stats(group.group_id, window.period)
+        card = build_embed(payload) if payload else None
+        if card is None:
+            return await ctx.send("No stats for that period yet.", ephemeral=True)
+
+        embed = Embed(title=card["title"], url=card["url"],
+                      description=card["description"], color=card["color"])
+        for field in card["fields"]:
+            embed.add_field(name=field["name"], value=field["value"], inline=field["inline"])
+        embed.set_footer(text=card["footer"]["text"])
+        components = ActionRow(
+            Button(label="Open the full breakdown", style=ButtonStyle.URL,
+                   url=stats_url(group.group_id, window.period))
+        )
+        return await ctx.send(embed=embed, components=components)

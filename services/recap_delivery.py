@@ -93,6 +93,24 @@ CFG_CHANNEL = "channel_id_to_post_recaps"
 CFG_HOUR = "recap_post_hour"
 CFG_TIMEZONE = "recap_timezone"
 CFG_LOOTBOARD_CHANNEL = "lootboard_channel_id"
+# Whether a clan's card waits for its admins (web154a, suggestion #224):
+#   off      post at the scheduled time, as always
+#   notify   DM the admins once the card is built, then post as scheduled
+#   approve  DM the admins and hold the post until one of them approves it
+CFG_REVIEW = "recap_review_mode"
+REVIEW_OFF = "off"
+REVIEW_NOTIFY = "notify"
+REVIEW_APPROVE = "approve"
+REVIEW_MODES = (REVIEW_OFF, REVIEW_NOTIFY, REVIEW_APPROVE)
+# Ledger kind for one admin's review DM: "rv:{user_id}". The ledger's unique
+# key is (scope, subject, period, kind, is_test), so the user id has to live in
+# the kind for each admin to get their own row.
+REVIEW_KIND_PREFIX = "rv:"
+
+
+def review_mode(raw) -> str:
+    value = str(raw or "").strip().lower()
+    return value if value in REVIEW_MODES else REVIEW_OFF
 
 # A clan's card is *generated* at local midnight on the 1st, twelve hours before
 # DEFAULT_POST_HOUR posts it. Group cards are not built on first view the way
@@ -663,8 +681,10 @@ def collect_group_targets(
     cfg = gc.get_bulk(
         session,
         group_ids,
-        [CFG_ENABLED, CFG_CHANNEL, CFG_HOUR, CFG_TIMEZONE, CFG_LOOTBOARD_CHANNEL],
+        [CFG_ENABLED, CFG_CHANNEL, CFG_HOUR, CFG_TIMEZONE, CFG_LOOTBOARD_CHANNEL,
+         CFG_REVIEW],
     )
+    approved: Optional[set] = None
 
     out: list[GroupTarget] = []
     for group_id in group_ids:
@@ -689,6 +709,16 @@ def collect_group_targets(
             continue
         if already_delivered(session, SCOPE_GROUP, group_id, period, DELIVERY_CHANNEL, is_test):
             continue
+        # Held for review: due or not, the post waits for an admin's approval.
+        # The sweep re-checks every 15 minutes, so an approval made after the
+        # post hour goes out on the next tick (within the window's grace days).
+        if review_mode(value(CFG_REVIEW)) == REVIEW_APPROVE and not is_test:
+            if approved is None:
+                from services.recap_design import approved_group_ids
+
+                approved = approved_group_ids(session, period)
+            if group_id not in approved:
+                continue
         out.append(
             GroupTarget(
                 group_id=group_id,
@@ -1648,6 +1678,16 @@ async def run_delivery(
             _safe_rollback(session)
             log(f"  clan card pre-generation failed: {e}")
 
+    if include_groups:
+        try:
+            await send_review_notices(
+                session, period=period, apply=apply, only_group=only_group,
+                test_discord_id=test_id, log=log,
+            )
+        except Exception as e:
+            _safe_rollback(session)
+            log(f"  review notices failed: {e}")
+
     targets: list = []
     if include_groups:
         targets += collect_group_targets(
@@ -1702,6 +1742,10 @@ async def run_delivery(
             target.group_id if is_group else target.player_id,
         )
         stamp = ensure_snapshot(session, key[0], key[1], period)
+        if stamp and is_group:
+            # The PNG is cached on this stamp; folding the clan's design into
+            # it is what makes an edit made in the designer re-render the card.
+            stamp = f"{stamp}|{_design_stamp(session, key[1], period)}"
         if stamp:
             stamps[key] = stamp
     log(f"  {len(stamps)}/{len(targets)} card(s) available")
@@ -1790,3 +1834,250 @@ async def run_delivery(
     if test_id:
         outcome.notes.append(f"test mode: everything addressed to {test_id}")
     return outcome
+
+
+# --------------------------------------------------------------------------- #
+# Review before posting (web154a, suggestion #224)
+# --------------------------------------------------------------------------- #
+def _design_stamp(session, group_id: int, period: str) -> str:
+    try:
+        from services.recap_design import design_stamp
+
+        return design_stamp(session, group_id, period)
+    except Exception:
+        _safe_rollback(session)
+        return "builtin:"
+
+
+def group_design_url(group_id: int, period: str) -> str:
+    """The recap designer (web: (admin)/groups/[id]/recaps), on this month."""
+    return f"{_SITE}/groups/{int(group_id)}/recaps?period={period}"
+
+
+def collect_review_targets(
+    session, period: str, *, only_group: Optional[int] = None,
+) -> list[tuple[int, str, str, list[tuple[int, str]]]]:
+    """``[(group_id, group_name, mode, [(user_id, discord_id)])]`` still owed a
+    review DM for ``period``.
+
+    A clan qualifies when its review mode is on, its card exists and has not
+    been posted yet. Recipients are the clan's explicit owner/admins
+    (``group_admins``): the people who can act on the link. Each admin is
+    messaged once per month.
+    """
+    from utils import group_config as gc
+
+    rows = session.execute(
+        text(
+            "SELECT g.group_id, g.group_name FROM groups g WHERE g.group_id NOT IN (1, 2)"
+            + (" AND g.group_id = :gid" if only_group is not None else "")
+        ),
+        {"gid": only_group} if only_group is not None else {},
+    ).fetchall()
+    if not rows:
+        return []
+    names = {int(r[0]): r[1] for r in rows}
+    cfg = gc.get_bulk(session, list(names), [CFG_ENABLED, CFG_REVIEW])
+    wanted = [
+        gid for gid in names
+        if gc.is_truthy(cfg.get((gid, CFG_ENABLED)))
+        and review_mode(cfg.get((gid, CFG_REVIEW))) != REVIEW_OFF
+    ]
+    out = []
+    for gid in wanted:
+        if not snapshot_exists(session, SCOPE_GROUP, gid, period):
+            continue
+        if already_delivered(session, SCOPE_GROUP, gid, period, DELIVERY_CHANNEL, False):
+            continue
+        admins = session.execute(
+            text(
+                "SELECT u.user_id, u.discord_id FROM group_admins a "
+                "JOIN users u ON u.user_id = a.user_id "
+                "WHERE a.group_id = :gid AND a.role IN ('owner', 'admin') "
+                "  AND u.discord_id IS NOT NULL AND u.discord_id != ''"
+            ),
+            {"gid": gid},
+        ).fetchall()
+        owed = [
+            (int(uid), str(did)) for uid, did in admins
+            if not already_delivered(
+                session, SCOPE_GROUP, gid, period, f"{REVIEW_KIND_PREFIX}{int(uid)}", False
+            )
+        ]
+        if owed:
+            out.append((gid, names[gid] or f"Group {gid}",
+                        review_mode(cfg.get((gid, CFG_REVIEW))), owed))
+    return out
+
+
+def build_review_message(group_id: int, group_name: str, period: str, mode: str,
+                         payload: dict, post_at: Optional[datetime]) -> dict:
+    """The DM an admin gets when their clan's card is ready."""
+    when = (
+        f"<t:{int(post_at.timestamp())}:F>" if post_at is not None else "the scheduled time"
+    )
+    if mode == REVIEW_APPROVE:
+        status = (
+            "It will **not** be posted until an admin approves it. "
+            "Once approved it goes out at " + when + ", or within 15 minutes if that has passed."
+        )
+    else:
+        status = f"It will be posted at {when}. You can still change it until then."
+    lines = [
+        f"The **{month_phrase(period)}** recap for **{group_name}** is ready.",
+        _summary_line(payload),
+        "",
+        "Choose what it shows, reorder it, add a message from the clan, "
+        "or hide members from the rankings.",
+        "",
+        status,
+    ]
+    return {
+        "embeds": [{
+            "title": f"{group_name}: your recap is ready to review",
+            "url": group_design_url(group_id, period),
+            "description": "\n".join(line for line in lines if line is not None),
+            "color": _GOLD,
+        }],
+        "components": [{
+            "type": 1,
+            "components": [
+                {"type": 2, "style": 5, "label": "Review and customize",
+                 "url": group_design_url(group_id, period)},
+                {"type": 2, "style": 5, "label": "View the card",
+                 "url": group_recap_url(group_id, period)},
+            ],
+        }],
+    }
+
+
+async def send_review_notices(
+    session, *, period: str, apply: bool, only_group: Optional[int] = None,
+    test_discord_id: Optional[str] = None, log=print,
+) -> int:
+    """DM each clan admin whose clan reviews its recap. Returns DMs sent.
+
+    Best-effort and once per admin per month: a closed DM is recorded as
+    ``forbidden`` and not retried, the same rule as recap DMs.
+    """
+    targets = collect_review_targets(session, period, only_group=only_group)
+    if not targets:
+        return 0
+    if not apply:
+        count = sum(len(t[3]) for t in targets)
+        log(f"  would send {count} review DM(s) for {len(targets)} clan(s)")
+        return 0
+
+    from interactions.client.errors import Forbidden, NotFound
+
+    from services.recap import load_snapshot
+    from utils import group_config as gc
+    from utils.discord_rest import DiscordRest
+    from utils.discord_write import DiscordWriter
+
+    writer = DiscordWriter(
+        label="recap-review", global_max_calls=4, global_period=1.0,
+        bucket_max_calls=1, bucket_period=1.0,
+    )
+    sent = 0
+    async with DiscordRest(os.getenv("BOT_TOKEN", "")) as rest:
+        for gid, name, mode, admins in targets:
+            payload = load_snapshot(session, SCOPE_GROUP, gid, period) or {}
+            cfg = gc.get_bulk(session, [gid], [CFG_HOUR, CFG_TIMEZONE])
+            raw_hour = cfg.get((gid, CFG_HOUR))
+            try:
+                hour = DEFAULT_POST_HOUR if raw_hour in (None, "") else int(raw_hour)
+            except (TypeError, ValueError):
+                hour = DEFAULT_POST_HOUR
+            try:
+                post_at = due_at_utc(period, cfg.get((gid, CFG_TIMEZONE)), hour)
+            except Exception:
+                post_at = None
+            message = build_review_message(gid, name, period, mode, payload, post_at)
+            for user_id, discord_id in admins:
+                to = test_discord_id or discord_id
+                msg = with_test_banner(message, f"review for {name} -> user {user_id}") \
+                    if test_discord_id else message
+                kind = f"{REVIEW_KIND_PREFIX}{user_id}"
+                try:
+                    message_id = await writer.write(
+                        f"dm:{to}", lambda t=to, m=msg: rest.send_dm(t, m), expect_result=True
+                    )
+                    status, error = DELIVERY_SENT, None
+                    sent += 1
+                except (Forbidden, NotFound) as e:
+                    message_id, status, error = None, DELIVERY_FORBIDDEN, str(e)
+                except Exception as e:
+                    message_id, status, error = None, DELIVERY_FAILED, str(e)
+                record_delivery(
+                    session, scope=SCOPE_GROUP, subject_id=gid, period=period,
+                    kind=kind, status=status, user_id=user_id, target_id=to,
+                    message_id=message_id, error=error, is_test=bool(test_discord_id),
+                )
+                session.commit()
+                log(f"  review {status:9} {name} -> user {user_id}")
+    return sent
+
+
+async def refresh_posted_card(group_id: int, period: str) -> dict:
+    """Re-render a clan's card with its current design and edit the posted
+    Discord message to show it. ``{"status": ..., ...}``; never raises.
+
+    Discord only re-reads an embed image when its URL changes, so the new image
+    goes out under a fresh ``?v=`` (the reprobe trick). Only the embeds are
+    edited, so the buttons on the post stay as they are.
+    """
+    from db import Session
+    from services.recap_image import write_recap_image
+
+    session = Session()
+    try:
+        row = (
+            session.query(RecapDelivery)
+            .filter(
+                RecapDelivery.scope == SCOPE_GROUP,
+                RecapDelivery.subject_id == int(group_id),
+                RecapDelivery.period == period,
+                RecapDelivery.kind == DELIVERY_CHANNEL,
+                RecapDelivery.is_test == 0,
+                RecapDelivery.status == DELIVERY_SENT,
+            )
+            .first()
+        )
+        if row is None or not row.message_id or not row.target_id:
+            return {"status": "not_posted"}
+        channel_id, message_id = str(row.target_id), str(row.message_id)
+        stamp = ensure_snapshot(session, SCOPE_GROUP, int(group_id), period)
+        if not stamp:
+            return {"status": "no_card"}
+        stamp = f"{stamp}|{_design_stamp(session, int(group_id), period)}"
+    finally:
+        try:
+            session.rollback()
+            session.close()
+        except Exception:
+            pass
+
+    image_url = await write_recap_image(SCOPE_GROUP, int(group_id), period, stamp)
+    if not image_url:
+        return {"status": "render_failed"}
+
+    from utils.discord_rest import DiscordRest
+
+    try:
+        async with DiscordRest(os.getenv("BOT_TOKEN", "")) as rest:
+            message = await rest.get_message(channel_id, message_id)
+            embeds = []
+            for embed in (message or {}).get("embeds") or []:
+                embed = {k: v for k, v in dict(embed).items()
+                         if k in ("title", "url", "description", "color", "footer",
+                                  "image", "fields", "author", "timestamp")}
+                if isinstance(embed.get("image"), dict):
+                    embed["image"] = {"url": f"{image_url}?v={int(datetime.now().timestamp())}"}
+                embeds.append(embed)
+            if not embeds:
+                return {"status": "message_missing"}
+            await rest.edit_message(channel_id, message_id, {"embeds": embeds})
+    except Exception as e:
+        return {"status": "edit_failed", "error": str(e)[:200]}
+    return {"status": "updated", "channel_id": channel_id, "message_id": message_id}

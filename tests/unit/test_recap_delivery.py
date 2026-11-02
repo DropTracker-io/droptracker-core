@@ -833,3 +833,63 @@ class TestBlankImageReprobe:
     def test_deliver_one_skips_cards_without_an_image(self, monkeypatch):
         group = delivery.GroupTarget(group_id=227, name="Renatus", channel_id="707", period="2026-10")
         assert self._deliver(monkeypatch, group, None)[1] == []
+
+
+class TestReviewHold:
+    """A clan that holds its recap for review (web154a, suggestion #224)."""
+
+    def _targets(self, monkeypatch, mode, approved=()):
+        import types
+
+        gc = types.ModuleType("utils.group_config")
+        gc.get_bulk = lambda session, ids, keys: {
+            (14, delivery.CFG_ENABLED): "1",
+            (14, delivery.CFG_CHANNEL): "123",
+            (14, delivery.CFG_REVIEW): mode,
+        }
+        gc.is_truthy = lambda v: str(v or "").lower() in ("1", "true", "yes", "on")
+        designs = types.ModuleType("services.recap_design")
+        designs.approved_group_ids = lambda session, period: set(approved)
+        import utils
+
+        monkeypatch.setitem(sys.modules, "utils.group_config", gc)
+        monkeypatch.setattr(utils, "group_config", gc, raising=False)
+        monkeypatch.setitem(sys.modules, "services.recap_design", designs)
+        monkeypatch.setattr(delivery, "already_delivered", lambda *a, **k: False)
+
+        class _Rows:
+            def fetchall(self):
+                return [(14, "Pegasus PvM")]
+
+        class _Session:
+            def execute(self, *a, **k):
+                return _Rows()
+
+        return delivery.collect_group_targets(
+            _Session(), "2026-10", _utc(2026, 11, 1, 13), ignore_due=True)
+
+    def test_off_and_notify_post_as_scheduled(self, monkeypatch):
+        assert len(self._targets(monkeypatch, "off")) == 1
+        assert len(self._targets(monkeypatch, "notify")) == 1
+        assert len(self._targets(monkeypatch, "")) == 1
+
+    def test_approve_holds_until_an_admin_approves(self, monkeypatch):
+        assert self._targets(monkeypatch, "approve") == []
+        assert len(self._targets(monkeypatch, "approve", approved={14})) == 1
+
+    def test_unknown_modes_mean_off(self):
+        assert delivery.review_mode("APPROVE") == "approve"
+        assert delivery.review_mode("sometimes") == "off"
+        assert delivery.review_mode(None) == "off"
+
+    def test_review_dm_says_whether_it_waits(self):
+        held = delivery.build_review_message(14, "Pegasus PvM", "2026-10", "approve", {}, None)
+        told = delivery.build_review_message(14, "Pegasus PvM", "2026-10", "notify", {}, None)
+        assert "not** be posted until an admin approves" in held["embeds"][0]["description"]
+        assert "will be posted at" in told["embeds"][0]["description"]
+        button = held["components"][0]["components"][0]
+        assert button["url"].endswith("/groups/14/recaps?period=2026-10")
+
+    def test_review_ledger_kinds_fit_the_column(self):
+        # recap_deliveries.kind is VARCHAR(16).
+        assert len(f"{delivery.REVIEW_KIND_PREFIX}{2**31}") <= 16
