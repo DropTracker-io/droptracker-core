@@ -200,7 +200,7 @@ async def generate_tasks(event_id: int):
     def _run():
         from web_api.common import ProblemException
         from web_api.routes.event_task_validation import validate_task_payload
-        from web_api.task_generator_catalog import clan_activity, load_catalog
+        from web_api.task_generator_catalog import clan_activity, load_catalog, load_library
 
         ev_mod = _events()
         tg = _tg()
@@ -208,6 +208,7 @@ async def generate_tasks(event_id: int):
             ev = ev_mod._load_event_or_404(s, event_id)
             ev_mod._assert_event_admin(s, user_id, ev)
             catalog = load_catalog(s)
+            library = load_library(s, ev.group_id)
             activity, members = ({}, 0)
             if criteria["clan_focus"] != "off":
                 activity, members = clan_activity(s, ev.group_id, catalog)
@@ -237,6 +238,7 @@ async def generate_tasks(event_id: int):
                     activity=activity,
                     roster=members,
                     only_tier=criteria["only_tier"],
+                    library=library,
                 )
                 failed = []
                 for row in result["tasks"]:

@@ -91,8 +91,14 @@ MAX_GENERATE = 100
 # Curated encounters
 # --------------------------------------------------------------------------- #
 # ``kc_npcs`` are npc_list names exactly as drops and kills arrive (first one
-# is the canonical target); ``sections`` are clan_log_sections slugs whose
-# enabled items are the uniques (attributable) and pet (not attributable).
+# is the canonical target). Uniques (attributable) and the pet (not
+# attributable) come from the Clan Log sections whose ``npc_keys`` share an
+# ``npc_match_key`` with ``kc_npcs`` — matched by key, not slug, so a catalog
+# reseed that renames sections can't silently empty the generator (the v2
+# catalog of 2026-10-19 did exactly that to a slug list).
+# ``clog_keys`` adds npc_keys the boss's own names don't produce ("gauntlet"
+# for the Corrupted Gauntlet); ``sections`` names sections with no npc_keys
+# (shared sets like Virtus, the gorilla drops) by slug.
 # ``short`` (optional) replaces ``label`` inside task labels.
 # Overrides, all per kill / per completion for ONE player:
 #   unique_rate — chance of any unique. Required where the wiki table is
@@ -104,154 +110,162 @@ MAX_GENERATE = 100
 #                 prices the boss.
 # Rates are deliberately approximate: they size targets, they don't score.
 
+_VIRTUS = ["desert_treasure_virtus_set"]
+
 ENCOUNTERS: tuple[dict, ...] = (
     # Raids
     {"key": "chambers_of_xeric", "label": "Chambers of Xeric", "category": "raids",
      "kc_npcs": ["Chambers of Xeric", "Chambers of Xeric Challenge Mode"],
-     "sections": ["chambers_of_xeric"], "wom_metric": "chambers_of_xeric",
+     "wom_metric": "chambers_of_xeric",
      "ca_monsters": ["Chambers of Xeric", "Chambers of Xeric: CM"],
      "unique_rate": 1 / 29, "conditional": True, "pet_rate": 1 / 1500, "unit": "completions"},
     {"key": "theatre_of_blood", "label": "Theatre of Blood", "category": "raids",
      "kc_npcs": ["Theatre of Blood", "Theatre of Blood: Hard Mode"],
-     "sections": ["theater_of_blood"], "wom_metric": "theatre_of_blood",
+     "wom_metric": "theatre_of_blood",
      "ca_monsters": ["Theatre of Blood", "Theatre of Blood: Hard Mode"],
      "unique_rate": 1 / 36, "conditional": True, "pet_rate": 1 / 650, "unit": "completions"},
     {"key": "tombs_of_amascut", "label": "Tombs of Amascut", "category": "raids",
      "kc_npcs": ["Tombs of Amascut", "Tombs of Amascut: Expert Mode"],
-     "sections": ["tombs_of_amascut"], "wom_metric": "tombs_of_amascut",
+     "wom_metric": "tombs_of_amascut",
      "ca_monsters": ["Tombs of Amascut", "Tombs of Amascut: Expert Mode"],
      "unique_rate": 1 / 24, "conditional": True, "pet_rate": 1 / 1000, "unit": "completions"},
     # God Wars Dungeon
     {"key": "kree_arra", "label": "Kree'arra", "category": "gwd", "kc_npcs": ["Kree'arra"],
-     "sections": ["kree_arra"], "wom_metric": "kreearra", "pet_rate": 1 / 5000},
+     "wom_metric": "kreearra", "pet_rate": 1 / 5000},
     {"key": "general_graardor", "label": "General Graardor", "category": "gwd",
-     "kc_npcs": ["General Graardor"], "sections": ["general_graardor"],
-     "wom_metric": "general_graardor", "pet_rate": 1 / 5000},
+     "kc_npcs": ["General Graardor"], "wom_metric": "general_graardor", "pet_rate": 1 / 5000},
     {"key": "commander_zilyana", "label": "Commander Zilyana", "category": "gwd",
-     "kc_npcs": ["Commander Zilyana"], "sections": ["commander_zilyana"],
-     "wom_metric": "commander_zilyana", "pet_rate": 1 / 5000},
+     "kc_npcs": ["Commander Zilyana"], "wom_metric": "commander_zilyana", "pet_rate": 1 / 5000},
     {"key": "kril_tsutsaroth", "label": "K'ril Tsutsaroth", "category": "gwd",
-     "kc_npcs": ["K'ril Tsutsaroth"], "sections": ["k_ril_tsutsaroth"],
-     "wom_metric": "kril_tsutsaroth", "pet_rate": 1 / 5000},
-    {"key": "nex", "label": "Nex", "category": "gwd", "kc_npcs": ["Nex"],
-     "sections": ["nex"], "wom_metric": "nex", "unique_rate": 1 / 90},
+     "kc_npcs": ["K'ril Tsutsaroth"], "wom_metric": "kril_tsutsaroth", "pet_rate": 1 / 5000},
+    {"key": "nex", "label": "Nex", "category": "gwd", "kc_npcs": ["Nex"], "wom_metric": "nex",
+     "unique_rate": 1 / 90},
     # Desert Treasure II
     {"key": "vardorvis", "label": "Vardorvis", "category": "dt2", "kc_npcs": ["Vardorvis"],
-     "sections": ["vardorvis"], "wom_metric": "vardorvis"},
+     "sections": _VIRTUS, "wom_metric": "vardorvis"},
     {"key": "duke_sucellus", "label": "Duke Sucellus", "category": "dt2",
-     "kc_npcs": ["Duke Sucellus"], "sections": ["duke_sucellus"], "wom_metric": "duke_sucellus"},
+     "kc_npcs": ["Duke Sucellus"], "sections": _VIRTUS, "wom_metric": "duke_sucellus"},
     {"key": "the_whisperer", "label": "The Whisperer", "category": "dt2",
-     "kc_npcs": ["The Whisperer"], "sections": ["the_whisperer"], "wom_metric": "the_whisperer"},
+     "kc_npcs": ["The Whisperer"], "sections": _VIRTUS, "wom_metric": "the_whisperer"},
     {"key": "the_leviathan", "label": "The Leviathan", "category": "dt2",
-     "kc_npcs": ["The Leviathan"], "sections": ["the_leviathan"], "wom_metric": "the_leviathan"},
+     "kc_npcs": ["The Leviathan"], "sections": _VIRTUS, "wom_metric": "the_leviathan"},
     # Other bosses
     {"key": "zulrah", "label": "Zulrah", "category": "bosses", "kc_npcs": ["Zulrah"],
-     "sections": ["zulrah"], "wom_metric": "zulrah", "pet_rate": 1 / 4000},
+     "wom_metric": "zulrah", "pet_rate": 1 / 4000},
     {"key": "vorkath", "label": "Vorkath", "category": "bosses", "kc_npcs": ["Vorkath"],
-     "sections": ["vorkath"], "wom_metric": "vorkath"},
+     "wom_metric": "vorkath"},
     {"key": "phantom_muspah", "label": "Phantom Muspah", "category": "bosses",
-     "kc_npcs": ["Phantom Muspah"], "sections": ["phantom_muspah"], "wom_metric": "phantom_muspah"},
+     "kc_npcs": ["Phantom Muspah"], "wom_metric": "phantom_muspah"},
     {"key": "kalphite_queen", "label": "Kalphite Queen", "category": "bosses",
-     "kc_npcs": ["Kalphite Queen"], "sections": ["kalphite_queen"],
-     "wom_metric": "kalphite_queen", "pet_rate": 1 / 3000},
+     "kc_npcs": ["Kalphite Queen"], "wom_metric": "kalphite_queen", "pet_rate": 1 / 3000},
     {"key": "hueycoatl", "label": "The Hueycoatl", "category": "bosses",
-     "kc_npcs": ["The Hueycoatl"], "sections": ["hueycoatl"], "wom_metric": "the_hueycoatl"},
+     "kc_npcs": ["The Hueycoatl"], "wom_metric": "the_hueycoatl"},
     {"key": "nightmare", "label": "The Nightmare", "category": "bosses",
-     "kc_npcs": ["The Nightmare", "Phosani's Nightmare"], "sections": ["nightmare"],
+     "kc_npcs": ["The Nightmare", "Phosani's Nightmare"],
      "wom_metric": "nightmare", "ca_monsters": ["The Nightmare", "Phosani's Nightmare"],
      "pet_rate": 1 / 1400},
     {"key": "amoxliatl", "label": "Amoxliatl", "category": "bosses", "kc_npcs": ["Amoxliatl"],
-     "sections": ["amoxliatl"], "wom_metric": "amoxliatl"},
+     "wom_metric": "amoxliatl"},
+    {"key": "the_gauntlet", "label": "The Gauntlet", "category": "bosses",
+     "kc_npcs": ["The Gauntlet"], "wom_metric": "the_gauntlet",
+     "ca_monsters": ["Crystalline Hunllef"], "pet_rate": 1 / 2000, "unit": "completions"},
     {"key": "corrupted_gauntlet", "label": "The Corrupted Gauntlet", "category": "bosses",
-     "kc_npcs": ["The Corrupted Gauntlet"], "sections": ["gauntlet"],
+     "kc_npcs": ["The Corrupted Gauntlet"], "clog_keys": ["gauntlet"],
      "wom_metric": "the_corrupted_gauntlet", "ca_monsters": ["Corrupted Hunllef"],
      "unique_rate": 1 / 24, "pet_rate": 1 / 800, "unit": "completions"},
     {"key": "scurrius", "label": "Scurrius", "category": "bosses", "kc_npcs": ["Scurrius"],
-     "sections": ["scurrius"], "wom_metric": "scurrius"},
+     "wom_metric": "scurrius"},
     {"key": "fortis_colosseum", "label": "Fortis Colosseum", "category": "bosses",
-     "kc_npcs": ["Fortis Colosseum"], "sections": [], "wom_metric": "sol_heredit",
-     "unit": "completions"},
+     "kc_npcs": ["Fortis Colosseum"], "wom_metric": "sol_heredit", "unit": "completions"},
     {"key": "tormented_demon", "label": "Tormented Demons", "short": "Tormented Demon",
-     "category": "bosses",
-     "kc_npcs": ["Tormented Demon"], "sections": ["tormented_demon"], "kph": 45.0},
+     "category": "bosses", "kc_npcs": ["Tormented Demon"], "clog_keys": ["tormented-demons"],
+     "kph": 45.0},
     {"key": "corporeal_beast", "label": "Corporeal Beast", "category": "bosses",
-     "kc_npcs": ["Corporeal Beast"], "sections": [], "wom_metric": "corporeal_beast",
+     "kc_npcs": ["Corporeal Beast"], "wom_metric": "corporeal_beast",
      "uniques": ["Spectral sigil", "Arcane sigil", "Elysian sigil", "Holy elixir"],
      "pet": "Pet dark core", "pet_rate": 1 / 5000},
     {"key": "yama", "label": "Yama", "category": "bosses", "kc_npcs": ["Yama"],
-     "sections": [], "wom_metric": "yama"},
+     "wom_metric": "yama"},
     {"key": "royal_titans", "label": "The Royal Titans", "category": "bosses",
-     "kc_npcs": ["Royal Titans"], "sections": [], "wom_metric": "the_royal_titans",
+     "kc_npcs": ["Royal Titans"], "wom_metric": "the_royal_titans",
      "ca_monsters": ["Royal Titans"]},
     {"key": "doom_of_mokhaiotl", "label": "Doom of Mokhaiotl", "category": "bosses",
-     "kc_npcs": ["Doom of Mokhaiotl"], "sections": [], "wom_metric": "doom_of_mokhaiotl"},
+     "kc_npcs": ["Doom of Mokhaiotl"], "wom_metric": "doom_of_mokhaiotl"},
+    {"key": "giant_mole", "label": "Giant Mole", "category": "bosses",
+     "kc_npcs": ["Giant Mole"], "wom_metric": "giant_mole"},
+    {"key": "obor", "label": "Obor", "category": "bosses", "kc_npcs": ["Obor"],
+     "wom_metric": "obor"},
+    {"key": "bryophyta", "label": "Bryophyta", "category": "bosses", "kc_npcs": ["Bryophyta"],
+     "wom_metric": "bryophyta"},
+    {"key": "deranged_archaeologist", "label": "Deranged Archaeologist", "category": "bosses",
+     "kc_npcs": ["Deranged archaeologist"], "wom_metric": "deranged_archaeologist"},
+    {"key": "brutus", "label": "Brutus", "category": "bosses", "kc_npcs": ["Brutus"],
+     "wom_metric": "brutus"},
+    {"key": "maggot_king", "label": "Maggot King", "category": "bosses",
+     "kc_npcs": ["Maggot King"], "wom_metric": "maggot_king"},
+    {"key": "mad_angel", "label": "The Mad Angel", "category": "bosses",
+     "kc_npcs": ["Mad Angel"], "wom_metric": "mad_angel"},
     # Slayer bosses
     {"key": "sarachnis", "label": "Sarachnis", "category": "slayer", "kc_npcs": ["Sarachnis"],
-     "sections": ["sarachnis"], "wom_metric": "sarachnis"},
+     "wom_metric": "sarachnis"},
     {"key": "grotesque_guardians", "label": "Grotesque Guardians", "category": "slayer",
-     "kc_npcs": ["Grotesque Guardians"], "sections": ["grotesque_guardians"],
+     "kc_npcs": ["Grotesque Guardians"],
      "wom_metric": "grotesque_guardians", "unique_rate": 1 / 75, "conditional": True,
      "pet_rate": 1 / 3000},
     {"key": "abyssal_sire", "label": "Abyssal Sire", "category": "slayer",
-     "kc_npcs": ["Abyssal Sire"], "sections": ["abyssal_sire"], "wom_metric": "abyssal_sire",
-     "pet_rate": 1 / 2560},
+     "kc_npcs": ["Abyssal Sire"], "wom_metric": "abyssal_sire", "pet_rate": 1 / 2560},
     {"key": "kraken", "label": "Kraken", "category": "slayer", "kc_npcs": ["Kraken"],
-     "sections": ["kraken_boss"], "wom_metric": "kraken", "unique_rate": 1 / 220,
-     "pet_rate": 1 / 3000},
+     "wom_metric": "kraken", "unique_rate": 1 / 220, "pet_rate": 1 / 3000},
     {"key": "cerberus", "label": "Cerberus", "category": "slayer", "kc_npcs": ["Cerberus"],
-     "sections": ["cerberus"], "wom_metric": "cerberus"},
+     "wom_metric": "cerberus"},
     {"key": "araxxor", "label": "Araxxor", "category": "slayer", "kc_npcs": ["Araxxor"],
-     "sections": ["araxxor"], "wom_metric": "araxxor"},
+     "wom_metric": "araxxor"},
     {"key": "thermonuclear_smoke_devil", "label": "Thermonuclear Smoke Devil",
      "category": "slayer", "kc_npcs": ["Thermonuclear smoke devil"],
-     "sections": ["thermonuclear_devil"], "wom_metric": "thermonuclear_smoke_devil",
+     "wom_metric": "thermonuclear_smoke_devil",
      "ca_monsters": ["Thermonuclear Smoke Devil"], "pet_rate": 1 / 3000},
     {"key": "alchemical_hydra", "label": "Alchemical Hydra", "category": "slayer",
-     "kc_npcs": ["Alchemical Hydra"], "sections": ["alchemical_hydra"],
-     "wom_metric": "alchemical_hydra", "pet_rate": 1 / 3000},
+     "kc_npcs": ["Alchemical Hydra"], "wom_metric": "alchemical_hydra", "pet_rate": 1 / 3000},
     {"key": "demonic_gorillas", "label": "Demonic Gorillas", "category": "slayer",
-     "kc_npcs": ["Demonic gorilla"], "sections": ["demonic_gorillas"],
+     "kc_npcs": ["Demonic gorilla"], "sections": ["slayer_demonic_gorillas"],
      "ca_monsters": ["Demonic Gorilla"]},
+    {"key": "skotizo", "label": "Skotizo", "category": "slayer", "kc_npcs": ["Skotizo"],
+     "wom_metric": "skotizo"},
+    {"key": "shellbane", "label": "Shellbane Gryphon", "category": "slayer",
+     "kc_npcs": ["Shellbane gryphon"], "wom_metric": "shellbane_gryphon"},
     # Wilderness
     {"key": "chaos_elemental", "label": "Chaos Elemental", "category": "wilderness",
-     "kc_npcs": ["Chaos Elemental"], "sections": ["chaos_elemental"],
-     "wom_metric": "chaos_elemental"},
+     "kc_npcs": ["Chaos Elemental"], "wom_metric": "chaos_elemental"},
     {"key": "venenatis_spindel", "label": "Venenatis / Spindel", "category": "wilderness",
-     "kc_npcs": ["Venenatis", "Spindel"], "sections": ["venenatis_spindel"],
-     "wom_metric": "venenatis", "ca_monsters": ["Venenatis"]},
+     "kc_npcs": ["Venenatis", "Spindel"], "wom_metric": "venenatis",
+     "ca_monsters": ["Venenatis"]},
     {"key": "callisto_artio", "label": "Callisto / Artio", "category": "wilderness",
-     "kc_npcs": ["Callisto", "Artio"], "sections": ["callisto_artio"],
-     "wom_metric": "callisto", "ca_monsters": ["Callisto"]},
+     "kc_npcs": ["Callisto", "Artio"], "wom_metric": "callisto", "ca_monsters": ["Callisto"]},
     {"key": "vetion_calvarion", "label": "Vet'ion / Calvar'ion", "category": "wilderness",
-     "kc_npcs": ["Vet'ion", "Calvar'ion"], "sections": ["vet_ion_calvar_ion"],
-     "wom_metric": "vetion", "ca_monsters": ["Vet'ion"], "pet_rate": 1 / 1500},
+     "kc_npcs": ["Vet'ion", "Calvar'ion"], "wom_metric": "vetion", "ca_monsters": ["Vet'ion"],
+     "pet_rate": 1 / 1500},
     {"key": "king_black_dragon", "label": "King Black Dragon", "category": "wilderness",
-     "kc_npcs": ["King Black Dragon"], "sections": ["king_black_dragon"],
-     "wom_metric": "king_black_dragon", "pet_rate": 1 / 3000},
+     "kc_npcs": ["King Black Dragon"], "wom_metric": "king_black_dragon", "pet_rate": 1 / 3000},
     {"key": "wilderness_demi_bosses", "label": "Chaos Fanatic, Crazy Archaeologist & Scorpia",
      "short": "Wilderness demi-boss", "category": "wilderness",
      "kc_npcs": ["Chaos Fanatic", "Crazy archaeologist", "Scorpia"],
-     "sections": ["wilderness_wards"], "wom_metric": "chaos_fanatic",
+     "wom_metric": "chaos_fanatic",
      "ca_monsters": ["Chaos Fanatic", "Crazy Archaeologist", "Scorpia"]},
     # Group content
     {"key": "barrows", "label": "Barrows", "category": "group", "kc_npcs": ["Barrows"],
-     "sections": ["barrows_brothers_ahrim", "barrows_brothers_dharok",
-                  "barrows_brothers_guthan", "barrows_brothers_karil",
-                  "barrows_brothers_torag", "barrows_brothers_verac"],
      "wom_metric": "barrows_chests", "unit": "chests"},
     {"key": "dagannoth_kings", "label": "Dagannoth Kings", "category": "group",
      "kc_npcs": ["Dagannoth Rex", "Dagannoth Prime", "Dagannoth Supreme"],
-     "sections": ["dagannoth_kings_dagannoth_supreme", "dagannoth_kings_dagannoth_rex",
-                  "dagannoth_kings_dagannoth_prime"],
      "wom_metric": "dagannoth_rex",
      "ca_monsters": ["Dagannoth Rex", "Dagannoth Prime", "Dagannoth Supreme"],
      "unique_rate": 1 / 43, "conditional": True, "pet_rate": 1 / 5000},
     {"key": "moons_of_peril", "label": "Moons of Peril", "category": "group",
-     "kc_npcs": ["Lunar Chest"], "sections": ["moons_of_peril_eclipse_moon",
-                                              "moons_of_peril_blood_moon",
-                                              "moons_of_peril_blue_moon"],
-     "wom_metric": "lunar_chests", "ca_monsters": ["Moons of Peril"],
-     "unique_rate": 1 / 40, "conditional": True, "unit": "chests"},
+     "kc_npcs": ["Lunar Chest"], "wom_metric": "lunar_chests",
+     "ca_monsters": ["Moons of Peril"], "unique_rate": 1 / 40, "conditional": True,
+     "unit": "chests"},
+    # Skilling bosses
+    {"key": "zalcano", "label": "Zalcano", "category": "skilling", "kc_npcs": ["Zalcano"],
+     "kph": 20.0},
 )
 
 ENCOUNTER_BY_KEY = {e["key"]: e for e in ENCOUNTERS}
@@ -445,10 +459,11 @@ def encounter_candidates(enc: dict, bounds: dict) -> list[dict]:
                     "estimated": est, "detail": f"{n:,} at ~{rate_note}",
                     "task": _kc_task(enc, n)})
 
-    # Any unique — 1..5 of them, whichever counts land in a tier.
+    # Any unique — 1..5 of them, whichever counts land in a tier. A one-item
+    # table is the specific-item task below ("Any Scurrius unique" isn't).
     uniques = [u["name"] for u in enc.get("uniques") or []]
     p_any = float(enc.get("unique_rate") or 0)
-    if uniques and p_any > 0:
+    if len(uniques) > 1 and p_any > 0:
         seen_n: set[int] = set()
         for tier in DIFFICULTIES:
             # "5 KBD uniques" off a 3-item table reads as a grind, not a goal.
@@ -561,12 +576,237 @@ def general_candidates(bounds: dict) -> list[dict]:
     return out
 
 
-def build_candidates(catalog: Iterable[dict], bounds: dict) -> list[dict]:
+# --------------------------------------------------------------------------- #
+# Library tasks
+# --------------------------------------------------------------------------- #
+# Public (and the clan's own private) rows of ``web_event_task_library`` join
+# the pool when they can be sized: every item they name is a unique of one
+# assembled encounter (or the boss / pet / skill they target is one we price).
+# The task goes in exactly as the library holds it; only difficulty and points
+# are ours. A row several bosses could satisfy (a Dragon pickaxe) yields one
+# candidate per boss, sharing a "lib:<id>" signature so only one is picked.
+
+#: Library tasks get a nudge over generated ones: a clan has already run them
+#: and their names have more character than "3 Zulrah uniques".
+LIBRARY_WEIGHT = 1.5
+
+#: Exact all-of odds by inclusion-exclusion up to this many items (2^n terms).
+_ALL_OF_EXACT_MAX = 12
+
+#: Config keys that change how a task reports, not what it counts.
+_COSMETIC_CONFIG_KEYS = {"progress_notify"}
+
+#: Below these a library XP / loot row is a typo, not a goal (a "2,000,000
+#: Fishing XP" row that actually asks for 2 Attack XP exists).
+_MIN_LIBRARY_XP = 10_000
+_MIN_LIBRARY_GP = 100_000
+
+
+def _norm(name) -> str:
+    return " ".join(str(name or "").lower().split())
+
+
+def _config_items(config: dict) -> list[tuple[str, float]]:
+    """``[(lower name, points)]`` from a flat ``items`` list (dicts or bare
+    strings). Empty for nested shapes (groups / paths), which aren't sized."""
+    out = []
+    for it in config.get("items") or []:
+        if isinstance(it, str):
+            out.append((_norm(it), 0.0))
+        elif isinstance(it, dict):
+            name = it.get("item_name") or it.get("name")
+            if name:
+                try:
+                    pts = float(it.get("points") or 0)
+                except (TypeError, ValueError):
+                    pts = 0.0
+                out.append((_norm(name), pts))
+    return out
+
+
+def item_rates(enc: dict) -> dict[str, float]:
+    """``{lower item name: per-kill chance}`` for one assembled encounter.
+
+    Where the wiki rates are conditional (raids, DKs, Moons) they are shares of
+    the unique roll, so they are rescaled to sum to ``unique_rate``. Items
+    without a rate are left out, so a task naming one can't be sized."""
+    uniques = enc.get("uniques") or []
+    rated = {_norm(u["name"]): float(u["rate"]) for u in uniques if u.get("rate")}
+    if enc.get("conditional"):
+        p_any = float(enc.get("unique_rate") or 0)
+        total = sum(rated.values())
+        if p_any <= 0 or total <= 0:
+            return {}
+        return {n: p_any * r / total for n, r in rated.items()}
+    return rated
+
+
+def _expected_all_of(rates: list[float]) -> float:
+    """Expected kills to see every item at least once (each an independent
+    per-kill chance; continuous-time approximation)."""
+    m = len(rates)
+    if m <= _ALL_OF_EXACT_MAX:
+        total = 0.0
+        for mask in range(1, 1 << m):
+            s = sum(rates[i] for i in range(m) if mask >> i & 1)
+            total += (1 if bin(mask).count("1") % 2 else -1) / s
+        return total
+    mean = sum(rates) / m
+    return sum(1 / k for k in range(1, m + 1)) / mean
+
+
+def _expected_distinct(rates: list[float], n: int) -> float:
+    """Expected kills to see ``n`` different items (equal-rate approximation)."""
+    m = len(rates)
+    mean = sum(rates) / m
+    return sum(1 / ((m - k) * mean) for k in range(min(n, m)))
+
+
+def _library_kills(task: dict, rates: dict[str, float]) -> Optional[float]:
+    """Expected kills for an item_collection task at a boss with these item
+    rates, or None when any item it names isn't one of the boss's uniques."""
+    config = task.get("config") or {}
+    kind = config.get("kind")
+    n = int(task.get("target_value") or 1)
+    if not kind:
+        r = rates.get(_norm(task.get("target")))
+        return n / r if r else None
+    items = _config_items(config)
+    if not items or any(name not in rates for name, _p in items):
+        return None
+    rs = [rates[name] for name, _p in items]
+    if kind == "any_of":
+        return n / sum(rs)
+    if kind == "any_of_distinct":
+        return _expected_distinct(rs, n)
+    if kind in ("all_of", "assembly"):
+        return _expected_all_of(rs)
+    if kind == "point_collection":
+        per_kill = sum(rates[name] * p for name, p in items)
+        return n / per_kill if per_kill > 0 else None
+    return None
+
+
+def _restricted_npcs(config: dict) -> set[str]:
+    """Every NPC a library task's source restriction names (lower-cased)."""
+    out = {_norm(n) for n in config.get("source_npcs") or []}
+    for npcs in (config.get("item_npcs") or {}).values():
+        out |= {_norm(n) for n in npcs or []}
+    return out
+
+
+def library_candidates(library: Iterable[dict], catalog: Iterable[dict]) -> list[dict]:
+    """Sized candidates from task-library rows (unsized-by-tier: the caller
+    tags difficulty). Rows that can't be tied to a rate are skipped."""
+    catalog = list(catalog)
+    out: list[dict] = []
+    rates_by_enc = {e["key"]: item_rates(e) for e in catalog}
+    for row in library:
+        task = {"type": row.get("type"), "label": str(row.get("name") or "").strip(),
+                "target": row.get("target") or None,
+                "target_value": row.get("target_value"), "config": row.get("config") or None}
+        if not task["label"] or not task["type"]:
+            continue
+        config = task["config"] if isinstance(task["config"], dict) else {}
+        if task["config"] is not None and not isinstance(task["config"], dict):
+            continue
+        counted = {k: v for k, v in config.items() if k not in _COSMETIC_CONFIG_KEYS}
+        lib_id = row.get("id")
+        base = {"library_id": lib_id, "estimated": True, "task": task,
+                "lib_sig": f"lib:{lib_id}"}
+        n = task["target_value"]
+        n = int(n) if isinstance(n, (int, float)) and n > 0 else 1
+        ttype = task["type"]
+
+        if ttype == "xp_target":
+            skill = next((k for k in SKILL_XP_RATES if _norm(k) == _norm(task["target"])), None)
+            if skill and not counted and n >= _MIN_LIBRARY_XP:
+                rate = SKILL_XP_RATES[skill]
+                out.append({**base, "key": f"lib:{lib_id}", "family": f"skill:{skill}",
+                            "encounter": None, "category": "skilling", "kind": "xp",
+                            "hours": n / rate, "detail": f"~{format_count(rate)} XP/hr"})
+            continue
+        if ttype == "loot_value":
+            if not counted and n >= _MIN_LIBRARY_GP:
+                out.append({**base, "key": f"lib:{lib_id}", "family": "loot",
+                            "encounter": None, "category": "general", "kind": "loot",
+                            "hours": n / LOOT_GP_PER_HOUR,
+                            "detail": f"~{format_count(LOOT_GP_PER_HOUR)} GP/hr"})
+            continue
+
+        restricted = _restricted_npcs(config)
+        for enc in catalog:
+            kph = float(enc.get("kph") or 0)
+            if kph <= 0:
+                continue
+            kc_npcs = {_norm(x) for x in enc["kc_npcs"]}
+            if restricted and not restricted & kc_npcs:
+                continue
+            kills, kind = None, None
+            if ttype == "kc_target":
+                npcs = {_norm(x) for x in config.get("npcs") or []} or {_norm(task["target"])}
+                if npcs and npcs <= kc_npcs:
+                    kills, kind = n, "kc"
+            elif ttype == "pet_collection":
+                pet, rate = enc.get("pet"), float(enc.get("pet_rate") or 0)
+                if pet and rate > 0 and _norm(task["target"]) == _norm(pet):
+                    kills, kind = n / rate, "pets"
+            elif ttype == "item_collection":
+                kills = _library_kills(task, rates_by_enc[enc["key"]])
+                kind = "uniques"
+            if not kills:
+                continue
+            out.append({**base, "key": f"lib:{lib_id}:{enc['key']}",
+                        "family": f"enc:{enc['key']}", "encounter": enc["key"],
+                        "category": enc["category"], "kind": kind, "hours": kills / kph,
+                        "estimated": bool(enc.get("kph_estimated")),
+                        "detail": f"library task, ~{kills:,.0f} {enc.get('unit') or 'kills'} "
+                                  f"at {kph:g}/hr"})
+    return out
+
+
+def task_signatures(c: dict) -> set[str]:
+    """What a candidate asks for, independent of its label: two candidates
+    sharing a signature are the same task (a library "Trident of the Seas" and
+    a generated "Trident of the seas from Kraken"), so only one is picked."""
+    if "sigs" in c:
+        return c["sigs"]
+    task = c["task"]
+    config = task.get("config") if isinstance(task.get("config"), dict) else {}
+    tv = task.get("target_value") or 1
+    ttype = task.get("type")
+    kind = config.get("kind")
+    sigs: set[str] = set()
+    if c.get("lib_sig"):
+        sigs.add(c["lib_sig"])
+    if ttype == "item_collection":
+        names = sorted({name for name, _p in _config_items(config)})
+        if not kind:
+            sigs.add(f"item:{_norm(task.get('target'))}:{tv}")
+        elif kind == "any_of" and len(names) == 1:
+            sigs.add(f"item:{names[0]}:{tv}")
+        elif names:
+            sigs.add(f"{kind}:{'|'.join(names)}:{tv}")
+    elif ttype == "kc_target":
+        npcs = sorted({_norm(x) for x in config.get("npcs") or []} or {_norm(task.get("target"))})
+        sigs.add(f"kc:{'|'.join(npcs)}:{tv}")
+    elif ttype in ("pet_collection", "xp_target"):
+        sigs.add(f"{ttype}:{_norm(task.get('target'))}:{tv}")
+    elif ttype in ("loot_value", "slayer_target"):
+        sigs.add(f"{ttype}:{tv}")
+    c["sigs"] = sigs
+    return sigs
+
+
+def build_candidates(catalog: Iterable[dict], bounds: dict,
+                     library: Iterable[dict] = ()) -> list[dict]:
     """The whole sized pool, each tagged with its tier."""
+    catalog = list(catalog)
     pool: list[dict] = []
     for enc in catalog:
         pool.extend(encounter_candidates(enc, bounds))
     pool.extend(general_candidates(bounds))
+    pool.extend(library_candidates(library, catalog))
     for c in pool:
         c["difficulty"] = tier_for_hours(c["hours"], bounds)
     return [c for c in pool if c["difficulty"]]
@@ -614,6 +854,7 @@ def select(pool: list[dict], *, count: int, mix: dict, rng: random.Random,
     kind_uses: dict[str, int] = {}
     used_keys: set[str] = set()
     used_labels: set[str] = set()
+    used_sigs: set[str] = set()
 
     def _note(c: dict) -> None:
         family_uses[c["family"]] = family_uses.get(c["family"], 0) + 1
@@ -621,6 +862,7 @@ def select(pool: list[dict], *, count: int, mix: dict, rng: random.Random,
         kind_uses[c["kind"]] = kind_uses.get(c["kind"], 0) + 1
         used_keys.add(c["key"])
         used_labels.add(c["task"]["label"].strip().lower())
+        used_sigs.update(task_signatures(c))
 
     for c in taken:
         _note(c)
@@ -630,12 +872,16 @@ def select(pool: list[dict], *, count: int, mix: dict, rng: random.Random,
         is applied in ``_pick_from``."""
         if c["key"] in used_keys or c["task"]["label"].strip().lower() in used_labels:
             return 0.0
+        if task_signatures(c) & used_sigs:
+            return 0.0
         fam = family_uses.get(c["family"], 0)
         if fam >= _family_cap(c["family"]):
             return 0.0
         w = 0.25 ** fam
         w /= 1.0 + 0.35 * category_uses.get(c["category"], 0)
         w *= _clan_factor(c, clan_focus, activity, roster)
+        if c.get("library_id") is not None:
+            w *= LIBRARY_WEIGHT
         return w
 
     by_tier: dict[str, list[dict]] = {t: [] for t in DIFFICULTIES}
@@ -724,6 +970,7 @@ def finalize(c: dict) -> dict:
         "kind": c["kind"],
         "category": c["category"],
         "encounter": c.get("encounter"),
+        "source": "library" if c.get("library_id") is not None else "generated",
         "difficulty": c["difficulty"],
         "hours": round(c["hours"], 2),
         "estimated": bool(c.get("estimated")),
@@ -761,13 +1008,14 @@ def generate(catalog: list[dict], *, count: int, capacity: float, mix: dict,
              exclude_encounters: Iterable[str] = (), exclude_labels: Iterable[str] = (),
              taken_keys: Iterable[str] = (), clan_focus: str = "off",
              activity: Optional[dict] = None, roster: int = 0,
-             only_tier: Optional[str] = None) -> dict:
+             only_tier: Optional[str] = None, library: Iterable[dict] = ()) -> dict:
     """Top-level entry: size the pool for ``capacity`` and pick ``count``.
 
-    Deterministic for a given (catalog, criteria, seed) so a shared seed
-    reproduces the same board."""
+    ``library`` is the task-library rows the clan can see (see
+    :func:`library_candidates`). Deterministic for a given (catalog, library,
+    criteria, seed) so a shared seed reproduces the same board."""
     bounds = tier_bounds(capacity)
-    full = build_candidates(catalog, bounds)
+    full = build_candidates(catalog, bounds, library)
     by_key = {c["key"]: c for c in full}
     must = [k for k in must_include if k in ENCOUNTER_BY_KEY or any(
         e.get("key") == k for e in catalog)]

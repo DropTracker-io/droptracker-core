@@ -18,10 +18,14 @@ is cached per group for 30 minutes.
 """
 from __future__ import annotations
 
+import json
+import logging
 import time
 from typing import Optional
 
 from sqlalchemy import bindparam, text
+
+log = logging.getLogger(__name__)
 
 _CATALOG_TTL_SECONDS = 900.0
 _ACTIVITY_TTL_SECONDS = 1800.0
@@ -29,6 +33,7 @@ _ACTIVITY_TTL_SECONDS = 1800.0
 #: signal is meaningless there and the member join is the expensive part.
 ACTIVITY_MAX_MEMBERS = 5000
 ACTIVITY_WINDOW_DAYS = 90
+MAX_WIKI_RATE = 0.25
 
 _catalog_cache: dict = {"ts": 0.0, "rows": None}
 _activity_cache: dict[int, tuple[float, dict, int]] = {}
@@ -43,6 +48,8 @@ def _generator():
 def invalidate_cache() -> None:
     _catalog_cache["ts"] = 0.0
     _catalog_cache["rows"] = None
+    _library_cache["ts"] = 0.0
+    _library_cache["rows"] = None
     _activity_cache.clear()
 
 
@@ -59,6 +66,32 @@ def _expanding(sql: str, *names: str):
     return text(sql).bindparams(*(bindparam(n, expanding=True) for n in names))
 
 
+def _json_keys(raw) -> list[str]:
+    try:
+        keys = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        return []
+    return [str(k) for k in keys if k] if isinstance(keys, list) else []
+
+
+def _sections_for(enc: dict, slugs_by_npc_key: dict[str, list[str]]) -> list[str]:
+    """Clan Log section slugs for one encounter: every section whose
+    ``npc_keys`` meet the boss's own match keys (plus ``clog_keys``), then any
+    slug the encounter names outright. Order-preserving, no repeats."""
+    from utils.npc_names import npc_match_key
+
+    keys = [npc_match_key(n) for n in enc["kc_npcs"]] + list(enc.get("clog_keys") or [])
+    out: list[str] = []
+    for key in keys:
+        for slug in slugs_by_npc_key.get(key, []):
+            if slug not in out:
+                out.append(slug)
+    for slug in enc.get("sections") or []:
+        if slug not in out:
+            out.append(slug)
+    return out
+
+
 def assemble_catalog(s) -> list[dict]:
     """Build the catalog rows (uncached). See the module docstring."""
     tg = _generator()
@@ -72,19 +105,22 @@ def assemble_catalog(s) -> list[dict]:
     ):
         npc_ids.setdefault(str(name), []).append(int(nid))
 
-    # Clan Log sections → (uniques, pets), in the catalog's own order.
-    slugs = sorted({slug for e in encounters for slug in e.get("sections") or []})
+    # Clan Log sections → (uniques, pets), in the catalog's own order. The
+    # whole enabled catalog is a few hundred rows; each encounter claims the
+    # sections whose npc_keys meet its own (see ENCOUNTERS).
     section_items: dict[str, list[tuple[str, bool]]] = {}
-    if slugs:
-        for slug, name, attributable in s.execute(
-            _expanding(
-                "SELECT c.slug, i.item_name, i.attributable FROM clan_log_items i "
-                "JOIN clan_log_sections c ON c.id = i.section_id "
-                "WHERE c.slug IN :slugs AND c.enabled = 1 AND i.enabled = 1 "
-                "ORDER BY c.sort_order, i.sort_order, i.id", "slugs"),
-            {"slugs": slugs},
-        ):
-            section_items.setdefault(str(slug), []).append((str(name), bool(attributable)))
+    slugs_by_npc_key: dict[str, list[str]] = {}
+    for slug, npc_keys, name, attributable in s.execute(text(
+            "SELECT c.slug, c.npc_keys, i.item_name, i.attributable FROM clan_log_items i "
+            "JOIN clan_log_sections c ON c.id = i.section_id "
+            "WHERE c.enabled = 1 AND i.enabled = 1 "
+            "ORDER BY c.sort_order, i.sort_order, i.id")):
+        slug = str(slug)
+        if slug not in section_items:
+            for key in _json_keys(npc_keys):
+                slugs_by_npc_key.setdefault(key, []).append(slug)
+        section_items.setdefault(slug, []).append((str(name), bool(attributable)))
+    encounter_sections = {e["key"]: _sections_for(e, slugs_by_npc_key) for e in encounters}
 
     # Canonical item spellings (the task validator requires exact names).
     wanted_items = {n for items in section_items.values() for n, _a in items}
@@ -110,7 +146,9 @@ def assemble_catalog(s) -> list[dict]:
                 "GROUP BY l.npc_id, i.item_name", "ids", "names"),
             {"ids": ids_flat, "names": sorted(canonical.values())},
         ):
-            if rate:
+            # A unique above 1/4 per kill is a sub-table row read as a whole
+            # table (Yama's Oathplate shows as "always"), not a real rate.
+            if rate and float(rate) <= MAX_WIKI_RATE:
                 wiki[(int(nid), str(name).lower())] = float(rate)
 
     # Our derived kill rates (bosses WOM doesn't price).
@@ -163,7 +201,7 @@ def assemble_catalog(s) -> list[dict]:
 
         names: list[str] = []
         pets: list[str] = []
-        for slug in enc.get("sections") or []:
+        for slug in encounter_sections[enc["key"]]:
             for name, attributable in section_items.get(slug, []):
                 (names if attributable else pets).append(name)
         names += list(enc.get("uniques") or [])
@@ -189,8 +227,10 @@ def assemble_catalog(s) -> list[dict]:
         pet_name = canonical_pet_name(pet_name) if pet_name else None
         pet_rate = None
         if pet_name:
-            pet_rate = max((wiki.get((i, pet_name.lower()), 0.0) for i in ids),
-                           default=0.0) or enc.get("pet_rate")
+            # The curated figure wins: raid pet rows on the wiki are
+            # conditional on a purple, which reads as 1/53 for an Olmlet.
+            pet_rate = enc.get("pet_rate") or max(
+                (wiki.get((i, pet_name.lower()), 0.0) for i in ids), default=0.0) or None
 
         monsters = enc.get("ca_monsters") or [enc["label"], *kc_npcs]
         resolved, tiers = [], set()
@@ -219,6 +259,14 @@ def assemble_catalog(s) -> list[dict]:
             "ca_monsters_resolved": resolved,
             "ca_tiers": [t for t in tier_order if t in tiers],
         })
+    # A boss with no Clan Log section offers KC and CA tasks only. One or two
+    # is normal (Fortis has no attributable drop); many means the catalog and
+    # ENCOUNTERS have drifted apart again.
+    bare = [e["key"] for e in encounters
+            if not encounter_sections[e["key"]] and not e.get("uniques")]
+    if bare:
+        log.warning("task generator: %d encounter(s) match no Clan Log section: %s",
+                    len(bare), ", ".join(bare))
     return rows
 
 
@@ -233,6 +281,53 @@ def load_catalog(s, *, fresh: bool = False) -> list[dict]:
         _catalog_cache["rows"] = rows
         _catalog_cache["ts"] = now
     return rows
+
+
+#: Library task types the generator can size (services/task_generator.py
+#: library_candidates); the rest (loot sweeps, PBs, custom) are never read.
+LIBRARY_TYPES = ("item_collection", "kc_target", "pet_collection", "xp_target", "loot_value")
+
+_library_cache: dict = {"ts": 0.0, "rows": None}
+
+
+def _library_rows(s, where: str, params: dict) -> list[dict]:
+    rows = []
+    for lid, name, ttype, target, tv, config in s.execute(
+        _expanding(
+            "SELECT id, name, type, target, target_value, config "
+            "FROM web_event_task_library "
+            f"WHERE active = 1 AND type IN :types AND {where} ORDER BY id", "types"),
+        {"types": list(LIBRARY_TYPES), **params},
+    ):
+        try:
+            cfg = json.loads(config) if config else None
+        except (TypeError, ValueError):
+            continue
+        if cfg is not None and not isinstance(cfg, dict):
+            continue
+        rows.append({"id": int(lid), "name": name, "type": ttype, "target": target,
+                     "target_value": int(tv) if tv is not None else None, "config": cfg})
+    return rows
+
+
+def load_library(s, group_id: Optional[int]) -> list[dict]:
+    """Task-library rows a clan's generator may draw on: every public row
+    (cached with the catalog's TTL) plus the clan's own private rows. A read
+    failure yields no library rows; the generator works without them."""
+    now = time.monotonic()
+    try:
+        if (_library_cache["rows"] is None
+                or now - _library_cache["ts"] >= _CATALOG_TTL_SECONDS):
+            _library_cache["rows"] = _library_rows(s, "visibility = 'public'", {})
+            _library_cache["ts"] = now
+        rows = list(_library_cache["rows"])
+        if group_id:
+            rows += _library_rows(
+                s, "visibility <> 'public' AND group_id = :g", {"g": int(group_id)})
+        return rows
+    except Exception:
+        log.warning("task generator: library read failed", exc_info=True)
+        return []
 
 
 def clan_activity(s, group_id: Optional[int], catalog: list[dict]) -> tuple[dict, int]:

@@ -34,7 +34,8 @@ cq = _load("_conquest_rules_for_presets_ut", "services", "conquest.py")
 
 
 EXTRA_KEYS = {t["key"] for t in presets.EXTRA_TILES}
-ALL_TILES = len(tg.ENCOUNTERS) + len(presets.EXTRA_TILES)
+ON_MAP_KEYS = ({e["key"] for e in tg.ENCOUNTERS} - presets.OFF_MAP) | EXTRA_KEYS
+ALL_TILES = len(ON_MAP_KEYS)
 
 
 def _lookups():
@@ -77,7 +78,8 @@ class TestPresetCoverage:
     def test_every_tile_placed_exactly_once(self):
         placed = [k for r in presets.GIELINOR_REGIONS for k in r["tiles"]]
         assert len(placed) == len(set(placed))
-        assert set(placed) == {e["key"] for e in tg.ENCOUNTERS} | EXTRA_KEYS
+        assert set(placed) == ON_MAP_KEYS
+        assert not set(placed) & presets.OFF_MAP
         assert not EXTRA_KEYS & {e["key"] for e in tg.ENCOUNTERS}
 
     def test_region_keys_unique(self):

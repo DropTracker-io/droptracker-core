@@ -285,3 +285,139 @@ class TestSelectDirect:
         picks, _ = tg.select(pool, count=5, mix={"air": 1, "water": 1, "earth": 1, "fire": 1},
                              rng=random.Random(1), taken=zul[:2])
         assert not [p for p in picks if p["encounter"] == "zulrah"]
+
+
+# --------------------------------------------------------------------------- #
+# Task library
+# --------------------------------------------------------------------------- #
+
+def _lib(lid, name, ttype="item_collection", target=None, target_value=1, config=None):
+    return {"id": lid, "name": name, "type": ttype, "target": target,
+            "target_value": target_value, "config": config}
+
+
+class TestItemRates:
+    def test_plain_table_uses_the_wiki_rates(self):
+        rates = tg.item_rates(CATALOG[0])
+        assert rates["tanzanite fang"] == pytest.approx(1 / 512)
+
+    def test_conditional_rates_are_rescaled_to_the_unique_roll(self):
+        enc = _enc("cox", kph=3.5, conditional=True, unique_rate=1 / 30,
+                   uniques=[("Twisted bow", 1 / 34.5), ("Dexterous prayer scroll", 20 / 69)])
+        rates = tg.item_rates(enc)
+        assert sum(rates.values()) == pytest.approx(1 / 30)
+        assert rates["dexterous prayer scroll"] > rates["twisted bow"]
+
+    def test_unrated_conditional_table_offers_nothing(self):
+        assert tg.item_rates(CATALOG[2]) == {}
+
+
+class TestOdds:
+    def test_all_of_two_equal_items_is_one_and_a_half_draws(self):
+        assert tg._expected_all_of([0.1, 0.1]) == pytest.approx(15.0)
+
+    def test_all_of_large_set_uses_the_harmonic_approximation(self):
+        rates = [0.01] * 20
+        h = sum(1 / k for k in range(1, 21))
+        assert tg._expected_all_of(rates) == pytest.approx(h / 0.01)
+
+    def test_distinct_n_grows_as_the_pool_empties(self):
+        one = tg._expected_distinct([0.1, 0.1, 0.1], 1)
+        three = tg._expected_distinct([0.1, 0.1, 0.1], 3)
+        assert one == pytest.approx(1 / 0.3)
+        assert three == pytest.approx(tg._expected_all_of([0.1, 0.1, 0.1]))
+
+
+class TestLibraryCandidates:
+    def test_single_item_row_is_sized_at_its_boss(self):
+        (c,) = tg.library_candidates(
+            [_lib(7, "Serpentine Visage", target="Serpentine visage")], CATALOG)
+        assert c["encounter"] == "zulrah" and c["kind"] == "uniques"
+        assert c["hours"] == pytest.approx(512 / 46)
+        assert c["task"]["label"] == "Serpentine Visage"  # the library's own name
+        assert c["key"] == "lib:7:zulrah"
+
+    def test_item_shared_by_two_bosses_yields_one_candidate_each(self):
+        lib = [_lib(8, "Pickaxe", target="Dragon pickaxe")]
+        cat = CATALOG + [_enc("kq", uniques=[("Dragon pickaxe", 1 / 400)])]
+        cands = tg.library_candidates(lib, cat)
+        assert {c["encounter"] for c in cands} == {"callisto", "kq"}
+        assert all("lib:8" in tg.task_signatures(c) for c in cands)
+
+    def test_any_of_sums_the_listed_rates(self):
+        cfg = {"kind": "any_of", "items": [{"item_name": "Tanzanite fang"},
+                                           {"item_name": "Magic fang"}]}
+        (c,) = tg.library_candidates([_lib(9, "Fangs", target_value=2, config=cfg)], CATALOG)
+        assert c["hours"] == pytest.approx(2 / (2 / 512) / 46)
+
+    def test_point_collection_uses_points_per_kill(self):
+        cfg = {"kind": "point_collection",
+               "items": [{"item_name": "Vorkath's head", "points": 1},
+                         {"item_name": "Draconic visage", "points": 50}]}
+        (c,) = tg.library_candidates([_lib(10, "Vork points", target_value=10, config=cfg)],
+                                     CATALOG)
+        per_kill = 1 / 50 + 50 / 5000
+        assert c["hours"] == pytest.approx(10 / per_kill / 34)
+
+    def test_items_from_two_bosses_or_unknown_items_are_skipped(self):
+        mixed = {"kind": "any_of", "items": ["Tanzanite fang", "Vorkath's head"]}
+        unknown = {"kind": "all_of", "items": ["Tanzanite fang", "Bucket"]}
+        assert tg.library_candidates(
+            [_lib(11, "Mixed", config=mixed), _lib(12, "Unknown", config=unknown)], CATALOG) == []
+
+    def test_source_restriction_elsewhere_rules_the_boss_out(self):
+        cfg = {"source_npcs": ["Kalphite Queen"]}
+        assert tg.library_candidates(
+            [_lib(13, "Pick", target="Dragon pickaxe", config=cfg)], CATALOG) == []
+
+    def test_kc_pet_xp_and_loot_rows(self):
+        lib = [_lib(20, "50 Vorkath", "kc_target", target="Vorkath", target_value=50),
+               _lib(21, "Snakeling", "pet_collection", target="Pet snakeling"),
+               _lib(22, "1m Magic", "xp_target", target="Magic", target_value=1_000_000,
+                    config={"progress_notify": "off"}),
+               _lib(23, "Earn 10m", "loot_value", target_value=10_000_000)]
+        by_id = {c["library_id"]: c for c in tg.library_candidates(lib, CATALOG)}
+        assert by_id[20]["kind"] == "kc" and by_id[20]["hours"] == pytest.approx(50 / 34)
+        assert by_id[21]["kind"] == "pets" and by_id[21]["hours"] == pytest.approx(4000 / 46)
+        assert by_id[22]["family"] == "skill:Magic"
+        assert by_id[23]["family"] == "loot"
+
+    def test_typo_rows_and_unsizable_configs_are_skipped(self):
+        lib = [_lib(30, "2,000,000 Fishing XP", "xp_target", target="Attack", target_value=2),
+               _lib(31, "10m from Zulrah", "loot_value", target_value=10_000_000,
+                    config={"source_npcs": ["Zulrah"]}),
+               _lib(32, "PB", "pb_target", target="Vorkath", target_value=60)]
+        assert tg.library_candidates(lib, CATALOG) == []
+
+
+class TestLibraryInGenerate:
+    LIB = [_lib(7, "Serpentine Visage", target="Serpentine visage"),
+           _lib(9, "Fang pair", target_value=2,
+                config={"kind": "any_of", "items": ["Tanzanite fang", "Magic fang"]})]
+
+    def test_library_rows_are_picked_and_marked(self):
+        seen = set()
+        for seed in range(20):
+            # 200 h: both rows (~11 h each) fit under Elite.
+            res = _gen(seed=seed, capacity=200, kinds={"uniques"}, library=self.LIB)
+            for r in res["tasks"]:
+                seen.add(r["source"])
+                if r["source"] == "library":
+                    assert r["key"].startswith("lib:")
+                    assert isinstance(r["task"]["config"], (str, type(None)))
+        assert seen == {"generated", "library"}
+
+    def test_same_item_is_never_on_the_board_twice(self):
+        for seed in range(40):
+            res = _gen(seed=seed, count=20, capacity=200, kinds={"uniques"}, library=self.LIB,
+                       must_include=["zulrah"])
+            visage = [r for r in res["tasks"]
+                      if (r["task"].get("target") or "").lower() == "serpentine visage"]
+            assert len(visage) <= 1
+
+    def test_one_item_table_has_no_any_unique_task(self):
+        enc = _enc("scurrius", kph=70, uniques=[("Scurrius' spine", 1 / 33)],
+                   unique_rate=1 / 33)
+        pool = tg.encounter_candidates(enc, tg.tier_bounds(52.5))
+        assert not [c for c in pool if c["key"].startswith("unique_any:")]
+        assert [c for c in pool if c["key"].startswith("unique:")]

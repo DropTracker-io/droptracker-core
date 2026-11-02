@@ -109,6 +109,16 @@ GIELINOR_REGIONS: tuple = (
                "boat_paints", "ocean_encounters", "shellbane_gryphon")},
 )
 
+#: Task-generator encounters the preset doesn't draw. Placing one means a new
+#: tile in a region above AND a redrawn art pack (scripts/conquest_map), so a
+#: new generator boss lands here until someone does both.
+OFF_MAP: frozenset = frozenset({
+    "the_gauntlet", "giant_mole", "obor", "bryophyta", "deranged_archaeologist", "brutus",
+    "maggot_king", "mad_angel", "skotizo", "zalcano",
+    # Drawn as the preset's own shellbane_gryphon tile below.
+    "shellbane",
+})
+
 #: Tiles that aren't task-generator encounters, resolved into catalog-shaped
 #: rows by :func:`resolve_extra_tiles` (the route looks the names up):
 #:
@@ -134,7 +144,7 @@ EXTRA_TILES: tuple = (
     {"key": "tzhaar_city", "label": "TzHaar City", "short": "TzHaar",
      "clog_pages": ["TzHaar"], "common": True, "icon_item": "Obsidian cape"},
     {"key": "karamja_slayer", "label": "Slayer", "slayer_task_hours": 0.5,
-     "sections": ["slayer_non_boss"], "icon_item": "Slayer helmet"},
+     "sections": ["slayer_slayer_non_boss"], "icon_item": "Slayer helmet"},
     # The Seas: every Sailing collection-log page. Most Sailing drops aren't
     # tied to one sea, so where a tile floats is flavour.
     {"key": "lost_schematics", "label": "Lost Schematics", "clog_pages": ["Lost Schematics"],
