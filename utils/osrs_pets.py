@@ -29,7 +29,7 @@ _CATEGORIES = {
              "Beef", "Butch", "Callisto cub", "Dom", "Gull", "Hellpuppy",
              "Huberte", "Ikkle hydra", "Jal-nib-rek", "Kalphite princess",
              "Lil' zik", "Lil'viathan", "Little nightmare", "Maggot marquess",
-             "Moxi", "Muphin", "Nexling", "Nid", "Noon", "Olmlet", "Pet chaos elemental",
+             "Moxi", "Muphin", "Nexling", "Nid", "Noon", "Olmlet", "Orion", "Pet chaos elemental",
              "Pet dagannoth prime", "Pet dagannoth rex", "Pet dagannoth supreme", "Pet dark core",
              "Pet general graardor", "Pet k'ril tsutsaroth", "Pet kraken", "Pet kree'arra",
              "Pet smoke devil", "Pet snakeling", "Pet zilyana", "Phoenix", "Prince black dragon",
@@ -39,7 +39,7 @@ _CATEGORIES = {
     "skilling": {"Baby chinchompa", "Beaver", "Giant squirrel", "Heron",
                  "Rift guardian", "Rock golem", "Rocky", "Soup", "Tangleroot",
                  "Quetzin", "Herbi", "Mr mcgroot"},
-    "raids": {"Olmlet", "Tumeken's guardian", "Lil' zik"},
+    "raids": {"Olmlet", "Tumeken's guardian", "Lil' zik", "Orion"},
     # Clue-scroll and minigame pets: rare grinds like any boss/skilling pet, so
     # they count toward a bare "any pet" task — they just have no NPC to kill.
     "clue": {"Bloodhound"},

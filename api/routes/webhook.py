@@ -1386,6 +1386,7 @@ async def _process_manual_submission(req_start):
                         "milestone": data.get("milestone"),
                         "previously_owned": data.get("previously_owned"),
                         "game_message": data.get("game_message"),
+                        "pet_candidates": data.get("pet_candidates"),
                     })
                     response = await submissions.pet_processor(processed_data, external_session=db_session)
                     log_phase("pet_processed")

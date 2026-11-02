@@ -67,8 +67,8 @@ class TestResolvePetName:
         assert resolve_pet_name("") == (None, ())
 
     def test_recorded_names_cover_pets_the_catalogue_lacks(self):
-        assert resolve_pet_name("orion") == (None, ())
-        assert resolve_pet_name("orion", extra_names=("Orion",))[0] == "Orion"
+        assert resolve_pet_name("zorbit") == (None, ())
+        assert resolve_pet_name("zorbit", extra_names=("Zorbit",))[0] == "Zorbit"
 
 
 class TestResolvePetInput:

@@ -31,6 +31,25 @@ from .common import (
 )
 
 
+def pet_from_candidates(pet_name, candidates):
+    """The pet's name, taken from the plugin's candidates when it sent none.
+
+    A plugin without the manifest (Use API off, the default) can't tell a
+    pet's "Untradeable drop" line from a clue scroll's in the same tick, so
+    from 6.1.24 it sends every item line it saw as ``pet_candidates``
+    ("A|B") with ``pet_name`` "Unknown Pet". The first one that is a pet wins.
+    """
+    from utils.osrs_pets import canonical_pet_name
+
+    if canonical_pet_name(pet_name) or not candidates:
+        return pet_name
+    for candidate in str(candidates).split("|"):
+        known = canonical_pet_name(candidate.strip())
+        if known:
+            return known
+    return pet_name
+
+
 async def pet_processor(pet_data, external_session=None, world_type="main"):
     debug_print(f"=== PET PROCESSOR START (world_type={world_type}) ===")
     debug_print(f"Raw pet data: {pet_data}")
@@ -54,6 +73,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     if not pet_name:
         debug_print("No pet name found, aborting")
         return
+    pet_name = pet_from_candidates(pet_name, pet_data.get("pet_candidates"))
 
     auth_key = pet_data.get("auth_key", "")
     attachment_url = pet_data.get("attachment_url", None)
