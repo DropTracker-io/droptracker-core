@@ -15,6 +15,12 @@ API never shows more than an anonymous visitor would see:
       neither is something a clan has announced, so both are left out.
     * Clan-vs-clan events appear for every group that ACCEPTED them, not only
       the host, matching the group's own list on the site.
+
+One opt-in exception: ``?include_private=true`` adds the group's private
+events, and is honoured only for the group's OWN key (403 for any other). A
+clan's own bot needs them (the Discord relay posts results when an event
+ends, web153a); a partner page never asks for them, so nothing it renders
+changes.
 """
 from __future__ import annotations
 
@@ -56,14 +62,14 @@ def _unix(dt):
     return int(dt.replace(tzinfo=timezone.utc).timestamp())
 
 
-def classify(row, now: datetime) -> str | None:
+def classify(row, now: datetime, include_private: bool = False) -> str | None:
     """Which list ``row`` belongs on, or None when it must not be published.
 
     Mirrors ``web_api.routes.events._effective_status`` (an active event past
     its end reads as past before the sweep flips it) plus the public-list
     rule for drafts described in the module docstring.
     """
-    if (row.visibility or "public") == "private":
+    if (row.visibility or "public") == "private" and not include_private:
         return None
     if row.status == "past":
         return "past"
@@ -89,7 +95,7 @@ def event_payload(row, now: datetime, site_url: str, counts: dict,
         "id": row.id,
         "name": row.name,
         "description": row.description or None,
-        "status": classify(row, now),
+        "status": classify(row, now, include_private=True),  # rows here already passed the filter
         "kind": row.kind or "standard",
         "mode": row.mode or "standard",
         "starts_at": _iso(row.starts_at),
@@ -111,11 +117,13 @@ def event_payload(row, now: datetime, site_url: str, counts: dict,
         "signups_close_at": _iso(close_at),
         "signups_close_at_unix": _unix(close_at),
         "url": f"{site_url}/events/{int(row.id)}",
+        "visibility": getattr(row, "visibility", None) or "public",
     }
 
 
 def build_group_events(session, group_id: int, past_limit: int,
-                       wanted: tuple, now: datetime | None = None) -> dict:
+                       wanted: tuple, now: datetime | None = None,
+                       include_private: bool = False) -> dict:
     from sqlalchemy import bindparam, text
 
     from utils.site_urls import WEBSITE_URL
@@ -132,13 +140,13 @@ def build_group_events(session, group_id: int, past_limit: int,
          WHERE (e.group_id = :gid
                 OR e.id IN (SELECT eg.event_id FROM web_event_groups eg
                              WHERE eg.group_id = :gid AND eg.status = 'accepted'))
-           AND e.visibility <> 'private'
+           AND (:priv OR e.visibility <> 'private')
            AND (e.status <> 'draft' OR e.starts_at > :now)
-    """).bindparams(gid=group_id, now=now)).all()
+    """).bindparams(gid=group_id, now=now, priv=bool(include_private))).all()
 
     buckets: dict = {status: [] for status in _STATUSES}
     for row in rows:
-        status = classify(row, now)
+        status = classify(row, now, include_private)
         if status in wanted:
             buckets[status].append(row)
 
@@ -222,6 +230,14 @@ async def group_events(group_id: int):
     else:
         wanted = _STATUSES
 
+    include_private = (request.args.get("include_private") or "").strip().lower() in (
+        "1", "true", "yes")
+    if include_private and not (key.get("owner_type") == "group" and key.get("group_id") == group_id):
+        return jsonify({
+            "error": "forbidden",
+            "detail": "include_private is only available to the group's own key.",
+        }), 403
+
     raw_limit = request.args.get("past_limit")
     past_limit = DEFAULT_PAST
     if raw_limit is not None:
@@ -235,7 +251,8 @@ async def group_events(group_id: int):
     def build(session):
         if not scope.group_exists(session, group_id):
             return None
-        return build_group_events(session, group_id, past_limit, wanted)
+        extra = {"include_private": True} if include_private else {}
+        return build_group_events(session, group_id, past_limit, wanted, **extra)
 
     return await serve_fixed("groups.events", GROUP_EVENTS_COST, build,
                              not_found_detail="No group with that id.",
