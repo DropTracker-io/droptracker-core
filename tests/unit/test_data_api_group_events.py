@@ -245,3 +245,41 @@ async def test_route_unknown_group_and_scope(monkeypatch):
     client, _ = _client(monkeypatch, key_scope="group", key_group=7)
     assert (await _get(client, "/v2/groups/7/events"))[0] == 200
     assert (await _get(client, "/v2/groups/9/events"))[0] == 403
+
+
+def test_private_events_only_when_asked():
+    from data_api.routes.events import build_group_events, classify
+
+    day = timedelta(days=1)
+    private_past = _row(9, "past", visibility="private", starts=NOW - 3 * day, ends=NOW - day)
+    assert classify(private_past, NOW) is None
+    assert classify(private_past, NOW, include_private=True) == "past"
+    body = build_group_events(_FakeSession([private_past]), 7, 10, ("past",), now=NOW,
+                              include_private=True)
+    [ev] = body["past"]
+    assert ev["id"] == 9 and ev["status"] == "past" and ev["visibility"] == "private"
+
+
+def test_include_private_refused_for_any_other_key(monkeypatch):
+    import asyncio
+
+    from quart import Quart, g
+
+    import data_api.routes.events as routes
+
+    app = Quart(__name__)
+    app.register_blueprint(routes.events_bp, url_prefix="/v2")
+    state = {}
+
+    @app.before_request
+    async def _auth():
+        g.api_key = state["key"]
+
+    async def call(path):
+        resp = await app.test_client().get(path)
+        return resp.status_code
+
+    for key in ({"owner_type": "group", "group_id": 8, "scope": "group"},
+                {"owner_type": "global", "group_id": None, "scope": "global"}):
+        state["key"] = key
+        assert asyncio.run(call("/v2/groups/7/events?include_private=true")) == 403
