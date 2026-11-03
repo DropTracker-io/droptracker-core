@@ -136,6 +136,19 @@ class TestGlobalExclusion:
         assert pvp.global_exclusion(13362, _player(1, 10), None) == "pvp_minigame:pvp_arena"
         assert pvp.global_exclusion(10588, _player(1, 10), None) == "pvp_minigame:pk_tutor"
 
+    def test_an_instanced_lms_kill_counts_nowhere(self):
+        # The plugin's kill handler reports the instance region, not the LMS
+        # map's (2026-11-03: ~1,900 LMS kills on worlds 559/580 reached the
+        # boards as region 25984, 38419, ...). Real-gear PvP never happens in
+        # an instance.
+        for region in (25984, 38419, 32353, 50442, 28217):
+            assert pvp.global_exclusion(region, _player(1, 10), None) == "pvp_minigame:instanced"
+
+    def test_the_real_world_is_not_an_instance(self):
+        # Wilderness, Grand Exchange (PvP worlds), Ferox, the far east of the map.
+        for region in (11835, 12598, 12344, 13375, 15159):
+            assert pvp.global_exclusion(region, _player(1, 10), None) is None
+
     def test_killing_your_own_alt_counts_nowhere(self):
         assert pvp.global_exclusion(12345, _player(1, 10), _player(2, 10)) == "own_account"
 

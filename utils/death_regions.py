@@ -177,8 +177,27 @@ PVP_MINIGAME_REGIONS: dict[str, frozenset[int]] = {
 }
 
 
+#: Instanced areas live at map x >= 6400, i.e. region x (``region_id >> 8``)
+#: >= 100; the real world ends well short of that. No PvP that risks real gear
+#: happens in an instance: LMS, Soul Wars, Clan Wars and the PvP Arena all
+#: run there. The plugin's PvP kill handler reports the *instance* region
+#: rather than the template map region (its death handler converts, so deaths
+#: arrive as "LMS - Wild Varrock" etc.), which is how ~1,900 LMS kills worth
+#: ~82B on worlds 559/580 reached the boards before 2026-11-03.
+INSTANCE_REGION_X = 100
+PVP_INSTANCED = "instanced"
+
+
+def is_instanced_region(region_id) -> bool:
+    try:
+        return (int(region_id) >> 8) >= INSTANCE_REGION_X
+    except (TypeError, ValueError):
+        return False
+
+
 def pvp_minigame_for_region(region_id) -> str | None:
-    """The PvP minigame this region belongs to (``"lms"``), or ``None``."""
+    """The PvP minigame this region belongs to (``"lms"``), ``"instanced"``
+    for any instanced region, or ``None``."""
     try:
         region = int(region_id)
     except (TypeError, ValueError):
@@ -186,4 +205,6 @@ def pvp_minigame_for_region(region_id) -> str | None:
     for name, regions in PVP_MINIGAME_REGIONS.items():
         if region in regions:
             return name
+    if is_instanced_region(region):
+        return PVP_INSTANCED
     return None
