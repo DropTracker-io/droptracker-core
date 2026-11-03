@@ -17,6 +17,12 @@ Amounts are entered as positive GP; the kind decides the sign stored (see
 ``services/group_bank.signed_amount``). Adjustments carry their own sign.
 The balance is the sum of confirmed rows.
 
+With ``bank_coffer_withdrawals_neutral`` on, synced coffer withdrawals are
+GP moving out of the (50M-capped) coffer into an admin's keeping: they stay
+in the ledger but leave the balance and the outflow totals, and the headline
+reports them as ``held_outside_coffer_total`` instead. Applied at read time,
+so flipping the setting re-reads every past row.
+
 ``created_at`` (unix seconds) backdates an entry to when the GP actually
 moved, so a clan can enter its history; the ledger is ordered by it.
 
@@ -48,6 +54,7 @@ from services.group_bank import (
     entry_date,
     merge_donors,
     signed_amount,
+    split_coffer_moves,
     totals_from_kind_sums,
 )
 from web_api.common import (
@@ -156,6 +163,17 @@ def _bank_visibility(s, group_id: int) -> tuple:
     return _flag("bank_show_on_profile"), _flag("bank_show_donors")
 
 
+def _coffer_withdrawals_neutral(s, group_id: int) -> bool:
+    from utils import group_config as gc
+
+    return gc.is_truthy(gc.get(s, group_id, "bank_coffer_withdrawals_neutral", default=None))
+
+
+def _not_coffer_move():
+    """Filter clause excluding synced coffer withdrawals (see the module doc)."""
+    return ~and_(GroupBankEntry.kind == "withdrawal", GroupBankEntry.source == "coffer")
+
+
 def _counterparty(s, body: dict, kind: str, required: bool) -> tuple:
     """``(player_id, rsn, user_id)`` for the other side of the movement."""
     player_id = body.get("player_id")
@@ -229,12 +247,17 @@ def _decorate(s, rows, can_manage: bool) -> list:
 
 def _summary(s, group_id: int) -> dict:
     """Totals + donor ranking over confirmed rows, computed in SQL."""
-    kind_sums = (
-        s.query(GroupBankEntry.kind, func.sum(GroupBankEntry.amount), func.count(GroupBankEntry.id))
+    neutral = _coffer_withdrawals_neutral(s, group_id)
+    kind_source_sums = (
+        s.query(
+            GroupBankEntry.kind, GroupBankEntry.source,
+            func.sum(GroupBankEntry.amount), func.count(GroupBankEntry.id),
+        )
         .filter(GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed")
-        .group_by(GroupBankEntry.kind)
+        .group_by(GroupBankEntry.kind, GroupBankEntry.source)
         .all()
     )
+    kind_sums, held_outside = split_coffer_moves(kind_source_sums, neutral)
     totals = totals_from_kind_sums(kind_sums)
     confirmed_donation = (
         GroupBankEntry.group_id == group_id,
@@ -258,7 +281,13 @@ def _summary(s, group_id: int) -> dict:
         s.query(Player.player_id, Player.player_name).filter(Player.player_id.in_(pids)).all()
     ) if pids else {}
     top, donor_count = merge_donors(by_player, by_name, player_names)
-    return {"totals": totals, "top_donors": top, "donor_count": donor_count}
+    return {
+        "totals": totals,
+        "top_donors": top,
+        "donor_count": donor_count,
+        "coffer_withdrawals_neutral": neutral,
+        "held_outside_coffer": held_outside,
+    }
 
 
 def _pending_count(s, group_id: int) -> int:
@@ -291,9 +320,15 @@ async def get_bank(group_id: int):
                 return {"visible": False, "can_manage": False}
             summary = _summary(s, group_id)
             totals = summary["totals"]
+            neutral = summary["coffer_withdrawals_neutral"]
+            recent_q = s.query(GroupBankEntry).filter(
+                GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed"
+            )
+            if neutral:
+                # Moving GP out of the coffer isn't clan activity worth listing.
+                recent_q = recent_q.filter(_not_coffer_move())
             recent_rows = (
-                s.query(GroupBankEntry)
-                .filter(GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed")
+                recent_q
                 .order_by(GroupBankEntry.created_at.desc(), GroupBankEntry.id.desc())
                 .limit(_RECENT_LIMIT)
                 .all()
@@ -309,6 +344,8 @@ async def get_bank(group_id: int):
                 "withdrawn_total": money(totals["withdrawn"]),
                 "payout_total": money(totals["payouts"]),
                 "transferred_total": money(totals["transferred"]),
+                "coffer_withdrawals_neutral": neutral,
+                "held_outside_coffer_total": money(summary["held_outside_coffer"]),
                 "adjustment_total": money(totals["adjustments"]),
                 "donation_count": totals["donation_count"],
                 "donor_count": summary["donor_count"],

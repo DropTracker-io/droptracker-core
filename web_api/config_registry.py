@@ -1302,6 +1302,17 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "default": "pending",
         "options": ["pending", "confirmed"],
     },
+    # Suggestion #160: the coffer caps at 50M, so clans withdraw to hold GP
+    # elsewhere. On, synced withdrawals stay in the ledger but don't lower the
+    # balance (applied at read time in web_api/routes/group_bank.py).
+    {
+        "key": "bank_coffer_withdrawals_neutral",
+        "label": "Coffer withdrawals stay in the bank",
+        "category": "bank",
+        "type": "boolean",
+        "help": "Turn on if your admins take GP out of the coffer to hold it, since the coffer holds at most 50M. Synced withdrawals then show in the ledger without lowering the balance, and only payouts and event funding count as GP taken out. If held GP goes back into the coffer, remove that deposit so it isn't counted twice.",
+        "default": False,
+    },
 
     # --- PvP ---
     # Player kills are tracked apart from drops (data/submissions/pvp.py,

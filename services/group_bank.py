@@ -186,6 +186,32 @@ def entry_date(value, now: datetime) -> datetime:
     return when
 
 
+def is_coffer_move(kind: str, source: Optional[str], coffer_withdrawals_neutral: bool) -> bool:
+    """True for a synced coffer withdrawal the group counts as GP moving out
+    of the coffer but staying the clan's (``bank_coffer_withdrawals_neutral``).
+    The coffer holds at most 50M, so clans take GP out to hold it; that isn't
+    spending. Only synced lines: a withdrawal staff record is GP leaving."""
+    return bool(coffer_withdrawals_neutral) and kind == "withdrawal" and source == "coffer"
+
+
+def split_coffer_moves(kind_source_sums: Iterable, coffer_withdrawals_neutral: bool) -> tuple:
+    """``(kind, source, SUM(amount), COUNT(*))`` over confirmed rows ->
+    ``(kind_sums for totals_from_kind_sums, gp held outside the coffer)``.
+
+    Coffer moves (see :func:`is_coffer_move`) leave the totals; what they
+    moved is reported on its own, as a positive number."""
+    by_kind: dict = {}
+    held = 0
+    for kind, source, total, count in kind_source_sums:
+        total = int(total or 0)
+        if is_coffer_move(kind, source, coffer_withdrawals_neutral):
+            held += -total
+            continue
+        t, c = by_kind.get(kind, (0, 0))
+        by_kind[kind] = (t + total, c + int(count or 0))
+    return [(k, t, c) for k, (t, c) in by_kind.items()], held
+
+
 def totals_from_kind_sums(kind_sums: Iterable) -> dict:
     """Headline numbers from ``(kind, SUM(amount), COUNT(*))`` over confirmed rows.
 

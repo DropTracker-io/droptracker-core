@@ -145,6 +145,41 @@ class TestMergeDonors:
         assert top[0]["player_id"] == 19
 
 
+class TestCofferMoves:
+    ROWS = [
+        ("donation", "coffer", 45_000_000, 9),
+        ("donation", "staff", 1_000, 1),
+        ("withdrawal", "coffer", -36_069_421, 2),
+        ("withdrawal", "staff", -500, 1),
+        ("payout", "staff", -2_000, 1),
+    ]
+
+    def test_off_everything_counts(self):
+        kind_sums, held = gbs.split_coffer_moves(self.ROWS, False)
+        t = gbs.totals_from_kind_sums(kind_sums)
+        assert held == 0
+        assert t["withdrawn"] == 36_069_921
+        assert t["balance"] == 45_001_000 - 36_069_921 - 2_000
+
+    def test_on_coffer_withdrawals_leave_the_totals(self):
+        kind_sums, held = gbs.split_coffer_moves(self.ROWS, True)
+        t = gbs.totals_from_kind_sums(kind_sums)
+        assert held == 36_069_421
+        # A withdrawal staff record is still GP leaving the clan.
+        assert t["withdrawn"] == 500 and t["payouts"] == 2_000
+        assert t["paid_out"] == 2_500
+        assert t["balance"] == 45_001_000 - 2_500
+        # Deposits from either source still merge into one donation count.
+        assert t["donated"] == 45_001_000 and t["donation_count"] == 10
+
+    def test_only_synced_withdrawals_are_moves(self):
+        assert gbs.is_coffer_move("withdrawal", "coffer", True)
+        assert not gbs.is_coffer_move("withdrawal", "coffer", False)
+        assert not gbs.is_coffer_move("withdrawal", "staff", True)
+        assert not gbs.is_coffer_move("donation", "coffer", True)
+        assert not gbs.is_coffer_move("payout", "coffer", True)
+
+
 class TestEntryDate:
     NOW = datetime(2026, 11, 2, 21, 0, 0)
 
@@ -653,7 +688,7 @@ class TestTransfer:
 # public read
 # --------------------------------------------------------------------------- #
 class TestGetBank:
-    def _wire_read(self, monkeypatch, s, *, viewer=None, role=None, show=(True, True)):
+    def _wire_read(self, monkeypatch, s, *, viewer=None, role=None, show=(True, True), neutral=False):
         _wire(monkeypatch, s)
         # Reads order by real columns (created_at.desc()): keep a mock class.
         monkeypatch.setattr(gb, "GroupBankEntry", MagicMock())
@@ -665,6 +700,8 @@ class TestGetBank:
             "totals": gbs.totals_from_kind_sums([("donation", 9_000, 2), ("payout", -1_000, 1)]),
             "top_donors": [{"player_id": None, "rsn": "Zez", "total": 9_000, "count": 2}],
             "donor_count": 1,
+            "coffer_withdrawals_neutral": neutral,
+            "held_outside_coffer": 5_000 if neutral else 0,
         })
 
     async def test_public_headline(self, client, monkeypatch):
@@ -678,10 +715,24 @@ class TestGetBank:
         assert body["paid_out_total"]["value"] == 1_000
         assert body["payout_total"]["value"] == 1_000
         assert body["withdrawn_total"]["value"] == 0
+        assert body["coffer_withdrawals_neutral"] is False
+        assert body["held_outside_coffer_total"]["value"] == 0
         assert body["top_donors"][0]["total"]["value"] == 9_000
         # Staff notes and the queue size never reach the public.
         assert body["recent"][0]["note"] is None
         assert body["pending_count"] == 0
+
+    async def test_neutral_coffer_moves_reported_and_kept_off_the_activity_list(
+        self, client, monkeypatch
+    ):
+        s = _S([_GROUP], [])
+        self._wire_read(monkeypatch, s, neutral=True)
+        clauses = []
+        monkeypatch.setattr(gb, "_not_coffer_move", lambda: clauses.append(1) or True)
+        body = await (await client.get("/api/v1/groups/42/bank")).get_json()
+        assert body["coffer_withdrawals_neutral"] is True
+        assert body["held_outside_coffer_total"]["value"] == 5_000
+        assert clauses == [1]
 
     async def test_hidden_from_public_when_turned_off(self, client, monkeypatch):
         s = _S([_GROUP])
@@ -714,6 +765,22 @@ class _SS(_S):
     def query(self, *a, **k):
         assert self._batches, "unexpected extra query"
         return _QS(self._batches.pop(0))
+
+
+class TestSummarySQL:
+    async def test_summary_groups_by_source_and_applies_the_setting(self, monkeypatch):
+        sums = [
+            ("donation", "coffer", 10_000, 2),
+            ("withdrawal", "coffer", -4_000, 1),
+        ]
+        s = _S(sums, [], [])
+        monkeypatch.setattr(gb, "GroupBankEntry", MagicMock())
+        monkeypatch.setattr(gb, "_coffer_withdrawals_neutral", lambda s, gid: True)
+        out = gb._summary(s, 42)
+        assert out["coffer_withdrawals_neutral"] is True
+        assert out["held_outside_coffer"] == 4_000
+        assert out["totals"]["balance"] == 10_000
+        assert out["totals"]["paid_out"] == 0
 
 
 class TestListEntries:
