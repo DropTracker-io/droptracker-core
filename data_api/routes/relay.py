@@ -163,6 +163,12 @@ async def messages():
     if integ["status"] != "active":
         # Still honour the long-poll: a bot set up before staff activate it
         # would otherwise spin on instant empty answers into the ceiling.
+        # And record the poll: "is their bot polling yet?" is exactly what
+        # staff check before activating (claim() records it when active).
+        try:
+            conn.hset(core.stats_key(integ["id"]), "last_poll", str(int(time.time())))
+        except Exception:
+            pass
         if wait:
             await asyncio.sleep(wait)
         _record("relay_messages", 200, started)
