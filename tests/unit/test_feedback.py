@@ -252,3 +252,11 @@ def test_live_read_failure_shows_nothing_and_is_cached(monkeypatch):
     assert mod._live_requests() == []
     assert mod._live_requests() == []
     assert len(calls) == 1
+
+
+def test_global_group_is_never_offered(monkeypatch):
+    import web_api.popup_audience as pa
+    import web_api.routes.feedback as mod
+
+    monkeypatch.setattr(pa, "_leader_roles", lambda s, uid: {2: "owner"})
+    assert mod.leader_groups(MagicMock(), 0) == []

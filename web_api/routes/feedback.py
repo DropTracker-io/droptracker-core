@@ -68,6 +68,9 @@ SNOOZE = timedelta(days=14)
 #: to hang a one-answer limit on).
 HOURLY_LIMIT = 5
 ADMIN_RESPONSES_MAX = 300
+#: The site-wide DropTracker.io group every player is in. Not a clan anyone
+#: leads in the usual sense, so it is never offered as "answering for".
+GLOBAL_GROUP_ID = 2
 
 _LIVE_KEY = "feedback:live"
 _LIVE_TTL = 20.0
@@ -128,6 +131,7 @@ def leader_groups(s, user_id: int) -> list[dict]:
     from web_api.popup_audience import _leader_roles, _paid_group_tiers
 
     roles = _leader_roles(s, user_id)
+    roles.pop(GLOBAL_GROUP_ID, None)
     if not roles:
         return []
     groups = {int(gid): (name, added) for gid, name, added in
