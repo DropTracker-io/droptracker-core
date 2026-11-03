@@ -125,18 +125,73 @@ class TestRawEmbed:
         assert e["footer"]["text"].endswith("Share feedback page")
 
 
-class TestPublishedEmbed:
-    def test_only_quote_score_and_signature(self):
-        e = core.published_embed(rating=9, quote="  Love it  ", attribution_text="Clan X")
-        assert e["description"] == "“Love it”"
-        assert e["author"]["name"] == "⭐ 9/10"
-        assert e["footer"]["text"] == "Clan X"
-        assert "fields" not in e
+def _card(**over):
+    kwargs = dict(rating=8, quote="Loot boards keep\nthe clan chat alive", attribution="clan",
+                  username="joel", group_name="Clan X",
+                  group_icon_url="https://cdn.example/icon.png",
+                  group_page_url="https://www.droptracker.io/groups/7", role="owner",
+                  member_count=1200, group_since=datetime(2026, 3, 1))
+    kwargs.update(over)
+    return core.published_message(**kwargs)
+
+
+def _texts(msg) -> str:
+    out = []
+
+    def walk(c):
+        if isinstance(c, dict):
+            if c.get("type") == 10:
+                out.append(c["content"])
+            for v in c.values():
+                walk(v)
+        elif isinstance(c, list):
+            for v in c:
+                walk(v)
+
+    walk(msg["components"])
+    return "\n".join(out)
+
+
+class TestPublishedCard:
+    def test_is_components_v2_with_logo_score_and_quote(self):
+        msg = _card()
+        assert msg["flags"] == 1 << 15
+        container = msg["components"][0]
+        assert container["type"] == 17 and container["accent_color"] == 0xD4AF37
+        assert container["components"][0]["accessory"]["media"]["url"] == core.LOGO_URL
+        text = _texts(msg)
+        assert "★★★★★★★★☆☆" in text and "Rated 8/10" in text
+        assert "> Loot boards keep\n> the clan chat alive" in text
+
+    def test_clan_section_has_icon_stats_and_link(self):
+        msg = _card()
+        flat = json.dumps(msg)
+        assert "https://cdn.example/icon.png" in flat
+        assert "1,200 members" in _texts(msg) and "tracking since Mar 2026" in _texts(msg)
+        assert '"label": "View Clan X"' in flat
+        assert "joel" not in _texts(msg)  # clan name only
+
+    def test_one_member_is_singular(self):
+        assert "1 member ·" in _texts(_card(member_count=1))
+
+    def test_full_names_the_person(self):
+        assert "**joel**\nOwner of **Clan X**" in _texts(_card(attribution="full"))
+
+    def test_anonymous_has_no_clan_details(self):
+        msg = _card(attribution="anon")
+        flat = json.dumps(msg)
+        for leak in ("Clan X", "joel", "icon.png", "/groups/7", "1,200"):
+            assert leak not in flat
+        assert core.ANON_LABEL in _texts(msg)
+
+    def test_missing_icon_falls_back_to_plain_text(self):
+        msg = _card(group_icon_url=None)
+        who = msg["components"][0]["components"][4]
+        assert who["type"] == 10
 
     def test_no_em_dashes(self):
         # Site copy rule: em-dashes read as AI-written.
-        e = core.published_embed(rating=9, quote="Good", attribution_text="Clan X")
-        assert "—" not in json.dumps(e, ensure_ascii=False)
+        assert "—" not in json.dumps(_card(), ensure_ascii=False)
 
 
 class TestComponents:

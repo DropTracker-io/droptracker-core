@@ -64,15 +64,20 @@ def _load(s, response_id):
 
 def _published_payload(s, resp) -> dict:
     from db.models import Group, User
+    from utils.site_urls import group_url
 
     username = s.query(User.username).filter(User.user_id == resp.user_id).scalar()
-    group_name = None
+    group = None
     if resp.group_id is not None:
-        group_name = s.query(Group.group_name).filter(Group.group_id == resp.group_id).scalar()
-    label = core.attribution_label(resp.attribution, username=username, group_name=group_name)
-    embed = core.published_embed(rating=int(resp.rating), quote=resp.liked_text or "",
-                                 attribution_text=label)
-    return {"embeds": [embed], "allowed_mentions": {"parse": []}}
+        group = s.query(Group).filter(Group.group_id == resp.group_id).first()
+    return core.published_message(
+        rating=int(resp.rating), quote=resp.liked_text or "", attribution=resp.attribution,
+        username=username, group_name=group.group_name if group else None,
+        group_icon_url=group.icon_url if group else None,
+        group_page_url=group_url(group.group_id) if group else None,
+        role=resp.role, member_count=resp.member_count,
+        group_since=group.date_added if group else None,
+    )
 
 
 def _claim(parsed: dict, discord_id: str):

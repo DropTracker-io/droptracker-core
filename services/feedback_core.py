@@ -180,15 +180,94 @@ def dismissed_components(response_id: int) -> list:
     return _row(_button("Reopen", custom_id("reopen", response_id), 2))
 
 
-def published_embed(*, rating: int, quote: str, attribution_text: str) -> dict:
-    """The public testimonial: the quote, the score and the chosen signature.
-    Never the suggestions text, contact details, plan or member count."""
-    return {
-        "author": {"name": f"⭐ {rating}/10"},
-        "description": f"“{quote.strip()[:3900]}”",
-        "color": _GOLD,
-        "footer": {"text": attribution_text[:2048]},
+IS_COMPONENTS_V2 = 1 << 15
+LOGO_URL = "https://www.droptracker.io/img/droptracker-small.gif"
+SITE_URL = "https://www.droptracker.io/"
+
+
+def _stars(rating: int) -> str:
+    rating = max(RATING_MIN, min(RATING_MAX, int(rating)))
+    return "★" * rating + "☆" * (RATING_MAX - rating)
+
+
+def _text(content: str) -> dict:
+    return {"type": 10, "content": content}
+
+
+def _section(content: str, image_url: Optional[str]) -> dict:
+    """A text block with a thumbnail on the right, or plain text without one."""
+    if not image_url:
+        return _text(content)
+    return {"type": 9, "components": [_text(content)],
+            "accessory": {"type": 11, "media": {"url": image_url}}}
+
+
+def _usable_image(url: Optional[str]) -> Optional[str]:
+    return url if isinstance(url, str) and url.startswith(("http://", "https://")) else None
+
+
+def published_message(
+    *,
+    rating: int,
+    quote: str,
+    attribution: str,
+    username: Optional[str],
+    group_name: Optional[str],
+    group_icon_url: Optional[str],
+    group_page_url: Optional[str],
+    role: Optional[str],
+    member_count: Optional[int],
+    group_since: Optional[datetime],
+) -> dict:
+    """The public testimonial as a Components V2 card: our logo and the score
+    up top, the quote, then who said it with their clan's icon and a link to
+    the clan page. Anonymous quotes carry no clan details at all. Never the
+    suggestions text, contact details or plan."""
+    rating = int(rating)
+    header = _section(
+        f"-# Clan leader testimonial\n## {_stars(rating)}\n**Rated {rating}/10**",
+        LOGO_URL,
+    )
+    body = "\n".join(f"> {line}" if line.strip() else ">" for line in quote.strip()[:3500].splitlines())
+    quote_block = _text(f"{body}")
+
+    show_clan = attribution != "anon" and bool(group_name)
+    label = attribution_label(attribution, username=username, group_name=group_name)
+    if show_clan:
+        if attribution == "full" and username:
+            title = f"**{username}**\n{(role or 'leader').capitalize()} of **{group_name}**"
+        else:
+            title = f"**{group_name}**"
+        stats = [
+            (f"{member_count:,} member{'' if member_count == 1 else 's'}" if member_count else None),
+            f"tracking since {group_since.strftime('%b %Y')}" if group_since else None,
+        ]
+        stats_line = " · ".join(s for s in stats if s)
+        who = _section(title + (f"\n-# {stats_line}" if stats_line else ""),
+                       _usable_image(group_icon_url))
+    else:
+        who = _text(f"**{label}**")
+
+    buttons = []
+    if show_clan and group_page_url:
+        buttons.append({"type": 2, "style": 5, "label": f"View {group_name}"[:80], "url": group_page_url})
+    buttons.append({"type": 2, "style": 5, "label": "Try The DropTracker", "url": SITE_URL})
+
+    container = {
+        "type": 17,
+        "accent_color": _GOLD,
+        "components": [
+            header,
+            {"type": 14, "divider": True, "spacing": 1},
+            quote_block,
+            {"type": 14, "divider": True, "spacing": 1},
+            who,
+            {"type": 1, "components": buttons},
+            _text("-# Shared with permission · droptracker.io"),
+        ],
     }
+    return {"flags": IS_COMPONENTS_V2, "components": [container],
+            "allowed_mentions": {"parse": []}}
 
 
 def message_url(guild_id, channel_id, message_id) -> Optional[str]:
