@@ -127,6 +127,8 @@ def test_paused_still_honours_the_long_poll(env, monkeypatch):
     monkeypatch.setattr(relay_routes.asyncio, "sleep", fake_sleep)
     status, body = _run(_call(app, "get", "/v2/relay/messages?wait=20"))
     assert status == 200 and body["status"] == "paused" and slept == [20]
+    # Staff check "is the bot polling?" before activating, so a paused poll counts.
+    assert core.stats(_r, 7).get("last_poll")
 
 
 def test_long_poll_returns_as_soon_as_something_arrives(env, monkeypatch):
