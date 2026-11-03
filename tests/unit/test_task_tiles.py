@@ -256,3 +256,16 @@ def test_uncapped_build_tile_keeps_every_icon():
     full = build_tile(spec, {}, {}, cap=None)
     assert len(full["icons"]) == len(spec["items"])
     assert full["icon_overflow"] == 0
+
+
+def test_every_event_skill_icon_is_named_like_the_wom_metric_art():
+    """/img/metrics art is named after WOM's metric slugs, so every skill an
+    event task can name must map onto one (Sailing, and Runecraft →
+    runecrafting, once rendered as blank tiles)."""
+    from web_api.routes.event_task_validation import OSRS_SKILLS
+
+    wom_spelling = {"runecraft": "runecrafting"}
+    for skill in OSRS_SKILLS:
+        slug = wom_spelling.get(skill.lower(), skill.lower())
+        assert icon_asset_path({"type": "skill", "id": None, "name": skill}) == \
+            f"metrics/{slug}.png", skill

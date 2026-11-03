@@ -237,3 +237,14 @@ def test_with_skill_icons_prefixes_each_segment(monkeypatch):
     assert icons("Slayer — 25,000,000 XP", "core") == "<:skill_slayer:1> Slayer — 25,000,000 XP"
     assert icons("", "core") == ""
     assert icons("Slayer 99", "hof") == "Slayer 99"
+
+
+def test_every_event_skill_and_its_wom_spelling_has_an_icon_key():
+    """Events take the game's skill names, SOTW competitions WOM's slugs
+    ("runecrafting"); both must find the skill's emoji."""
+    from utils import app_emojis
+    from web_api.routes.event_task_validation import OSRS_SKILLS
+
+    for skill in [s.lower() for s in OSRS_SKILLS] + ["runecrafting"]:
+        key = app_emojis._SKILL_KEY_ALIASES.get(skill) or f"skill_{skill}"
+        assert key in SPECS, skill

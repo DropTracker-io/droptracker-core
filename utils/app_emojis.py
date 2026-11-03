@@ -193,6 +193,8 @@ del _skill
 #: Skill name → registry key for the skills that borrow an existing emoji.
 _SKILL_KEY_ALIASES = {
     "construction": "construction",
+    # WOM (SOTW competitions, clan stats) spells it out; the game doesn't.
+    "runecrafting": "skill_runecraft",
     "total": "stats",
     "overall": "stats",
 }
