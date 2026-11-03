@@ -109,7 +109,8 @@ _MAX_COMPONENT_BUTTONS = 5
 #: a bot extension that handles the click. Anything else is dropped, so a
 #: queued row can never mint a button nothing answers.
 #:   dtrv: — review buttons (services/review_buttons_discord.py, suggestion #198)
-ACTION_BUTTON_PREFIXES = ("dtrv:",)
+#:   dtfb: — feedback publish buttons (services/feedback_buttons_discord.py, web155a)
+ACTION_BUTTON_PREFIXES = ("dtrv:", "dtfb:")
 
 _ACTION_STYLES = {"primary": "BLURPLE", "secondary": "GREY",
                   "success": "GREEN", "danger": "RED"}
@@ -486,6 +487,18 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
                         )
                         if sm:
                             sm.discord_message_id = row.discord_message_id
+                    # Clan leader feedback (web155a): the raw staff post, so
+                    # the admin page can link to it.
+                    elif row.ref_type == "feedback_response" and row.ref_id:
+                        from db.models import FeedbackResponse
+
+                        fr = (
+                            session.query(FeedbackResponse)
+                            .filter(FeedbackResponse.id == row.ref_id)
+                            .first()
+                        )
+                        if fr:
+                            fr.raw_message_id = row.discord_message_id
                     # Web ticket replies (web102a): traceability only — the
                     # mirror's relay-marker skip is what prevents echo, never
                     # this write-back.

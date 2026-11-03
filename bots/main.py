@@ -324,6 +324,8 @@ async def on_startup(event: Startup):
     # Submit button + Discord review buttons (suggestion #198).
     bot.load_extension("services.submit_panel_discord")
     bot.load_extension("services.review_buttons_discord")
+    # Publish / Dismiss buttons on clan leader feedback in the staff Discord (web155a).
+    bot.load_extension("services.feedback_buttons_discord")
     # Staff-DM reply bridge (web102a): DMs to this bot flow into staff_dm
     # chat threads. Must live on the SAME bot that sends the relay DMs
     # (the outbox drain runs here), or replies land in the wrong app's inbox.

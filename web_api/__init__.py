@@ -73,6 +73,7 @@ from web_api.routes.paypal_ipn import paypal_ipn_bp
 from web_api.routes.personal_bests import personal_bests_bp
 from web_api.routes.platform import platform_bp
 from web_api.routes.popup_notices import popup_notices_bp
+from web_api.routes.feedback import feedback_bp
 from web_api.routes.player_claims import player_claims_bp
 from web_api.routes.points import points_bp
 from web_api.routes.profiles import profiles_bp
@@ -286,6 +287,7 @@ def create_app() -> Quart:
     app.register_blueprint(staff_chats_bp, url_prefix=API_PREFIX)
     app.register_blueprint(group_notices_bp, url_prefix=API_PREFIX)
     app.register_blueprint(popup_notices_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(feedback_bp, url_prefix=API_PREFIX)
     app.register_blueprint(tester_builds_bp, url_prefix=API_PREFIX)
     app.register_blueprint(plugin_registration_bp, url_prefix=API_PREFIX)
     app.register_blueprint(admin_widget_bp, url_prefix=API_PREFIX)
