@@ -101,3 +101,41 @@ async def test_successful_insert_unchanged(monkeypatch):
     assert name == "Blood-starved venator"
     session.commit.assert_called_once()
     assert common.npc_list["Blood-starved venator"] == 15770
+
+
+async def test_unknown_npc_keeps_the_callers_player_id(monkeypatch):
+    """A Hardcore Worlds character isn't in the main-game name cache. The
+    new_npc notification used to take its player id from that cache, got
+    None, and the NOT NULL insert dead-lettered the submission (2026-11-04,
+    "Tiny port coin bag")."""
+    monkeypatch.setattr(common, "npc_list", {})
+    monkeypatch.setattr(common, "player_list", {})
+    monkeypatch.setattr(common.osrs_api, "create_client", lambda *a, **k: _FakeSemanticClient(None))
+    notify = AsyncMock()
+    monkeypatch.setattr(common, "create_notification", notify)
+
+    session = _fresh_session(first_results=[None])
+    npc_id, name = await common.ensure_npc_id_for_player(
+        session, "Tiny port coin bag", 5764999, "OneLifeJimmy", True
+    )
+
+    assert (npc_id, name) == (None, "Tiny port coin bag")
+    notify.assert_awaited_once()
+    assert notify.await_args.args[1] == 5764999
+    assert notify.await_args.args[2]["player_id"] == 5764999
+
+
+async def test_unknown_npc_without_any_player_id_is_a_plain_refusal(monkeypatch):
+    monkeypatch.setattr(common, "npc_list", {})
+    monkeypatch.setattr(common, "player_list", {})
+    monkeypatch.setattr(common.osrs_api, "create_client", lambda *a, **k: _FakeSemanticClient(None))
+    notify = AsyncMock()
+    monkeypatch.setattr(common, "create_notification", notify)
+
+    session = _fresh_session(first_results=[None])
+    npc_id, _ = await common.ensure_npc_id_for_player(
+        session, "Tiny port coin bag", None, "Nobody", True
+    )
+
+    assert npc_id is None
+    notify.assert_not_awaited()

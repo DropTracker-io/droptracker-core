@@ -1341,9 +1341,14 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
             canonical_id, canonical_name = int(norm_row[0]), norm_row[1]
             npc_list[npc_name] = canonical_id
             return canonical_id, canonical_name
-    player_id = player_list.get(player_name)
-    if player_id == 0:
+    # The caller's id wins: the name cache only knows main-game accounts, so a
+    # Hardcore Worlds character resolved to None here and the new_npc insert
+    # below (player_id NOT NULL) dead-lettered the whole submission.
+    cached_id = player_list.get(player_name)
+    if cached_id == 0:
         return None, npc_name
+    if player_id is None:
+        player_id = cached_id
     try:
         async with osrs_api.create_client() as client:
             npc_id = await client.semantic.get_npc_id(npc_name)
@@ -1375,6 +1380,10 @@ async def ensure_npc_id_for_player(session, npc_name, player_id, player_name, us
             session.rollback()
         except Exception:
             pass
+    if player_id is None:
+        # notification_queue.player_id is NOT NULL; an unknown NPC is still an
+        # ordinary refusal, never a crash that dead-letters the submission.
+        return None, npc_name
     notification_data = {"npc_name": npc_name, "player_name": player_name, "player_id": player_id}
     await create_notification(
         "new_npc",

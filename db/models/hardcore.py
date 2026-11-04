@@ -112,6 +112,9 @@ class HardcorePersonalBestEntry(Base):
     date_added = Column(DateTime, nullable=True, default=func.now())
     used_api = Column(Boolean, default=False)
     unique_id = Column(String(255), nullable=True)
+    # As personal_best.precise_timing (web127a); pb.py writes it for every
+    # world, so a mirror without it crashed the first PB per boss (web157a).
+    precise_timing = Column(Boolean, nullable=True)
 
 
 class HardcoreCollectionLogEntry(Base):
