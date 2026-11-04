@@ -28,7 +28,12 @@ Rules the owner settled on (dev tracker #38, t383):
   rank.
 * ``single`` mode gives one role; ``cumulative`` gives the rank's role plus
   every mapped rank below it.
-* A rank with no role falls back to the next mapped rank below it.
+* A rank with no role falls back to the next mapped rank below it, except in
+  ``exact`` mode (1:1): there each rank gets only its own role, a rank with
+  no role gets none, and the list order only breaks ties between a member's
+  accounts (their highest rank that has a role wins). Added because leaders
+  read the list as the clan's real rank order and didn't expect staff ranks
+  to borrow a skill rank's role.
 * Strict: a mapped role a member shouldn't have is taken off, including one
   staff gave by hand, unless the member holds the exempt role. Leaving the
   clan or being demoted removes the old role. Roles not in the map are never
@@ -63,7 +68,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 
 CONFIG_KEY = "rank_role_sync"
 
-MODES = ("single", "cumulative")
+MODES = ("single", "cumulative", "exact")
 
 #: WOM's role for a clan member with no rank. ``utils.clan_ranks`` never stores
 #: it, so it stands for "on the roster, absent from the rank cache".
@@ -258,7 +263,7 @@ def validate_config(data: Mapping, *, guild_id=None, stored: Optional[Mapping] =
 
     mode = str(data.get("mode") or "single").strip().lower()
     if mode not in MODES:
-        errors.append("Choose one role per member or a ladder of roles.")
+        errors.append("Choose one role per member, a ladder of roles, or 1:1.")
     exempt_raw = data.get("exempt_role_id")
     exempt = _snowflake(exempt_raw)
     if exempt_raw not in (None, "") and exempt is None:
@@ -382,6 +387,19 @@ def roles_for_rank_index(best: Optional[int], role_ids: Sequence[Optional[str]],
     return set(below) if mode == "cumulative" else {below[0]}
 
 
+def member_roles(ranks: Iterable[str], order: Mapping[str, int],
+                 role_ids: Sequence[Optional[str]], mode: str) -> Set[str]:
+    """The roles for a member holding ``ranks`` (one per account).
+
+    ``exact`` never borrows: the member gets the role of their highest rank
+    that has one of its own. The other modes resolve from the highest listed
+    rank and fall back down the list (:func:`roles_for_rank_index`)."""
+    if mode == "exact":
+        mapped = [order[r] for r in ranks if r in order and role_ids[order[r]]]
+        return {role_ids[min(mapped)]} if mapped else set()
+    return roles_for_rank_index(best_rank_index(ranks, order), role_ids, mode)
+
+
 def best_rank_index(ranks: Iterable[str], order: Mapping[str, int]) -> Optional[int]:
     """Highest (lowest index) of a member's ranks that the leader listed."""
     found = [order[r] for r in ranks if r in order]
@@ -405,7 +423,7 @@ def desired_roles(config: Mapping, roster: Iterable[Tuple[Optional[str], str]],
         if did is None:
             continue
         ranks_by_member.setdefault(did, set()).add(rank_of(player_name, rank_map))
-    return {did: roles_for_rank_index(best_rank_index(ranks, order), role_ids, mode)
+    return {did: member_roles(ranks, order, role_ids, mode)
             for did, ranks in ranks_by_member.items()}
 
 
@@ -423,7 +441,7 @@ def roles_in_use(config: Mapping, roster_names: Iterable[str],
         ranks.add(MEMBER_RANK)
     used: Set[str] = set()
     for rank in ranks:
-        used |= roles_for_rank_index(best_rank_index([rank], order), role_ids, mode)
+        used |= member_roles([rank], order, role_ids, mode)
     return used
 
 

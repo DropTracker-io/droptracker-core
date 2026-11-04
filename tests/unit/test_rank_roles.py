@@ -158,6 +158,30 @@ def test_cumulative_gives_the_ladder():
     assert got == {U1: {R_GENERAL, R_RECRUIT}}
 
 
+def test_exact_mode_never_borrows_a_role():
+    # 1:1: a staff rank with no role of its own (captain) gets nothing,
+    # instead of the skill rank below it (the Law/Zarosian report).
+    cfg = _cfg(mode="exact")
+    assert rr.desired_roles(cfg, [(U1, "Charlie")], RANKS) == {U1: set()}
+    assert rr.desired_roles(cfg, [(U1, "Bravo")], RANKS) == {U1: {R_GENERAL}}
+    assert rr.roles_in_use(cfg, [], {"zed": "captain"}) == set()
+
+
+def test_exact_mode_uses_the_highest_rank_that_has_a_role():
+    # Accounts in an unmapped captain rank and the mapped recruit rank: the
+    # recruit role is the member's own, so they keep it. Mapped ranks still
+    # break ties by list order.
+    cfg = _cfg(mode="exact")
+    assert rr.desired_roles(cfg, [(U1, "Charlie"), (U1, "Delta")], RANKS) == {U1: {R_RECRUIT}}
+    assert rr.desired_roles(cfg, [(U1, "Delta"), (U1, "Bravo")], RANKS) == {U1: {R_GENERAL}}
+
+
+def test_validate_accepts_exact_mode():
+    assert rr.parse_config({"mode": "exact"})["mode"] == "exact"
+    assert rr.validate_config({"mode": "exact", "ranks": []})["mode"] == "exact"
+    assert "1:1" in _errors({"mode": "strict", "ranks": []})
+
+
 def test_unlisted_rank_and_unlinked_members():
     roster = [(U1, "Echo"), (None, "Alpha"), ("", "Bravo")]
     # gnome_child isn't in the leader's list: no role, but U1 is still planned
