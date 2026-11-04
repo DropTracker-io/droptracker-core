@@ -367,6 +367,51 @@ def hidden_player_ids() -> set:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Account types (game modes) for the public player-board filter. The synced
+# varbit (player_state) is the live source; players.account_type is the
+# submission-side fallback. Players who never synced have no entry, so they
+# appear only on the unfiltered board.
+# --------------------------------------------------------------------------- #
+_ACCOUNT_TYPES_TTL = 120.0
+
+
+def player_account_types() -> dict:
+    """``{player_id: wire string}`` for every player with a known mode.
+    Cached in-process ~2 min; a mode changes rarely (a hardcore death)."""
+    cached = cache_get("account_types:by_pid", _ACCOUNT_TYPES_TTL)
+    if cached is not None:
+        return cached
+    from db import Player
+    from db.models import PlayerState
+    from utils.account_types import VALID_ACCOUNT_TYPES, account_type_from_varbit
+
+    out: dict = {}
+    try:
+        with db_session() as s:
+            for pid, stored in (
+                s.query(Player.player_id, Player.account_type)
+                .filter(Player.account_type.isnot(None))
+                .all()
+            ):
+                if stored in VALID_ACCOUNT_TYPES:
+                    out[int(pid)] = stored
+            # The synced varbit wins over the stored string.
+            for pid, varbit in (
+                s.query(PlayerState.player_id, PlayerState.account_type)
+                .filter(PlayerState.account_type.isnot(None))
+                .all()
+            ):
+                decoded = account_type_from_varbit(varbit)
+                if decoded:
+                    out[int(pid)] = decoded
+    except Exception:
+        # Fail soft: filtered boards come back empty, the unfiltered one is untouched.
+        out = {}
+    cache_set("account_types:by_pid", out)
+    return out
+
+
 def group_ignored_player_ids(group_id) -> set:
     """Set of player ids one group's leaders hid from that group's surfaces.
 

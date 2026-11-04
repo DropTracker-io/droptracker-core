@@ -1009,7 +1009,12 @@ async def site_roster(group_id: int):
 
     def _load():
         from db.models import IgnoredPlayer, Player
-        from web_api.common import hidden_player_ids, money, player_month_totals
+        from web_api.common import (
+            hidden_player_ids,
+            money,
+            player_account_types,
+            player_month_totals,
+        )
         from utils.partitions import resolve_period
 
         with db_session() as s:
@@ -1039,6 +1044,7 @@ async def site_roster(group_id: int):
             # Two batched Redis passes (each is pipelined internally), not 2·N.
             monthly = player_month_totals(ids, resolve_period("month"))
             all_time = player_month_totals(ids, resolve_period("all"))
+            types = player_account_types()
 
             members = [
                 {
@@ -1046,6 +1052,7 @@ async def site_roster(group_id: int):
                     "name": name,
                     "monthly_loot": money(int(monthly.get(pid, 0) or 0)),
                     "all_time_loot": money(int(all_time.get(pid, 0) or 0)),
+                    **({"account_type": types[pid]} if pid in types else {}),
                 }
                 for pid, name in visible
             ]

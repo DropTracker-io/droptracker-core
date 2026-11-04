@@ -282,6 +282,15 @@
           },
           {
             "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "name": "account_type",
+            "in": "query",
+            "required": false,
+            "description": "Narrow the board to one game mode (an AccountType value) or a family: any_ironman, any_group_ironman. Ranks are positions within the mode. Unknown values return the unfiltered board.",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1800,6 +1809,10 @@
           },
           "flair": {
             "$ref": "#/components/schemas/GroupFlair"
+          },
+          "account_type": {
+            "type": "string",
+            "description": "Player's game mode when known (player boards only)."
           }
         }
       },

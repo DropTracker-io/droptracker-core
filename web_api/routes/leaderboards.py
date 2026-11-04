@@ -1,6 +1,6 @@
 """Task 04 — leaderboards.
 
-GET /api/v1/leaderboards/players?period=&scope=&page=&limit=
+GET /api/v1/leaderboards/players?period=&scope=&page=&limit=&account_type=
 GET /api/v1/leaderboards/groups?period=&page=&limit=
 
 Players read the canonical Redis sorted set directly (paged ZREVRANGE). Groups
@@ -19,6 +19,7 @@ from sqlalchemy import func
 from db import Player, Group
 from db.models import user_group_association
 from web_api.flair import group_flairs
+from utils.account_types import account_type_filter_modes
 from web_api.common import (
     cache_get,
     cache_set,
@@ -30,6 +31,7 @@ from web_api.common import (
     money,
     npc_leaderboard_key,
     parse_page,
+    player_account_types,
     player_list_loot_sum,
     resolve_period,
     with_cache_headers,
@@ -44,6 +46,9 @@ BADGES_TTL = 30.0
 _MAX_ROW_BADGES = 6
 IMG_BASE = "https://www.droptracker.io/img"
 CARD_TTL = 30.0
+# A filtered board is the whole sorted set narrowed in Python, so it is cached
+# per (board, filter) rather than re-read for every page.
+FILTERED_BOARD_TTL = 30.0
 # The model's constructor default. Nearly every group still carries it, so it
 # says nothing about the clan and is left off the cards.
 _DEFAULT_GROUP_DESCRIPTION = "An Old School RuneScape group."
@@ -279,6 +284,10 @@ async def leaderboards_players():
     scope = request.args.get("scope", "global")
     page, limit = parse_page(request)
     token = resolve_period(period)
+    account_filter = (request.args.get("account_type") or "").strip().lower()
+    modes = account_type_filter_modes(account_filter)
+    if modes is None:
+        account_filter = ""
 
     group_id = None
     npc_id = None
@@ -310,29 +319,51 @@ async def leaderboards_players():
     entries = []
     total = 0
     if conn is not None:
-        def _read():
-            start = (page - 1) * limit
-            end = start + limit - 1
-            raw = conn.zrevrange(key, start, end, withscores=True)
-            card = conn.zcard(key)
-            return raw, card
-
-        raw, total = await asyncio.to_thread(_read)
-
-        # Privacy: drop hidden players from the page (user "Hidden" setting or
-        # per-account hide). Ranks keep their Redis positions, so a filtered
-        # row leaves a gap rather than reshuffling everyone below it.
-        hidden = await asyncio.to_thread(hidden_player_ids)
-
+        types = await asyncio.to_thread(player_account_types)
         start_rank = (page - 1) * limit
         ids = []
         scored = []
-        for pos, (member_raw, score) in enumerate(raw):
-            pid = decode_member(member_raw)
-            if pid is None or pid in hidden:
-                continue
-            ids.append(pid)
-            scored.append((start_rank + pos + 1, pid, int(float(score))))
+        if modes is not None:
+            # Account-type board: ranks are positions WITHIN the mode (#1 is
+            # the top ultimate ironman), so the narrowed list is re-ranked
+            # and hidden players drop out before ranking.
+            cache_key = f"lb:filtered:{key}:{account_filter}"
+            board = cache_get(cache_key, FILTERED_BOARD_TTL)
+            if board is None:
+                raw = await asyncio.to_thread(conn.zrevrange, key, 0, -1, withscores=True)
+                hidden = await asyncio.to_thread(hidden_player_ids)
+                board = []
+                for member_raw, score in raw:
+                    pid = decode_member(member_raw)
+                    if pid is None or pid in hidden or types.get(pid) not in modes:
+                        continue
+                    board.append((pid, int(float(score))))
+                cache_set(cache_key, board)
+            total = len(board)
+            for pos, (pid, loot) in enumerate(board[start_rank:start_rank + limit]):
+                ids.append(pid)
+                scored.append((start_rank + pos + 1, pid, loot))
+        else:
+            def _read():
+                start = (page - 1) * limit
+                end = start + limit - 1
+                raw = conn.zrevrange(key, start, end, withscores=True)
+                card = conn.zcard(key)
+                return raw, card
+
+            raw, total = await asyncio.to_thread(_read)
+
+            # Privacy: drop hidden players from the page (user "Hidden" setting or
+            # per-account hide). Ranks keep their Redis positions, so a filtered
+            # row leaves a gap rather than reshuffling everyone below it.
+            hidden = await asyncio.to_thread(hidden_player_ids)
+
+            for pos, (member_raw, score) in enumerate(raw):
+                pid = decode_member(member_raw)
+                if pid is None or pid in hidden:
+                    continue
+                ids.append(pid)
+                scored.append((start_rank + pos + 1, pid, int(float(score))))
 
         name_map = {}
         if ids:
@@ -362,6 +393,9 @@ async def leaderboards_players():
                 "name": name_map.get(pid, f"Player {pid}"),
                 "loot": money(loot),
             }
+            mode = types.get(pid)
+            if mode:
+                row["account_type"] = mode
             chips = badge_map.get(pid)
             if chips:
                 row["badges"] = chips
@@ -373,6 +407,7 @@ async def leaderboards_players():
     resp = jsonify({
         "period": token,
         "scope": scope,
+        **({"account_type": account_filter} if account_filter else {}),
         "entries": entries,
         "meta": {"page": page, "limit": limit, "total": int(total)},
     })

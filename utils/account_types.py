@@ -43,3 +43,21 @@ def account_type_from_varbit(value) -> Optional[str]:
     if 0 <= value < len(ACCOUNT_TYPES_BY_VARBIT):
         return ACCOUNT_TYPES_BY_VARBIT[value]
     return None
+
+
+#: Public filter keys (``?account_type=`` on player boards) → the modes each
+#: covers. Every exact mode is its own key; ``any_ironman`` folds every iron
+#: variant together and ``any_group_ironman`` the three group modes.
+ACCOUNT_TYPE_FILTERS = {
+    **{mode: frozenset((mode,)) for mode in ACCOUNT_TYPES_BY_VARBIT},
+    "any_ironman": frozenset(m for m in ACCOUNT_TYPES_BY_VARBIT if m != "normal"),
+    "any_group_ironman": frozenset(m for m in ACCOUNT_TYPES_BY_VARBIT if "group_ironman" in m),
+}
+
+
+def account_type_filter_modes(key) -> Optional[frozenset]:
+    """The modes a filter key covers, or ``None`` for "all players" (absent,
+    ``all``, or a key this build does not know — never an empty board)."""
+    if not key:
+        return None
+    return ACCOUNT_TYPE_FILTERS.get(str(key).strip().lower())
