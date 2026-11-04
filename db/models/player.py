@@ -308,12 +308,13 @@ class Player(Base):
         player_rank = redis_client.client.zrank(base_key, self.player_id)
         return player_rank, player_score
 
-    def __init__(self, wom_id, player_name, account_hash, user_id=None, user=None, log_slots=0, total_level=0, group=None, hidden=False, ehb=None):
+    def __init__(self, wom_id=None, player_name=None, account_hash=None, user_id=None, user=None, log_slots=0, total_level=0, group=None, hidden=False, ehb=None, world=None):
         """
         Initialize a new Player instance.
 
         Args:
-            wom_id (int): Wise Old Man player ID
+            wom_id (int, optional): Wise Old Man player ID. None for a
+                Hardcore Worlds character, which WOM does not track.
             player_name (str): OSRS username
             account_hash (str): Unique hash identifier for the OSRS account
             user_id (int, optional): ID of the associated Discord user
@@ -323,6 +324,7 @@ class Player(Base):
             group (Group, optional): Initial group to associate with. Defaults to None.
             hidden (bool, optional): Whether player should be hidden. Defaults to False.
             ehb (float, optional): WOM efficient hours bossed. Defaults to None (unknown).
+            world (str, optional): 'main' (the column default) or 'hardcore'.
         """
         self.wom_id = wom_id
         self.player_name = player_name
@@ -334,6 +336,8 @@ class Player(Base):
         self.ehb = ehb
         self.hidden = hidden
         self.group = group
+        if world is not None:
+            self.world = world
 
 
 class IgnoredPlayer(Base):

@@ -326,3 +326,42 @@ class TestMirrorsOfSpecialKeys:
         assert death_filter._config_flag(None, 5, "notify_deaths_safe", "seasonal")
         assert death_filter._config_flag(None, 5, "notify_deaths_safe", "main")
         assert asked == ["hardcore_notify_deaths_safe", "seasonal_notify_deaths_safe", "notify_deaths_safe"]
+
+
+class TestEnsureHardcorePlayer:
+    """The first submission from a new character creates its players row.
+
+    Against the real Player model: its hand-written __init__ took neither
+    ``world`` nor an optional ``wom_id``, so every new character's first
+    submission raised TypeError and was dead-lettered (2026-11-04).
+    """
+
+    def test_first_sight_creates_a_hardcore_row(self):
+        from contextlib import nullcontext
+        from data.submissions import common
+
+        added = []
+
+        class _Query:
+            def filter(self, *a):
+                return self
+
+            def first(self):
+                return None
+
+        session = SimpleNamespace(
+            query=lambda model: _Query(),
+            begin_nested=nullcontext,
+            add=added.append,
+        )
+        player = common.ensure_hardcore_player(session, " Hc Guy ", "123456789")
+        assert added == [player]
+        assert isinstance(player, common.Player)
+        assert player.world == "hardcore"
+        assert player.wom_id is None
+        assert (player.player_name, player.account_hash) == ("Hc Guy", "123456789")
+
+    def test_positional_callers_unchanged(self):
+        from data.submissions import common
+        player = common.Player(42, "Main Guy", "987")
+        assert (player.wom_id, player.player_name, player.account_hash) == (42, "Main Guy", "987")
