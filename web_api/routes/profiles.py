@@ -418,6 +418,32 @@ def _account_type_for(s, player_id: int):
         return None
 
 
+@profiles_bp.get("/players/<int:player_id>/visibility")
+async def player_visibility(player_id: int):
+    """Is this player's public profile viewable? Always 200.
+
+    The profile itself 404s for a hidden account, and Next's fetch cache only
+    stores 200s: the 404 a revalidation gets back is dropped and the pre-hide
+    profile keeps being served by id indefinitely (ticket #515). The web
+    checks this alongside the profile so hiding takes effect. Missing and
+    hidden both read ``visible: false``, so they stay indistinguishable.
+    """
+    def _load():
+        with db_session() as s:
+            row = s.execute(
+                text(
+                    "SELECT p.hidden, u.hidden FROM players p "
+                    "LEFT JOIN users u ON u.user_id = p.user_id "
+                    "WHERE p.player_id = :pid"
+                ),
+                {"pid": player_id},
+            ).fetchone()
+            return row is not None and not bool(row[0]) and not bool(row[1])
+
+    visible = await asyncio.to_thread(_load)
+    return with_cache_headers(jsonify({"id": player_id, "visible": visible}), max_age=15)
+
+
 @profiles_bp.get("/players/<int:player_id>")
 async def player_profile(player_id: int):
     def _load():

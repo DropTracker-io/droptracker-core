@@ -103,17 +103,20 @@ def _groups_for(s, player_ids):
 
 
 def _drops_for(s, player_id, limit, since, dup_window):
+    # Newest by accept time, read straight off (player_id, date_added). Ordering
+    # by drop_id let the optimizer walk the PK backwards, which never finished
+    # for a player whose drops are all old (ticket #515: 158k rows, none in the
+    # last 3M ids).
     rows = _q(s, """
         SELECT d.drop_id, d.date_added, d.item_id, i.item_name, d.npc_id, n.npc_name,
                d.value, d.quantity, d.kill_count, d.unique_id, d.source, d.hidden,
                d.image_url IS NOT NULL AS has_image
-        FROM drops d
+        FROM drops d FORCE INDEX (ix_drops_player_id_date_added)
         LEFT JOIN items i ON i.item_id = d.item_id
         LEFT JOIN npc_list n ON n.npc_id = d.npc_id
-        WHERE d.player_id = :p
-        ORDER BY d.drop_id DESC LIMIT :lim""", p=player_id, lim=limit)
-    if since:
-        rows = [r for r in rows if r["date_added"] and r["date_added"] >= since]
+        WHERE d.player_id = :p AND d.date_added >= :since
+        ORDER BY d.date_added DESC, d.drop_id DESC LIMIT :lim""",
+              p=player_id, lim=limit, since=since or datetime.min)
     # DUP-ROW: same content within the window. date_added is accept time
     # (not monotonic with drop_id), so compare on timestamps, not ids.
     by_key = defaultdict(list)
@@ -155,6 +158,9 @@ def _queue_for(s, player_id, limit):
 
 
 def build(ticket_id, rsns, drops_limit, queue_limit, since, dup_window, transcript_only):
+    from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError
+
     from db.models.base import Session
 
     s = Session()
@@ -184,7 +190,14 @@ def build(ticket_id, rsns, drops_limit, queue_limit, since, dup_window, transcri
         groups = _groups_for(s, [p["player_id"] for p in players])
         accounts = []
         for p in players:
-            drops = _drops_for(s, p["player_id"], drops_limit, since, dup_window)
+            try:
+                drops = _drops_for(s, p["player_id"], drops_limit, since, dup_window)
+                drops_error = None
+            except OperationalError as e:
+                # One slow account must not cost the rest of the dossier.
+                s.rollback()
+                s.execute(text("SET SESSION TRANSACTION READ ONLY"))
+                drops, drops_error = [], str(e.orig)[:200]
             notified = _notified_for(s, [d["drop_id"] for d in drops])
             for d in drops:
                 posts = notified.get(d["drop_id"], [])
@@ -199,6 +212,7 @@ def build(ticket_id, rsns, drops_limit, queue_limit, since, dup_window, transcri
                 "player": p,
                 "groups": groups.get(p["player_id"], []),
                 "drops": drops,
+                "drops_error": drops_error,
                 "queue": _queue_for(s, p["player_id"], queue_limit),
             })
         missing = [n for n in rsns if not any(a["player"]["player_name"] and
@@ -248,6 +262,8 @@ def render(r):
         print(f"\n### player {p['player_id']} {p['player_name']!r} wom={p['wom_id']} user={p['user_id']} "
               f"type={p.get('account_type')} acc={p['account_hash']}")
         print(f"  groups: {gs}")
+        if a.get("drops_error"):
+            print(f"  drops: QUERY FAILED ({a['drops_error']})")
         print(f"  drops (newest first, {len(a['drops'])}):")
         for d in a["drops"]:
             posts = ",".join(f"g{n['group_id']}" for n in d["notified"]) or "-"

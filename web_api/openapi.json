@@ -374,6 +374,45 @@
         }
       }
     },
+    "/players/{playerId}/visibility": {
+      "get": {
+        "tags": [
+          "players"
+        ],
+        "operationId": "getPlayerVisibility",
+        "summary": "Whether a player's public profile is viewable",
+        "description": "Always 200. Missing and hidden accounts both read visible=false. The profile 404s a hidden account, which a fetch cache that only stores 200s never records; this lets a cached profile be retired when its account is hidden.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PlayerId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Visibility flag.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "visible"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "visible": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/players/{playerId}/loot": {
       "get": {
         "tags": [

@@ -40,11 +40,23 @@ def test_outside_window_or_different_quantity_is_not_flagged(monkeypatch):
     assert not any("flags" in r for r in td._drops_for(None, 1, 50, None, 10))
 
 
-def test_since_filters_before_flagging(monkeypatch):
-    rows = [_drop(2, 5, 3), _drop(1, 5, 0)]
-    monkeypatch.setattr(td, "_q", lambda *a, **k: rows)
-    out = td._drops_for(None, 1, 50, T0 + timedelta(seconds=1), 10)
-    assert [r["drop_id"] for r in out] == [2] and "flags" not in out[0]
+def test_since_and_order_are_pushed_into_the_index_read(monkeypatch):
+    # Ticket #515: ORDER BY drop_id walked the PK for a player with only old
+    # drops and timed out; the read now runs off (player_id, date_added).
+    seen = {}
+
+    def fake_q(_s, sql, **params):
+        seen.update(sql=sql, **params)
+        return []
+
+    monkeypatch.setattr(td, "_q", fake_q)
+    since = T0 + timedelta(seconds=1)
+    td._drops_for(None, 1, 50, since, 10)
+    assert seen["since"] == since and seen["p"] == 1 and seen["lim"] == 50
+    assert "FORCE INDEX (ix_drops_player_id_date_added)" in seen["sql"]
+    assert "ORDER BY d.date_added DESC" in seen["sql"]
+    td._drops_for(None, 1, 50, None, 10)
+    assert seen["since"] == td.datetime.min
 
 
 def test_retry_fingerprint_flagged(monkeypatch):
