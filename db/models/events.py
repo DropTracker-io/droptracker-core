@@ -548,6 +548,11 @@ class Event(Base):
     # plugin, so nobody's name is tagged in clan chat (free-for-all events,
     # where every player is their own team).
     team_chat_tags = Column(Boolean, nullable=False, default=True, server_default="1")
+    # Partial points (web156a): when the event ends, a "points from a list"
+    # task a team did not finish pays the share of its task points matching
+    # the share of the points goal reached (rounded down). Off by default:
+    # an unfinished task scores nothing. See services/event_partial_points.py.
+    partial_points = Column(Boolean, nullable=False, default=False, server_default="0")
     activated_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)

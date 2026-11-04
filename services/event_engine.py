@@ -3732,6 +3732,28 @@ def _enqueue_notification(session, notification_type: str, event: dict,
 
 
 APPLIED_BONUS_STATUSES = ("auto", "confirmed", "manual")
+# services/event_partial_points.PARTIAL_GUID — a bonus row with this guid is
+# an end-of-event partial payout, not a line/blackout bonus. Duplicated, not
+# imported: the unit tests load this file standalone with services stubbed.
+PARTIAL_POINTS_GUID = "partial-points"
+
+
+def _resync_partial_points(session, event_row, task_id=None, team_id=None,
+                           completion=None) -> None:
+    """After a correction on an ENDED event, re-price the partial payout of
+    the (task, team) it touched (web156a). Best-effort: the correction itself
+    must land even if this fails."""
+    if event_row is None or getattr(event_row, "status", None) != "past":
+        return
+    try:
+        from services.event_partial_points import resync_after_correction
+
+        resync_after_correction(session, event_row, task_id=task_id,
+                                team_id=team_id, completion=completion)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("partial-points resync failed")
 
 
 def _team_completed_idxs(session, cells, team_id: int,
@@ -6482,9 +6504,11 @@ def apply_completion(session, completion) -> Optional[dict]:
         for c in session.query(EventBingoCell).filter(
             EventBingoCell.task_id == task.id).all()
     ]
-    return apply_ledger_row(
+    result = apply_ledger_row(
         session, getattr(redis_client, "client", None),
         _event_to_dict(event), _task_to_dict(task), completion, cells=cells)
+    _resync_partial_points(session, event, task.id, completion.team_id)
+    return result
 
 
 def _unwind_bonuses(session, event: dict, team_id: int) -> list:
@@ -6515,8 +6539,8 @@ def _unwind_bonuses(session, event: dict, team_id: int) -> list:
 
     revoked, delta = [], 0
     for row in bonus_rows:
-        if row.note in still_valid:
-            continue
+        if row.note in still_valid or row.submission_guid == PARTIAL_POINTS_GUID:
+            continue  # partial-points rows aren't line bonuses (web156a)
         row.status = "revoked"
         delta += max(int(row.quantity or 0), 0)
         revoked.append(row.note)
@@ -6587,6 +6611,20 @@ def kill_bonus_siblings(session, completion) -> list:
 
 
 def revoke_ledger_row(session, completion) -> Optional[dict]:
+    """:func:`_revoke_ledger_row`, then re-price the partial-points payout
+    when the event has already ended (web156a)."""
+    summary = _revoke_ledger_row(session, completion)
+    if summary is not None:
+        from db.models import Event
+
+        _resync_partial_points(
+            session,
+            session.query(Event).filter(Event.id == completion.event_id).first(),
+            completion.task_id, completion.team_id, completion=completion)
+    return summary
+
+
+def _revoke_ledger_row(session, completion) -> Optional[dict]:
     """Recompute (task, team) state after a ledger row was revoked (Task 18).
 
     The caller has already flipped ``completion.status`` to ``revoked`` and
@@ -7002,7 +7040,16 @@ def sync_repeat_flags(session, event_row, task_row, old_task: dict) -> dict:
     return changed
 
 
-def recompute_task_rollups(session, event_row, task_row, *,
+def recompute_task_rollups(session, event_row, task_row, **kwargs) -> dict:
+    """:func:`_recompute_task_rollups`, then re-price the task's partial-points
+    payouts when the event has already ended (web156a): a new goal or point
+    value changes what an unfinished team is owed."""
+    result = _recompute_task_rollups(session, event_row, task_row, **kwargs)
+    _resync_partial_points(session, event_row, getattr(task_row, "id", None))
+    return result
+
+
+def _recompute_task_rollups(session, event_row, task_row, *,
                            old_points: Optional[int] = None,
                            old_task: Optional[dict] = None,
                            preserve_completed: bool = False,

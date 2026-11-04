@@ -330,6 +330,8 @@ def _summary(ev: Event) -> dict:
         # web152a: roster follows the clan; clan-chat team tags in the plugin.
         "roster_clan_sync": bool(getattr(ev, "roster_clan_sync", False)),
         "team_chat_tags": getattr(ev, "team_chat_tags", True) is not False,
+        # web156a: unfinished "points from a list" tasks pay their share at the end.
+        "partial_points": bool(getattr(ev, "partial_points", False)),
         "signups_open": _signups_open(ev),
         "signups_close_at": _ts(_signup_close_at(ev)),
         # Recurring schedule (web82a) — the cheap, query-free half: whether
@@ -4791,6 +4793,7 @@ async def create_event():
                     body.get("tasks_visibility")),
                 allow_late_signups=bool(body.get("allow_late_signups")),
                 team_chat_tags=body.get("team_chat_tags") is not False,
+                partial_points=bool(body.get("partial_points")),
                 submission_policy=submission_policy,
                 join_code=join_code or None,
                 discord_guild_id=discord_guild_id,
@@ -4951,6 +4954,7 @@ def _event_settings_snapshot(ev) -> dict:
         "allow_late_signups": bool(getattr(ev, "allow_late_signups", False)),
         "roster_clan_sync": bool(getattr(ev, "roster_clan_sync", False)),
         "team_chat_tags": getattr(ev, "team_chat_tags", True) is not False,
+        "partial_points": bool(getattr(ev, "partial_points", False)),
         "starts_at": starts_at.isoformat() if starts_at else None,
         "ends_at": ends_at.isoformat() if ends_at else None,
         # web82a — a schedule change moves when submissions count, which is
@@ -5237,6 +5241,19 @@ async def update_event(event_id: int):
                 # next /event_state poll — the roster stamp goes away and the
                 # client clears its badges.
                 ev.team_chat_tags = body.get("team_chat_tags") is not False
+            if "partial_points" in body:
+                # web156a: unfinished "points from a list" tasks pay their
+                # share of the task points when the event ends. Flipped on an
+                # event that is already over, the payout (or its removal)
+                # lands now, so a clan that forgot can still settle it.
+                want = bool(body.get("partial_points"))
+                if want != bool(getattr(ev, "partial_points", False)):
+                    ev.partial_points = want
+                    if ev.status == "past":
+                        from services.event_partial_points import sync_partial_points
+
+                        s.flush()
+                        sync_partial_points(s, ev)
             if "roster_clan_sync" in body:
                 # web152a: keep the roster equal to the clan. Needs a host
                 # clan — a staff-hosted event's per-clan rosters are picked

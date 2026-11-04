@@ -1528,6 +1528,21 @@ def end_event(session, event, *, actor_user_id=None,
             log.error("end_event(%s): conquest finalize failed",
                       event.id, exc_info=True)
 
+    # Partial points (web156a): unfinished "points from a list" tasks pay
+    # their share now, before anything reads the standings (the announcement,
+    # clan-point placements).
+    if getattr(event, "partial_points", False):
+        try:
+            from services.event_partial_points import sync_partial_points
+
+            sync_partial_points(session, event)
+            session.commit()
+        except Exception:
+            session.rollback()
+            failed_steps.append("partial points")
+            log.error("end_event(%s): partial points failed",
+                      event.id, exc_info=True)
+
     standings: list = []
     try:
         standings = final_standings(session, event.id, limit=5)
