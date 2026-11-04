@@ -2133,9 +2133,31 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         status="pending",
     )
     
-    db_session.add(notification)
-    if not use_existing_session:
-        db_session.commit()
+    # uix_notification_unique: an identical row (type, player, group, data)
+    # already exists — a replayed submission, or a clan broadcast whose guid
+    # was announced before. It IS queued, so that's success, not a failure.
+    # Unchecked, the IntegrityError surfaced at the caller's commit and
+    # dead-lettered the whole submission (2026-11-04, a clan pet broadcast).
+    try:
+        if use_existing_session:
+            with db_session.begin_nested():
+                db_session.add(notification)
+                db_session.flush()
+        else:
+            db_session.add(notification)
+            db_session.commit()
+    except IntegrityError as exc:
+        if "uix_notification_unique" not in str(getattr(exc, "orig", exc)):
+            raise
+        if not use_existing_session:
+            db_session.rollback()
+        app_logger.log(
+            log_type="debug",
+            data=f"{notification_type} notification for group {group_id} already queued",
+            app_name="core",
+            description="create_notification",
+        )
+        return None
     notification_id = notification.id
     if debug_test:
         await log_to_file(f"Debug test: Created notification for group {group_id}: {notification_id}")

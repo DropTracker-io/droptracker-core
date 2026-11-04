@@ -867,3 +867,40 @@ class TestWantsDropConfirmation:
     def test_unknown_player_defaults_on(self):
         self.site_pref = False
         assert self.fn(None, {}, None) is True
+
+
+# ── create_notification: an identical row already queued ──────────────────────
+
+class TestCreateNotificationAlreadyQueued:
+    """uix_notification_unique refusing an identical row means it's already
+    queued. It used to raise at the caller's commit and dead-letter the
+    whole submission (a replayed clan pet broadcast, 2026-11-04)."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from data.submissions import common
+        self.common = common
+
+    def _dup(self):
+        from sqlalchemy.exc import IntegrityError
+        return IntegrityError(
+            "INSERT", {}, Exception("(1062, 'Duplicate entry pet-1-2 for key uix_notification_unique')"))
+
+    async def test_duplicate_is_success_not_a_crash(self, mock_session):
+        _configure_channels(mock_session, [("channel_id_to_post_pets", "123456789012345678")])
+        mock_session.flush.side_effect = self._dup()
+        out = await self.common.create_notification(
+            "pet", player_id=42, data={"pet_name": "Tangleroot", "guid": "dup-a"},
+            group_id=5, existing_session=mock_session)
+        assert out is None
+        mock_session.begin_nested.assert_called()  # savepoint keeps the caller's txn usable
+
+    async def test_other_integrity_errors_still_raise(self, mock_session):
+        from sqlalchemy.exc import IntegrityError
+        _configure_channels(mock_session, [("channel_id_to_post_pets", "123456789012345678")])
+        mock_session.flush.side_effect = IntegrityError(
+            "INSERT", {}, Exception("(1452, 'foreign key constraint fails')"))
+        with pytest.raises(IntegrityError):
+            await self.common.create_notification(
+                "pet", player_id=42, data={"pet_name": "Tangleroot", "guid": "dup-b"},
+                group_id=5, existing_session=mock_session)
