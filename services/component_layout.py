@@ -517,6 +517,13 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
         "sample": "",
         "optional": True,
     },
+    "item_rarity": {
+        # Optional: only items with one clear wiki drop rate from this source
+        # have one (not raids, whose wiki odds are within the purple table).
+        "help": "The item's drop rate from this source, from the wiki drop table. Lines holding it are left out when there is no clear rate (raids and clue caskets have none)",
+        "sample": "1 in 256 (0.391%)",
+        "optional": True,
+    },
     "item_id": {
         "help": "OSRS item id — an icon is https://www.droptracker.io/img/itemdb/{item_id}.png",
         "sample": "20997",
@@ -776,7 +783,7 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Drop",
         "group": "Loot",
         "description": "Posted when a member receives a drop worth announcing.",
-        "tokens": ("drop_message", "item_name", "item_link", "item_emoji", "item_id", "item_value", "quantity",
+        "tokens": ("drop_message", "item_name", "item_link", "item_emoji", "item_id", "item_value", "quantity", "item_rarity",
                    "total_value", "npc_name", "npc_link", "npc_id", "kill_count", "month_name", "player_total_month",
                    "group_total_month", "group_total", "global_rank", "group_rank",
                    "group_to_group_rank", "user_count") + _POINTS_TOKENS + _MEDIA_TOKENS,
@@ -785,7 +792,7 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Collection log",
         "group": "Loot",
         "description": "Posted when a member fills a collection log slot.",
-        "tokens": ("clog_message", "item_name", "item_link", "item_emoji", "item_id", "collection_name", "npc_name",
+        "tokens": ("clog_message", "item_name", "item_link", "item_emoji", "item_id", "item_rarity", "collection_name", "npc_name",
                    "npc_link", "kc_received", "slots_unlocked", "slots_total",
                    "player_loot_month", "total_tracked") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
@@ -950,7 +957,7 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
             {"type": "separator", "divider": True},
             {
                 "type": "section",
-                "content": "## {item_link}\nG/E Value: `{item_value}`\nfrom **{npc_name}**",
+                "content": "## {item_link}\nG/E Value: `{item_value}`\nfrom **{npc_name}**\nDrop rate: `{item_rarity}`",
                 "thumbnail": _ITEM_ICON,
             },
             {"type": "text", "content": "**Kill count** {kill_count}"},
@@ -989,7 +996,8 @@ DEFAULT_LAYOUTS: Dict[str, Dict[str, Any]] = {
                 "type": "section",
                 "content": (
                     "## {item_link}\n"
-                    "They currently have `{kc_received}` kc at `{npc_name}`"
+                    "They currently have `{kc_received}` kc at `{npc_name}`\n"
+                    "Drop rate: `{item_rarity}`"
                 ),
                 "thumbnail": _ITEM_ICON,
             },

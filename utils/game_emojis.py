@@ -311,7 +311,7 @@ def emoji_for_npc_id(npc_id, profile=None) -> Optional[str]:
 
 # Tokens with_derived_tokens fills, so no sender has to.
 DERIVED_TOKENS = ("item_emoji", "item_link", "npc_link", "pet_emoji", "skill_emoji",
-                  "skills_text_emoji")
+                  "skills_text_emoji", "item_rarity")
 
 
 def with_derived_tokens(values: dict, profile=None) -> dict:
@@ -326,7 +326,8 @@ def with_derived_tokens(values: dict, profile=None) -> dict:
 
     ``{pet_emoji}`` is the same thing for ``{pet_name}``.
     ``{item_link}``/``{npc_link}`` (the name as a markdown wiki link) are
-    derived here for the same reason, though they are not glyphs.
+    derived here for the same reason, though they are not glyphs, and so is
+    ``{item_rarity}`` (the wiki drop rate, :mod:`utils.drop_rarity`).
     """
     if not isinstance(values, dict):
         return values
@@ -354,6 +355,17 @@ def with_derived_tokens(values: dict, profile=None) -> dict:
         derived["{item_link}"] = wiki_link(name)
     if "{npc_link}" not in values and "{npc_name}" in values:
         derived["{npc_link}"] = wiki_link(values.get("{npc_name}"))
+    # The wiki drop rate of this item from this NPC. None (not "") when there
+    # is no clear rate or no source, so the field or line holding it drops
+    # instead of showing an empty "Drop rate: ``".
+    if "{item_rarity}" not in values and "{item_name}" in values:
+        try:
+            from utils.drop_rarity import rarity_text
+            derived["{item_rarity}"] = rarity_text(
+                name, values.get("{npc_name}"), values.get("{npc_id}"), values.get("{quantity}")
+            )
+        except Exception:
+            derived["{item_rarity}"] = None
     # Level-up glyphs: {skill_emoji} is the first skill's icon (a multi-skill
     # level-up names several), {skills_text_emoji} is {skills_text} with every
     # skill's icon in front of it. Skill icons are app emojis, not game ones.

@@ -1533,6 +1533,14 @@ class NotificationService:
         self._task = None
         self.running = True
 
+        # Load the {item_rarity} drop table (~2s) off the event loop, so the
+        # first drop after boot does not block the gateway while it loads.
+        try:
+            from utils.drop_rarity import get_table
+            await asyncio.to_thread(get_table)
+        except Exception:
+            pass
+
         loop = asyncio.get_running_loop()
         self._task = loop.create_task(self.process_notifications_loop(), name="notification_service_loop")
         app_logger.log(log_type="info", data="Notification service started successfully", app_name="notification_service", description="start")
