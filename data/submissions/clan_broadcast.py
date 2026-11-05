@@ -362,6 +362,18 @@ def _coffer_counterparty(session, name):
     return None, name
 
 
+def _queue_bank_posts(session, group_id, rows):
+    from services.group_bank_discord import queue_entry_posts
+
+    queue_entry_posts(session, group_id, rows)
+
+
+def _mark_bank_board_dirty(group_id):
+    from services.group_bank_discord import mark_board_dirty
+
+    mark_board_dirty(group_id)
+
+
 def _process_coffer(session, use_external_session, broadcast_data, relayer, clan_slug,
                     message, parsed, mirror_note=""):
     """Book a relayed coffer deposit or withdrawal into the clan bank of every
@@ -407,6 +419,7 @@ def _process_coffer(session, use_external_session, broadcast_data, relayer, clan
     from db import AuditLog, GroupBankEntry
 
     booked = 0
+    booked_groups = []
     try:
         for gid, status in groups.items():
             already = (
@@ -450,6 +463,10 @@ def _process_coffer(session, use_external_session, broadcast_data, relayer, clan
                 # insert; the unique index is the backstop for exactly this.
                 continue
             booked += 1
+            booked_groups.append(gid)
+            if status == "confirmed":
+                # Discord activity post (suggestion #230), committed with the row.
+                _queue_bank_posts(session, gid, [row])
         if use_external_session:
             session.flush()
         else:
@@ -463,6 +480,8 @@ def _process_coffer(session, use_external_session, broadcast_data, relayer, clan
         return SubmissionResponse(False, f"Coffer sync failed: {e}")
 
     _stat("coffer_booked" if booked else "coffer_duplicate")
+    for gid in booked_groups:
+        _mark_bank_board_dirty(gid)
     if not booked:
         return SubmissionResponse(True, "Coffer line already in the bank")
     return SubmissionResponse(

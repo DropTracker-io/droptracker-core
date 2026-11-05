@@ -412,6 +412,8 @@ REPOST_BOARDS = {
     "lootboard": ("lootboard_channel_id", "lootboard_message_id", "loot"),
     "pvp_lootboard": ("pvp_lootboard_channel_id", "pvp_lootboard_message_id", "pvp"),
     "clan_log": ("clan_log_channel_id", "clan_log_message_id", "clan_log"),
+    # services/group_bank_discord stores "<channel_id>:<message_id>".
+    "bank_board": ("bank_board_channel_id", "bank_board_message_id", "bank_board"),
 }
 
 
@@ -452,8 +454,12 @@ def repost_board(user_id: int, group_id: int, board: str) -> dict:
             s.add(GroupConfiguration(group_id=group_id, config_key=message_key, config_value=""))
         else:
             message_row.config_value = ""
+        old_channel = channel
+        ref = re.fullmatch(r"(\d{15,21}):(\d{15,21})", old)
+        if ref:
+            old_channel, old = ref.group(1), ref.group(2)
         if re.fullmatch(r"\d{15,21}", old):
-            discord_outbox.enqueue(s, channel_id=channel, kind="delete_own_message",
+            discord_outbox.enqueue(s, channel_id=old_channel, kind="delete_own_message",
                                    discord_message_id=old, ref_type="board_repost",
                                    actor_user_id=user_id, commit=False)
         s.add(AuditLog(actor_user_id=user_id, group_id=group_id, action="board.repost",
@@ -466,6 +472,11 @@ def repost_board(user_id: int, group_id: int, board: str) -> dict:
         try:
             if marker == "clan_log":
                 conn.delete(f"clan_log:{group_id}:posted_hash")
+            elif marker == "bank_board":
+                from services.group_bank_discord import mark_board_dirty
+
+                conn.delete(f"bank:board:{group_id}:posted_hash")
+                mark_board_dirty(group_id)
             else:
                 from lootboard import schedule
 

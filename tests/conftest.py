@@ -215,6 +215,18 @@ if "services.group_bank" not in sys.modules:
     _spec.loader.exec_module(_mod)
     setattr(sys.modules["services"], "group_bank", _mod)
 
+# services/group_bank_discord.py — clan bank activity posts and board
+# (suggestion #230). stdlib-only at import (DB, Redis, Discord are lazy), so
+# load the real module: the embed wording and post rules are what's tested.
+_GROUP_BANK_DISCORD_PATH = _Path(__file__).resolve().parent.parent / "services" / "group_bank_discord.py"
+if "services.group_bank_discord" not in sys.modules:
+    _spec = _importlib_util.spec_from_file_location(
+        "services.group_bank_discord", _GROUP_BANK_DISCORD_PATH)
+    _mod = _importlib_util.module_from_spec(_spec)
+    sys.modules["services.group_bank_discord"] = _mod
+    _spec.loader.exec_module(_mod)
+    setattr(sys.modules["services"], "group_bank_discord", _mod)
+
 # services/bot_profile.py — custom bot profile rules (validation, diffing, the
 # PATCH payload). stdlib-only at import (Pillow, DB and Discord are lazy), so
 # load the real module: what it sends Discord is the thing worth testing.

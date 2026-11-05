@@ -1095,6 +1095,11 @@ def coffer(monkeypatch):
     monkeypatch.setattr(cb, "_relayer_within_rate_limit", lambda _pid: True)
     monkeypatch.setattr(cb, "_stat", lambda *_a, **_k: None)
     monkeypatch.setattr(cb, "received_at", lambda _data: _STAMP)
+    state["posted"] = []
+    state["dirty"] = []
+    monkeypatch.setattr(cb, "_queue_bank_posts",
+                        lambda _s, gid, rows: state["posted"].extend((gid, r) for r in rows))
+    monkeypatch.setattr(cb, "_mark_bank_board_dirty", lambda gid: state["dirty"].append(gid))
     return state
 
 
@@ -1134,6 +1139,20 @@ def test_coffer_withdrawal_is_negative_and_auto_confirm_stamps_it(coffer):
     (row,) = s.rows
     assert row.kind == "withdrawal" and row.amount == -2_000_000
     assert row.status == "confirmed" and row.confirmed_at == _STAMP
+    # Counted straight away, so it goes to Discord with the row (#230).
+    assert coffer["posted"] == [(10, row)] and coffer["dirty"] == [10]
+
+
+def test_coffer_pending_line_marks_the_board_but_does_not_post(coffer):
+    s = _CofferSession()
+    _run_coffer(s)
+    assert coffer["posted"] == [] and coffer["dirty"] == [10]
+
+
+def test_coffer_duplicate_line_touches_nothing_on_discord(coffer):
+    s = _CofferSession(booked={(10, _ref())})
+    _run_coffer(s)
+    assert coffer["posted"] == [] and coffer["dirty"] == []
 
 
 def test_coffer_line_another_relayer_booked_is_skipped(coffer):

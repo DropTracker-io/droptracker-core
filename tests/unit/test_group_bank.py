@@ -329,6 +329,12 @@ def _wire(monkeypatch, session, *, admin=True, user_id=7):
     monkeypatch.setattr(gb, "EventBuyin", _RecBuyin)
     monkeypatch.setattr(gb, "AuditLog", _RecAudit)
     monkeypatch.setattr(gb, "_match_player", lambda s, rsn: None)
+    # Discord side (suggestion #230): record what would be posted.
+    session.queued_posts = []
+    session.dirty = []
+    monkeypatch.setattr(gb, "_queue_posts",
+                        lambda s, gid, rows: session.queued_posts.extend(rows))
+    monkeypatch.setattr(gb, "_board_dirty", lambda gid: session.dirty.append(gid))
 
     def _assert_admin(*a, **k):
         if not admin:
@@ -596,6 +602,54 @@ class TestUpdateEntry:
         _wire(monkeypatch, s)
         r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"note": "x"})
         assert r.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# Discord hooks (suggestion #230)
+# --------------------------------------------------------------------------- #
+class TestDiscordHooks:
+    async def test_confirmed_record_is_queued_and_marks_the_board(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "donation", "amount": 5_000_000, "rsn": "Sponsor"},
+        )
+        assert r.status_code == 200
+        (row,) = s.queued_posts
+        assert row.kind == "donation" and row.status == "confirmed"
+        assert s.dirty == [42]
+
+    async def test_pending_record_is_not_posted(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "donation", "amount": 10, "rsn": "x", "status": "pending"},
+        )
+        assert s.queued_posts == [] and s.dirty == [42]
+
+    async def test_first_confirmation_posts(self, client, monkeypatch):
+        row = _entry()
+        s = _S([row])
+        _wire(monkeypatch, s)
+        await client.patch("/api/v1/groups/42/bank/entries/9", json={"status": "confirmed"})
+        assert s.queued_posts == [row]
+
+    async def test_reconfirming_a_taken_back_entry_does_not_post_again(self, client, monkeypatch):
+        row = _entry(status="pending", confirmed_at=datetime(2026, 11, 1))
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"status": "confirmed"})
+        assert r.status_code == 200
+        assert s.queued_posts == [] and s.dirty == [42]
+
+    async def test_plain_edit_does_not_post(self, client, monkeypatch):
+        row = _entry(status="confirmed", confirmed_at=datetime(2026, 11, 1))
+        s = _S([row])
+        _wire(monkeypatch, s)
+        await client.patch("/api/v1/groups/42/bank/entries/9", json={"note": "fixed"})
+        assert s.queued_posts == [] and s.dirty == [42]
 
 
 # --------------------------------------------------------------------------- #

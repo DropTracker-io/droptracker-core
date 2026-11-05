@@ -689,6 +689,38 @@ async def clan_log_refresh():
             session.close()
 
 
+# Every Nth tick of bank_board_updates sweeps all boards instead of only the
+# dirty ones: picks up a newly chosen channel and any lost dirty mark.
+_BANK_BOARD_FULL_EVERY = 15
+_bank_board_tick = 0
+_bank_board_running = False
+
+
+@Task.create(IntervalTrigger(minutes=1))
+async def bank_board_updates():
+    """Clan bank boards on Discord (suggestion #230, services/group_bank_discord):
+    edits each group's standing bank message after its ledger changes. Bank
+    writes mark the group dirty in Redis; this drains that set every minute.
+    The per-entry activity posts go through the outbox, not here."""
+    global _bank_board_tick, _bank_board_running
+
+    if _bank_board_running:
+        return
+    _bank_board_running = True
+    try:
+        from services.group_bank_discord import refresh_boards
+
+        full = _bank_board_tick % _BANK_BOARD_FULL_EVERY == 0
+        _bank_board_tick += 1
+        stats = await refresh_boards(bot, full=full)
+        if stats["posted"] or stats["edited"] or stats["failed"]:
+            print(f"Bank boards ({'full' if full else 'dirty'}): {stats}")
+    except Exception as e:
+        print(f"Bank board refresh error: {e}")
+    finally:
+        _bank_board_running = False
+
+
 @Task.create(IntervalTrigger(minutes=1))
 async def status_channel_updates():
     """#status channel upkeep (services/status_channel.py): edits the service
@@ -1073,6 +1105,7 @@ async def create_tasks():
     badge_cycle.start()
     clan_chat_mirror_drain.start()
     clan_log_refresh.start()
+    bank_board_updates.start()
     # Lootboard POSTING is user-visible and must stay with the interval tasks
     # above — NEVER gated behind the multi-minute, rate-limited guild-cache /
     # WOM warm-ups below. It previously sat after `await cache_guild_channels()`

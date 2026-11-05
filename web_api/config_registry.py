@@ -1313,6 +1313,43 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Turn on if your admins take GP out of the coffer to hold it, since the coffer holds at most 50M. Synced withdrawals then show in the ledger without lowering the balance, and only payouts and event funding count as GP taken out. If held GP goes back into the coffer, remove that deposit so it isn't counted twice.",
         "default": False,
     },
+    # Discord (suggestion #230, services/group_bank_discord): a post per
+    # confirmed entry, and a standing board message the core bot edits.
+    {
+        "key": "bank_post_channel_id",
+        "label": "Bank activity channel",
+        "category": "bank",
+        "type": "channel",
+        "help": "Post a message here each time a donation is counted in the bank, from the coffer or recorded on the site. Nothing is posted until you set it. Entries you backdate more than a week aren't posted.",
+        "default": None,
+    },
+    {
+        "key": "bank_post_outflows",
+        "label": "Also post GP taken out",
+        "category": "bank",
+        "type": "boolean",
+        "help": "Post withdrawals, payouts and GP moved into event prize pots to the bank activity channel too, not just donations.",
+        "default": False,
+    },
+    {
+        "key": "bank_board_channel_id",
+        "label": "Bank board channel",
+        "category": "bank",
+        "type": "channel",
+        "help": "Keep one message here showing the bank balance, top donors and recent activity, updated as the bank changes. Pick a quiet channel, since the board is edited in place.",
+        "default": None,
+    },
+    # The board message the bot edits ("<channel_id>:<message_id>").
+    {
+        "key": "bank_board_message_id",
+        "label": "Bank board message id",
+        "category": "bank",
+        "type": "string",
+        "help": "Message the bot edits when updating the bank board. Managed automatically.",
+        "default": None,
+        # Written by the bot; see MANAGED_KEYS.
+        "managed": True,
+    },
 
     # --- PvP ---
     # Player kills are tracked apart from drops (data/submissions/pvp.py,

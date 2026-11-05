@@ -298,6 +298,21 @@ def _pending_count(s, group_id: int) -> int:
     )
 
 
+def _queue_posts(s, group_id: int, rows) -> None:
+    """Queue Discord activity posts for rows confirmed in this transaction
+    (suggestion #230). Outbox rows commit with the entry; never raises."""
+    from services.group_bank_discord import queue_entry_posts
+
+    queue_entry_posts(s, group_id, rows)
+
+
+def _board_dirty(group_id: int) -> None:
+    """Have the core bot refresh the group's Discord bank board."""
+    from services.group_bank_discord import mark_board_dirty
+
+    mark_board_dirty(group_id)
+
+
 # --------------------------------------------------------------------------- #
 # Reads
 # --------------------------------------------------------------------------- #
@@ -497,10 +512,13 @@ async def record_bank_entry(group_id: int):
             s.flush()
             _audit(s, user_id, group_id, "group.bank.record", row.id, None, _snapshot(row),
                    event_id=event_id)
+            if status == "confirmed":
+                _queue_posts(s, group_id, [row])
             s.commit()
             return row.id
 
     entry_id = await asyncio.to_thread(_apply)
+    _board_dirty(group_id)
     return private_no_store(jsonify({"id": entry_id}))
 
 
@@ -545,18 +563,25 @@ async def update_bank_entry(group_id: int, entry_id: int):
             proof = _clean_proof(body)
             if proof is not _UNSET:
                 row.proof_url = proof
+            first_confirm = False
             if "status" in body:
                 new = body.get("status")
                 _rule(check_transition, row.status, new)
                 if new == "confirmed" and row.status != "confirmed":
+                    # Posted to Discord only the first time it counts; taking
+                    # a decision back and re-confirming doesn't post again.
+                    first_confirm = row.confirmed_at is None
                     row.confirmed_at = datetime.utcnow()
                 row.status = new
             row.acted_by_user_id = user_id
             _audit(s, user_id, group_id, "group.bank.update", entry_id, before, _snapshot(row),
                    event_id=row.event_id)
+            if first_confirm:
+                _queue_posts(s, group_id, [row])
             s.commit()
 
     await asyncio.to_thread(_apply)
+    _board_dirty(group_id)
     return private_no_store(jsonify({"ok": True}))
 
 
@@ -608,6 +633,7 @@ async def delete_bank_entry(group_id: int, entry_id: int):
             return ever_counted, bumped_event
 
     voided, bumped_event = await asyncio.to_thread(_apply)
+    _board_dirty(group_id)
     if bumped_event is not None:
         from web_api.routes.events import _bump
 
@@ -689,10 +715,12 @@ async def transfer_to_event(group_id: int):
                 after=json.dumps({"kind": "donation", "amount": -amount, "status": "paid",
                                   "via": f"group_bank_entries.{row.id}"}),
             ))
+            _queue_posts(s, group_id, [row])
             s.commit()
             return row.id, ev.id
 
     entry_id, ev_id = await asyncio.to_thread(_apply)
+    _board_dirty(group_id)
     from web_api.routes.events import _bump
 
     _bump(ev_id)

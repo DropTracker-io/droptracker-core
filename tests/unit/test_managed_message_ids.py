@@ -25,7 +25,8 @@ from web_api import config_registry as reg
 from web_api.common import ProblemException
 import web_api.routes.config as cfg
 
-MESSAGE_KEYS = {"lootboard_message_id", "clan_log_message_id", "pvp_lootboard_message_id"}
+MESSAGE_KEYS = {"lootboard_message_id", "clan_log_message_id", "pvp_lootboard_message_id",
+                "bank_board_message_id"}
 
 
 def test_exactly_the_board_message_ids_are_managed():
@@ -164,6 +165,22 @@ def test_repost_ignores_a_stored_value_that_is_not_a_message_id(wired):
     cfg.repost_board(7, 42, "clan_log")
     assert state["enqueued"] == []
     assert state["redis"].deleted == ["clan_log:42:posted_hash"]
+
+
+def test_repost_bank_board_deletes_in_the_channel_it_was_posted_to(wired, monkeypatch):
+    # services/group_bank_discord stores "<channel_id>:<message_id>" (suggestion #230).
+    import services.group_bank_discord as gbd
+
+    dirty = []
+    monkeypatch.setattr(gbd, "mark_board_dirty", dirty.append)
+    message = _row("bank_board_message_id", "111111111111111111:123456789012345678")
+    state = wired([_row("bank_board_channel_id", "998877665544332211"), message])
+    cfg.repost_board(7, 42, "bank_board")
+    assert message.config_value == ""
+    assert state["enqueued"][0]["channel_id"] == "111111111111111111"
+    assert state["enqueued"][0]["discord_message_id"] == "123456789012345678"
+    assert state["redis"].deleted == ["bank:board:42:posted_hash"]
+    assert dirty == [42]
 
 
 def test_repost_needs_a_channel(wired):
