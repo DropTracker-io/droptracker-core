@@ -46,6 +46,10 @@ _TRANSITIONS = {
 
 TOP_DONORS_LIMIT = 10
 
+# An event run outside DropTracker is named by the clan; the name is stored on
+# the transfer (group_bank_entries.event_label, VARCHAR(64)).
+OUTSIDE_EVENT_NAME_LIMIT = 64
+
 # A backdated entry can't predate Old School itself (launched 2013-02-22), and
 # can't be in the future beyond a little clock slack between browser and server.
 EARLIEST_ENTRY_DATE = datetime(2013, 2, 22)
@@ -168,6 +172,24 @@ def clean_text(value, field: str, limit: int = 255) -> Optional[str]:
     if len(value) > limit:
         raise BankRuleError(f"Invalid {field}", f"'{field}' must be at most {limit} characters.")
     return value or None
+
+
+def transfer_target(event_id, event_name) -> tuple:
+    """``(event_id, None)`` for one of the group's DropTracker events, or
+    ``(None, name)`` for an event the clan runs elsewhere. Exactly one."""
+    if event_id is not None and not _is_int(event_id):
+        raise BankRuleError("Invalid event_id", "'event_id' must be an integer.")
+    name = clean_text(event_name, "event_name", OUTSIDE_EVENT_NAME_LIMIT)
+    if event_id is not None and name:
+        raise BankRuleError(
+            "Choose one event", "Send an 'event_id' or an 'event_name', not both."
+        )
+    if event_id is None and not name:
+        raise BankRuleError(
+            "Event required",
+            "Send the 'event_id' of one of your events, or an 'event_name' for one run outside DropTracker.",
+        )
+    return event_id, name
 
 
 def entry_date(value, now: datetime) -> datetime:

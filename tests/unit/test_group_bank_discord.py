@@ -71,6 +71,13 @@ class TestWording:
     def test_activity_line(self, kind, source, amount, name, expected):
         assert gbd.activity_line(kind, source, amount, name) == expected
 
+    def test_transfer_names_its_event(self):
+        assert gbd.activity_line("event_transfer", "staff", -3_000, None, "BOTW") == (
+            "**3,000 gp** moved into the **BOTW** prize pot")
+        assert gbd.activity_line("event_transfer", "staff", -3_000, None, "Weekly_PvM",
+                                 outside_event=True) == (
+            "**3,000 gp** set aside for **Weekly\\_PvM**")
+
     def test_names_are_markdown_escaped(self):
         assert gbd.activity_line("donation", "staff", 1, "big_boi*") == (
             "**big\\_boi\\*** donated **1 gp**")
@@ -234,7 +241,8 @@ class _Session:
 
 def _row(**kw):
     base = dict(id=5, kind="donation", source="coffer", amount=5_000_000, player_id=None,
-                rsn="Zezima", proof_url=None, created_at=_NOW, confirmed_at=_NOW)
+                rsn="Zezima", proof_url=None, created_at=_NOW, confirmed_at=_NOW,
+                event_id=None, event_label=None)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -286,6 +294,18 @@ class TestQueueEntryPosts:
         assert gbd.queue_entry_posts(_Session(), 363, [withdrawal]) == 0
         queue["config"]["bank_post_outflows"] = "true"
         assert gbd.queue_entry_posts(_Session(), 363, [withdrawal]) == 1
+
+    def test_transfers_name_their_event(self, queue):
+        queue["config"]["bank_post_outflows"] = "true"
+        outside = _row(kind="event_transfer", source="staff", amount=-5, rsn=None,
+                       event_label="Weekly PvM")
+        gbd.queue_entry_posts(_Session(), 363, [outside])
+        assert "set aside for **Weekly PvM**" in queue["sent"][0]["embed"]["description"]
+        # A pot transfer looks its event up (the group name, then event names:
+        # no player query without a player).
+        pot = _row(id=6, kind="event_transfer", source="staff", amount=-5, rsn=None, event_id=12)
+        gbd.queue_entry_posts(_Session(players=[(12, "BOTW")]), 363, [pot])
+        assert "the **BOTW** prize pot" in queue["sent"][1]["embed"]["description"]
 
     def test_never_raises(self, queue, monkeypatch):
         def _boom(*a, **k):

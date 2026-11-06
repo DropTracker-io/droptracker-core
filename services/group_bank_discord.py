@@ -127,8 +127,11 @@ def board_title(group_name: str) -> str:
     return f"{name} bank" if name.lower().endswith("clan") else f"{name} clan bank"
 
 
-def activity_line(kind: str, source: Optional[str], amount, name: Optional[str]) -> str:
-    """One sentence for an entry, e.g. ``**Zezima** donated **5,000,000 gp**``."""
+def activity_line(kind: str, source: Optional[str], amount, name: Optional[str],
+                  event: Optional[str] = None, outside_event: bool = False) -> str:
+    """One sentence for an entry, e.g. ``**Zezima** donated **5,000,000 gp**``.
+    ``event`` names a transfer's event; ``outside_event`` marks one the clan
+    runs outside DropTracker (no prize pot here, just GP set aside for it)."""
     who = f"**{md_escape(name)}**" if name else _UNNAMED
     value = f"**{gp(amount)}**"
     coffer = source == "coffer"
@@ -141,14 +144,19 @@ def activity_line(kind: str, source: Optional[str], amount, name: Optional[str])
     if kind == "payout":
         return f"{who} was paid {value}" if name else f"{value} paid out"
     if kind == "event_transfer":
-        return f"{value} moved into an event prize pot"
+        if not event:
+            return f"{value} moved into an event prize pot"
+        if outside_event:
+            return f"{value} set aside for **{md_escape(event)}**"
+        return f"{value} moved into the **{md_escape(event)}** prize pot"
     verb = "added to" if int(amount or 0) >= 0 else "taken from"
     return f"{value} {verb} the bank"
 
 
 def entry_embed(*, group_id: int, group_name: str, kind: str, source: Optional[str],
                 amount, name: Optional[str], balance: int, proof_url: Optional[str],
-                when: Optional[datetime]) -> dict:
+                when: Optional[datetime], event: Optional[str] = None,
+                outside_event: bool = False) -> dict:
     """The activity post for one entry, as an embed dict for the outbox."""
     from utils.site_urls import group_url
 
@@ -156,7 +164,7 @@ def entry_embed(*, group_id: int, group_name: str, kind: str, source: Optional[s
     embed = {
         "title": "Clan bank donation" if kind == "donation" else "Clan bank",
         "url": f"{group_url(group_id)}#bank",
-        "description": activity_line(kind, source, amount, name) + ".",
+        "description": activity_line(kind, source, amount, name, event, outside_event) + ".",
         "color": _COLOR_IN if inflow else _COLOR_OUT,
         "fields": [{"name": "Bank balance", "value": gp_signed(balance), "inline": True}],
         "footer": {"text": f"{group_name} · DropTracker.io"},
@@ -186,7 +194,8 @@ def _clip_lines(lines: Iterable[str], limit: int = _FIELD_LIMIT) -> str:
 def board_embed(*, group_id: int, group_name: str, summary: dict,
                 recent: list, show_names: bool) -> dict:
     """The standing board. ``summary`` is the route's ``_summary`` output and
-    ``recent`` is ``[{kind, source, amount, rsn, created_at}]`` newest first.
+    ``recent`` is ``[{kind, source, amount, rsn, created_at, event_name?,
+    outside_event?}]`` newest first.
     Carries no timestamp, so the same bank always builds the same embed."""
     from utils.site_urls import group_url
 
@@ -216,7 +225,10 @@ def board_embed(*, group_id: int, group_name: str, summary: dict,
             stamp = r.get("created_at")
             when = f"<t:{int(stamp)}:R> " if stamp else ""
             name = r.get("rsn") if show_names else None
-            lines.append(when + activity_line(r.get("kind"), r.get("source"), r.get("amount"), name))
+            lines.append(when + activity_line(
+                r.get("kind"), r.get("source"), r.get("amount"), name,
+                r.get("event_name"), bool(r.get("outside_event")),
+            ))
         fields.append({"name": "Recent activity", "value": _clip_lines(lines), "inline": False})
     has_activity = bool(totals.get("by_kind"))
     return {
@@ -313,7 +325,7 @@ def queue_entry_posts(session, group_id: int, entries: list) -> int:
         if not wanted:
             return 0
 
-        from db import Group, Player
+        from db import Event, Group, Player
         from services.discord_outbox import enqueue
 
         group_name = (
@@ -325,9 +337,15 @@ def queue_entry_posts(session, group_id: int, entries: list) -> int:
             session.query(Player.player_id, Player.player_name)
             .filter(Player.player_id.in_(pids)).all()
         ) if pids else {}
+        eids = {e.event_id for e in wanted if e.event_id is not None}
+        event_names = dict(
+            session.query(Event.id, Event.name).filter(Event.id.in_(eids)).all()
+        ) if eids else {}
         balance = _balance(session, group_id, neutral)
         for e in wanted:
             name = (names.get(e.player_id) or e.rsn) if show_names else None
+            outside = e.event_id is None and bool(e.event_label)
+            event = e.event_label if outside else event_names.get(e.event_id)
             enqueue(
                 session,
                 channel_id=channel_id,
@@ -335,6 +353,7 @@ def queue_entry_posts(session, group_id: int, entries: list) -> int:
                     group_id=group_id, group_name=group_name, kind=e.kind,
                     source=e.source, amount=e.amount, name=name, balance=balance,
                     proof_url=e.proof_url, when=e.created_at,
+                    event=event, outside_event=outside,
                 ),
                 ref_type="group_bank_entry",
                 ref_id=e.id,
@@ -401,7 +420,8 @@ def build_board(session, group_id: int, channel_id: str) -> Optional[dict]:
     )
     recent = [
         {"kind": r["kind"], "source": r["source"], "amount": _money_value(r["amount"]),
-         "rsn": r["rsn"], "created_at": r["created_at"]}
+         "rsn": r["rsn"], "created_at": r["created_at"],
+         "event_name": r["event_name"], "outside_event": r["outside_event"]}
         for r in _decorate(session, rows, False)
     ]
     embed = board_embed(group_id=group_id, group_name=group_name, summary=summary,

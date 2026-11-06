@@ -91,6 +91,22 @@ class TestCleanText:
             gbs.clean_text(5, "note")
 
 
+class TestTransferTarget:
+    def test_one_of_ours_or_a_named_outside_event(self):
+        assert gbs.transfer_target(5, None) == (5, None)
+        assert gbs.transfer_target(None, "  Weekly PvM ") == (None, "Weekly PvM")
+        # A blank name with an id is just the id.
+        assert gbs.transfer_target(5, "  ") == (5, None)
+
+    @pytest.mark.parametrize("event_id,name", [
+        (None, None), (None, "   "), (5, "Weekly PvM"), ("5", None), (True, None),
+        (None, "x" * 65), (None, 7),
+    ])
+    def test_refused(self, event_id, name):
+        with pytest.raises(gbs.BankRuleError):
+            gbs.transfer_target(event_id, name)
+
+
 class TestTotals:
     def test_balance_from_kind_sums(self):
         t = gbs.totals_from_kind_sums([
@@ -284,7 +300,7 @@ class _Rec:
 
     id = group_id = kind = status = player_id = rsn = amount = None
     created_at = event_buyin_id = event_id = source = user_id = None
-    note = review_note = proof_url = confirmed_at = None
+    note = review_note = proof_url = confirmed_at = event_label = None
 
     def __init__(self, **kw):
         self.id = None
@@ -308,7 +324,7 @@ def _entry(**kw):
         id=9, group_id=42, kind="donation", amount=1_000, status="pending",
         source="member", player_id=None, rsn="Zez", user_id=None, note=None,
         review_note=None, proof_url=None, event_id=None, event_buyin_id=None,
-        created_at=None, confirmed_at=None, acted_by_user_id=None,
+        event_label=None, created_at=None, confirmed_at=None, acted_by_user_id=None,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -581,6 +597,43 @@ class TestUpdateEntry:
         assert '"created_at": 1714564800' in audit.after
         assert '"created_at": 1714564800' not in audit.before
 
+    async def test_outside_transfer_amount_date_and_name_are_editable(self, client, monkeypatch):
+        row = _entry(kind="event_transfer", amount=-100, status="confirmed",
+                     source="staff", rsn=None, event_label="Weekly PvM",
+                     created_at=datetime(2026, 11, 2, 21, 0, 0))
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch(
+            "/api/v1/groups/42/bank/entries/9",
+            json={"amount": 250, "created_at": 1_714_564_800, "event_name": " Friday race "},
+        )
+        assert r.status_code == 200, await r.get_data()
+        assert row.amount == -250 and row.event_label == "Friday race"
+        assert row.created_at == datetime(2024, 5, 1, 12, 0, 0)
+
+    @pytest.mark.parametrize("patch", [{"status": "pending"}, {"rsn": "Zez"}, {"event_name": ""}])
+    async def test_outside_transfer_refuses(self, client, monkeypatch, patch):
+        row = _entry(kind="event_transfer", amount=-100, status="confirmed", event_label="W")
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json=patch)
+        assert r.status_code in (409, 422)
+        assert row.event_label == "W" and row.status == "confirmed" and not s.committed
+
+    async def test_pot_transfer_cant_be_renamed(self, client, monkeypatch):
+        row = _entry(kind="event_transfer", amount=-100, status="confirmed",
+                     event_id=1, event_buyin_id=3)
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"event_name": "X"})
+        assert r.status_code == 409
+
+    async def test_only_a_transfer_has_an_event_name(self, client, monkeypatch):
+        s = _S([_entry(status="confirmed")])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"event_name": "X"})
+        assert r.status_code == 422
+
     async def test_transfer_date_is_fixed(self, client, monkeypatch):
         row = _entry(kind="event_transfer", amount=-100, status="confirmed", event_buyin_id=3)
         s = _S([row])
@@ -737,6 +790,43 @@ class TestTransfer:
         r = await client.post("/api/v1/groups/42/bank/transfer", json={"event_id": 1, "amount": -5})
         assert r.status_code == 422
 
+    async def test_outside_event_writes_only_the_bank_row(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        bumped = []
+        import web_api.routes.events as evr
+        monkeypatch.setattr(evr, "_bump", lambda *a, **k: bumped.append(a))
+        r = await client.post(
+            "/api/v1/groups/42/bank/transfer",
+            json={"event_name": " Weekly PvM ", "amount": 2_000_000, "note": "wk 45",
+                  "created_at": 1_714_564_800},
+        )
+        assert r.status_code == 200, await r.get_data()
+        assert not any(isinstance(a, _RecBuyin) for a in s.added)
+        entry = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert entry.kind == "event_transfer" and entry.amount == -2_000_000
+        assert entry.event_id is None and entry.event_label == "Weekly PvM"
+        assert entry.status == "confirmed" and entry.event_buyin_id is None
+        assert entry.created_at == datetime(2024, 5, 1, 12, 0, 0)
+        audit = next(a for a in s.added if isinstance(a, _RecAudit))
+        assert '"event_label": "Weekly PvM"' in audit.after
+        assert s.queued_posts == [entry] and s.dirty == [42] and s.committed
+        assert bumped == []
+
+    @pytest.mark.parametrize("body", [
+        {"amount": 5},
+        {"event_id": 1, "event_name": "Weekly PvM", "amount": 5},
+        {"event_name": "   ", "amount": 5},
+        # A pot transfer happens when it's made.
+        {"event_id": 1, "amount": 5, "created_at": 1_714_564_800},
+    ])
+    async def test_target_refused(self, client, monkeypatch, body):
+        s = _S()
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/groups/42/bank/transfer", json=body)
+        assert r.status_code == 422
+        assert not s.committed
+
 
 # --------------------------------------------------------------------------- #
 # public read
@@ -849,6 +939,7 @@ class TestListEntries:
             created_at=column("created_at"),
         ))
         monkeypatch.setattr(gb, "_pending_count", lambda s, gid: 0)
+        monkeypatch.setattr(gb, "_outside_events", lambda s, gid: [{"name": "Weekly PvM"}])
 
     async def test_page_continues_from_the_cursor_rows_date(self, client, monkeypatch):
         rows = [_entry(id=5, status="confirmed"), _entry(id=4, status="confirmed")]
@@ -860,6 +951,17 @@ class TestListEntries:
         body = await r.get_json()
         assert [e["id"] for e in body["entries"]] == [5, 4]
         assert body["next_before_id"] is None
+        assert body["outside_events"] == [{"name": "Weekly PvM"}]
+
+    async def test_outside_transfer_row_carries_its_name(self, client, monkeypatch):
+        rows = [_entry(id=5, kind="event_transfer", status="confirmed", amount=-10,
+                       rsn=None, event_label="Weekly PvM")]
+        s = _SS([_GROUP], rows, [])
+        self._wire_list(monkeypatch, s)
+        r = await client.get("/api/v1/groups/42/bank/entries")
+        assert r.status_code == 200, await r.get_data()
+        e = (await r.get_json())["entries"][0]
+        assert e["event_name"] == "Weekly PvM" and e["outside_event"] is True
 
     async def test_unknown_cursor_is_422(self, client, monkeypatch):
         s = _SS([_GROUP], [], [])

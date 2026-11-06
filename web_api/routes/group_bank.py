@@ -11,7 +11,8 @@
                                                   player_id?, rsn?,
                                                   created_at? } -> { ok }
   DELETE /api/v1/groups/{id}/bank/entries/{eid}       -> { ok, voided }
-  POST   /api/v1/groups/{id}/bank/transfer { event_id, amount, note? } -> { id }
+  POST   /api/v1/groups/{id}/bank/transfer { event_id | event_name, amount,
+                                          note?, created_at? } -> { id }
 
 Amounts are entered as positive GP; the kind decides the sign stored (see
 ``services/group_bank.signed_amount``). Adjustments carry their own sign.
@@ -29,6 +30,10 @@ moved, so a clan can enter its history; the ledger is ordered by it.
 A **transfer** moves GP from the bank into one of the group's own event prize
 pots: it writes a confirmed ``event_transfer`` row here and a paid donation in
 ``web_event_buyins`` in the same commit, and the two are voided together.
+An event the clan runs outside DropTracker (a weekly event with its own prize
+pool) is named instead: ``event_name`` books the ``event_transfer`` with that
+label and no prize-pot row, so it can be backdated, edited and removed like
+any other entry. The ledger lists the names used before, with their totals.
 
 Writes need group admin, resolved the site's way (``assert_group_admin`` with
 the MANAGE_GUILD-derived role source). Every write locks its row, writes an
@@ -56,6 +61,7 @@ from services.group_bank import (
     signed_amount,
     split_coffer_moves,
     totals_from_kind_sums,
+    transfer_target,
 )
 from web_api.common import (
     abort_problem,
@@ -81,6 +87,8 @@ group_bank_bp = Blueprint("v1_group_bank", __name__)
 TRANSFER_DONOR_LABEL = "Clan bank"
 
 _RECENT_LIMIT = 10
+# Outside-event names offered back to the Fund an event form.
+_OUTSIDE_EVENTS_LIMIT = 25
 _LEDGER_DEFAULT_LIMIT = 50
 _LEDGER_MAX_LIMIT = 200
 _LEDGER_STATUSES = ("pending", "confirmed", "rejected", "void", "all")
@@ -115,6 +123,7 @@ def _snapshot(e: GroupBankEntry) -> str:
         "proof_url": e.proof_url,
         "event_id": e.event_id,
         "event_buyin_id": e.event_buyin_id,
+        "event_label": e.event_label,
         "created_at": _ts(e.created_at),
     })
 
@@ -220,7 +229,10 @@ def _entry_row(e: GroupBankEntry, names: dict, events: dict, users: dict, can_ma
         "review_note": e.review_note if can_manage else None,
         "proof_url": e.proof_url,
         "event_id": e.event_id,
-        "event_name": events.get(e.event_id),
+        # A DropTracker event's current name, or the clan's own name for an
+        # event run elsewhere.
+        "event_name": events.get(e.event_id) or e.event_label,
+        "outside_event": e.event_id is None and bool(e.event_label),
         "submitted_by": users.get(e.user_id) if can_manage else None,
         "created_at": _ts(e.created_at),
         "confirmed_at": _ts(e.confirmed_at),
@@ -288,6 +300,32 @@ def _summary(s, group_id: int) -> dict:
         "coffer_withdrawals_neutral": neutral,
         "held_outside_coffer": held_outside,
     }
+
+
+def _outside_events(s, group_id: int) -> list:
+    """Names the group has funded outside events under, most recently used
+    first, with what each has had: the form offers them back so a weekly
+    event keeps one name (and one running total)."""
+    last = func.max(GroupBankEntry.created_at)
+    rows = (
+        s.query(GroupBankEntry.event_label, func.sum(GroupBankEntry.amount),
+                func.count(GroupBankEntry.id), last)
+        .filter(
+            GroupBankEntry.group_id == group_id,
+            GroupBankEntry.kind == "event_transfer",
+            GroupBankEntry.status == "confirmed",
+            GroupBankEntry.event_label.isnot(None),
+        )
+        .group_by(GroupBankEntry.event_label)
+        .order_by(last.desc())
+        .limit(_OUTSIDE_EVENTS_LIMIT)
+        .all()
+    )
+    return [
+        {"name": name, "total": money(-int(total or 0)), "count": int(count or 0),
+         "last_at": _ts(last_at)}
+        for name, total, count, last_at in rows
+    ]
 
 
 def _pending_count(s, group_id: int) -> int:
@@ -440,6 +478,7 @@ async def list_bank_entries(group_id: int):
                 "entries": _decorate(s, rows, True),
                 "next_before_id": rows[-1].id if more and rows else None,
                 "pending_count": _pending_count(s, group_id),
+                "outside_events": _outside_events(s, group_id),
                 "transfer_events": [
                     {"id": eid, "name": name, "status": st, "pot_enabled": bool(pot)}
                     for eid, name, st, pot, ends_at in events
@@ -526,9 +565,10 @@ async def record_bank_entry(group_id: int):
 async def update_bank_entry(group_id: int, entry_id: int):
     """Edit an entry, or review it: confirm or reject a pending one, or take a
     decision back (to pending). A transfer's amount and status belong to the
-    prize-pot row it wrote, so only its note and screenshot are editable.
-    ``created_at`` re-dates an entry (a backdated record, or a coffer line
-    seen late)."""
+    prize-pot row it wrote, so only its note and screenshot are editable. A
+    transfer to an outside event has no pot row: its amount, date and
+    ``event_name`` can change too, but it is never reviewed. ``created_at``
+    re-dates an entry (a backdated record, or a coffer line seen late)."""
     user_id = current_user_id()
     manage_ids = manageable_guild_ids(user_id)
     body = await json_body()
@@ -539,14 +579,22 @@ async def update_bank_entry(group_id: int, entry_id: int):
             row = _load_entry_for_update(s, group_id, entry_id)
             if row.status == "void":
                 abort_problem(409, "Entry removed", "A removed entry can't be edited.")
-            if row.kind == "event_transfer" and any(
-                k in body for k in ("amount", "status", "player_id", "rsn", "created_at")
-            ):
-                abort_problem(
-                    409, "Transfers are fixed",
-                    "Remove this transfer and make a new one to change it.",
-                )
+            # A transfer into a pot has a pot row; one to an outside event doesn't.
+            outside = (row.kind == "event_transfer" and row.event_id is None
+                       and row.event_buyin_id is None)
+            if row.kind == "event_transfer":
+                fixed = ("status", "player_id", "rsn") if outside else (
+                    "amount", "status", "player_id", "rsn", "created_at", "event_name")
+                if any(k in body for k in fixed):
+                    abort_problem(
+                        409, "Transfers are fixed",
+                        "Remove this transfer and make a new one to change it.",
+                    )
+            elif "event_name" in body:
+                abort_problem(422, "Not a transfer", "Only a transfer has an event.")
             before = _snapshot(row)
+            if outside and "event_name" in body:
+                _eid, row.event_label = _rule(transfer_target, None, body.get("event_name"))
             if "amount" in body:
                 row.amount = _rule(signed_amount, row.kind, body.get("amount"))
             if "note" in body:
@@ -645,16 +693,54 @@ async def delete_bank_entry(group_id: int, entry_id: int):
 async def transfer_to_event(group_id: int):
     """Move GP from the bank into one of this group's event prize pots: a
     confirmed ``event_transfer`` here plus a paid donation in the pot, written
-    together."""
+    together. With ``event_name`` instead, the GP goes to an event run outside
+    DropTracker: only the bank row is written, and ``created_at`` may
+    backdate it."""
     user_id = current_user_id()
     manage_ids = manageable_guild_ids(user_id)
     body = await json_body()
 
-    event_id = body.get("event_id")
-    if not _is_id(event_id):
-        abort_problem(422, "Invalid event_id", "'event_id' must be an integer.")
+    event_id, event_name = _rule(transfer_target, body.get("event_id"), body.get("event_name"))
     amount = _rule(signed_amount, "event_transfer", body.get("amount"))
     note = _rule(clean_text, body.get("note"), "note")
+    raw_date = body.get("created_at")
+    if raw_date is not None and event_id is not None:
+        abort_problem(
+            422, "Transfers are dated now",
+            "A transfer into a prize pot happens when it's made; only an outside event's can be backdated.",
+        )
+    created_at = None if raw_date is None else _rule(entry_date, raw_date, datetime.utcnow())
+
+    def _apply_outside():
+        with db_session() as s:
+            _load_group_or_404(s, group_id)
+            assert_group_admin(s, user_id, group_id, manage_ids)
+            now = datetime.utcnow()
+            row = GroupBankEntry(
+                group_id=group_id,
+                kind="event_transfer",
+                amount=amount,
+                status="confirmed",
+                source="staff",
+                note=note,
+                event_id=None,
+                event_label=event_name,
+                created_by_user_id=user_id,
+                acted_by_user_id=user_id,
+                created_at=created_at or now,
+                confirmed_at=now,
+            )
+            s.add(row)
+            s.flush()
+            _audit(s, user_id, group_id, "group.bank.transfer", row.id, None, _snapshot(row))
+            _queue_posts(s, group_id, [row])
+            s.commit()
+            return row.id
+
+    if event_name is not None:
+        entry_id = await asyncio.to_thread(_apply_outside)
+        _board_dirty(group_id)
+        return private_no_store(jsonify({"id": entry_id}))
 
     def _apply():
         from web_api.event_scope import is_staff_hosted

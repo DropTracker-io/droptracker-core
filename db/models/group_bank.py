@@ -75,6 +75,10 @@ class GroupBankEntry(Base):
     event_id = Column(Integer, nullable=True)
     # The prize-pot row a transfer created, so voiding one voids the other.
     event_buyin_id = Column(Integer, nullable=True)
+    # A transfer to an event run outside DropTracker (a weekly clan event with
+    # its own prize pool): the clan's name for it. event_id is NULL then, and
+    # no prize-pot row is written (web158a).
+    event_label = Column(String(64), nullable=True)
     # Coffer-synced rows only: the deterministic reference of the broadcast
     # that wrote it (services/group_bank.coffer_ref). Unique per group, so a
     # line relayed by several clanmates books once. NULL everywhere else.
