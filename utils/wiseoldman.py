@@ -1277,6 +1277,11 @@ _BOSS_METRIC_OVERRIDES = {
     # metric (wise-old-man/utils 4.0.28) keeps the article. Also caught by the
     # article fallback in wom_boss_metric, listed so the mapping is explicit.
     "fractured_archive": "the_fractured_archive",
+    # WOM pluralizes the Moons of Peril chest; DropTracker's NPC is singular.
+    "lunar_chest": "lunar_chests",
+    # Wintertodt loot arrives under its reward container, never "Wintertodt".
+    "supply_crate_(wintertodt)": "wintertodt",
+    "reward_cart_(wintertodt)": "wintertodt",
 }
 
 

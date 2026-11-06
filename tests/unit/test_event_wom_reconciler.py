@@ -215,6 +215,9 @@ class TestMetricMapping:
             "Yama": "yama",
             "Fractured Archive": "the_fractured_archive",
             "The Fractured Archive": "the_fractured_archive",
+            "Lunar Chest": "lunar_chests",
+            "Supply crate (Wintertodt)": "wintertodt",
+            "Reward cart (Wintertodt)": "wintertodt",
             "Made Up Boss": None,
         }
         for name, slug in cases.items():
