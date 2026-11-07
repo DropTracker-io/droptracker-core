@@ -968,6 +968,8 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
     elif notification_type == "event_pending":
         spec["title"] = "\U0001F50D Completion awaiting review"
         spec["description"] = f"**{task_label or 'A task'}** needs an admin's confirmation."
+        if data.get("matched_target"):
+            field("Counted", f"**{data['matched_target']}**")
         if player:
             field("Player", f"`{player}`")
         if team:

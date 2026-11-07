@@ -393,7 +393,7 @@ DEFAULT_LAYOUTS = {
             {"type": "text", "content": "### \U0001F50D Completion awaiting review"},
             {
                 "type": "section",
-                "content": "**{task_label}** needs an admin's confirmation.\n**Player** `{player_name}`\n**Team** {team_name}",
+                "content": "**{task_label}** needs an admin's confirmation.\n{counted_line}\n**Player** `{player_name}`\n**Team** {team_name}",
                 "thumbnail": "{proof_url}",
             },
             {
@@ -681,6 +681,9 @@ TOKEN_DOCS = {
                               "requirement it filled (drops when the task is named "
                               "after the item)",
                       "sample": "**Bandos chestplate** — filled the whole requirement"},
+    "counted_line": {"help": "What the submission matched on: the item, boss or pet "
+                             "that counted toward the task (drops when unknown)",
+                     "sample": "**Counted** Fire light"},
     "team_total_line": {"help": "Running team total (non-bingo events)",
                         "sample": "**Team total** `120 pts`"},
     "completed_by_line": {"help": "\"Completed by\" line (single contributor)",
@@ -930,7 +933,8 @@ TYPE_META = {
     "event_pending": {
         "label": "Completion pending review", "group": "Progress",
         "description": "A submission needs an admin's confirmation before it counts.",
-        "tokens": ("team_name", "player_name", "task_label", "proof_url", "review_url"),
+        "tokens": ("team_name", "player_name", "task_label", "counted_line", "proof_url",
+                   "review_url"),
         "standings": False,
     },
     "event_sweep_item": {
@@ -1617,6 +1621,10 @@ def notification_context(notification_type: str, data: dict) -> dict:
     # text as the legacy embed's "Received" field so both renderers agree.
     if not _completion_item_redundant(data):
         put("received_line", _received_item_text(data))
+
+    # Pending review: what the submission matched on (suggestion #229).
+    if data.get("matched_target"):
+        put("counted_line", f"**Counted** {data['matched_target']}")
 
     # Manual awards: the organizer's reason for granting credit (enqueued
     # only when one was written) — same text as the legacy embed's "Note".

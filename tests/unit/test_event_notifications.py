@@ -381,6 +381,12 @@ class TestEmbedSpecs:
         assert "https://www.droptracker.io/groups/9/events/42" in fields["Review"]
         assert spec["thumbnail"] == "https://x/p.png"
 
+    def test_pending_names_what_counted(self):
+        spec = _spec("event_pending", {"task_label": "T", "matched_target": "Fire light"})
+        fields = {f["name"]: f["value"] for f in spec["fields"]}
+        assert fields["Counted"] == "**Fire light**"
+        assert "Counted" not in {f["name"] for f in _spec("event_pending", {"task_label": "T"})["fields"]}
+
     def test_pending_falls_back_to_event_url(self):
         spec = _spec("event_pending", {"task_label": "T"})
         fields = {f["name"]: f["value"] for f in spec["fields"]}

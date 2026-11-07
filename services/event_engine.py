@@ -6242,6 +6242,10 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
             "completion_id": completion.id,
             "source_type": completion.source_type,
             "proof_url": completion.proof_url,
+            # What the submission matched on (the item, boss or pet), so a
+            # reviewer can tell a Fire light from a clue unique without
+            # opening the queue (suggestion #229).
+            "matched_target": completion.matched_target,
         })
         return {"kind": "pending", "event_id": event["id"],
                 "task_id": task["id"], "team_id": team_id,

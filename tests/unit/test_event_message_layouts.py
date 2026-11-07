@@ -431,6 +431,20 @@ class TestDefaultLayouts:
                 b.get("content", "") for b in spec["blocks"] if b["type"] in ("text", "section"))
             assert not ml._TOKEN_RE.search(joined), (message_type, joined)
 
+    def test_pending_card_names_what_counted(self):
+        # Suggestion #229: the reviewer sees the matched item on the card,
+        # and the line drops when the completion matched nothing by name.
+        def body(data):
+            spec = ml.render_message_spec(
+                ml.DEFAULT_LAYOUTS["event_pending"],
+                ml.notification_context("event_pending", data))
+            return " ".join(b.get("content", "") for b in spec["blocks"] if "content" in b)
+
+        base = {"event_id": 7, "task_label": "Medium clue uniques", "player_name": "Zed",
+                "team_name": "Reds", "review_url": "https://x/review"}
+        assert "**Counted** Fire light" in body({**base, "matched_target": "Fire light"})
+        assert "Counted" not in body(base)
+
     def test_board_action_renders_its_action_line(self):
         # The skirmish layout's only body line: it used to be missing from the
         # context, so the V2 message showed its title alone.
