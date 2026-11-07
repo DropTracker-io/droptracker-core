@@ -18,6 +18,11 @@ row cannot be told apart from a genuine one by its own timestamps. Two tiers:
     misses PBs whose drops land on a different NPC row, and it clears the
     rare row whose later kills happened to be in the same gear.
 
+APPLIED 2026-11-07 16:02 UTC (--include-later-kills, 44,585 rows; backup in
+logs/purge_stale_pb_loadouts_20261107_160209.tsv). Do not re-run that tier:
+since the fix, a loadout written by a genuine PB that the player then killed
+again is correct, and the later-kills test would delete it.
+
 A removed loadout leaves the PB showing no gear, which is accurate: we do not
 know what it was set in. The next genuine PB writes a fresh one.
 
