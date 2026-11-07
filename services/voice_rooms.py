@@ -73,6 +73,7 @@ class VoiceRooms(Extension):
         self._rooms: set = set()
         self._cooldown: Dict[tuple, float] = {}
         self._failed_at: Dict[int, float] = {}
+        self._explained_at: Dict[int, float] = {}
         try:
             self._rooms = {int(k) for k in (_redis().hkeys(core.ROOMS_HASH) or [])}
         except Exception:
@@ -161,6 +162,7 @@ class VoiceRooms(Extension):
                 reason=f"Voice room for {display}")
         except Exception:
             self._note_failure(guild_id, "couldn't create a voice room")
+            await self._explain(guild_id, hub_id, parent_id, user_id)
             return
         room_id = int(data["id"])
         self._rooms.add(room_id)
@@ -170,6 +172,49 @@ class VoiceRooms(Extension):
             # They left the hub before we could move them, or we lack Move
             # Members: an empty room is no use to anyone.
             await self._delete(room_id, "Voice room owner left before moving in")
+            if self._occupancy(hub_id):
+                await self._explain(guild_id, hub_id, parent_id, user_id)
+
+    async def _explain(self, guild_id: int, hub_id: int, parent_id, user_id: int) -> None:
+        """Tell the server what permission is missing, at most once an hour.
+
+        Discord only says "Missing Permissions", and the member who joined the
+        hub otherwise sees nothing happen. Said in the hub's own text chat
+        (every voice channel has one), or by DM to the member if the bot
+        can't post there.
+        """
+        now = time.monotonic()
+        if now - self._explained_at.get(int(guild_id), 0) < _FAIL_LOG_EVERY_S:
+            return
+        self._explained_at[int(guild_id)] = now
+        try:
+            roles = {str(r["id"]): int(r["permissions"])
+                     for r in await self.bot.http.get_roles(guild_id)}
+            me = await self.bot.http.get_member(guild_id, self.bot.user.id)
+            where = await self.bot.http.get_channel(parent_id or hub_id)
+            overwrites = where.get("permission_overwrites") or []
+            perms = core.effective_permissions(guild_id, self.bot.user.id,
+                                               me.get("roles"), roles, overwrites)
+            missing = core.missing_room_permissions(perms, overwrites)
+            name = where.get("name") if parent_id else None
+        except Exception:
+            log.warning("[VoiceRooms] permission check failed in %s", guild_id, exc_info=True)
+            return
+        if not missing:
+            return
+        text = core.permissions_notice(missing, name)
+        payload = {"content": text, "allowed_mentions": {"parse": []}}
+        try:
+            await self.bot.http.create_message(payload, hub_id)
+            return
+        except Exception:
+            pass
+        try:
+            user = await self.bot.fetch_user(user_id)
+            if user is not None:
+                await user.send(text)
+        except Exception:
+            pass
 
     async def _move(self, guild_id: int, user_id: int, room_id: int) -> bool:
         try:

@@ -970,7 +970,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Join-to-create voice channel",
         "category": "voice",
         "type": "channel",
-        "help": "Members who join this voice channel get their own temporary voice channel next to it and are moved into it. Anyone can join them there, and it is deleted once it is empty. Give the bot Manage Channels and Move Members.",
+        "help": "Members who join this voice channel get their own temporary voice channel next to it and are moved into it. Anyone can join them there, and it is deleted once it is empty. On the hub's category, allow the DropTracker bot's role View Channel, Manage Channels, Connect, Move Members and Manage Permissions (or give it Administrator). If one is missing, the bot says which in the hub's chat.",
         "default": None,
     },
     {

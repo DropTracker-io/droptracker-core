@@ -92,3 +92,78 @@ def sweepable(record: dict, member_count: int, now: Optional[float] = None) -> b
         return False
     age = (now or time.time()) - int(record.get("created_at") or 0)
     return age >= SWEEP_GRACE_S
+
+
+# --------------------------------------------------------------------------- #
+# Permission diagnosis: why a room could not be created, in words an admin can
+# act on. Discord answers only "403 Missing Permissions"; a category that
+# denies @everyone Manage Channels/Connect (common on voice categories) takes
+# them from the bot too unless its role is allowed back, and a new room copies
+# the category's overwrites, which Discord permits only for permission bits
+# the bot itself holds (or with Manage Permissions there).
+# --------------------------------------------------------------------------- #
+ADMINISTRATOR = 1 << 3
+VIEW_CHANNEL = 1 << 10
+MANAGE_CHANNELS = 1 << 4
+CONNECT = 1 << 20
+MOVE_MEMBERS = 1 << 24
+MANAGE_ROLES = 1 << 28  # "Manage Permissions" on a channel
+
+_PERM_LABELS = (
+    (VIEW_CHANNEL, "View Channel"),
+    (MANAGE_CHANNELS, "Manage Channels"),
+    (CONNECT, "Connect"),
+    (MOVE_MEMBERS, "Move Members"),
+)
+
+
+def effective_permissions(guild_id, member_id, member_role_ids, roles: Dict[str, int],
+                          overwrites) -> int:
+    """Discord's permission resolution for one member in one channel.
+
+    ``roles`` maps role id -> permission int (the @everyone role's id is the
+    guild id); ``overwrites`` is the channel's raw overwrite list.
+    """
+    gid = str(guild_id)
+    role_ids = [str(r) for r in (member_role_ids or [])]
+    perms = int(roles.get(gid, 0))
+    for rid in role_ids:
+        perms |= int(roles.get(rid, 0))
+    if perms & ADMINISTRATOR:
+        return -1  # everything
+    by_id = {str(o.get("id")): o for o in (overwrites or [])}
+    if (ev := by_id.get(gid)) is not None:
+        perms = (perms & ~int(ev.get("deny") or 0)) | int(ev.get("allow") or 0)
+    allow = deny = 0
+    for rid in role_ids:
+        o = by_id.get(rid)
+        if o is not None and int(o.get("type", 0)) == 0:
+            allow |= int(o.get("allow") or 0)
+            deny |= int(o.get("deny") or 0)
+    perms = (perms & ~deny) | allow
+    if (mo := by_id.get(str(member_id))) is not None:
+        perms = (perms & ~int(mo.get("deny") or 0)) | int(mo.get("allow") or 0)
+    return perms
+
+
+def missing_room_permissions(perms: int, category_overwrites) -> list:
+    """Labels of what the bot lacks to open rooms in a category ([] = none)."""
+    if perms == -1:
+        return []
+    missing = [label for bit, label in _PERM_LABELS if not perms & bit]
+    if not perms & MANAGE_ROLES:
+        touched = 0
+        for o in category_overwrites or []:
+            touched |= int(o.get("allow") or 0) | int(o.get("deny") or 0)
+        if touched & ~perms:
+            missing.append("Manage Permissions")
+    return missing
+
+
+def permissions_notice(missing: list, category_name: Optional[str]) -> str:
+    where = f"the **{category_name}** category" if category_name else "this server"
+    return (
+        "I couldn't open a voice room. In " + where + " I'm missing: **"
+        + ", ".join(missing) + "**. Allow these for the DropTracker bot's role on "
+        "the category (Edit Category > Permissions), then try again."
+    )
