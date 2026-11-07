@@ -132,7 +132,21 @@ class TestWindow:
         assert body["error"] == "malformed_parameter"
         assert "since" in body["detail"]
 
-    @pytest.mark.parametrize("query", ["since=abc", "until=abc", "max_drops=abc"])
+    @pytest.mark.asyncio
+    async def test_min_value_reaches_the_loader(self, harness):
+        client, seen, _ = harness
+        status, _ = await _get(client, "/v2/groups/7/players?include=drops&min_value=1000000")
+        assert status == 200
+        assert seen["ctx"]["drops_min_value"] == 1_000_000
+
+    @pytest.mark.asyncio
+    async def test_zero_or_negative_min_value_means_no_floor(self, harness):
+        client, seen, _ = harness
+        status, _ = await _get(client, "/v2/groups/7/players?include=drops&min_value=-5")
+        assert status == 200
+        assert "drops_min_value" not in seen["ctx"]
+
+    @pytest.mark.parametrize("query", ["since=abc", "until=abc", "max_drops=abc", "min_value=1m"])
     @pytest.mark.asyncio
     async def test_non_integer_parameters_are_named(self, harness, query):
         client, _, _ = harness

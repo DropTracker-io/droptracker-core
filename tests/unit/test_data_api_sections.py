@@ -239,14 +239,15 @@ class TestDropsFeed:
     def _rows(self):
         from datetime import datetime
 
-        # (player_id, drop_id, item_id, item_name, npc_id, npc_name, qty, value, date_added)
+        # (player_id, drop_id, item_id, item_name, npc_id, npc_name, qty, value,
+        #  date_added, image_url)
         return [
             (7, 501, 4151, "Abyssal whip", 415, "Abyssal Sire", 1, 2_000_000,
-             datetime(2026, 9, 2, 10, 0, 0)),
+             datetime(2026, 9, 2, 10, 0, 0), "https://www.droptracker.io/img/user-upload/7/whip.png"),
             (7, 500, 995, "Coins", 415, "Abyssal Sire", 1500, 1,
-             datetime(2026, 9, 2, 9, 59, 30)),
+             datetime(2026, 9, 2, 9, 59, 30), None),
             (9, 480, 11832, "Bandos chestplate", 2215, "General Graardor", 1, 20_000_000,
-             datetime(2026, 9, 1, 22, 0, 0)),
+             datetime(2026, 9, 1, 22, 0, 0), "https://cdn.discordapp.com/attachments/x.png"),
         ]
 
     def _ctx(self, sections=("identity", "drops"), per_player=50):
@@ -300,6 +301,28 @@ class TestDropsFeed:
         assert whip["received_at"] == 1788343200
         assert whip["received_at_iso"] == "2026-09-02T10:00:00"
         assert whip["total_value"] == 2_000_000 and whip["value_each"] == 2_000_000
+
+    def test_screenshots_we_host_are_returned_others_are_null(self):
+        out = self._load(self._rows(), self._ctx())
+        assert out[7]["drops"][0]["image_url"].endswith("/whip.png")
+        assert out[7]["drops"][1]["image_url"] is None
+        assert out[9]["drops"][0]["image_url"] is None, "dead third-party links are withheld"
+
+    def test_min_value_filters_the_stack_total_inside_the_ranked_subquery(self):
+        seen = []
+        ctx = self._ctx()
+        ctx["drops_min_value"] = 1_000_000
+        out = self._load(self._rows(), ctx, seen)
+        sql = seen[0]
+        assert "d.value * d.quantity >= :min_value" in sql
+        assert sql.index("d.hidden = 0") < sql.index(":min_value") < sql.index(") ranked")
+        assert out[11]["min_value"] == 1_000_000
+
+    def test_without_min_value_the_query_is_unchanged(self):
+        seen = []
+        out = self._load(self._rows(), self._ctx(), seen)
+        assert "min_value" not in seen[0]
+        assert "min_value" not in out[7]
 
     def test_drop_id_is_only_attached_with_the_modifier(self):
         without = self._load(self._rows(), self._ctx())

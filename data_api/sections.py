@@ -745,12 +745,18 @@ def _load_drops(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     # which are Barrows". Same index either way: npc_id is filtered on rows
     # the composite index already narrowed to this player and window.
     npc_clause = "AND d.npc_id IN :npc_ids" if npc_ids else ""
+    # Same placement and reasoning for the value floor: "your 50 most recent
+    # drops worth 1M+" rather than "50 drops, keep the 1M+ ones". Compared on
+    # the stack total (value x quantity), the number the site shows.
+    min_value = int(ctx.get("drops_min_value") or 0)
+    value_clause = "AND d.value * d.quantity >= :min_value" if min_value > 0 else ""
     statement = text(f"""
         SELECT player_id, drop_id, item_id, item_name, npc_id, npc_name,
-               quantity, value, date_added
+               quantity, value, date_added, image_url
         FROM (
             SELECT d.player_id, d.drop_id, d.item_id, i.item_name,
                    d.npc_id, n.npc_name, d.quantity, d.value, d.date_added,
+                   d.image_url,
                    ROW_NUMBER() OVER (
                        PARTITION BY d.player_id
                        ORDER BY d.date_added DESC, d.drop_id DESC
@@ -762,23 +768,30 @@ def _load_drops(session, player_ids: List[int], ctx) -> Dict[int, dict]:
               AND d.date_added >= :start AND d.date_added < :end
               AND d.hidden = 0
               {npc_clause}
+              {value_clause}
         ) ranked
         WHERE rn <= :lim
         ORDER BY player_id, date_added DESC, drop_id DESC
     """).bindparams(ids=tuple(player_ids), start=since, end=until, lim=per_player)
     if npc_ids:
         statement = statement.bindparams(npc_ids=tuple(npc_ids))
+    if min_value > 0:
+        statement = statement.bindparams(min_value=min_value)
     rows = session.execute(statement)
+
+    from web_api.common import proof_url
 
     window = {"from": _unix(since), "to": _unix(until)}
     if npc_ids:
         window["npc_ids"] = npc_ids
+    if min_value > 0:
+        window["min_value"] = min_value
     out: Dict[int, dict] = {
         pid: {**window, "count": 0, "truncated": False, "oldest": None, "drops": []}
         for pid in player_ids
     }
     for (player_id, drop_id, item_id, item_name, npc_id, npc_name,
-         quantity, value, date_added) in rows:
+         quantity, value, date_added, image_url) in rows:
         entry = out[int(player_id)]
         quantity = int(quantity or 0)
         value = int(value or 0)
@@ -792,6 +805,9 @@ def _load_drops(session, player_ids: List[int], ctx) -> Dict[int, dict]:
             "total_value": value * quantity,
             "received_at": _unix(date_added),
             "received_at_iso": _iso(date_added),
+            # The submitted screenshot, when one was taken and we still host
+            # it (proof_url drops dead third-party links). None otherwise.
+            "image_url": proof_url(image_url),
         }
         if with_ids:
             drop["drop_id"] = int(drop_id)
@@ -951,9 +967,11 @@ _SECTIONS = (
             "Individual drops, newest first, inside a bounded window "
             "(?since / ?until as unix seconds, default the last 24 hours, "
             "maximum 7 days; ?max_drops rows per player, default 50, maximum "
-            "200). Each carries received_at as unix seconds UTC. Optional ?npc= "
-            "(a boss name or Wise Old Man boss slug) restricts the feed to that "
-            "boss, and the per-player cap then counts only its drops. Priced "
+            "200). Each carries received_at as unix seconds UTC and image_url "
+            "(the submitted screenshot, or null). Optional ?npc= (a boss name "
+            "or Wise Old Man boss slug) restricts the feed to that boss, and "
+            "?min_value= (gp, stack total) to drops worth at least that much; "
+            "the per-player cap then counts only matching drops. Priced "
             "per 24 hours of window. Not part of 'all'.",
             in_all=False, scale=_drops_cost_scale),
     Section("drop_ids", 0, _load_drop_ids,

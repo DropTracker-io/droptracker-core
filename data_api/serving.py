@@ -201,6 +201,11 @@ async def serve(endpoint: str, resolve: Callable, build: Callable,
                               "(e.g. barrows_chests).",
                 }, 400)
             ctx["drops_npc"] = raw_npc.strip()
+        min_value, error = int_param("min_value", 0, 0, 2 ** 53)
+        if error is not None:
+            return error
+        if min_value:
+            ctx["drops_min_value"] = min_value
     if "combat_achievements" in requested:
         # Taken here, on the event loop, because that is where a stale table
         # can be refreshed in the background; the loader runs in a worker
