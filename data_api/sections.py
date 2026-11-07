@@ -716,6 +716,24 @@ def _drops_cost_scale(ctx) -> int:
     return max(1, math.ceil(_drops_window_hours(ctx) / 24.0))
 
 
+def _drop_image_url(url):
+    """The submitted screenshot if it is one we host, else None.
+
+    Screenshots live on the image CDN (``video.droptracker.io/dt_img/``);
+    ``web_api.common.proof_url`` alone accepts only the site's own host and
+    would null every one of them. Older rows point at the Discord CDN, whose
+    links expire, so those are withheld rather than handed out broken.
+    """
+    from utils.image_storage import key_from_url
+    from web_api.common import proof_url
+
+    if not isinstance(url, str) or not url:
+        return None
+    if key_from_url(url):
+        return url.strip()
+    return proof_url(url)
+
+
 def _load_drops(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     """Individual drops per player, newest first, inside a bounded window.
 
@@ -779,8 +797,6 @@ def _load_drops(session, player_ids: List[int], ctx) -> Dict[int, dict]:
         statement = statement.bindparams(min_value=min_value)
     rows = session.execute(statement)
 
-    from web_api.common import proof_url
-
     window = {"from": _unix(since), "to": _unix(until)}
     if npc_ids:
         window["npc_ids"] = npc_ids
@@ -805,9 +821,7 @@ def _load_drops(session, player_ids: List[int], ctx) -> Dict[int, dict]:
             "total_value": value * quantity,
             "received_at": _unix(date_added),
             "received_at_iso": _iso(date_added),
-            # The submitted screenshot, when one was taken and we still host
-            # it (proof_url drops dead third-party links). None otherwise.
-            "image_url": proof_url(image_url),
+            "image_url": _drop_image_url(image_url),
         }
         if with_ids:
             drop["drop_id"] = int(drop_id)

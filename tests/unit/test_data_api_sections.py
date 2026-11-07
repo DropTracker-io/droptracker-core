@@ -245,7 +245,8 @@ class TestDropsFeed:
             (7, 501, 4151, "Abyssal whip", 415, "Abyssal Sire", 1, 2_000_000,
              datetime(2026, 9, 2, 10, 0, 0), "https://www.droptracker.io/img/user-upload/7/whip.png"),
             (7, 500, 995, "Coins", 415, "Abyssal Sire", 1500, 1,
-             datetime(2026, 9, 2, 9, 59, 30), None),
+             datetime(2026, 9, 2, 9, 59, 30),
+             "https://video.droptracker.io/dt_img/user-upload/7/drop/coins.jpg"),
             (9, 480, 11832, "Bandos chestplate", 2215, "General Graardor", 1, 20_000_000,
              datetime(2026, 9, 1, 22, 0, 0), "https://cdn.discordapp.com/attachments/x.png"),
         ]
@@ -305,7 +306,8 @@ class TestDropsFeed:
     def test_screenshots_we_host_are_returned_others_are_null(self):
         out = self._load(self._rows(), self._ctx())
         assert out[7]["drops"][0]["image_url"].endswith("/whip.png")
-        assert out[7]["drops"][1]["image_url"] is None
+        assert out[7]["drops"][1]["image_url"] == \
+            "https://video.droptracker.io/dt_img/user-upload/7/drop/coins.jpg"
         assert out[9]["drops"][0]["image_url"] is None, "dead third-party links are withheld"
 
     def test_min_value_filters_the_stack_total_inside_the_ranked_subquery(self):
