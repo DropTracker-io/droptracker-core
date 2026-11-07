@@ -45,8 +45,7 @@ class _FakeRedis:
         self.kv[key] = value
 
     def delete(self, *keys):
-        for key in keys:
-            self.kv.pop(key, None)
+        return sum(1 for key in keys if self.kv.pop(key, None) is not None)
 
     # hashes / sets
     def hgetall(self, key):
@@ -139,6 +138,59 @@ def test_heard_line_is_not_delivered_and_clears_the_flag(monkeypatch):
     assert muted.process_due_checks(now=muted.time.time() + 60)["heard"] == 1
     assert pushed == []
     assert not muted.is_flagged(SLUG, 1)
+
+
+def _heard_key(player_id=1):
+    return muted.HEARD_KEY_TEMPLATE.format(clan_slug=SLUG, player_id=player_id)
+
+
+def test_a_heard_line_records_that_the_sender_is_not_muted(monkeypatch):
+    fake, _pushed = _env(monkeypatch, online=[1, 2])
+    fake.hashes[SEEN] = {"1": 1, "2": 1, "_shown": 1}
+    _say()
+    muted.process_due_checks(now=muted.time.time() + 60)
+    assert fake.exists(_heard_key())
+
+
+def test_one_unheard_line_after_a_heard_one_is_swallowed_not_muted(monkeypatch):
+    # Bug #233: the game dropped one line ("Cheers") from a player who is not
+    # muted. The server had just heard them, so no clanmate sees a muted line.
+    fake, pushed = _env(monkeypatch, online=[1, 2, 3])
+    muted.mark_heard(SLUG, 1)
+    fake.hashes[SEEN] = {"1": 1, "_shown": 1}
+    _say()
+    counts = muted.process_due_checks(now=muted.time.time() + 60)
+    assert counts == {"heard": 0, "swallowed": 1, "unheard": 0, "error": 0}
+    assert pushed == []
+    assert not muted.is_flagged(SLUG, 1)
+    assert not fake.exists(_heard_key())  # the proof is spent
+
+    # A second unheard line in a row, nothing heard in between: muted.
+    _say()
+    assert muted.process_due_checks(now=muted.time.time() + 60)["unheard"] == 1
+    assert sorted(pid for pid, _p in pushed) == [2, 3]
+    assert muted.is_flagged(SLUG, 1)
+
+
+def test_a_heard_line_between_two_unheard_ones_keeps_the_sender_unmuted(monkeypatch):
+    fake, pushed = _env(monkeypatch, online=[1, 2])
+    muted.mark_heard(SLUG, 1)
+    fake.hashes[SEEN] = {"1": 1, "_shown": 1}
+    _say()
+    muted.process_due_checks(now=muted.time.time() + 60)
+    muted.mark_heard(SLUG, 1)  # a clanmate's copy of their next line won the claim
+    _say()
+    assert muted.process_due_checks(now=muted.time.time() + 60)["swallowed"] == 1
+    assert pushed == []
+    assert not muted.is_flagged(SLUG, 1)
+
+
+def test_mark_heard_clears_the_flag(monkeypatch):
+    fake, _pushed = _env(monkeypatch, online=[1, 2])
+    fake.kv[muted.MUTED_FLAG_KEY_TEMPLATE.format(clan_slug=SLUG, player_id=1)] = "1"
+    muted.mark_heard(SLUG, 1)
+    assert not muted.is_flagged(SLUG, 1)
+    assert fake.exists(_heard_key())
 
 
 def test_flagged_sender_is_delivered_at_once(monkeypatch):

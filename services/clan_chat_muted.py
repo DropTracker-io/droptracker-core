@@ -16,6 +16,14 @@ fan out at intake instead of waiting for the window. The first line from that
 sender that someone else does report clears the flag, which is how a lifted
 mute is noticed.
 
+A heard line is also proof the sender is NOT muted, and that proof outranks
+one unheard line. The game drops the odd single line from players who are
+not muted (bug #233: "Cheers" swallowed, the very next line delivered), so
+the first unheard line after a heard one is only spent against that proof
+(:data:`HEARD_KEY_TEMPLATE`): it is not delivered and flags nothing. A second
+unheard line in a row, with nothing heard in between, flags as before. A
+really muted player is never heard, so they flag on their first line.
+
 Delivery rides the plugin-notification inbox like Discord lines do, as a
 :data:`ENVELOPE_TYPE` envelope that the plugin renders as real clan chat with
 a muted icon by the name. Builds that predate the type drop it unread. A
@@ -59,6 +67,13 @@ STALE_AFTER_SECONDS = 90
 MUTED_FLAG_KEY_TEMPLATE = "chatbridge:muted:{clan_slug}:{player_id}"
 #: Mutes run hours to permanent; a quiet day re-derives it from one line.
 MUTED_FLAG_TTL_SECONDS = 6 * 3600
+
+#: Set when someone else reported the sender's line: the server knows they are
+#: not muted. The next unheard line spends it instead of flagging. A day, so
+#: a player who chats now and then keeps the benefit of the doubt between
+#: lines; a real mute that starts later costs one undelivered line.
+HEARD_KEY_TEMPLATE = "chatbridge:heard:{clan_slug}:{player_id}"
+HEARD_TTL_SECONDS = 24 * 3600
 
 #: Inbox recipients of one line, so a second pass never delivers twice.
 DELIVERED_KEY_TEMPLATE = "chatbridge:mutedsent:{clan_slug}:{digest}"
@@ -115,10 +130,19 @@ def is_flagged(clan_slug: str, player_id) -> bool:
         return False
 
 
-def clear_flag(clan_slug: str, player_id) -> None:
-    """The sender was just heard by someone else: no longer muted."""
+def _mark_heard(client, clan_slug: str, player_id: int) -> None:
+    pipe = client.pipeline()
+    pipe.delete(MUTED_FLAG_KEY_TEMPLATE.format(clan_slug=clan_slug, player_id=player_id))
+    pipe.set(HEARD_KEY_TEMPLATE.format(clan_slug=clan_slug, player_id=player_id), "1",
+             ex=HEARD_TTL_SECONDS)
+    pipe.execute()
+
+
+def mark_heard(clan_slug: str, player_id) -> None:
+    """Someone else reported the sender's line: they are not muted. Clears the
+    flag and records the proof the next unheard line is weighed against."""
     try:
-        _redis().delete(MUTED_FLAG_KEY_TEMPLATE.format(clan_slug=clan_slug, player_id=int(player_id)))
+        _mark_heard(_redis(), clan_slug, int(player_id))
     except Exception:
         pass
 
@@ -213,7 +237,8 @@ def on_self_line(clan_slug: str, digest: str, sender_id, sender: str, message: s
 
 
 def _settle(record: dict) -> str:
-    """Decide one due line. Returns "heard", "unheard" or "error"."""
+    """Decide one due line. Returns "heard", "swallowed", "unheard" or
+    "error"."""
     slug = record["slug"]
     digest = record["digest"]
     sender_id = int(record["sender_id"])
@@ -226,8 +251,14 @@ def _settle(record: dict) -> str:
     flag_key = MUTED_FLAG_KEY_TEMPLATE.format(clan_slug=slug, player_id=sender_id)
 
     if _heard_by_others(seen, sender_id):
-        client.delete(flag_key)
+        _mark_heard(client, slug, sender_id)
         return "heard"
+
+    # Heard since their last unheard line: the game lost this one line, the
+    # player is not muted. Spending the proof means a second unheard line in
+    # a row flags them.
+    if client.delete(HEARD_KEY_TEMPLATE.format(clan_slug=slug, player_id=sender_id)):
+        return "swallowed"
 
     client.set(flag_key, "1", ex=MUTED_FLAG_TTL_SECONDS)
     # A backlog (the core bot was down) is history, not conversation.
@@ -240,7 +271,7 @@ def process_due_checks(now: float = None, limit: int = CHECK_DRAIN_BATCH) -> dic
     """Settle every queued line whose window has closed. Called from the core
     bot's bridge drain task, off the event loop. Single consumer."""
     now = time.time() if now is None else now
-    counts = {"heard": 0, "unheard": 0, "error": 0}
+    counts = {"heard": 0, "swallowed": 0, "unheard": 0, "error": 0}
     try:
         client = _redis()
         due = client.zrangebyscore(CHECK_QUEUE_KEY, "-inf", now, start=0, num=int(limit))
@@ -257,7 +288,7 @@ def process_due_checks(now: float = None, limit: int = CHECK_DRAIN_BATCH) -> dic
         except Exception as e:
             counts["error"] += 1
             print(f"[ClanChatMuted] settle failed: {e}")
-    if counts["unheard"]:
+    if counts["unheard"] or counts["swallowed"]:
         _bump_stats(counts)
     return counts
 
@@ -268,6 +299,7 @@ def _bump_stats(counts: dict) -> None:
         key = f"clanchat:stats:{day}"
         pipe = _redis().pipeline()
         pipe.hincrby(key, "muted_unheard", int(counts.get("unheard", 0)))
+        pipe.hincrby(key, "muted_swallowed", int(counts.get("swallowed", 0)))
         pipe.expire(key, 14 * 86400)
         pipe.execute()
     except Exception:

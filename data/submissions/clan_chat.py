@@ -133,9 +133,10 @@ async def clan_chat_processor(chat_data, external_session=None, world_type="main
         muted = clan_chat_muted.is_flagged(slug, relayer.player_id)
 
     if not claimed:
-        if muted:
-            # Another clanmate's copy got here first, so the game delivered it.
-            clan_chat_muted.clear_flag(slug, relayer.player_id)
+        if self_line:
+            # Another clanmate's copy got here first, so the game delivered it:
+            # the sender is not muted.
+            clan_chat_muted.mark_heard(slug, relayer.player_id)
         return SubmissionResponse(True, "Line already relayed by another clanmate")
 
     # Rank drives the mirror line's rank emoji. The plugin's relay doesn't send
