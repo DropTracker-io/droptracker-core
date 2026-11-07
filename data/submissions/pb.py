@@ -109,9 +109,19 @@ def _model_for_loadout(session, player_id, sent):
     return resolve_model_fingerprint(None, row[0] if row else None)
 
 
-def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_changed,
-                   model_fingerprint_raw=None, player_id=None):
+def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, kill_set_best,
+                   pb_row_changed, model_fingerprint_raw=None, player_id=None):
     """Persist the gear/inventory captured at the kill, if any was sent.
+
+    Only a kill that itself set the stored best (``kill_set_best``) may write
+    a loadout: the plugin sends gear on every timed kill, and storing it
+    unconditionally put whatever the player wore on their latest slow kill
+    onto a PB set months earlier (bug #236: Ascension crossbows on a June
+    Leviathan PB). A silent sync (``pb_row_changed`` without
+    ``kill_set_best``: the game reported a faster standing best than we held)
+    clears the stored loadout instead, since it described a time that no
+    longer exists and this kill's gear is not the gear of the synced time.
+    Any other kill leaves the loadout untouched.
 
     Wrapped in its own try/except and a SAVEPOINT: this is an additive nicety,
     so a malformed loadout must not roll back or fail the personal best it is
@@ -129,6 +139,20 @@ def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_chang
     the website renders those slots as the placeholder GIF forever.
     """
     item_ids: set[int] = set()
+    if not kill_set_best:
+        if pb_row_changed and pb_entry.id:
+            try:
+                from db.models import PersonalBestLoadout
+
+                with session.begin_nested():
+                    (
+                        session.query(PersonalBestLoadout)
+                        .filter(PersonalBestLoadout.pb_id == pb_entry.id)
+                        .delete()
+                    )
+            except Exception as e:
+                debug_print(f"Could not clear stale PB loadout: {e}")
+        return item_ids
     try:
         from services.loadout import parse_loadout, serialize_loadout
 
@@ -142,10 +166,10 @@ def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, pb_row_chang
         from db.models import PersonalBestLoadout
 
         if equipment is None and inventory is None:
-            # Nothing sent. If the stored best time just changed, whatever
-            # loadout we hold describes a time that no longer exists - keeping
-            # it would attribute the wrong gear to the new best. Drop it.
-            if pb_row_changed and pb_entry.id:
+            # Nothing sent with a new best: whatever loadout we hold describes
+            # a time that no longer exists - keeping it would attribute the
+            # wrong gear to the new best. Drop it.
+            if pb_entry.id:
                 with session.begin_nested():
                     (
                         session.query(PersonalBestLoadout)
@@ -387,6 +411,10 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # leaderboard for this boss could now look different (a faster time, or a
     # brand-new team-size bracket). Drives the near-real-time HOF refresh below.
     pb_row_changed = False
+    # Whether this kill's own time is now the stored best, so the gear it was
+    # done in is the gear of the PB (see _store_loadout). Narrower than
+    # pb_row_changed, which a silent sync also sets.
+    kill_set_best = False
     # Whether THIS kill demonstrably set the best. A "Personal best: X"
     # segment (pb_ms) on the message means the game did NOT call this kill a
     # PB — a submission can pair a slower kill_time with a faster reported
@@ -417,6 +445,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 pb_entry.video_url = video_url
             is_personal_best = True
             pb_row_changed = True
+            kill_set_best = True
         else:
             is_personal_best = False
             # Every non-PB kill message still carries the game's standing PB
@@ -460,6 +489,10 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 session.add(pb_entry)
                 session.flush()
             pb_row_changed = True
+            # time_ms is the kill itself only when it beat the reported best;
+            # a row created from a slower kill holds the game's standing best,
+            # which some earlier, unseen kill set.
+            kill_set_best = current_ms > 0 and beats_reported
         except IntegrityError:
             debug_print(
                 f"PB entry with Unique ID {unique_id} already exists — replay, ignoring"
@@ -470,8 +503,8 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     # decorative extra must never cost the player their personal best.
     if pb_entry is not None and not side_world:
         loadout_item_ids = _store_loadout(
-            session, pb_entry, equipment_raw, inventory_raw, pb_row_changed,
-            model_fingerprint_raw, player_id,
+            session, pb_entry, equipment_raw, inventory_raw, kill_set_best,
+            pb_row_changed, model_fingerprint_raw, player_id,
         )
         # Make sure the site can actually draw what we just stored. Costs one
         # stat() per id once the icons are cached, which is the normal case.

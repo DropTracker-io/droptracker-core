@@ -327,7 +327,7 @@ class TestLoadoutItemIds:
         session.query.return_value.filter.return_value.first.return_value = None
         entry = MagicMock()
         entry.id = 7
-        return pb._store_loadout(session, entry, equipment, inventory, False)
+        return pb._store_loadout(session, entry, equipment, inventory, True, True)
 
     def test_returns_every_item_id_across_gear_and_inventory(self):
         assert self._store("0-11802-1,3-995-100", "0-4151-1") == {11802, 995, 4151}
@@ -371,7 +371,7 @@ class TestLoadoutModel:
         db.models.PersonalBestLoadout.reset_mock()
         entry = MagicMock()
         entry.id = 7
-        pb._store_loadout(session, entry, "0-11802-1", None, False, sent, 5751994)
+        pb._store_loadout(session, entry, "0-11802-1", None, True, True, sent, 5751994)
         return db.models.PersonalBestLoadout, state_key in queried
 
     def test_the_plugins_fingerprint_is_stored_as_exact_without_asking_the_server(self):
@@ -407,8 +407,67 @@ class TestLoadoutModel:
         payload = dict(_payload(600_000, 0, True), model_fingerprint="2f3ab1c")
         with patch.object(pb, "_store_loadout", return_value=set()) as store:
             _run(payload)
-        assert store.call_args.args[5] == "2f3ab1c"
-        assert store.call_args.args[6] == _FakePlayer.player_id
+        assert store.call_args.args[6] == "2f3ab1c"
+        assert store.call_args.args[7] == _FakePlayer.player_id
+
+
+class TestLoadoutOnlyFromTheKillThatSetTheBest:
+    """Gear is sent on every timed kill, but only the kill that set the stored
+    best may write it (bug #236: a June Leviathan PB showed Ascension
+    crossbows, released in October, from a later slow kill)."""
+
+    def _flags(self, payload, row=None):
+        import data.submissions.pb as pb
+
+        payload = dict(payload, equipment="0-11802-1")
+        with patch.object(pb, "_store_loadout", return_value=set()) as store:
+            _run(payload, row=row)
+        return store.call_args.args[4], store.call_args.args[5]
+
+    def test_a_new_best_writes_its_gear(self):
+        assert self._flags(_payload(800_000, 0, True), _existing_row(904800)) == (True, True)
+
+    def test_a_slower_kill_leaves_the_stored_gear_alone(self):
+        # Stored 0:49.2, this kill 1:02.4, game reports the same best.
+        assert self._flags(_payload(62_400, 49_200, False), _existing_row(49_200)) == (False, False)
+
+    def test_a_silent_sync_does_not_write_this_kills_gear(self):
+        # The row was stale; the game's standing best came from another kill.
+        assert self._flags(_payload(62_400, 49_200, False), _existing_row(55_000)) == (False, True)
+
+    def test_a_first_row_from_a_genuine_pb_writes_its_gear(self):
+        assert self._flags(_payload(600_000, 0, True)) == (True, True)
+
+    def test_a_first_row_from_a_slow_kill_does_not_write_its_gear(self):
+        assert self._flags(_payload(62_400, 49_200, False)) == (False, True)
+
+    def _store(self, kill_set_best, pb_row_changed, existing_row=None):
+        import data.submissions.pb as pb
+
+        session = MagicMock()
+        q = session.query.return_value.filter.return_value
+        q.first.return_value = existing_row
+        db.models.PersonalBestLoadout.reset_mock()
+        entry = MagicMock()
+        entry.id = 7
+        ids = pb._store_loadout(session, entry, "0-34681-1", None,
+                                kill_set_best, pb_row_changed)
+        return ids, q, db.models.PersonalBestLoadout
+
+    def test_store_ignores_gear_from_a_kill_that_set_nothing(self):
+        row = MagicMock()
+        row.equipment = "old"
+        ids, q, loadout_cls = self._store(False, False, existing_row=row)
+        assert ids == set()
+        assert row.equipment == "old"
+        loadout_cls.assert_not_called()
+        q.delete.assert_not_called()
+
+    def test_store_clears_the_loadout_on_a_silent_sync(self):
+        ids, q, loadout_cls = self._store(False, True)
+        assert ids == set()
+        q.delete.assert_called_once()
+        loadout_cls.assert_not_called()
 
 
 class TestPreciseTiming:
