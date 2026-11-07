@@ -165,6 +165,64 @@ _REDIS_PLAYER_PREFIX = "wom:player:v3:"
 _REDIS_PLAYER_FAIL_PREFIX = "wom:player:v3:fail:"
 _REDIS_GROUP_PREFIX = "wom:group:"
 
+# Dead-group backoff. A group whose WOM id 404s (deleted on WOM, or a typo like
+# 99999) used to be re-fetched on every member-sync round, ~16x/day forever:
+# 29 dead ids were ~800 of WOM's daily 404s from us (WOM flagged it 2026-11-07).
+# Each consecutive 404 doubles the wait from BASE up to MAX; any successful
+# fetch (including the user-initiated check_group_by_id) clears it.
+_REDIS_GROUP_404_PREFIX = "wom:group404:"
+GROUP_404_BACKOFF_BASE = int(os.getenv("WOM_GROUP_404_BACKOFF_BASE", "21600"))
+GROUP_404_BACKOFF_MAX = int(os.getenv("WOM_GROUP_404_BACKOFF_MAX", "604800"))
+
+
+def _group_404_backoff(streak: int) -> int:
+    """Seconds to wait after the ``streak``-th consecutive 404."""
+    return min(GROUP_404_BACKOFF_BASE * (2 ** max(streak - 1, 0)), GROUP_404_BACKOFF_MAX)
+
+
+def _group_in_404_backoff(wom_group_id) -> bool:
+    try:
+        raw = redis_client.client.get(_REDIS_GROUP_404_PREFIX + str(wom_group_id))
+        if raw is None:
+            return False
+        _streak, retry_at = (int(x) for x in json.loads(raw))
+        return time.time() < retry_at
+    except Exception as e:
+        logger.debug("WOM group 404 backoff read failed for %s: %s", wom_group_id, e)
+        return False
+
+
+def _record_group_404(wom_group_id) -> int:
+    """Bump the consecutive-404 streak; returns the backoff applied (seconds)."""
+    key = _REDIS_GROUP_404_PREFIX + str(wom_group_id)
+    try:
+        raw = redis_client.client.get(key)
+        streak = int(json.loads(raw)[0]) + 1 if raw is not None else 1
+        wait = _group_404_backoff(streak)
+        # Keep the streak well past the retry time so the next 404 doubles it.
+        redis_client.client.setex(key, GROUP_404_BACKOFF_MAX * 2,
+                                  json.dumps([streak, int(time.time()) + wait]))
+        logger.info("WOM group %s not found (404 #%d); backing off %ds",
+                    wom_group_id, streak, wait)
+        return wait
+    except Exception as e:
+        logger.debug("WOM group 404 backoff write failed for %s: %s", wom_group_id, e)
+        return 0
+
+
+def _clear_group_404(wom_group_id) -> None:
+    try:
+        redis_client.client.delete(_REDIS_GROUP_404_PREFIX + str(wom_group_id))
+    except Exception as e:
+        logger.debug("WOM group 404 backoff clear failed for %s: %s", wom_group_id, e)
+
+
+def _is_not_found(result) -> bool:
+    try:
+        return getattr(result.unwrap_err(), "status", None) == 404
+    except Exception:
+        return False
+
 # Stores the WOM-reported total member_count per group (populated during API calls).
 # Used by _sync_group_from_wom to detect incomplete API responses before removing members.
 # This one stays in-process: it's only read within the same request that populates it
@@ -534,6 +592,9 @@ async def check_group_by_id(wom_group_id: int, *, force_refresh: bool = False):
             group_name, member_count = _extract_group_metadata(details)
             member_ids = [member.player_id for member in members]
             await _store_group_cache(wom_group_id, member_ids)
+            # Someone just (re)linked or checked this id and it exists: let the
+            # member sync pick it up right away instead of waiting out a backoff.
+            _clear_group_404(wom_group_id)
             return group_name, member_count, members
         else:
             return None, None, None
@@ -635,13 +696,19 @@ async def fetch_group_members(
     cached = await _get_cached_group(wom_group_id, force_refresh or not use_cache)
     if cached is not None:
         return cached
+    if _group_in_404_backoff(wom_group_id):
+        return []
     if not await limiter.wait():
         return []
     await client.start()
     try:
         _log_wom_call("groups.get_details", id=wom_group_id, force_refresh=force_refresh)
         result = await client.groups.get_details(wom_group_id)
+        if not result.is_ok and _is_not_found(result):
+            _record_group_404(wom_group_id)
+            return []
         if result.is_ok:
+            _clear_group_404(wom_group_id)
             details = result.unwrap()
             members = details.memberships
             # Store the WOM-reported expected member count so _sync_group_from_wom

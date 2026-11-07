@@ -40,7 +40,11 @@ log = logging.getLogger("event_wom_reconciler")
 
 RELEVANT_TASK_TYPES = ("xp_target", "skill_target", "kc_target", "competition")
 
-WOM_RECONCILE_SECONDS = int(os.getenv("WOM_RECONCILE_SECONDS", "300"))
+# 30 min, down from 5 (2026-11-07): WOM asked us to cut bulk-gained, their
+# most expensive route, and a clan's rows only change when its members get
+# updated anyway. Key-moment passes and the final reconcile run on their own
+# schedule, so event start/end accuracy does not depend on this cadence.
+WOM_RECONCILE_SECONDS = int(os.getenv("WOM_RECONCILE_SECONDS", "1800"))
 WOM_EVENT_UPDATE_BUDGET = int(os.getenv("WOM_EVENT_UPDATE_BUDGET", "10"))
 WOM_UPDATE_ALL_LEAD_SECONDS = int(os.getenv("WOM_UPDATE_ALL_LEAD_SECONDS", "1800"))
 
@@ -50,8 +54,9 @@ WOM_UPDATE_ALL_LEAD_SECONDS = int(os.getenv("WOM_UPDATE_ALL_LEAD_SECONDS", "1800
 # whose snapshots keep showing no relevant gains — and ones whose updates keep
 # failing (unranked / rename limbo) — back off exponentially from
 # IDLE_BASE_INTERVAL to IDLE_MAX_INTERVAL. The per-cycle cap bounds the worst
-# case at MAX_PER_CYCLE per ~5-min cycle (~1.4k WOM calls/day at 5, down from
-# ~10k with the old always-on rotation that WOM asked us to stop).
+# case at MAX_PER_CYCLE per reconcile cycle (~240 WOM calls/day at 5 on the
+# 30-min cycle; ~1.4k on the old 5-min one, and ~10k with the old always-on
+# rotation that WOM asked us to stop).
 WOM_EVENT_UPDATE_SECONDS_PER_PLAYER = int(os.getenv("WOM_EVENT_UPDATE_SECONDS_PER_PLAYER", "60"))
 WOM_EVENT_UPDATE_MIN_INTERVAL = int(os.getenv("WOM_EVENT_UPDATE_MIN_INTERVAL", "1800"))
 WOM_EVENT_UPDATE_MAX_INTERVAL = int(os.getenv("WOM_EVENT_UPDATE_MAX_INTERVAL", "10800"))
