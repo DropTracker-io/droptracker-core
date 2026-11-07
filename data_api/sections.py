@@ -425,17 +425,24 @@ def _load_personal_bests(session, player_ids: List[int], ctx) -> Dict[int, dict]
     # name what was killed is not reportable, and `int(None)` in the loop
     # below used to raise -- which cost every player on the page their whole
     # personal_bests section, not just the one holding the bad row.
+    #
+    # ``npc_name`` rides along from ``npc_list`` (suggestion #232): without it
+    # every consumer kept a hand-made id -> name table that went stale on each
+    # new boss. LEFT JOIN so a PB whose npc row is missing still reports, with
+    # a null name, rather than vanishing.
     rows = session.execute(text("""
-        SELECT player_id, npc_id, team_size, MIN(personal_best) AS best
-        FROM personal_best
-        WHERE player_id IN :ids AND npc_id IS NOT NULL
-          AND personal_best IS NOT NULL AND personal_best > 0
-        GROUP BY player_id, npc_id, team_size
-        ORDER BY player_id, npc_id
+        SELECT pb.player_id, pb.npc_id, pb.team_size, MIN(pb.personal_best) AS best,
+               MAX(n.npc_name) AS npc_name
+        FROM personal_best pb
+        LEFT JOIN npc_list n ON n.npc_id = pb.npc_id
+        WHERE pb.player_id IN :ids AND pb.npc_id IS NOT NULL
+          AND pb.personal_best IS NOT NULL AND pb.personal_best > 0
+        GROUP BY pb.player_id, pb.npc_id, pb.team_size
+        ORDER BY pb.player_id, pb.npc_id
     """).bindparams(ids=tuple(player_ids)))
 
     out: Dict[int, dict] = {}
-    for player_id, npc_id, team_size, best in rows:
+    for player_id, npc_id, team_size, best, npc_name in rows:
         entry = out.setdefault(int(player_id), {"bests": []})
         if npc_id is None:
             # Belt and braces with the WHERE clause above: the loop must not
@@ -444,6 +451,7 @@ def _load_personal_bests(session, player_ids: List[int], ctx) -> Dict[int, dict]
             continue
         entry["bests"].append({
             "npc_id": int(npc_id),
+            "npc_name": npc_name or None,
             "team_size": team_size or "Solo",
             "best_ms": int(best),
         })
@@ -910,7 +918,8 @@ _SECTIONS = (
     Section("diaries", 8, _load_diaries,
             "Achievement diary completion counts per area and tier."),
     Section("personal_bests", 8, _load_personal_bests,
-            "Best time per boss and team-size bracket."),
+            "Best time per boss and team-size bracket, with the boss's "
+            "npc_id and npc_name (see /v2/npcs)."),
     Section("points", 8, _load_points,
             "Lifetime points earned."),
     Section("badges", 1, _load_badges,

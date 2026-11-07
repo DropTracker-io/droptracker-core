@@ -158,17 +158,17 @@ class TestPersonalBestsSurvivesAPbWithNoNpc:
         # handling has to hold on its own, or the SQL filter is the only
         # thing between a nullable column and a page-wide failure.
         session = _Session([
-            (1593, None, "2", 1366800),      # legacy row, no boss
-            (1593, 415, "Solo", 92400),
+            (1593, None, "2", 1366800, None),      # legacy row, no boss
+            (1593, 415, "Solo", 92400, "Barrows"),
         ])
         out = sect._load_personal_bests(session, [1593], {})
         assert out[1593]["bests"] == [
-            {"npc_id": 415, "team_size": "Solo", "best_ms": 92400}
+            {"npc_id": 415, "npc_name": "Barrows", "team_size": "Solo", "best_ms": 92400}
         ]
 
     def test_a_player_whose_only_pb_is_unattributable_is_not_an_error(self):
         # Empty bests, not a failure: the player is fine, the row is not.
-        session = _Session([(5213, None, "2", 3090000)])
+        session = _Session([(5213, None, "2", 3090000, None)])
         assert sect._load_personal_bests(session, [5213], {}) == {
             5213: {"bests": []}
         }

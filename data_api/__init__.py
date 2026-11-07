@@ -36,6 +36,7 @@ def create_app() -> Quart:
     from data_api.routes.groups import groups_bp
     from data_api.routes.health import health_bp
     from data_api.routes.meta import meta_bp
+    from data_api.routes.npcs import npcs_bp
     from data_api.routes.players import players_bp
     from data_api.routes.reference import reference_bp
     from data_api.routes.relay import relay_bp
@@ -48,6 +49,7 @@ def create_app() -> Quart:
     app.register_blueprint(events_bp, url_prefix=API_PREFIX)
     app.register_blueprint(event_standings_bp, url_prefix=API_PREFIX)
     app.register_blueprint(reference_bp, url_prefix=API_PREFIX)
+    app.register_blueprint(npcs_bp, url_prefix=API_PREFIX)
     app.register_blueprint(submissions_bp, url_prefix=API_PREFIX)
     app.register_blueprint(relay_bp, url_prefix=API_PREFIX)
 
