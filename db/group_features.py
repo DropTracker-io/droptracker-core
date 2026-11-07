@@ -119,6 +119,13 @@ FEATURES: List[Dict[str, Any]] = [
         "path": "/groups/{id}/settings#cfg-voice",
     },
     {
+        "key": "voice_rooms",
+        "title": "Join-to-create voice",
+        "blurb": "Members join one channel and get their own temporary voice channel.",
+        "kind": "link",
+        "path": "/groups/{id}/settings#cfg-voice",
+    },
+    {
         "key": "hall_of_fame",
         "title": "Hall of Fame",
         "blurb": "Personal-best boards for the bosses you choose.",
@@ -142,7 +149,7 @@ _BY_KEY = {f["key"]: f for f in FEATURES}
 _STATUS_KEYS = sorted({
     POINTS_ENABLED_KEY, "create_pb_embeds", "channel_id_to_send_pb_embeds",
     "clan_chat_bridge_enabled", "channel_id_clan_chat_bridge",
-    "vc_to_display_monthly_loot", "vc_to_display_droptracker_users",
+    "vc_to_display_monthly_loot", "vc_to_display_droptracker_users", "vc_join_to_create",
     *(f["channel_key"] for f in FEATURES if f.get("channel_key")),
     *(k for f in FEATURES for k in (f.get("enable") or {})),
 })
@@ -193,6 +200,8 @@ def _is_on(s, group_id: int, feature: Dict[str, Any], cfg: Dict[str, str]) -> bo
         return _truthy(cfg.get("clan_chat_bridge_enabled")) and _channel_set(cfg.get("channel_id_clan_chat_bridge"))
     if key == "voice_counters":
         return _channel_set(cfg.get("vc_to_display_monthly_loot")) or _channel_set(cfg.get("vc_to_display_droptracker_users"))
+    if key == "voice_rooms":
+        return _channel_set(cfg.get("vc_join_to_create"))
     if key == "hall_of_fame":
         return _truthy(cfg.get("create_pb_embeds")) and _channel_set(cfg.get("channel_id_to_send_pb_embeds"))
     if key == "group_site":

@@ -151,8 +151,11 @@ def create_hypercorn_config():
 # messages — without GUILD_MESSAGES the gateway never dispatches MESSAGE_CREATE,
 # and without MESSAGE_CONTENT every non-mention body arrives empty. The portal
 # toggle must stay enabled on the application or identify fails at startup.
+# GUILD_VOICE_STATES (not privileged) feeds join-to-create voice rooms
+# (services/voice_rooms.py): room occupancy comes from its voice-state cache.
 bot = interactions.Client(intents=Intents.DIRECT_MESSAGES | Intents.GUILD_INTEGRATIONS | Intents.GUILDS
-                          | Intents.GUILD_MESSAGES | Intents.MESSAGE_CONTENT,
+                          | Intents.GUILD_MESSAGES | Intents.MESSAGE_CONTENT
+                          | Intents.GUILD_VOICE_STATES,
                           send_command_traceback=False,
                           owner_ids=[528746710042804247, 232236164776460288])
 bot.send_not_ready_messages = True
@@ -316,6 +319,8 @@ async def on_startup(event: Startup):
     bot.load_extension("services.message_handler")
     bot.load_extension("services.event_signup_discord")
     bot.load_extension("services.channel_names")
+    # Join-to-create voice rooms (suggestion #237).
+    bot.load_extension("services.voice_rooms")
     bot.load_extension("services.components")
     bot.load_extension("services.entry_modifier")
     bot.load_extension("services.user_context")

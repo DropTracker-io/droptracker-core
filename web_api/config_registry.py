@@ -965,6 +965,22 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Template for the member-count voice channel name. Placeholder: {member_count}.",
         "default": "{member_count} members",
     },
+    {
+        "key": "vc_join_to_create",
+        "label": "Join-to-create voice channel",
+        "category": "voice",
+        "type": "channel",
+        "help": "Members who join this voice channel get their own temporary voice channel next to it and are moved into it. Anyone can join them there, and it is deleted once it is empty. Give the bot Manage Channels and Move Members.",
+        "default": None,
+    },
+    {
+        "key": "vc_join_to_create_name",
+        "label": "Temporary channel name",
+        "category": "voice",
+        "type": "string",
+        "help": "Name for each temporary voice channel. Placeholder: {name}, the member's server name.",
+        "default": "{name}'s Channel",
+    },
 
     # --- Misc / integration ---
     # Not a setting of its own: this is an editable view of groups.group_name,
