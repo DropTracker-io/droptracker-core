@@ -35,6 +35,7 @@ from web_api.common import (
     canonical_slug_for,
     db_session,
     decode_member,
+    group_member_ids,
     hidden_player_ids,
     leaderboard_key,
     money,
@@ -231,17 +232,24 @@ def _previous_partition(partition: int) -> int:
 
 
 def _group_top_players(s, conn, group_id: int, partition, hidden: set, limit: int = 5):
-    """Top members from the per-group monthly board, hidden accounts skipped."""
+    """Top members from the per-group monthly board, hidden accounts and
+    players no longer in the group skipped (bug #235: the board keeps them)."""
     if conn is None:
         return []
+    members = group_member_ids(group_id)
+    # A group's board is a few hundred rows at most; read it whole when
+    # filtering so a run of leavers at the top cannot empty the widget.
+    end = -1 if members is not None else limit + 14
     raw = conn.zrevrange(
-        leaderboard_key(partition, group_id=group_id), 0, limit + 14, withscores=True
+        leaderboard_key(partition, group_id=group_id), 0, end, withscores=True
     )
     ids = []
     scores = {}
     for member, score in raw:
         pid = decode_member(member)
         if pid is None or pid in hidden:
+            continue
+        if members is not None and pid not in members:
             continue
         ids.append(pid)
         scores[pid] = int(float(score))

@@ -25,6 +25,7 @@ from web_api.common import (
     cache_set,
     db_session,
     decode_member,
+    group_member_ids,
     group_totals_key,
     hidden_player_ids,
     leaderboard_key,
@@ -188,30 +189,48 @@ def _group_card_details(gids: list[int], token) -> dict[int, dict]:
 
     out: dict[int, dict] = {gid: {} for gid in gids}
 
-    # Per-group boards for the same period: ZCARD = members with loot, the
-    # head of the set = top earner. A few extra rows cover hidden players.
+    # Per-group boards for the same period: members with loot, and the top
+    # earner among them.
     top_raw: dict[int, list] = {}
     conn = _rc()
     if conn is not None:
         pipe = conn.pipeline(transaction=False)
         for gid in gids:
             key = leaderboard_key(token, group_id=gid)
-            pipe.zcard(key)
-            pipe.zrevrange(key, 0, 9, withscores=True)
+            pipe.zrevrange(key, 0, -1, withscores=True)
         res = pipe.execute()
         for i, gid in enumerate(gids):
-            out[gid]["active_count"] = int(res[2 * i] or 0)
-            top_raw[gid] = res[2 * i + 1] or []
+            top_raw[gid] = res[i] or []
 
+    # Boards keep players who have since left the group (bug #235): count and
+    # crown current members only. A group's board is a few hundred rows.
     hidden = hidden_player_ids()
+    members: dict[int, set] = {gid: set() for gid in top_raw}
+    if top_raw:
+        try:
+            with db_session() as s:
+                for gid, pid in (
+                    s.query(user_group_association.c.group_id,
+                            user_group_association.c.player_id)
+                    .filter(user_group_association.c.group_id.in_(list(top_raw)),
+                            user_group_association.c.player_id.isnot(None))
+                    .all()
+                ):
+                    members[int(gid)].add(int(pid))
+        except Exception:
+            members = {}  # fail open: unfiltered beats blank cards
     top: dict[int, tuple[int, int]] = {}
     for gid, raw in top_raw.items():
+        current = members.get(gid)
+        active = 0
         for member_raw, score in raw:
             pid = decode_member(member_raw)
-            if pid is None or pid in hidden:
+            if pid is None or (current is not None and pid not in current):
                 continue
-            top[gid] = (pid, int(float(score)))
-            break
+            active += 1
+            if gid not in top and pid not in hidden:
+                top[gid] = (pid, int(float(score)))
+        out[gid]["active_count"] = active
 
     with db_session() as s:
         for gid, icon, desc in (
@@ -323,10 +342,17 @@ async def leaderboards_players():
         start_rank = (page - 1) * limit
         ids = []
         scored = []
-        if modes is not None:
+        # Group boards keep players who have since left the group (bug #235);
+        # only current members are ranked on them.
+        members = (
+            await asyncio.to_thread(group_member_ids, group_id)
+            if group_id is not None else None
+        )
+        if modes is not None or members is not None:
             # Account-type board: ranks are positions WITHIN the mode (#1 is
             # the top ultimate ironman), so the narrowed list is re-ranked
-            # and hidden players drop out before ranking.
+            # and hidden players drop out before ranking. A group board is
+            # narrowed to its current members the same way.
             cache_key = f"lb:filtered:{key}:{account_filter}"
             board = cache_get(cache_key, FILTERED_BOARD_TTL)
             if board is None:
@@ -335,7 +361,11 @@ async def leaderboards_players():
                 board = []
                 for member_raw, score in raw:
                     pid = decode_member(member_raw)
-                    if pid is None or pid in hidden or types.get(pid) not in modes:
+                    if pid is None or pid in hidden:
+                        continue
+                    if modes is not None and types.get(pid) not in modes:
+                        continue
+                    if members is not None and pid not in members:
                         continue
                     board.append((pid, int(float(score))))
                 cache_set(cache_key, board)

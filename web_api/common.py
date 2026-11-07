@@ -453,6 +453,54 @@ def group_ignored_player_ids(group_id) -> set:
     return out
 
 
+_MEMBERS_TTL = 60.0
+# Every player is in the global group, so its boards need no membership filter.
+_UNFILTERED_GROUP_IDS = (0, 2)
+
+
+def group_member_ids(group_id) -> Optional[set]:
+    """Current members of one group, for filtering its Redis player boards.
+
+    Per-group boards (``leaderboard:{token}:group:{gid}`` and the per-NPC
+    ``leaderboard:group:{gid}:npc:...``) are only ever added to at drop time,
+    so a player removed from the group (WOM sync, claim, admin) stays on them
+    for the rest of the period (bug #235). Group totals already sum current
+    members only; filtering the boards the same way keeps the two agreeing,
+    and a player who rejoins reappears with no rebuild.
+
+    ``None`` means "do not filter": the global group, a bad id, or a DB fault
+    (fail open, like ``hidden_player_ids``: a stale row beats an empty board).
+    Cached per group ~60s.
+    """
+    try:
+        gid = int(group_id)
+    except (TypeError, ValueError):
+        return None
+    if gid in _UNFILTERED_GROUP_IDS:
+        return None
+
+    key = f"group:member_pids:{gid}"
+    cached = cache_get(key, _MEMBERS_TTL)
+    if cached is not None:
+        return cached
+
+    from db.models import user_group_association
+
+    try:
+        with db_session() as s:
+            rows = (
+                s.query(user_group_association.c.player_id)
+                .filter(user_group_association.c.group_id == gid,
+                        user_group_association.c.player_id.isnot(None))
+                .all()
+            )
+            out = {int(pid) for (pid,) in rows}
+    except Exception:
+        return None
+    cache_set(key, out)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Slugs / "nice URLs" (web_api/routes/resolve.py + `canonical_slug` on the
 # group/player/npc/item detail payloads).

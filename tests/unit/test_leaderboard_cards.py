@@ -43,7 +43,8 @@ class _Pipe:
         self._ops.append(len(self._boards.get(key, [])))
 
     def zrevrange(self, key, start, end, withscores=False):
-        self._ops.append(self._boards.get(key, [])[start:end + 1])
+        board = self._boards.get(key, [])
+        self._ops.append(board[start:] if end == -1 else board[start:end + 1])
 
     def execute(self):
         return self._ops
@@ -80,6 +81,7 @@ def test_group_cards_fold_icon_members_and_top_earner(wire):
         "leaderboard:202609:group:6": [],
     }
     session = _Session(
+        [(5, 11), (5, 12)],
         [(5, "https://x/icon.png", "PvM clan"), (6, None, "An Old School RuneScape group.")],
         [(5, 40), (6, 3)],
         [(11, "Zezima")],
@@ -101,10 +103,22 @@ def test_group_cards_fold_icon_members_and_top_earner(wire):
 
 def test_group_top_earner_skips_hidden_players(wire):
     boards = {"leaderboard:all:group:5": [(b"11", 900.0), (b"12", 400.0)]}
-    session = _Session([(5, None, None)], [(5, 2)], [(12, "Lynx Titan")])
+    session = _Session([(5, 11), (5, 12)], [(5, None, None)], [(5, 2)], [(12, "Lynx Titan")])
     wire(session, boards, hidden={11})
 
     out = lb._group_card_details([5], "all")
+
+    assert out[5]["top_player"]["id"] == 12
+    assert out[5]["active_count"] == 2
+
+
+def test_group_cards_ignore_players_who_left_the_group(wire):
+    # Bug #235: the board keeps a leaver for the rest of the period.
+    boards = {"leaderboard:202611:group:5": [(b"11", 900.0), (b"12", 400.0), (b"13", 1.0)]}
+    session = _Session([(5, 12), (5, 13)], [(5, None, None)], [(5, 2)], [(12, "Lynx Titan")])
+    wire(session, boards)
+
+    out = lb._group_card_details([5], 202611)
 
     assert out[5]["top_player"]["id"] == 12
     assert out[5]["active_count"] == 2
