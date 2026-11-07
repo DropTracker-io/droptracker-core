@@ -262,6 +262,32 @@ class TestDecidedMessage:
         assert all("dtrv:" not in json.dumps(c) for c in inner)
         assert any(c.get("type") == 1 for c in inner)  # the link row survived
 
+    def test_v2_card_parsed_by_the_library_keeps_its_structure(self):
+        # Suggestion #228: interactions.py swaps message["components"] for
+        # component objects in the shared raw payload. The card must survive
+        # that with its section and thumbnail, not collapse to the status line.
+        # What the library's ContainerComponent.to_dict() returns: Nones for
+        # every unset field (captured from interactions 5.16).
+        parsed = {"type": 17, "accent_color": 15105570, "spoiler": False, "components": [
+            {"type": 10, "content": "### Completion awaiting review"},
+            {"type": 9, "components": [{"type": 10, "content": "**Task** needs review"}],
+             "accessory": {"type": 11, "media": {"url": "https://www.droptracker.io/x.png"},
+                           "description": None, "spoiler": False}},
+            {"type": 1, "components": [
+                {"type": 2, "style": 5, "label": "Open", "emoji": None, "custom_id": None,
+                 "sku_id": None, "url": "https://x", "disabled": False},
+                {"type": 2, "style": 3, "label": "Approve", "emoji": None,
+                 "custom_id": "dtrv:e:a:5", "sku_id": None, "url": None, "disabled": False}]},
+        ]}
+        card = {"flags": 1 << 15,
+                "components": [SimpleNamespace(to_dict=lambda: json.loads(json.dumps(parsed)))]}
+        edit = rb.decided_message(card, "✅ Approved by <@1>")
+        inner = edit["components"][0]["components"]
+        assert [c["type"] for c in inner] == [10, 9, 10]
+        assert inner[1]["accessory"]["media"]["url"] == "https://www.droptracker.io/x.png"
+        assert inner[-1] == {"type": 10, "content": "✅ Approved by <@1>"}
+        assert "null" not in json.dumps(edit)
+
     def test_undo_restores_approve_and_reject(self):
         decided = rb.decided_message(_ping(), "✅ Approved by <@1>", "dtrv:m:u:7:1")
         message = {"flags": 0, "content": decided["content"], "components": decided["components"]}

@@ -81,11 +81,42 @@ def may_review(*, interaction_guild_id, group_guild_id, is_group_admin: bool,
     return bool(role) and role in {str(r) for r in (member_role_ids or ())}
 
 
+def _drop_nones(value):
+    if isinstance(value, dict):
+        return {k: _drop_nones(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nones(v) for v in value]
+    return value
+
+
+def _as_dict(comp):
+    """A component as a plain dict.
+
+    The raw interaction payload is shared with interactions.py, whose
+    ``Message._process_dict`` replaces ``message["components"]`` with
+    component objects in place. When its parser runs before our raw listener
+    the card arrives as objects, and skipping them rebuilt the whole card as
+    just the "Approved by" line (suggestion #228). ``to_dict`` round-trips
+    every Components V2 type; the Nones it emits for unset fields are
+    dropped so the edit carries only what Discord sent us.
+    """
+    if isinstance(comp, dict):
+        return comp
+    to_dict = getattr(comp, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return _drop_nones(to_dict())
+        except Exception:
+            return None
+    return None
+
+
 def _strip(components) -> list:
     """Drop every action row holding one of our buttons, at any depth."""
     out = []
     for comp in components or []:
-        if not isinstance(comp, dict):
+        comp = _as_dict(comp)
+        if comp is None:
             continue
         children = comp.get("components")
         if comp.get("type") == 1 and any(
