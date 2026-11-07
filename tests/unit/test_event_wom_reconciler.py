@@ -557,3 +557,39 @@ class TestParticipantNameFallback:
                          participants_by_name=self._indexed((77, name, False)))
         assert target.participants_by_name == {}
         assert recon._match_participant(target, {"displayName": name}) is None
+
+
+class TestPluginCoveredSkip:
+    """The rotation is for progress the plugin missed: participants whose
+    plugin was seen recently are not force-updated (tiered mode only)."""
+
+    def _run(self, covered, *, min_stale=None):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+        target = _target(participants_by_wom={
+            2188996: (901, "btw fe male", datetime(2026, 6, 30), False),
+            555555: (902, "no plugin", datetime(2026, 6, 30), False),
+        })
+        seen = AsyncMock(return_value=set(covered))
+        upd = AsyncMock(return_value=True)
+        with patch.object(recon, "plugin_recently_seen", seen), \
+                patch.object(womutils, "request_player_update", upd):
+            sys.modules["utils.wiseoldman"] = womutils
+            out = asyncio.run(recon._freshness_for_target(
+                _FakeRedis(), target, [], max_updates=10, min_stale=min_stale))
+        return out, seen, upd
+
+    def test_recent_plugin_users_are_skipped(self):
+        out, seen, upd = self._run({901})
+        assert seen.await_count == 1
+        assert [c.args[0] for c in upd.await_args_list] == ["no plugin"]
+        assert out["plugin_covered"] == 1 and out["player_updates"] == 1
+
+    def test_no_plugin_users_all_updated(self):
+        out, _seen, upd = self._run(set())
+        assert upd.await_count == 2 and out["plugin_covered"] == 0
+
+    def test_key_moment_flat_pass_updates_everyone(self):
+        out, seen, upd = self._run({901}, min_stale=0)
+        assert seen.await_count == 0
+        assert upd.await_count == 2

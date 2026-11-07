@@ -63,6 +63,13 @@ WOM_EVENT_UPDATE_MAX_INTERVAL = int(os.getenv("WOM_EVENT_UPDATE_MAX_INTERVAL", "
 WOM_EVENT_UPDATE_MAX_PER_CYCLE = int(os.getenv("WOM_EVENT_UPDATE_MAX_PER_CYCLE", "5"))
 WOM_EVENT_IDLE_BASE_INTERVAL = int(os.getenv("WOM_EVENT_IDLE_BASE_INTERVAL", "3600"))
 WOM_EVENT_IDLE_MAX_INTERVAL = int(os.getenv("WOM_EVENT_IDLE_MAX_INTERVAL", "86400"))
+# The rotation exists to pick up progress the plugin missed. A participant
+# whose plugin talked to us within this window is skipped: the plugin reports
+# absolute XP and KC, so its next submission folds any gap in by itself and a
+# forced WOM update would only fold to 0. Key-moment passes (activation,
+# pre-end, final) still update everyone — they are the safety net for a
+# player who stops using the plugin late in an event.
+WOM_EVENT_PLUGIN_COVERED_SECONDS = int(os.getenv("WOM_EVENT_PLUGIN_COVERED_SECONDS", "21600"))
 # Floor for retry pacing after a failed / rate-skipped update attempt (the
 # idle backoff from the player's failure-bumped streak usually exceeds it).
 _UPDATE_FAIL_COOLDOWN_SECONDS = 900
@@ -561,7 +568,7 @@ def _new_stats() -> dict:
     return {"targets": 0, "groups_fetched": 0, "group_fetch_failures": 0,
             "players_emitted": 0, "players_stale": 0, "players_unmatched": 0,
             "envelopes": 0, "updates_requested": 0, "update_candidates": 0,
-            "players_active": 0, "players_idle": 0}
+            "players_active": 0, "players_idle": 0, "players_plugin_covered": 0}
 
 
 async def reconcile_once(state, redis_conn, now: Optional[datetime] = None) -> dict:
@@ -584,6 +591,7 @@ async def reconcile_once(state, redis_conn, now: Optional[datetime] = None) -> d
             stats["update_candidates"] += fresh["candidates"]
             stats["players_active"] += fresh["active"]
             stats["players_idle"] += fresh["idle"]
+            stats["players_plugin_covered"] += fresh["plugin_covered"]
             update_cap -= fresh["player_updates"]
     return stats
 
@@ -814,7 +822,7 @@ async def _freshness_for_target(redis_conn, target: ReconcileTarget, rows: list,
     from utils.wiseoldman import UPDATE_ALL_BADCODE_PREFIX, request_group_update_all
 
     out = {"update_all": 0, "player_updates": 0, "candidates": 0,
-           "active": 0, "idle": 0}
+           "active": 0, "idle": 0, "plugin_covered": 0}
     if use_update_all:
         for _group_id, wom_gid, code in target.wom_groups:
             if not code:
@@ -846,12 +854,48 @@ async def _freshness_for_target(redis_conn, target: ReconcileTarget, rows: list,
     candidates = _select_update_candidates(
         target, latest, activity, int(time.time()),
         active_interval=active_interval, flat_min_stale=min_stale)
+    if min_stale is None and candidates and WOM_EVENT_PLUGIN_COVERED_SECONDS > 0:
+        covered = await plugin_recently_seen(
+            {c[2] for c in candidates}, WOM_EVENT_PLUGIN_COVERED_SECONDS)
+        if covered:
+            candidates = [c for c in candidates if c[2] not in covered]
+            out["plugin_covered"] = len(covered)
     out["candidates"] = len(candidates)
     out["player_updates"] = await _request_updates(
         redis_conn, candidates, max_updates=max_updates,
         act_key=_womact_key(target.event_id), activity=activity,
         latest=latest, active_interval=active_interval)
     return out
+
+
+def _plugin_recently_seen_db(player_ids: set, within_seconds: int) -> set:
+    """Player ids whose plugin was seen (``player_last_seen``) within the
+    window. Blocking; run in a worker thread. Fails open to an empty set —
+    a DB hiccup must cost at most a few redundant WOM updates, never skip
+    the plugin-less players this rotation is for."""
+    from api.core import get_db_session, reset_db_connections
+    from db.models.player_last_seen import PlayerLastSeen
+
+    if not player_ids:
+        return set()
+    cutoff = datetime.utcnow() - timedelta(seconds=within_seconds)
+    session = get_db_session()
+    try:
+        rows = session.query(PlayerLastSeen.player_id).filter(
+            PlayerLastSeen.player_id.in_(list(player_ids)),
+            PlayerLastSeen.last_seen_at >= cutoff,
+        ).all()
+        return {int(r[0]) for r in rows}
+    except Exception:
+        log.exception("player_last_seen lookup failed; not filtering plugin users")
+        return set()
+    finally:
+        session.close()
+        reset_db_connections()
+
+
+async def plugin_recently_seen(player_ids: set, within_seconds: int) -> set:
+    return await asyncio.to_thread(_plugin_recently_seen_db, player_ids, within_seconds)
 
 
 async def _fetch_target_rows(target: ReconcileTarget, now: datetime) -> list:
