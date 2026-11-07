@@ -256,12 +256,23 @@ def _discard_stashed_image(entry_bytes: bytes) -> None:
 
 
 async def _process_entry(entry_bytes: bytes) -> None:
-    """Process one queue entry, rerouting it first if it is firehose traffic."""
-    try:
-        mirrored = json.loads(entry_bytes).get("mirrored")
-    except Exception:
-        mirrored = None
+    """Process one queue entry, rerouting it first if it is firehose traffic.
 
+    The workers share one event loop, so one account's entries take turns: two
+    in flight at once can freeze every worker on a row lock
+    (utils/account_turns.py)."""
+    from utils.account_turns import account_key, account_turn
+
+    try:
+        entry = json.loads(entry_bytes)
+    except Exception:
+        entry = {}
+    payload = entry.get("payload") if isinstance(entry, dict) else None
+    async with account_turn(account_key(payload)):
+        await _route_entry(entry_bytes, entry.get("mirrored") if isinstance(entry, dict) else None)
+
+
+async def _route_entry(entry_bytes: bytes, mirrored) -> None:
     if not mirrored:
         await _process_submission(entry_bytes)
         return

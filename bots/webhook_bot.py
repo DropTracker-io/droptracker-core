@@ -828,14 +828,19 @@ async def process_message_bundle(message, bundle=None) -> int:
 
     _flag_bundle_duplicates([data for _, data in pending])
 
+    from utils.account_turns import account_key, account_turn
+
     dispatched = 0
-    for submission_type, embed_data in pending:
-        try:
-            await process_submission_with_session(submission_type, embed_data)
-            dispatched += 1
-        except Exception as e:
-            print(f"Failed to process submission after retries: {e}")
-            # Continue processing other embeds even if one fails
+    # One account's submissions take turns: two of them in flight at once can
+    # freeze this whole bot on a row lock (utils/account_turns.py).
+    async with account_turn(account_key(pending[0][1])):
+        for submission_type, embed_data in pending:
+            try:
+                await process_submission_with_session(submission_type, embed_data)
+                dispatched += 1
+            except Exception as e:
+                print(f"Failed to process submission after retries: {e}")
+                # Continue processing other embeds even if one fails
     return dispatched
 
 
