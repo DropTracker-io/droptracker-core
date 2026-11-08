@@ -37,6 +37,7 @@ GUARDED = [
     ("web_api/routes/search.py", "_search_players"),
     ("web_api/routes/admin.py", "admin_lookup"),
     ("web_api/routes/events.py", "admin_add_members_bulk"),
+    ("web_api/routes/events.py", "_resolve_bulk_names"),
     ("services/notification_service.py", "send_drop_notification_with_session"),
     # In-memory filters and autocompletes over names already loaded. (The web
     # members filter and _is_same_member_as_target compare through local

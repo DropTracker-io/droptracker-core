@@ -370,6 +370,88 @@ class TestSignupAllMembers:
         assert exc.value.title == "No teams"
 
 
+class TestAddSignups:
+    """The pool panel's "Add players" box (manager adds chosen players)."""
+
+    def _pool(self, **kw):
+        return _ev(formation_mode="signup_pool", **kw)
+
+    def test_adds_members_to_the_pool_and_reports_the_rest(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        mini_db.member(1, 5, uid=70)
+        mini_db.member(2, 5, uid=70)               # 1's alt: same person
+        mini_db.member(3, 5)                       # already signed up
+        mini_db.member(4, 5)                       # already on a team
+        mini_db.member(6, 99)                      # another clan
+        s.add(m.EventTeam(id=1, event_id=1, group_id=5))
+        s.add(m.EventTeamMember(team_id=1, player_id=4, event_id=1))
+        s.add(m.EventSignup(event_id=1, player_id=3, group_id=5, source="web"))
+        s.commit()
+        players = [(1, "A", 70), (2, "B", 70), (3, "C", None), (4, "D", None),
+                   (6, "F", None)]
+        res = sus.add_signups(s, self._pool(), players)
+        s.commit()
+        assert res["added"] == [1]
+        assert res["skipped"] == {
+            2: "Another of their accounts is already in this event.",
+            3: "Already signed up.",
+            4: "Already on a team in this event.",
+            6: "Not a member of a participating clan.",
+        }
+        row = s.query(m.EventSignup).filter(m.EventSignup.player_id == 1).one()
+        assert (row.group_id, row.user_id, row.source) == (5, 70, "manual")
+        assert s.query(m.EventTeamMember).count() == 1   # never placed
+
+    def test_only_pool_events(self, mini_db):
+        with pytest.raises(sus.SignupError) as exc:
+            sus.add_signups(mini_db.s, _ev(formation_mode="auto_assign"), [(1, "A", None)])
+        assert exc.value.status == 409
+
+    def test_a_global_event_takes_any_tracked_player(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        mini_db.member(1, 99)
+        s.commit()
+        res = sus.add_signups(s, self._pool(group_id=None), [(1, "A", None)])
+        assert res["added"] == [1]
+        assert s.query(m.EventSignup).one().group_id is None
+
+    def test_clan_vs_clan_signs_up_under_the_players_clan(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        mini_db.member(1, 10)
+        mini_db.member(2, 20)
+        mini_db.member(3, 10)
+        mini_db.member(3, 20)                      # in both clans
+        s.add_all([m.EventGroup(event_id=1, group_id=10, status="accepted"),
+                   m.EventGroup(event_id=1, group_id=20, status="accepted")])
+        s.commit()
+        ev = self._pool(mode="clan_vs_clan", group_id=None)
+        players = [(1, "A", None), (2, "B", None), (3, "C", None)]
+        res = sus.add_signups(s, ev, players)
+        s.commit()
+        assert res["added"] == [1, 2]
+        assert res["skipped"][3].startswith("In more than one clan")
+        assert dict(s.query(m.EventSignup.player_id, m.EventSignup.group_id).all()) \
+            == {1: 10, 2: 20}
+
+    def test_a_clan_manager_adds_only_their_own_clan(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        mini_db.member(1, 10)
+        mini_db.member(2, 20)
+        mini_db.member(3, 10)
+        mini_db.member(3, 20)                      # scoped: only clan 10 counts
+        s.add_all([m.EventGroup(event_id=1, group_id=10, status="accepted"),
+                   m.EventGroup(event_id=1, group_id=20, status="accepted")])
+        s.commit()
+        ev = self._pool(mode="clan_vs_clan", group_id=None)
+        res = sus.add_signups(s, ev, [(1, "A", None), (2, "B", None), (3, "C", None)],
+                              scope_group_ids={10})
+        assert res["added"] == [1, 3]
+        assert res["skipped"] == {2: "Not a member of your clan."}
+        with pytest.raises(sus.SignupError) as exc:
+            sus.add_signups(s, ev, [(1, "A", None)], scope_group_ids={30})
+        assert exc.value.status == 422
+
+
 class TestSolo:
     """Free-for-all (formation_mode="solo"): the pure halves."""
 

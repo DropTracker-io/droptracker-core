@@ -1118,6 +1118,100 @@ def signup_all_members(session, ev, group_id: Optional[int] = None) -> dict:
     }
 
 
+def add_signups(session, ev, players, *, scope_group_ids: Optional[set] = None) -> dict:
+    """Manager action: put chosen players into a sign-up pool by hand (the
+    pool panel's "Add players" box). Pool events only; other formation modes
+    add straight to a team.
+
+    ``players`` are ``(player_id, player_name, user_id)`` rows, already
+    resolved. Each is checked like a self sign-up, but reported rather than
+    raised so a pasted list lands whatever it can: membership of a
+    participating clan (any tracked player on a global event), one account
+    per person, and on a clan_vs_clan event exactly one clan to sign up
+    under. ``scope_group_ids`` narrows the clans (a staff-hosted event's clan
+    manager adds only their own). Returns ``{"added": [player_id, ...],
+    "skipped": {player_id: reason}}``. The caller owns the commit."""
+    from db.models import EventSignup, EventTeam, EventTeamMember, Player
+
+    formation = getattr(ev, "formation_mode", None) or "admin_assign"
+    if formation != "signup_pool":
+        raise SignupError(409, "Not a sign-up pool",
+                          "This event's teams are its roster. Add players to a team instead.")
+
+    groups = participating_group_ids(session, ev)
+    if scope_group_ids is not None:
+        groups = groups & set(scope_group_ids)
+        if not groups:
+            raise SignupError(422, "Not a participating clan",
+                              "That clan isn't taking part in this event.")
+    clan_vs_clan = _is_clan_vs_clan(ev)
+    ids = [pid for pid, _, _ in players]
+    if not ids:
+        return {"added": [], "skipped": {}}
+
+    member_of: dict = {}
+    if groups:
+        from db.models import user_group_association
+
+        for pid, gid in (
+            session.query(user_group_association.c.player_id,
+                          user_group_association.c.group_id)
+            .filter(user_group_association.c.player_id.in_(ids),
+                    user_group_association.c.group_id.in_(list(groups)))
+            .all()
+        ):
+            member_of.setdefault(pid, set()).add(gid)
+
+    signed = {
+        pid for (pid,) in
+        session.query(EventSignup.player_id).filter(EventSignup.event_id == ev.id).all()
+    }
+    placed = {
+        pid for (pid,) in
+        session.query(EventTeamMember.player_id)
+        .join(EventTeam, EventTeam.id == EventTeamMember.team_id)
+        .filter(EventTeam.event_id == ev.id)
+        .all()
+    }
+    entered = signed | placed
+    entered_users = {
+        uid for (uid,) in
+        session.query(Player.user_id)
+        .filter(Player.player_id.in_(list(entered)), Player.user_id.isnot(None))
+        .all()
+    } if entered else set()
+
+    added: list = []
+    skipped: dict = {}
+    for pid, _name, uid in players:
+        if pid in signed:
+            skipped[pid] = "Already signed up."
+            continue
+        if pid in placed:
+            skipped[pid] = "Already on a team in this event."
+            continue
+        clans = member_of.get(pid, set())
+        if groups and not clans:
+            skipped[pid] = ("Not a member of your clan." if scope_group_ids is not None
+                            else "Not a member of a participating clan.")
+            continue
+        if clan_vs_clan and len(clans) > 1:
+            skipped[pid] = ("In more than one clan in this event. Add them from the "
+                            "clan they play for.")
+            continue
+        if uid is not None and uid in entered_users:
+            skipped[pid] = "Another of their accounts is already in this event."
+            continue
+        group_id = next(iter(clans)) if clan_vs_clan else ev.group_id
+        session.add(EventSignup(event_id=ev.id, player_id=pid, group_id=group_id,
+                                user_id=uid, source="manual"))
+        signed.add(pid)
+        if uid is not None:
+            entered_users.add(uid)
+        added.append(pid)
+    return {"added": added, "skipped": skipped}
+
+
 # Clan roster sync (web152a). A removal pass that would take out more than this
 # share of the roster (and more than CLAN_SYNC_REMOVAL_FLOOR players) is held:
 # a clan sync that briefly comes back short must never empty a live event.

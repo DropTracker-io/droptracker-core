@@ -7851,18 +7851,11 @@ async def admin_add_member(event_id: int, team_id: int):
 MAX_BULK_ADD_NAMES = 200
 
 
-@events_bp.post("/events/<int:event_id>/teams/<int:team_id>/members/bulk")
-async def admin_add_members_bulk(event_id: int, team_id: int):
-    """Admin roster add, list form ("paste your team"): resolves a list of
-    RSNs case-insensitively and places every tracked, eligible player on the
-    team in one call. Unlike the single-add route this never MOVES a player —
-    anyone already placed on a team in this event comes back as skipped, so a
-    pasted list can't silently reshuffle rosters. Per-name outcomes are
-    returned so the UI can show exactly what happened. Audit-logged once."""
-    user_id = current_user_id()
-    body = await json_body()
-    names = body.get("names")
-    override = body.get("override") is True
+def _clean_bulk_names(names) -> tuple[list[str], set[str]]:
+    """A pasted RSN list from a bulk-add body, validated: strings only, at
+    most :data:`MAX_BULK_ADD_NAMES`, blanks dropped, and one account under two
+    spellings ("1-19", "1 19") kept once. Returns ``(names, folded keys)``;
+    a 422 problem on a bad list."""
     if not isinstance(names, list) or not names:
         abort_problem(422, "Invalid names", "'names' must be a non-empty list of player names.")
     if len(names) > MAX_BULK_ADD_NAMES:
@@ -7876,7 +7869,6 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
         name = raw.strip()
         if not name:
             continue
-        # One account under two spellings ("1-19", "1 19") is one name.
         key = normalize_player_display_equivalence(name)
         if not key or key in seen_keys:
             continue
@@ -7884,6 +7876,44 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
         cleaned.append(name)
     if not cleaned:
         abort_problem(422, "Invalid names", "No usable names in the list.")
+    return cleaned, seen_keys
+
+
+def _resolve_bulk_names(s, cleaned: list[str], keys: set[str]) -> dict:
+    """``{typed name: player (player_id, player_name) or None}`` for a cleaned
+    list, in one query on the indexed folded name; the response keeps the
+    DB's capitalization. OSRS treats '-', '_' and ' ' as one character and
+    stored names usually carry WOM's space, so a pasted "1-19" used to miss
+    its "1 19" row."""
+    rows = (
+        s.query(Player.player_id, Player.player_name)
+        .filter(Player.player_name_norm.in_(list(keys)))
+        .order_by(Player.player_id)
+        .all()
+    )
+    by_key: dict[str, list] = {}
+    for pid, pname in rows:
+        by_key.setdefault(normalize_player_display_equivalence(pname), []).append(
+            SimpleNamespace(player_id=pid, player_name=pname))
+    return {
+        name: pick_player_by_rsn(
+            by_key.get(normalize_player_display_equivalence(name), ()), name)
+        for name in cleaned
+    }
+
+
+@events_bp.post("/events/<int:event_id>/teams/<int:team_id>/members/bulk")
+async def admin_add_members_bulk(event_id: int, team_id: int):
+    """Admin roster add, list form ("paste your team"): resolves a list of
+    RSNs case-insensitively and places every tracked, eligible player on the
+    team in one call. Unlike the single-add route this never MOVES a player —
+    anyone already placed on a team in this event comes back as skipped, so a
+    pasted list can't silently reshuffle rosters. Per-name outcomes are
+    returned so the UI can show exactly what happened. Audit-logged once."""
+    user_id = current_user_id()
+    body = await json_body()
+    override = body.get("override") is True
+    cleaned, seen_keys = _clean_bulk_names(body.get("names"))
 
     def _apply():
         with db_session() as s:
@@ -7898,25 +7928,7 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                 abort_problem(404, "Team not found", f"No team {team_id} in this event.")
             as_staff = _assert_team_manager(s, user_id, ev, team)
 
-            # Resolve the whole list in one query on the indexed folded name;
-            # keep the DB's canonical capitalization for the response. OSRS
-            # treats '-', '_' and ' ' as one character and stored names usually
-            # carry WOM's space, so a pasted "1-19" used to miss its "1 19" row.
-            rows = (
-                s.query(Player.player_id, Player.player_name)
-                .filter(Player.player_name_norm.in_(list(seen_keys)))
-                .order_by(Player.player_id)
-                .all()
-            )
-            by_key: dict[str, list] = {}
-            for pid, pname in rows:
-                by_key.setdefault(normalize_player_display_equivalence(pname), []).append(
-                    SimpleNamespace(player_id=pid, player_name=pname))
-            hits = {
-                name: pick_player_by_rsn(
-                    by_key.get(normalize_player_display_equivalence(name), ()), name)
-                for name in cleaned
-            }
+            hits = _resolve_bulk_names(s, cleaned, seen_keys)
             resolved_ids = list({h.player_id for h in hits.values() if h is not None})
 
             # Eligibility mirrors admin_add_member: membership of the team's
@@ -8509,6 +8521,115 @@ async def signup_all_members_route(event_id: int):
 
     result = await asyncio.to_thread(_apply)
     _bump(event_id)
+    return private_no_store(jsonify(result))
+
+
+@events_bp.post("/events/<int:event_id>/signups")
+async def add_event_signups(event_id: int):
+    """Managers add chosen players to a sign-up pool by hand: body
+    ``{player_ids: [int]}`` (picked from search) or ``{names: [str]}`` (a
+    pasted list, resolved like the team bulk add), plus an optional
+    ``group_id`` scoping a clan-vs-clan event to one clan. Same permissions as
+    "Sign up all clan members". Players who can't be added come back in
+    ``skipped`` with the reason, in the team bulk add's response shape.
+    Audit-logged once."""
+    user_id = current_user_id()
+    body = await json_body()
+    group_id = body.get("group_id")
+    if group_id is not None and (not isinstance(group_id, int) or isinstance(group_id, bool)):
+        abort_problem(422, "Invalid group_id", "'group_id' must be an integer or omitted.")
+    player_ids = body.get("player_ids")
+    names = body.get("names")
+    if (player_ids is None) == (names is None):
+        abort_problem(422, "Invalid body", "Send either 'player_ids' or 'names'.")
+    cleaned: list[str] = []
+    keys: set[str] = set()
+    if names is not None:
+        cleaned, keys = _clean_bulk_names(names)
+    else:
+        if (not isinstance(player_ids, list) or not player_ids
+                or len(player_ids) > MAX_BULK_ADD_NAMES
+                or any(not isinstance(p, int) or isinstance(p, bool) for p in player_ids)):
+            abort_problem(422, "Invalid player_ids",
+                          f"'player_ids' must be a list of 1-{MAX_BULK_ADD_NAMES} integers.")
+        player_ids = list(dict.fromkeys(player_ids))
+
+    def _apply():
+        from services.event_signup import SignupError, add_signups
+
+        with db_session() as s:
+            ev = _load_event_or_404(s, event_id)
+            _assert_roster_open(ev)
+            scope_gid = group_id
+            if is_staff_hosted(ev):
+                # Same scoping as Sign up all clan members.
+                if scope_gid is None and not _is_event_admin(s, user_id, ev):
+                    mine = _clan_manager_group_ids(s, user_id, ev)
+                    if len(mine) == 1:
+                        scope_gid = next(iter(mine))
+                if scope_gid is None:
+                    _assert_event_admin(s, user_id, ev)
+                else:
+                    _assert_clan_manager(s, user_id, ev, scope_gid, roster=True)
+            else:
+                _assert_event_admin(s, user_id, ev)
+
+            # Resolve to (player_id, name, user_id), keeping each input's
+            # label for the response.
+            skipped: list[dict] = []
+            players: list[tuple] = []
+            if names is not None:
+                hits = _resolve_bulk_names(s, cleaned, keys)
+                for name in cleaned:
+                    if hits.get(name) is None:
+                        skipped.append({"name": name, "reason": "No tracked player by that name."})
+                wanted = list(dict.fromkeys(h.player_id for h in hits.values() if h is not None))
+            else:
+                wanted = player_ids
+            rows = {
+                pid: (pname, uid) for pid, pname, uid in (
+                    s.query(Player.player_id, Player.player_name, Player.user_id)
+                    .filter(Player.player_id.in_(wanted)).all()
+                )
+            } if wanted else {}
+            for pid in wanted:
+                if pid in rows:
+                    players.append((pid, rows[pid][0], rows[pid][1]))
+                else:
+                    skipped.append({"name": f"Player {pid}", "reason": "No tracked player."})
+
+            try:
+                result = add_signups(
+                    s, ev, players,
+                    scope_group_ids={scope_gid} if scope_gid is not None else None)
+            except SignupError as e:
+                abort_problem(e.status, e.title, e.detail)
+            label = {pid: name for pid, name, _ in players}
+            added = [{"id": pid, "name": label[pid]} for pid in result["added"]]
+            skipped += [{"name": label[pid], "reason": reason}
+                        for pid, reason in result["skipped"].items()]
+            if added:
+                s.add(AuditLog(
+                    actor_user_id=user_id, group_id=ev.group_id or scope_gid,
+                    event_id=ev.id,
+                    action="event.signup.manual_add",
+                    target=f"web_events.{event_id}",
+                    before=None,
+                    after=f"added:{len(added)}",
+                ))
+                try:
+                    s.commit()
+                except IntegrityError:
+                    # A concurrent sign-up beat this one; nothing half-lands.
+                    s.rollback()
+                    abort_problem(409, "Sign-ups changed underneath you",
+                                  "One of these players just signed up another way. "
+                                  "Try again: anyone already in is skipped.")
+            return {"added": added, "skipped": skipped}
+
+    result = await asyncio.to_thread(_apply)
+    if result["added"]:
+        _bump(event_id)
     return private_no_store(jsonify(result))
 
 
