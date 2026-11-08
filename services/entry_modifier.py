@@ -851,6 +851,25 @@ async def _announce_change(bot, ctx, db, *, group_id, channel_id, reply_to_messa
         print(f"[EntryModifier] Change note for drop {drop_id} failed: {e}")
 
 
+async def _dispatch_entry_modal(ext, ctx):
+    """Route a submitted "Modify Entry" modal; other modals are not ours."""
+    cid = ctx.custom_id
+    if not cid.startswith(("entry_edit_value_modal_", "entry_modify_splits_modal_")):
+        return
+
+    # Both edits re-award points, rebuild the Discord message and refresh the
+    # leaderboards before replying, which routinely runs past Discord's
+    # 3-second window: the modal then showed "Something went wrong" even though
+    # the change went through. Acknowledge first; every reply after this is a
+    # ctx.send, which becomes the follow-up.
+    await ctx.defer(ephemeral=True)
+
+    if cid.startswith("entry_edit_value_modal_"):
+        await ext._process_edit_value(ctx)
+    else:
+        await ext._process_modify_splits(ctx)
+
+
 # ---------------------------------------------------------------------------
 # Extension
 # ---------------------------------------------------------------------------
@@ -1225,13 +1244,7 @@ class EntryModifier(Extension):
 
     @interactions.listen(ModalCompletion)
     async def on_modal(self, event: ModalCompletion):
-        ctx = event.ctx
-        cid = ctx.custom_id
-
-        if cid.startswith("entry_edit_value_modal_"):
-            await self._process_edit_value(ctx)
-        elif cid.startswith("entry_modify_splits_modal_"):
-            await self._process_modify_splits(ctx)
+        await _dispatch_entry_modal(self, event.ctx)
 
     async def _process_edit_value(self, ctx: ComponentContext):
         notified_id = int(ctx.custom_id.split("_")[-1])
