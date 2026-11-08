@@ -58,6 +58,7 @@ def set_group_config(group_id: int, stored: dict, *,
         # nickname setting queues the bot's rename pass (services/auto_nickname).
         nick_row = existing.get(group_config.AUTO_SET_MEMBER_NICKNAMES)
         nicknames_before = nick_row.config_value if nick_row is not None else None
+        changed_keys = set()
         for key, value in stored.items():
             value = "" if value is None else str(value)
             long_value = None
@@ -74,6 +75,7 @@ def set_group_config(group_id: int, stored: dict, *,
             else:
                 s.add(GroupConfiguration(group_id=group_id, config_key=key,
                                          config_value=value, long_value=long_value))
+            changed_keys.add(key)
             shown_after = long_value if long_value else value
             if key in SENSITIVE_KEYS:
                 before, shown_after = "***", "***"
@@ -97,6 +99,13 @@ def set_group_config(group_id: int, stored: dict, *,
     finally:
         s.close()
     group_config.invalidate(group_id)
+    # Same as the site's PATCH: a changed PvP counting rule re-judges the
+    # kills already on file (data.submissions.pvp.apply_counting_rule_change).
+    if changed_keys:
+        from data.submissions.pvp import COUNTING_RULE_KEYS, apply_counting_rule_change
+
+        if changed_keys & COUNTING_RULE_KEYS:
+            apply_counting_rule_change(group_id)
 
 
 def get_group_config_values(group_id: int, keys, missing="") -> dict:

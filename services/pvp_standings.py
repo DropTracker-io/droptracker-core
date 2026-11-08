@@ -125,12 +125,14 @@ def _increment(pipe, metric: str, amount: float, player_id: int,
 
 
 def record_kill(kill, counted_group_ids: Iterable[int], *, player_name: str = "",
-                client=None) -> bool:
+                client=None, recent: bool = True) -> bool:
     """Add one kill to every board it counts toward.
 
     ``counted_group_ids`` is the set of groups whose ``pvp_kill_groups`` row is
-    counted (group 2 meaning the global boards). Returns False when Redis
-    could not be written; the caller carries on regardless.
+    counted (group 2 meaning the global boards). ``recent=False`` leaves the
+    recent-kill lists alone, for an old kill that only now counts (a recount).
+    Returns False when Redis could not be written; the caller carries on
+    regardless.
     """
     scopes = _scopes(counted_group_ids)
     if not scopes:
@@ -151,10 +153,11 @@ def record_kill(kill, counted_group_ids: Iterable[int], *, player_name: str = ""
                 pipe.zincrby(group_total_key(token), value, scope)
                 if ttl:
                     pipe.expire(group_total_key(token), ttl)
-        entry = json.dumps(recent_entry(kill, player_name))
-        for scope in scopes:
-            pipe.lpush(recent_key(scope), entry)
-            pipe.ltrim(recent_key(scope), 0, RECENT_LIMIT - 1)
+        if recent:
+            entry = json.dumps(recent_entry(kill, player_name))
+            for scope in scopes:
+                pipe.lpush(recent_key(scope), entry)
+                pipe.ltrim(recent_key(scope), 0, RECENT_LIMIT - 1)
         pipe.execute()
         return True
     except Exception as e:

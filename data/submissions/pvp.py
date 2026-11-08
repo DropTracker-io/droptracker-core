@@ -321,6 +321,110 @@ def group_verdict(session, kill, group_id: int, config: Dict[Any, str],
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Recount after a counting rule changes
+# --------------------------------------------------------------------------- #
+#: The group settings group_verdict reads. Intake judges a kill once, so a
+#: change to any of these re-judges the kills already on file (2026-11-08:
+#: Restricted turned clanmate kills on and their test kill stayed off the board).
+COUNTING_RULE_KEYS = frozenset({COUNT_MEMBER_KILLS_KEY, SAME_VICTIM_LIMIT_KEY,
+                                SAME_VICTIM_UNLIMITED_KEY})
+#: The verdicts those settings decide. Any other reason is left as it is.
+_RULE_REASONS = (None, "member_kill", "same_victim_limit")
+
+
+def rejudge_kills(rows, group_id: int, config: Dict[Any, str], member_ids: set) -> list:
+    """Apply the group's current counting rules to its stored kills.
+
+    ``rows`` are ``(pvp_kill_groups row, pvp_kill)`` pairs for one group, in
+    kill id order, hidden kills left out (intake's daily tally skips them).
+    The daily cap is replayed in that order, so a kill is judged against the
+    ones before it, as it was at intake. A victim is a clanmate when the row
+    already says so or the victim is in the group now. Rows are updated in
+    place; returns ``[(kill, counted)]`` for the kills whose counting flipped.
+    """
+    from collections import defaultdict
+
+    from utils import group_config as gc
+
+    count_members = gc.is_truthy(config.get((group_id, COUNT_MEMBER_KILLS_KEY)))
+    limit = same_victim_limit(config, group_id)
+    tally: Dict[tuple, int] = defaultdict(int)
+    flipped = []
+    for link, kill in rows:
+        day = (kill.player_id, str(kill.victim_name or "").lower(), kill.date_added.date())
+        if link.reason in _RULE_REASONS:
+            member = link.reason == "member_kill" or (
+                kill.victim_player_id is not None and int(kill.victim_player_id) in member_ids)
+            reason = None
+            if group_id != GLOBAL_GROUP_ID and member and not count_members:
+                reason = "member_kill"
+            elif limit is not None and tally[day] >= limit:
+                reason = "same_victim_limit"
+            counted = reason is None
+            if counted != bool(link.counted):
+                flipped.append((kill, counted))
+            link.counted = counted
+            link.reason = reason
+        if link.counted:
+            tally[day] += 1
+    return flipped
+
+
+def recount_group(session, group_id: int) -> list:
+    """Re-judge every stored kill of one group; the caller commits.
+    Returns :func:`rejudge_kills`' flipped kills."""
+    from sqlalchemy import text
+
+    from db.models import PvpKill, PvpKillGroup
+
+    config = _pvp_config(session, [group_id])
+    member_ids = {int(r[0]) for r in session.execute(
+        text("SELECT player_id FROM user_group_association "
+             "WHERE group_id = :gid AND player_id IS NOT NULL"),
+        {"gid": int(group_id)},
+    ).all()}
+    rows = (
+        session.query(PvpKillGroup, PvpKill)
+        .join(PvpKill, PvpKill.id == PvpKillGroup.kill_id)
+        .filter(PvpKillGroup.group_id == int(group_id), PvpKill.kind == KIND_KILL,
+                PvpKill.hidden.is_(False))
+        .order_by(PvpKill.id)
+        .all()
+    )
+    return rejudge_kills(rows, int(group_id), config, member_ids)
+
+
+def apply_counting_rule_change(group_id: int) -> int:
+    """Re-judge a group's kills after one of :data:`COUNTING_RULE_KEYS`
+    changed, and move its standings to match. Called by both settings writers
+    after their commit. Never raises: a saved setting must not fail over this.
+    Returns how many kills started or stopped counting."""
+    try:
+        from db.models import Session
+        from services import pvp_standings
+
+        session = Session()
+        try:
+            flipped = recount_group(session, group_id)
+            session.commit()
+            for kill, counted in flipped:
+                if kill.excluded_reason:
+                    continue  # off every board either way
+                if counted:
+                    pvp_standings.record_kill(kill, [group_id], recent=False)
+                else:
+                    pvp_standings.remove_kill(kill, [group_id])
+        finally:
+            session.close()
+        if flipped:
+            _mark_boards_dirty([group_id])
+        return len(flipped)
+    except Exception as e:
+        print(f"[PvP] Recount for group {group_id} failed: {e}")
+        return 0
+
+
 def _resolve_victim(session, victim_name: str):
     """The tracked Player behind a victim's RSN, or None. Indexed lookups only
     (exact name, then the game's '-'/'_'/' ' equivalence via player_name_norm),

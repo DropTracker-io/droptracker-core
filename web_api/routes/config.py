@@ -246,6 +246,10 @@ def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
         except GroupRenameError as e:
             abort_problem(422, "Invalid config value", str(e))
 
+    # Settings whose stored value this save actually changed, for the
+    # post-commit hooks below the write.
+    changed_keys: set = set()
+
     def _apply():
         with db_session() as s:
             user = load_user(s, user_id)
@@ -297,6 +301,8 @@ def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
                     .first()
                 )
                 before = _effective_stored_value(row) if row else None
+                if before != new_value:
+                    changed_keys.add(key)
                 if key == _AUTO_PROVISION_KEY:
                     provision_before = before
                 elif key == _AUTO_NICKNAMES_KEY:
@@ -392,6 +398,15 @@ def apply_group_config_patch(user_id: int, group_id: int, body: dict) -> None:
             return True
 
     _apply()
+
+    # PvP kills are judged once, at intake, so a changed counting rule
+    # (clanmate kills, the daily same-victim cap) re-judges the kills already
+    # on file and moves the group's standings with it.
+    if changed_keys:
+        from data.submissions.pvp import COUNTING_RULE_KEYS, apply_counting_rule_change
+
+        if changed_keys & COUNTING_RULE_KEYS:
+            apply_counting_rule_change(group_id)
 
 
 @config_bp.patch("/groups/<int:group_id>/config")
