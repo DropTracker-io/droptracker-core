@@ -4,14 +4,17 @@
   GET    /api/v1/groups/{id}/bank/entries              -> full ledger page (admin)
          ?status=pending|confirmed|rejected|void|all&before_id=&limit=
   POST   /api/v1/groups/{id}/bank/entries  { kind, amount, player_id?|rsn?,
+                                             holder_player_id?|holder_rsn?,
                                              note?, proof_key?, event_id?,
                                              status?, created_at? } -> { id }
   PATCH  /api/v1/groups/{id}/bank/entries/{eid} { amount?, status?, note?,
                                                   review_note?, proof_key?,
                                                   player_id?, rsn?,
+                                                  holder_player_id?, holder_rsn?,
                                                   created_at? } -> { ok }
   DELETE /api/v1/groups/{id}/bank/entries/{eid}       -> { ok, voided }
   POST   /api/v1/groups/{id}/bank/transfer { event_id | event_name, amount,
+                                          holder_player_id?|holder_rsn?,
                                           note?, created_at? } -> { id }
 
 Amounts are entered as positive GP; the kind decides the sign stored (see
@@ -23,6 +26,15 @@ GP moving out of the (50M-capped) coffer into an admin's keeping: they stay
 in the ledger but leave the balance and the outflow totals, and the headline
 reports them as ``held_outside_coffer_total`` instead. Applied at read time,
 so flipping the setting re-reads every past row.
+
+**Holders** (web159a): GP outside the coffer sits with the clan's staff. A
+row's holder says whose keeping it moved: a withdrawal into it, a deposit
+returned from it (both stay out of the balance), a payout or event funding
+paid from it, or a ``holder_transfer`` passing it to someone else. A synced
+coffer withdrawal with no holder set, while withdrawals are neutral, is held
+by whoever withdrew it. Staff see who holds what (``holders`` on the
+headline); ``held_outside_coffer_total`` is its sum. The rules are
+``services/group_bank.roll_up`` and ``is_held_move``.
 
 ``created_at`` (unix seconds) backdates an entry to when the GP actually
 moved, so a clan can enter its history; the ledger is ordered by it.
@@ -54,12 +66,13 @@ from services.group_bank import (
     NAMED_KINDS,
     RECORDABLE_KINDS,
     BankRuleError,
+    check_holder,
     check_transition,
     clean_text,
     entry_date,
     merge_donors,
+    roll_up,
     signed_amount,
-    split_coffer_moves,
     totals_from_kind_sums,
     transfer_target,
 )
@@ -124,6 +137,8 @@ def _snapshot(e: GroupBankEntry) -> str:
         "event_id": e.event_id,
         "event_buyin_id": e.event_buyin_id,
         "event_label": e.event_label,
+        "holder_player_id": e.holder_player_id,
+        "holder_rsn": e.holder_rsn,
         "created_at": _ts(e.created_at),
     })
 
@@ -178,9 +193,20 @@ def _coffer_withdrawals_neutral(s, group_id: int) -> bool:
     return gc.is_truthy(gc.get(s, group_id, "bank_coffer_withdrawals_neutral", default=None))
 
 
-def _not_coffer_move():
-    """Filter clause excluding synced coffer withdrawals (see the module doc)."""
-    return ~and_(GroupBankEntry.kind == "withdrawal", GroupBankEntry.source == "coffer")
+def _on_balance(neutral: bool):
+    """Filter clause keeping rows that change the balance: no held moves (GP
+    into or out of a holder's keeping, or between holders; see the module
+    doc). SQL twin of ``services/group_bank.is_held_move``."""
+    has_holder = or_(
+        GroupBankEntry.holder_player_id.isnot(None), GroupBankEntry.holder_rsn.isnot(None)
+    )
+    held = or_(
+        GroupBankEntry.kind == "holder_transfer",
+        and_(GroupBankEntry.kind.in_(("withdrawal", "donation")), has_holder),
+    )
+    if neutral:
+        held = or_(held, and_(GroupBankEntry.kind == "withdrawal", GroupBankEntry.source == "coffer"))
+    return ~held
 
 
 def _counterparty(s, body: dict, kind: str, required: bool) -> tuple:
@@ -195,7 +221,7 @@ def _counterparty(s, body: dict, kind: str, required: bool) -> tuple:
         return player_id, player.player_name, getattr(player, "user_id", None)
     rsn = _rule(clean_text, body.get("rsn"), "rsn", 24)
     if required and not rsn:
-        who = "who donated" if kind == "donation" else "who was paid"
+        who = {"donation": "who donated", "holder_transfer": "who received it"}.get(kind, "who was paid")
         abort_problem(422, "Name required", f"Provide a 'player_id' or an 'rsn' for {who}.")
     if rsn:
         # A typed name that is a tracked account becomes that account, so
@@ -204,6 +230,26 @@ def _counterparty(s, body: dict, kind: str, required: bool) -> tuple:
         if player is not None:
             return player.player_id, player.player_name, getattr(player, "user_id", None)
     return None, rsn, None
+
+
+def _holder(s, body: dict) -> tuple:
+    """``(holder_player_id, holder_rsn)`` from a body, resolved like the
+    other side: a typed name that is a tracked account becomes it. Both
+    None clears the holder."""
+    player_id = body.get("holder_player_id")
+    if player_id is not None:
+        if not _is_id(player_id):
+            abort_problem(422, "Invalid holder_player_id", "'holder_player_id' must be an integer or null.")
+        player = s.query(Player).filter(Player.player_id == player_id).first()
+        if not player:
+            abort_problem(404, "Player not found", f"No player {player_id}.")
+        return player_id, player.player_name
+    rsn = _rule(clean_text, body.get("holder_rsn"), "holder_rsn", 24)
+    if rsn:
+        player = _match_player(s, rsn)
+        if player is not None:
+            return player.player_id, player.player_name
+    return None, rsn
 
 
 def _match_player(s, rsn: str):
@@ -233,6 +279,9 @@ def _entry_row(e: GroupBankEntry, names: dict, events: dict, users: dict, can_ma
         # event run elsewhere.
         "event_name": events.get(e.event_id) or e.event_label,
         "outside_event": e.event_id is None and bool(e.event_label),
+        # Whose keeping this moved GP into or out of (see the module doc).
+        "holder_player_id": e.holder_player_id,
+        "holder_rsn": names.get(e.holder_player_id) or e.holder_rsn,
         "submitted_by": users.get(e.user_id) if can_manage else None,
         "created_at": _ts(e.created_at),
         "confirmed_at": _ts(e.confirmed_at),
@@ -243,6 +292,7 @@ def _decorate(s, rows, can_manage: bool) -> list:
     """Entry dicts with player names, event names and submitter names resolved
     in three batched lookups."""
     pids = {r.player_id for r in rows if r.player_id is not None}
+    pids |= {r.holder_player_id for r in rows if r.holder_player_id is not None}
     eids = {r.event_id for r in rows if r.event_id is not None}
     uids = {r.user_id for r in rows if r.user_id is not None} if can_manage else set()
     names = dict(
@@ -258,47 +308,38 @@ def _decorate(s, rows, can_manage: bool) -> list:
 
 
 def _summary(s, group_id: int) -> dict:
-    """Totals + donor ranking over confirmed rows, computed in SQL."""
+    """Totals, donor ranking and holders over confirmed rows: one grouped
+    query, rolled up by ``services/group_bank.roll_up``."""
     neutral = _coffer_withdrawals_neutral(s, group_id)
-    kind_source_sums = (
+    grouped = (
         s.query(
             GroupBankEntry.kind, GroupBankEntry.source,
+            GroupBankEntry.player_id, GroupBankEntry.rsn,
+            GroupBankEntry.holder_player_id, GroupBankEntry.holder_rsn,
             func.sum(GroupBankEntry.amount), func.count(GroupBankEntry.id),
         )
         .filter(GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed")
-        .group_by(GroupBankEntry.kind, GroupBankEntry.source)
+        .group_by(
+            GroupBankEntry.kind, GroupBankEntry.source,
+            GroupBankEntry.player_id, GroupBankEntry.rsn,
+            GroupBankEntry.holder_player_id, GroupBankEntry.holder_rsn,
+        )
         .all()
     )
-    kind_sums, held_outside = split_coffer_moves(kind_source_sums, neutral)
-    totals = totals_from_kind_sums(kind_sums)
-    confirmed_donation = (
-        GroupBankEntry.group_id == group_id,
-        GroupBankEntry.status == "confirmed",
-        GroupBankEntry.kind == "donation",
-    )
-    by_player = (
-        s.query(GroupBankEntry.player_id, func.sum(GroupBankEntry.amount), func.count(GroupBankEntry.id))
-        .filter(*confirmed_donation, GroupBankEntry.player_id.isnot(None))
-        .group_by(GroupBankEntry.player_id)
-        .all()
-    )
-    by_name = (
-        s.query(GroupBankEntry.rsn, func.sum(GroupBankEntry.amount), func.count(GroupBankEntry.id))
-        .filter(*confirmed_donation, GroupBankEntry.player_id.is_(None))
-        .group_by(GroupBankEntry.rsn)
-        .all()
-    )
-    pids = [pid for pid, _t, _c in by_player]
+    pids = {r[2] for r in grouped if r[2] is not None} | {r[4] for r in grouped if r[4] is not None}
     player_names = dict(
         s.query(Player.player_id, Player.player_name).filter(Player.player_id.in_(pids)).all()
     ) if pids else {}
-    top, donor_count = merge_donors(by_player, by_name, player_names)
+    rolled = roll_up(grouped, neutral, player_names)
+    totals = totals_from_kind_sums(rolled["kind_sums"])
+    top, donor_count = merge_donors(rolled["by_player"], rolled["by_name"], player_names)
     return {
         "totals": totals,
         "top_donors": top,
         "donor_count": donor_count,
         "coffer_withdrawals_neutral": neutral,
-        "held_outside_coffer": held_outside,
+        "held_outside_coffer": rolled["held"],
+        "holders": rolled["holders"],
     }
 
 
@@ -374,12 +415,12 @@ async def get_bank(group_id: int):
             summary = _summary(s, group_id)
             totals = summary["totals"]
             neutral = summary["coffer_withdrawals_neutral"]
+            # GP moving between the coffer and its holders isn't clan
+            # activity worth listing.
             recent_q = s.query(GroupBankEntry).filter(
-                GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed"
+                GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed",
+                _on_balance(neutral),
             )
-            if neutral:
-                # Moving GP out of the coffer isn't clan activity worth listing.
-                recent_q = recent_q.filter(_not_coffer_move())
             recent_rows = (
                 recent_q
                 .order_by(GroupBankEntry.created_at.desc(), GroupBankEntry.id.desc())
@@ -399,6 +440,11 @@ async def get_bank(group_id: int):
                 "transferred_total": money(totals["transferred"]),
                 "coffer_withdrawals_neutral": neutral,
                 "held_outside_coffer_total": money(summary["held_outside_coffer"]),
+                # Who holds the clan's GP is for staff: naming who carries a
+                # few hundred million isn't for the public page.
+                "holders": [
+                    {**h, "held": money(h["held"])} for h in summary["holders"]
+                ] if can_manage else None,
                 "adjustment_total": money(totals["adjustments"]),
                 "donation_count": totals["donation_count"],
                 "donor_count": summary["donor_count"],
@@ -407,7 +453,7 @@ async def get_bank(group_id: int):
                 ] if donors_visible else None,
                 "recent": _decorate(s, recent_rows, can_manage) if donors_visible else None,
                 "pending_count": _pending_count(s, group_id) if can_manage else 0,
-                "has_activity": bool(totals["by_kind"]),
+                "has_activity": bool(totals["by_kind"]) or bool(summary["holders"]),
                 "can_manage": can_manage,
             }
 
@@ -496,8 +542,10 @@ async def list_bank_entries(group_id: int):
 # --------------------------------------------------------------------------- #
 @group_bank_bp.post("/groups/<int:group_id>/bank/entries")
 async def record_bank_entry(group_id: int):
-    """Staff record a donation, withdrawal, payout or adjustment. Confirmed
-    unless ``status: "pending"`` is asked for."""
+    """Staff record a donation, withdrawal, payout, adjustment or holder
+    transfer. Confirmed unless ``status: "pending"`` is asked for. A holder
+    (``holder_player_id`` / ``holder_rsn``) says whose keeping the GP moved
+    into or out of; a holder transfer needs one."""
     user_id = current_user_id()
     manage_ids = manageable_guild_ids(user_id)
     body = await json_body()
@@ -529,6 +577,8 @@ async def record_bank_entry(group_id: int):
                 if not ev or ev.group_id != group_id:
                     abort_problem(404, "Event not found", f"No event {event_id} in this group.")
             player_id, rsn, uid = _counterparty(s, body, kind, required=kind in NAMED_KINDS)
+            holder_pid, holder_rsn = _holder(s, body)
+            _rule(check_holder, kind, (player_id, rsn), (holder_pid, holder_rsn))
             now = datetime.utcnow()
             row = GroupBankEntry(
                 group_id=group_id,
@@ -538,6 +588,8 @@ async def record_bank_entry(group_id: int):
                 source="staff",
                 player_id=player_id,
                 rsn=rsn,
+                holder_player_id=holder_pid,
+                holder_rsn=holder_rsn,
                 user_id=uid,
                 note=note,
                 proof_url=None if proof is _UNSET else proof,
@@ -568,7 +620,9 @@ async def update_bank_entry(group_id: int, entry_id: int):
     prize-pot row it wrote, so only its note and screenshot are editable. A
     transfer to an outside event has no pot row: its amount, date and
     ``event_name`` can change too, but it is never reviewed. ``created_at``
-    re-dates an entry (a backdated record, or a coffer line seen late)."""
+    re-dates an entry (a backdated record, or a coffer line seen late). Any
+    entry's holder can change, transfers included: marking a deposit as held
+    GP going back is setting its holder."""
     user_id = current_user_id()
     manage_ids = manageable_guild_ids(user_id)
     body = await json_body()
@@ -608,6 +662,10 @@ async def update_bank_entry(group_id: int, entry_id: int):
                 row.player_id, row.rsn = pid, rsn
                 if uid is not None:
                     row.user_id = row.user_id or uid
+            if "holder_player_id" in body or "holder_rsn" in body:
+                row.holder_player_id, row.holder_rsn = _holder(s, body)
+            _rule(check_holder, row.kind, (row.player_id, row.rsn),
+                  (row.holder_player_id, row.holder_rsn))
             proof = _clean_proof(body)
             if proof is not _UNSET:
                 row.proof_url = proof
@@ -695,7 +753,7 @@ async def transfer_to_event(group_id: int):
     confirmed ``event_transfer`` here plus a paid donation in the pot, written
     together. With ``event_name`` instead, the GP goes to an event run outside
     DropTracker: only the bank row is written, and ``created_at`` may
-    backdate it."""
+    backdate it. ``holder_player_id`` / ``holder_rsn`` names who paid it."""
     user_id = current_user_id()
     manage_ids = manageable_guild_ids(user_id)
     body = await json_body()
@@ -715,6 +773,7 @@ async def transfer_to_event(group_id: int):
         with db_session() as s:
             _load_group_or_404(s, group_id)
             assert_group_admin(s, user_id, group_id, manage_ids)
+            holder_pid, holder_rsn = _holder(s, body)
             now = datetime.utcnow()
             row = GroupBankEntry(
                 group_id=group_id,
@@ -725,6 +784,8 @@ async def transfer_to_event(group_id: int):
                 note=note,
                 event_id=None,
                 event_label=event_name,
+                holder_player_id=holder_pid,
+                holder_rsn=holder_rsn,
                 created_by_user_id=user_id,
                 acted_by_user_id=user_id,
                 created_at=created_at or now,
@@ -759,6 +820,7 @@ async def transfer_to_event(group_id: int):
                     422, "Prize pot is off",
                     "Turn on this event's prize pot before moving GP into it.",
                 )
+            holder_pid, holder_rsn = _holder(s, body)
             now = datetime.utcnow()
             buyin = EventBuyin(
                 event_id=ev.id,
@@ -784,6 +846,8 @@ async def transfer_to_event(group_id: int):
                 note=note,
                 event_id=ev.id,
                 event_buyin_id=buyin.id,
+                holder_player_id=holder_pid,
+                holder_rsn=holder_rsn,
                 created_by_user_id=user_id,
                 acted_by_user_id=user_id,
                 created_at=now,

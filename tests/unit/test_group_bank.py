@@ -161,26 +161,33 @@ class TestMergeDonors:
         assert top[0]["player_id"] == 19
 
 
+def _g(kind, source, total, count=1, pid=None, rsn=None, hpid=None, hrsn=None):
+    """One grouped row as ``_summary`` selects it for ``roll_up``."""
+    return (kind, source, pid, rsn, hpid, hrsn, total, count)
+
+
 class TestCofferMoves:
     ROWS = [
-        ("donation", "coffer", 45_000_000, 9),
-        ("donation", "staff", 1_000, 1),
-        ("withdrawal", "coffer", -36_069_421, 2),
-        ("withdrawal", "staff", -500, 1),
-        ("payout", "staff", -2_000, 1),
+        _g("donation", "coffer", 45_000_000, 9, rsn="Zez"),
+        _g("donation", "staff", 1_000, 1, rsn="Zez"),
+        _g("withdrawal", "coffer", -36_069_421, 2, rsn="xCmase"),
+        _g("withdrawal", "staff", -500, 1),
+        _g("payout", "staff", -2_000, 1, rsn="Winner"),
     ]
 
     def test_off_everything_counts(self):
-        kind_sums, held = gbs.split_coffer_moves(self.ROWS, False)
-        t = gbs.totals_from_kind_sums(kind_sums)
-        assert held == 0
+        out = gbs.roll_up(self.ROWS, False, {})
+        t = gbs.totals_from_kind_sums(out["kind_sums"])
+        assert out["held"] == 0 and out["holders"] == []
         assert t["withdrawn"] == 36_069_921
         assert t["balance"] == 45_001_000 - 36_069_921 - 2_000
 
     def test_on_coffer_withdrawals_leave_the_totals(self):
-        kind_sums, held = gbs.split_coffer_moves(self.ROWS, True)
-        t = gbs.totals_from_kind_sums(kind_sums)
-        assert held == 36_069_421
+        out = gbs.roll_up(self.ROWS, True, {})
+        t = gbs.totals_from_kind_sums(out["kind_sums"])
+        # Held by whoever took it out of the coffer.
+        assert out["held"] == 36_069_421
+        assert out["holders"] == [{"player_id": None, "rsn": "xCmase", "held": 36_069_421}]
         # A withdrawal staff record is still GP leaving the clan.
         assert t["withdrawn"] == 500 and t["payouts"] == 2_000
         assert t["paid_out"] == 2_500
@@ -194,6 +201,108 @@ class TestCofferMoves:
         assert not gbs.is_coffer_move("withdrawal", "staff", True)
         assert not gbs.is_coffer_move("donation", "coffer", True)
         assert not gbs.is_coffer_move("payout", "coffer", True)
+
+
+class TestHolders:
+    """Suggestion #160 (2026-11-07): who holds the clan's GP outside the coffer."""
+
+    M = 1_000_000
+    # The thread's flow, coffer withdrawals neutral: a donation, an admin
+    # takes it out to hold it, pays a prize from it, hands some to another
+    # admin, who returns part of it, and an outside event is funded.
+    ROWS = [
+        _g("donation", "coffer", 50 * M, rsn="Zez"),
+        _g("withdrawal", "coffer", -50 * M, rsn="Mahj"),
+        _g("payout", "staff", -20 * M, rsn="Winner", hrsn="Mahj"),
+        _g("holder_transfer", "staff", 10 * M, rsn="Croc", hrsn="Mahj"),
+        _g("donation", "coffer", 5 * M, rsn="Croc", hrsn="Croc"),
+        _g("event_transfer", "staff", -3 * M, hrsn="mahj"),
+    ]
+
+    def test_flow_from_the_thread(self):
+        out = gbs.roll_up(self.ROWS, True, {})
+        t = gbs.totals_from_kind_sums(out["kind_sums"])
+        held = {h["rsn"]: h["held"] for h in out["holders"]}
+        # "mahj" is the same person as "Mahj" (OSRS names ignore case).
+        assert held == {"Mahj": 17 * self.M, "Croc": 5 * self.M}
+        assert out["held"] == 22 * self.M
+        # The return and the hand-over never touch the balance: what's left
+        # is 5M in the coffer plus 22M with staff.
+        assert t["balance"] == 27 * self.M
+        assert t["donated"] == 50 * self.M and t["donation_count"] == 1
+        assert t["payouts"] == 20 * self.M and t["transferred"] == 3 * self.M
+        assert t["withdrawn"] == 0
+        # A return isn't a donation.
+        assert out["by_name"] == [("Zez", 50 * self.M, 1)]
+
+    def test_named_holder_keeps_a_staff_withdrawal_with_the_setting_off(self):
+        rows = [
+            _g("adjustment", "staff", 100 * self.M),
+            _g("withdrawal", "staff", -40 * self.M, rsn="Mahj", hrsn="Mahj"),
+            _g("withdrawal", "staff", -1 * self.M, rsn="Mahj"),
+            _g("withdrawal", "coffer", -7 * self.M, rsn="Croc"),
+        ]
+        out = gbs.roll_up(rows, False, {})
+        t = gbs.totals_from_kind_sums(out["kind_sums"])
+        assert out["holders"] == [{"player_id": None, "rsn": "Mahj", "held": 40 * self.M}]
+        # Unnamed withdrawals are still spent, coffer ones too while it's off.
+        assert t["withdrawn"] == 8 * self.M
+        assert t["balance"] == 92 * self.M
+
+    def test_explicit_holder_beats_the_withdrawer(self):
+        rows = [_g("withdrawal", "coffer", -9, rsn="Alt", hrsn="Main")]
+        out = gbs.roll_up(rows, True, {})
+        assert [(h["rsn"], h["held"]) for h in out["holders"]] == [("Main", 9)]
+
+    def test_tracked_accounts_use_their_current_name(self):
+        rows = [
+            _g("withdrawal", "coffer", -9, pid=5, rsn="Old name"),
+            _g("payout", "staff", -4, rsn="Winner", hpid=5, hrsn="Old name"),
+        ]
+        out = gbs.roll_up(rows, True, {5: "New name"})
+        assert out["holders"] == [{"player_id": 5, "rsn": "New name", "held": 5}]
+
+    def test_opening_holdings_count_in_the_balance(self):
+        rows = [_g("adjustment", "staff", 30, hrsn="Mahj")]
+        out = gbs.roll_up(rows, False, {})
+        assert out["held"] == 30
+        assert gbs.totals_from_kind_sums(out["kind_sums"])["balance"] == 30
+
+    def test_paid_out_everything_stays_listed_and_overdrawn_goes_negative(self):
+        rows = [
+            _g("withdrawal", "staff", -10, hrsn="Mahj"),
+            _g("payout", "staff", -10, rsn="W", hrsn="Mahj"),
+            _g("payout", "staff", -3, rsn="W", hrsn="Croc"),
+        ]
+        out = gbs.roll_up(rows, False, {})
+        assert [(h["rsn"], h["held"]) for h in out["holders"]] == [("Mahj", 0), ("Croc", -3)]
+
+    def test_held_moves(self):
+        assert gbs.is_held_move("holder_transfer", "staff", True, False)
+        assert gbs.is_held_move("withdrawal", "staff", True, False)
+        assert gbs.is_held_move("donation", "coffer", True, False)
+        assert gbs.is_held_move("withdrawal", "coffer", False, True)
+        assert not gbs.is_held_move("donation", "coffer", False, True)
+        assert not gbs.is_held_move("payout", "staff", True, True)
+        assert not gbs.is_held_move("adjustment", "staff", True, True)
+
+    def test_holder_key_follows_name_equivalence(self):
+        assert gbs.holder_key(None, " Iron_Mahj ") == gbs.holder_key(None, "iron-mahj")
+        assert gbs.holder_key(7, "anything") == ("p", 7)
+        assert gbs.holder_key(None, "  ") is None
+
+    def test_holder_transfer_rules(self):
+        gbs.check_holder("holder_transfer", (None, "Croc"), (None, "Mahj"))
+        gbs.check_holder("payout", (None, "W"), (None, None))
+        with pytest.raises(gbs.BankRuleError):
+            gbs.check_holder("holder_transfer", (None, "Croc"), (None, None))
+        with pytest.raises(gbs.BankRuleError):
+            gbs.check_holder("holder_transfer", (None, "Mahj"), (None, "mahj"))
+        assert gbs.signed_amount("holder_transfer", 5) == 5
+
+    def test_totals_never_count_a_hand_over(self):
+        t = gbs.totals_from_kind_sums([("donation", 10, 1), ("holder_transfer", 4, 1)])
+        assert t["balance"] == 10 and t["adjustments"] == 0
 
 
 class TestEntryDate:
@@ -301,6 +410,7 @@ class _Rec:
     id = group_id = kind = status = player_id = rsn = amount = None
     created_at = event_buyin_id = event_id = source = user_id = None
     note = review_note = proof_url = confirmed_at = event_label = None
+    holder_player_id = holder_rsn = None
 
     def __init__(self, **kw):
         self.id = None
@@ -325,6 +435,7 @@ def _entry(**kw):
         source="member", player_id=None, rsn="Zez", user_id=None, note=None,
         review_note=None, proof_url=None, event_id=None, event_buyin_id=None,
         event_label=None, created_at=None, confirmed_at=None, acted_by_user_id=None,
+        holder_player_id=None, holder_rsn=None,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -494,6 +605,132 @@ class TestRecordEntry:
 # --------------------------------------------------------------------------- #
 # update / review
 # --------------------------------------------------------------------------- #
+class TestHolderWrites:
+    """Suggestion #160: recording who holds the GP."""
+
+    async def test_withdrawal_into_someones_keeping(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "withdrawal", "amount": 40_000_000, "rsn": "Mahj", "holder_rsn": "Mahj"},
+        )
+        assert r.status_code == 200, await r.get_data()
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert row.amount == -40_000_000 and row.holder_rsn == "Mahj"
+        assert '"holder_rsn": "Mahj"' in next(a for a in s.added if isinstance(a, _RecAudit)).after
+
+    async def test_holder_transfer_needs_both_people(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "holder_transfer", "amount": 10, "rsn": "Croc"},
+        )
+        assert r.status_code == 422 and not s.committed
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "holder_transfer", "amount": 10, "holder_rsn": "Mahj"},
+        )
+        assert r.status_code == 422 and not s.committed
+
+    async def test_holder_transfer_to_the_same_person_refused(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "holder_transfer", "amount": 10, "rsn": "Mahj", "holder_rsn": "mahj"},
+        )
+        assert r.status_code == 422
+
+    async def test_holder_transfer_stored_positive(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "holder_transfer", "amount": 10, "rsn": "Croc", "holder_rsn": "Mahj"},
+        )
+        assert r.status_code == 200, await r.get_data()
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert (row.amount, row.rsn, row.holder_rsn) == (10, "Croc", "Mahj")
+
+    async def test_typed_holder_links_a_tracked_account(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        monkeypatch.setattr(
+            gb, "_match_player",
+            lambda s, rsn: SimpleNamespace(player_id=5, player_name="Mahj", user_id=None)
+            if rsn == "mahj" else None,
+        )
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "payout", "amount": 3, "rsn": "Winner", "holder_rsn": "mahj"},
+        )
+        assert r.status_code == 200
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert (row.holder_player_id, row.holder_rsn) == (5, "Mahj")
+
+    async def test_mark_a_deposit_as_returned_and_undo_it(self, client, monkeypatch):
+        row = _entry(status="confirmed", source="coffer", rsn="Croc", confirmed_at=datetime(2026, 11, 7))
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"holder_rsn": "Croc"})
+        assert r.status_code == 200, await r.get_data()
+        assert row.holder_rsn == "Croc" and row.holder_player_id is None
+        # Editing doesn't post (only a first confirmation does).
+        assert s.queued_posts == []
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9",
+                               json={"holder_rsn": None, "holder_player_id": None})
+        assert r.status_code == 200
+        assert row.holder_rsn is None
+
+    async def test_a_hand_over_cant_lose_its_holder(self, client, monkeypatch):
+        row = _entry(kind="holder_transfer", amount=10, status="confirmed", rsn="Croc",
+                     holder_rsn="Mahj")
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"holder_rsn": ""})
+        assert r.status_code == 422 and not s.committed
+
+    async def test_pot_transfer_records_who_paid(self, client, monkeypatch):
+        import web_api.routes.events as evr
+
+        monkeypatch.setattr(evr, "_bump", lambda *a, **k: None)
+        s = _S([_GROUP], [_event(group_id=42, buyins_enabled=True)])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/transfer",
+            json={"event_id": 1, "amount": 7_500, "holder_rsn": "Mahj"},
+        )
+        assert r.status_code == 200, await r.get_data()
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert row.holder_rsn == "Mahj" and row.amount == -7_500
+
+    async def test_pot_transfer_holder_is_editable(self, client, monkeypatch):
+        row = _entry(kind="event_transfer", amount=-5, status="confirmed", rsn=None,
+                     event_id=1, event_buyin_id=3)
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"holder_rsn": "Mahj"})
+        assert r.status_code == 200, await r.get_data()
+        assert row.holder_rsn == "Mahj"
+
+    async def test_outside_event_records_who_paid(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/transfer",
+            json={"event_name": "Weekly PvM", "amount": 2, "holder_rsn": "Croc"},
+        )
+        assert r.status_code == 200, await r.get_data()
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert row.holder_rsn == "Croc" and row.event_label == "Weekly PvM"
+
+
 class TestUpdateEntry:
     async def test_confirm_pending_stamps_confirmed_at(self, client, monkeypatch):
         row = _entry()
@@ -840,12 +1077,14 @@ class TestGetBank:
         monkeypatch.setattr(gb, "resolve_group_role", lambda *a, **k: role)
         monkeypatch.setattr(gb, "_bank_visibility", lambda s, gid: show)
         monkeypatch.setattr(gb, "_pending_count", lambda s, gid: 4)
+        monkeypatch.setattr(gb, "_on_balance", lambda neutral: True)
         monkeypatch.setattr(gb, "_summary", lambda s, gid: {
             "totals": gbs.totals_from_kind_sums([("donation", 9_000, 2), ("payout", -1_000, 1)]),
             "top_donors": [{"player_id": None, "rsn": "Zez", "total": 9_000, "count": 2}],
             "donor_count": 1,
             "coffer_withdrawals_neutral": neutral,
             "held_outside_coffer": 5_000 if neutral else 0,
+            "holders": [{"player_id": None, "rsn": "Mahj", "held": 5_000}] if neutral else [],
         })
 
     async def test_public_headline(self, client, monkeypatch):
@@ -865,18 +1104,23 @@ class TestGetBank:
         # Staff notes and the queue size never reach the public.
         assert body["recent"][0]["note"] is None
         assert body["pending_count"] == 0
+        # Who holds the GP is staff-only.
+        assert body["holders"] is None
 
     async def test_neutral_coffer_moves_reported_and_kept_off_the_activity_list(
         self, client, monkeypatch
     ):
         s = _S([_GROUP], [])
-        self._wire_read(monkeypatch, s, neutral=True)
+        self._wire_read(monkeypatch, s, viewer=7, role="admin", neutral=True)
         clauses = []
-        monkeypatch.setattr(gb, "_not_coffer_move", lambda: clauses.append(1) or True)
+        monkeypatch.setattr(gb, "_on_balance", lambda neutral: clauses.append(neutral) or True)
         body = await (await client.get("/api/v1/groups/42/bank")).get_json()
         assert body["coffer_withdrawals_neutral"] is True
         assert body["held_outside_coffer_total"]["value"] == 5_000
-        assert clauses == [1]
+        assert body["holders"] == [
+            {"player_id": None, "rsn": "Mahj", "held": {"value": 5_000, "value_formatted": body["holders"][0]["held"]["value_formatted"]}}
+        ]
+        assert clauses == [True]
 
     async def test_hidden_from_public_when_turned_off(self, client, monkeypatch):
         s = _S([_GROUP])
@@ -911,20 +1155,38 @@ class _SS(_S):
         return _QS(self._batches.pop(0))
 
 
+class TestOnBalanceSQL:
+    def _sql(self, monkeypatch, neutral):
+        from db.models.group_bank import GroupBankEntry
+
+        monkeypatch.setattr(gb, "GroupBankEntry", GroupBankEntry)
+        return str(gb._on_balance(neutral).compile(compile_kwargs={"literal_binds": True}))
+
+    def test_held_moves_left_out_and_coffer_rule_follows_the_setting(self, monkeypatch):
+        off, on = self._sql(monkeypatch, False), self._sql(monkeypatch, True)
+        for sql in (off, on):
+            assert "holder_transfer" in sql and "holder_player_id IS NOT NULL" in sql
+        assert "'coffer'" not in off and "'coffer'" in on
+
+
 class TestSummarySQL:
-    async def test_summary_groups_by_source_and_applies_the_setting(self, monkeypatch):
-        sums = [
-            ("donation", "coffer", 10_000, 2),
-            ("withdrawal", "coffer", -4_000, 1),
+    async def test_summary_rolls_up_one_grouped_query(self, monkeypatch):
+        grouped = [
+            _g("donation", "coffer", 10_000, 2, pid=5, rsn="Old"),
+            _g("withdrawal", "coffer", -4_000, 1, rsn="Mahj"),
+            _g("payout", "staff", -1_000, 1, rsn="W", hrsn="Mahj"),
         ]
-        s = _S(sums, [], [])
+        # The grouped rows, then current names for the tracked accounts.
+        s = _S(grouped, [(5, "New")])
         monkeypatch.setattr(gb, "GroupBankEntry", MagicMock())
         monkeypatch.setattr(gb, "_coffer_withdrawals_neutral", lambda s, gid: True)
         out = gb._summary(s, 42)
         assert out["coffer_withdrawals_neutral"] is True
-        assert out["held_outside_coffer"] == 4_000
-        assert out["totals"]["balance"] == 10_000
-        assert out["totals"]["paid_out"] == 0
+        assert out["held_outside_coffer"] == 3_000
+        assert out["holders"] == [{"player_id": None, "rsn": "Mahj", "held": 3_000}]
+        assert out["totals"]["balance"] == 9_000
+        assert out["totals"]["paid_out"] == 1_000
+        assert out["top_donors"][0]["rsn"] == "New" and out["donor_count"] == 1
 
 
 class TestListEntries:

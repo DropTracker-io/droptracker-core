@@ -16,8 +16,10 @@ _NOW = datetime(2026, 11, 5, 12, 0, 0)
 # Which entries post
 # --------------------------------------------------------------------------- #
 class TestIsPostable:
-    def _ok(self, kind, source="staff", created=_NOW, *, outflows=False, neutral=False):
-        return gbd.is_postable(kind, source, created, _NOW, outflows=outflows, neutral=neutral)
+    def _ok(self, kind, source="staff", created=_NOW, *, outflows=False, neutral=False,
+            holder=False):
+        return gbd.is_postable(kind, source, created, _NOW, outflows=outflows, neutral=neutral,
+                               has_holder=holder)
 
     def test_donations_post_by_default(self):
         assert self._ok("donation")
@@ -35,6 +37,14 @@ class TestIsPostable:
         assert not self._ok("withdrawal", "coffer", outflows=True, neutral=True)
         # A withdrawal staff record is still GP leaving.
         assert self._ok("withdrawal", "staff", outflows=True, neutral=True)
+
+    def test_gp_moving_between_coffer_and_holders_does_not_post(self):
+        # Suggestion #160: a withdrawal someone holds, a returned deposit, a
+        # hand-over between holders. A payout from a holder still posts.
+        assert not self._ok("withdrawal", outflows=True, holder=True)
+        assert not self._ok("donation", "coffer", holder=True)
+        assert not self._ok("holder_transfer", outflows=True, holder=True)
+        assert self._ok("payout", outflows=True, holder=True)
 
     def test_history_typed_in_does_not_post(self):
         assert not self._ok("donation", created=_NOW - timedelta(days=30))
@@ -242,7 +252,7 @@ class _Session:
 def _row(**kw):
     base = dict(id=5, kind="donation", source="coffer", amount=5_000_000, player_id=None,
                 rsn="Zezima", proof_url=None, created_at=_NOW, confirmed_at=_NOW,
-                event_id=None, event_label=None)
+                event_id=None, event_label=None, holder_player_id=None, holder_rsn=None)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -288,6 +298,9 @@ class TestQueueEntryPosts:
         queue["config"]["bank_show_donors"] = "false"
         gbd.queue_entry_posts(_Session(), 363, [_row()])
         assert "Zezima" not in str(queue["sent"][0]["embed"])
+
+    def test_returned_deposit_does_not_post(self, queue):
+        assert gbd.queue_entry_posts(_Session(), 363, [_row(holder_rsn="Zezima")]) == 0
 
     def test_outflow_needs_the_switch(self, queue):
         withdrawal = _row(kind="withdrawal", amount=-5)

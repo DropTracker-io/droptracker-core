@@ -18,17 +18,20 @@ from typing import Iterable, Optional
 
 # Re-declared locally (not imported from db.models) so this module stays
 # stdlib-only. Keep in sync with db/models/group_bank.py.
-BANK_ENTRY_KINDS = ("donation", "withdrawal", "payout", "event_transfer", "adjustment")
+BANK_ENTRY_KINDS = (
+    "donation", "withdrawal", "payout", "event_transfer", "adjustment", "holder_transfer",
+)
 INFLOW_KINDS = ("donation",)
 OUTFLOW_KINDS = ("withdrawal", "payout", "event_transfer")
 BANK_ENTRY_STATUSES = ("pending", "confirmed", "rejected", "void")
 
 # Kinds a person can record directly. Transfers into an event pot go through
 # their own route, which writes the matching prize-pot row in the same commit.
-RECORDABLE_KINDS = ("donation", "withdrawal", "payout", "adjustment")
+RECORDABLE_KINDS = ("donation", "withdrawal", "payout", "adjustment", "holder_transfer")
 
 # Kinds that must name the other side: who gave the GP, or who received it.
-NAMED_KINDS = ("donation", "payout")
+# A holder transfer names who received it; the holder is who passed it on.
+NAMED_KINDS = ("donation", "payout", "holder_transfer")
 
 # Same ceiling as the prize pot (services/event_prizes.MAX_BUYIN_AMOUNT): far
 # above any real clan bank, far below signed BIGINT, so a fat-fingered value
@@ -127,7 +130,8 @@ def signed_amount(kind: str, value) -> int:
 
     Donations and outflows are entered as a positive number of GP and stored
     with the kind's sign. An adjustment carries its own sign (an opening
-    balance is positive, a correction may be negative) and must not be 0.
+    balance is positive, a correction may be negative) and must not be 0. A
+    holder transfer is stored positive: it never touches the balance.
     """
     if kind not in BANK_ENTRY_KINDS:
         raise BankRuleError("Invalid kind", f"'kind' must be one of {list(BANK_ENTRY_KINDS)}.")
@@ -216,24 +220,6 @@ def is_coffer_move(kind: str, source: Optional[str], coffer_withdrawals_neutral:
     return bool(coffer_withdrawals_neutral) and kind == "withdrawal" and source == "coffer"
 
 
-def split_coffer_moves(kind_source_sums: Iterable, coffer_withdrawals_neutral: bool) -> tuple:
-    """``(kind, source, SUM(amount), COUNT(*))`` over confirmed rows ->
-    ``(kind_sums for totals_from_kind_sums, gp held outside the coffer)``.
-
-    Coffer moves (see :func:`is_coffer_move`) leave the totals; what they
-    moved is reported on its own, as a positive number."""
-    by_kind: dict = {}
-    held = 0
-    for kind, source, total, count in kind_source_sums:
-        total = int(total or 0)
-        if is_coffer_move(kind, source, coffer_withdrawals_neutral):
-            held += -total
-            continue
-        t, c = by_kind.get(kind, (0, 0))
-        by_kind[kind] = (t + total, c + int(count or 0))
-    return [(k, t, c) for k, (t, c) in by_kind.items()], held
-
-
 def totals_from_kind_sums(kind_sums: Iterable) -> dict:
     """Headline numbers from ``(kind, SUM(amount), COUNT(*))`` over confirmed rows.
 
@@ -241,6 +227,8 @@ def totals_from_kind_sums(kind_sums: Iterable) -> dict:
     ``withdrawn`` / ``payouts`` / ``transferred`` split it by kind (a coffer
     withdrawal is not a prize payout, and the page says which is which).
     ``adjustments`` keeps its sign. ``balance`` is everything added together.
+    Holder transfers never count (see :func:`roll_up`, which leaves every
+    held move out before this runs).
     """
     donated = paid_out = adjustments = 0
     donation_count = 0
@@ -253,7 +241,7 @@ def totals_from_kind_sums(kind_sums: Iterable) -> dict:
             donation_count += int(count or 0)
         elif kind in OUTFLOW_KINDS:
             paid_out += -total
-        else:
+        elif kind == "adjustment":
             adjustments += total
     return {
         "balance": donated - paid_out + adjustments,
@@ -265,6 +253,132 @@ def totals_from_kind_sums(kind_sums: Iterable) -> dict:
         "adjustments": adjustments,
         "donation_count": donation_count,
         "by_kind": by_kind,
+    }
+
+
+# --- Holders (suggestion #160, web159a) --------------------------------------
+# The coffer holds at most 50M, so clans keep GP with their staff. A row's
+# holder (holder_player_id / holder_rsn) is the person whose keeping it moved
+# GP into or out of:
+#   withdrawal       -> the GP went to the holder; the clan still has it
+#   donation         -> held GP went back into the coffer (a return)
+#   holder_transfer  -> passed from the holder to the named person
+#   payout / event_transfer / adjustment -> paid from (or, for a positive
+#                       adjustment, recorded as held by) the holder
+# The first three move GP within the clan, so they stay out of the balance.
+# A synced coffer withdrawal with no holder set is held by whoever withdrew
+# it while bank_coffer_withdrawals_neutral is on (see is_coffer_move).
+
+def is_held_move(kind: str, source: Optional[str], has_holder: bool,
+                 coffer_withdrawals_neutral: bool) -> bool:
+    """True for a row that moves GP between the coffer and the staff who hold
+    it, or between two of them: listed in the ledger, kept out of the
+    balance and the totals."""
+    if kind == "holder_transfer":
+        return True
+    if has_holder and kind in ("withdrawal", "donation"):
+        return True
+    return is_coffer_move(kind, source, coffer_withdrawals_neutral)
+
+
+def holder_key(player_id, rsn) -> Optional[tuple]:
+    """Who a holder is: a tracked account by id, a free-text name under OSRS
+    name equivalence (case, spaces, hyphens and underscores alike)."""
+    if player_id is not None:
+        return ("p", int(player_id))
+    label = " ".join(str(rsn or "").replace("-", " ").replace("_", " ").split()).lower()
+    return ("n", label) if label else None
+
+
+def holder_moves(kind: str, source: Optional[str], amount: int, player: tuple, holder: tuple,
+                 coffer_withdrawals_neutral: bool) -> list:
+    """``[((player_id, rsn), delta), ...]``: how one confirmed row changes
+    what each person holds. ``player`` is the row's other side and
+    ``holder`` its holder, both ``(player_id, rsn)``; ``amount`` is the
+    stored, signed GP."""
+    amount = int(amount or 0)
+    has_holder = holder_key(*holder) is not None
+    if kind == "holder_transfer":
+        return [(holder, -amount), (player, amount)] if has_holder else []
+    if kind in ("withdrawal", "donation"):
+        if has_holder:
+            # Stored negative for a withdrawal (into their keeping), positive
+            # for a return (out of it).
+            return [(holder, -amount)]
+        if is_coffer_move(kind, source, coffer_withdrawals_neutral) and holder_key(*player):
+            return [(player, -amount)]
+        return []
+    if has_holder:
+        # Outflows are stored negative: paying out lowers what they hold.
+        return [(holder, amount)]
+    return []
+
+
+def check_holder(kind: str, player: tuple, holder: tuple) -> None:
+    """Raise unless a row's holder fits its kind: a holder transfer needs one,
+    and it can't hand the GP to the same person."""
+    if kind != "holder_transfer":
+        return
+    hk = holder_key(*holder)
+    if hk is None:
+        raise BankRuleError(
+            "Holder required", "Name who passed the GP on ('holder_player_id' or 'holder_rsn').",
+        )
+    if hk == holder_key(*player):
+        raise BankRuleError("Same person", "The GP has to go to someone else.")
+
+
+def roll_up(rows: Iterable, coffer_withdrawals_neutral: bool, player_names: dict) -> dict:
+    """Everything the headline needs, from confirmed rows grouped by
+    ``(kind, source, player_id, rsn, holder_player_id, holder_rsn, SUM(amount),
+    COUNT(*))``.
+
+    Returns ``kind_sums`` (for :func:`totals_from_kind_sums`; held moves
+    left out), ``donors`` (``by_player`` / ``by_name`` for
+    :func:`merge_donors`; returns are not donations), ``holders`` (one per
+    person, most held first; someone who held GP and paid it all out stays
+    listed at 0) and ``held`` (their sum: the clan's GP outside the coffer).
+    """
+    by_kind: dict = {}
+    by_player: dict = {}
+    by_name: dict = {}
+    holders: dict = {}
+    for kind, source, pid, rsn, hpid, hrsn, total, count in rows:
+        total = int(total or 0)
+        count = int(count or 0)
+        has_holder = holder_key(hpid, hrsn) is not None
+        for (who_pid, who_rsn), delta in holder_moves(
+            kind, source, total, (pid, rsn), (hpid, hrsn), coffer_withdrawals_neutral
+        ):
+            key = holder_key(who_pid, who_rsn)
+            if key is None:
+                continue
+            entry = holders.setdefault(key, {
+                "player_id": who_pid,
+                "rsn": player_names.get(who_pid) if who_pid is not None else None,
+                "held": 0,
+            })
+            if entry["rsn"] is None:
+                entry["rsn"] = (str(who_rsn).strip() or None) if who_rsn else None
+            entry["held"] += delta
+        if is_held_move(kind, source, has_holder, coffer_withdrawals_neutral):
+            continue
+        t, c = by_kind.get(kind, (0, 0))
+        by_kind[kind] = (t + total, c + count)
+        if kind == "donation":
+            if pid is not None:
+                t, c = by_player.get(pid, (0, 0))
+                by_player[pid] = (t + total, c + count)
+            else:
+                t, c = by_name.get(rsn, (0, 0))
+                by_name[rsn] = (t + total, c + count)
+    listed = sorted(holders.values(), key=lambda h: (-h["held"], (h["rsn"] or "").lower()))
+    return {
+        "kind_sums": [(k, t, c) for k, (t, c) in by_kind.items()],
+        "by_player": [(p, t, c) for p, (t, c) in by_player.items()],
+        "by_name": [(n, t, c) for n, (t, c) in by_name.items()],
+        "holders": listed,
+        "held": sum(h["held"] for h in listed),
     }
 
 

@@ -27,8 +27,11 @@ from sqlalchemy import (
 from .base import Base
 
 # group_bank_entries.kind. Donations come in, withdrawals/payouts/transfers go
-# out, adjustments carry their own sign.
-BANK_ENTRY_KINDS = ("donation", "withdrawal", "payout", "event_transfer", "adjustment")
+# out, adjustments carry their own sign. A holder_transfer passes GP between two
+# staff holding it for the clan and never touches the balance (web159a).
+BANK_ENTRY_KINDS = (
+    "donation", "withdrawal", "payout", "event_transfer", "adjustment", "holder_transfer",
+)
 BANK_INFLOW_KINDS = ("donation",)
 BANK_OUTFLOW_KINDS = ("withdrawal", "payout", "event_transfer")
 # Only "confirmed" rows count toward the balance. "pending" waits in the staff
@@ -79,6 +82,13 @@ class GroupBankEntry(Base):
     # its own prize pool): the clan's name for it. event_id is NULL then, and
     # no prize-pot row is written (web158a).
     event_label = Column(String(64), nullable=True)
+    # The staff member whose keeping this moved GP into or out of (web159a,
+    # services/group_bank holder rules): who holds a withdrawal, who returned
+    # a deposit, who paid a payout or funded an event, who passed GP on in a
+    # holder_transfer. Same pairing as player_id/rsn. Not a ForeignKey, like
+    # event_id: it only names a person and must never block a player merge.
+    holder_player_id = Column(Integer, nullable=True)
+    holder_rsn = Column(String(24), nullable=True)
     # Coffer-synced rows only: the deterministic reference of the broadcast
     # that wrote it (services/group_bank.coffer_ref). Unique per group, so a
     # line relayed by several clanmates books once. NULL everywhere else.

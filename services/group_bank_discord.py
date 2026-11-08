@@ -16,9 +16,11 @@ Two surfaces, both opt-in by picking a channel in the group's bank settings:
 
 An entry posts once, the first time it is confirmed. Entries dated more than
 :data:`HISTORY_AFTER` before their confirmation are history a clan is typing
-in, not news, so they update the board without a post. Synced coffer
-withdrawals don't post while ``bank_coffer_withdrawals_neutral`` is on, the
-same rule that keeps them out of the totals. Names follow ``bank_show_donors``:
+in, not news, so they update the board without a post. GP moving between the
+coffer and the staff who hold it (a withdrawal they keep, a deposit they
+return, a hand-over between them, and synced coffer withdrawals while
+``bank_coffer_withdrawals_neutral`` is on) doesn't post, the same rule that
+keeps it out of the totals (``services/group_bank.is_held_move``). Names follow ``bank_show_donors``:
 with it off, posts and the board show amounts only.
 
 Stdlib-only at import time (DB, Redis and Discord are imported lazily), so the
@@ -95,14 +97,17 @@ def short_gp(amount) -> str:
 
 
 def is_postable(kind: str, source: Optional[str], created_at: Optional[datetime],
-                confirmed_at: datetime, *, outflows: bool, neutral: bool) -> bool:
+                confirmed_at: datetime, *, outflows: bool, neutral: bool,
+                has_holder: bool = False) -> bool:
     """Whether a freshly confirmed entry gets an activity post."""
-    from services.group_bank import is_coffer_move
+    from services.group_bank import is_held_move
 
+    if is_held_move(kind, source, has_holder, neutral):
+        return False
     if kind == "donation":
         pass
     elif kind in _OUTFLOW_KINDS:
-        if not outflows or is_coffer_move(kind, source, neutral):
+        if not outflows:
             return False
     else:
         # Adjustments are bookkeeping corrections, not something that happened.
@@ -206,7 +211,7 @@ def board_embed(*, group_id: int, group_name: str, summary: dict,
         {"name": "Donors", "value": f"{int(summary.get('donor_count') or 0):,}", "inline": True},
     ]
     held = int(summary.get("held_outside_coffer") or 0)
-    if summary.get("coffer_withdrawals_neutral") and held:
+    if held:
         fields.append({"name": "Held outside the coffer", "value": gp(held), "inline": True})
     if show_names:
         donors = summary.get("top_donors") or []
@@ -277,18 +282,18 @@ def mark_board_dirty(group_id: int) -> None:
 
 def _balance(session, group_id: int, neutral: bool) -> int:
     """Confirmed balance, the same number as the route's headline: every
-    confirmed row added up, less synced coffer withdrawals while they're
-    neutral. Runs inside the writer's transaction, so it includes the row
-    being confirmed (autoflush)."""
-    from sqlalchemy import and_, func
+    confirmed row added up, less held moves (the route's ``_on_balance``).
+    Runs inside the writer's transaction, so it includes the row being
+    confirmed (autoflush)."""
+    from sqlalchemy import func
 
     from db import GroupBankEntry
+    from web_api.routes.group_bank import _on_balance
 
     q = session.query(func.coalesce(func.sum(GroupBankEntry.amount), 0)).filter(
         GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed",
+        _on_balance(neutral),
     )
-    if neutral:
-        q = q.filter(~and_(GroupBankEntry.kind == "withdrawal", GroupBankEntry.source == "coffer"))
     return int(q.scalar() or 0)
 
 
@@ -320,7 +325,8 @@ def queue_entry_posts(session, group_id: int, entries: list) -> int:
         wanted = [
             e for e in entries
             if is_postable(e.kind, e.source, e.created_at, e.confirmed_at or now,
-                           outflows=outflows, neutral=neutral)
+                           outflows=outflows, neutral=neutral,
+                           has_holder=e.holder_player_id is not None or bool(e.holder_rsn))
         ]
         if not wanted:
             return 0
@@ -400,7 +406,7 @@ def build_board(session, group_id: int, channel_id: str) -> Optional[dict]:
     """``{"embed", "hash"}`` for a group's board, from the same queries as
     the group page's bank card."""
     from db import Group
-    from web_api.routes.group_bank import _bank_visibility, _decorate, _not_coffer_move, _summary
+    from web_api.routes.group_bank import _bank_visibility, _decorate, _on_balance, _summary
     from db import GroupBankEntry
 
     group_name = session.query(Group.group_name).filter(Group.group_id == group_id).scalar()
@@ -410,9 +416,8 @@ def build_board(session, group_id: int, channel_id: str) -> Optional[dict]:
     summary = _summary(session, group_id)
     q = session.query(GroupBankEntry).filter(
         GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed",
+        _on_balance(bool(summary.get("coffer_withdrawals_neutral"))),
     )
-    if summary.get("coffer_withdrawals_neutral"):
-        q = q.filter(_not_coffer_move())
     rows = (
         q.order_by(GroupBankEntry.created_at.desc(), GroupBankEntry.id.desc())
         .limit(BOARD_RECENT_LIMIT)

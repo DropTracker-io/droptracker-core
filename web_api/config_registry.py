@@ -1326,7 +1326,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Coffer withdrawals stay in the bank",
         "category": "bank",
         "type": "boolean",
-        "help": "Turn on if your admins take GP out of the coffer to hold it, since the coffer holds at most 50M. Synced withdrawals then show in the ledger without lowering the balance, and only payouts and event funding count as GP taken out. If held GP goes back into the coffer, remove that deposit so it isn't counted twice.",
+        "help": "Turn on if your admins take GP out of the coffer to hold it, since the coffer holds at most 50M. Synced withdrawals then show in the ledger without lowering the balance, and only payouts and event funding count as GP taken out. Each withdrawal counts as held by whoever made it, and the Holders list shows who has what. If held GP goes back into the coffer, mark that deposit as returned so it isn't counted twice.",
         "default": False,
     },
     # Discord (suggestion #230, services/group_bank_discord): a post per
