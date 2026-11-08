@@ -515,6 +515,23 @@ class TestLootKeyCollapse:
         kill = pvp.collapse_pvp_bundle([_key_item("Abyssal whip", 4151, 1, 1, "g1")])[0]
         assert normalize_submission_type(kill["type"]) == "pvp_kill"
 
+    def test_the_webhook_reader_hands_keys_to_the_collapse(self):
+        """bots/webhook_bot.build_message_bundle skipped every "Loot Chest"
+        embed before collapse_pvp_bundle saw it, so not one webhook user's
+        key was ever recorded (2026-11-08). Source-scanned: importing the
+        reader starts Sentry and builds a bot client."""
+        import ast
+
+        path = os.path.join(os.path.dirname(__file__), "..", "..", "bots", "webhook_bot.py")
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        builder = next(node for node in ast.walk(tree)
+                       if isinstance(node, ast.FunctionDef)
+                       and node.name == "build_message_bundle")
+        literals = {node.value.lower() for node in ast.walk(builder)
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        assert "loot chest" not in literals
+
 
 class TestKeyedKillShape:
     @staticmethod

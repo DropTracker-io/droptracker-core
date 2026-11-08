@@ -776,9 +776,9 @@ def build_message_bundle(message) -> list:
 
         field_names = [field.name for field in embed.fields]
         field_values = [field.value.lower().strip() for field in embed.fields]
-        if "source_type" in field_names and "loot chest" in field_values:
-            # Wilderness loot-key chests: the key's loot is not a drop.
-            continue
+        # Opened Wilderness loot keys ("Loot Chest") must reach
+        # collapse_pvp_bundle below, which files them as PvP loot. This
+        # loop used to skip them, so no webhook user's keys were ever recorded.
 
         # Transport flag for the DB rows only (API vs webhook intake).
         # The events engine no longer derives plugin-vs-manual from
