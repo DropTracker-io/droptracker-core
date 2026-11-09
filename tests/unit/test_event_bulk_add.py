@@ -20,6 +20,7 @@ from tests.unit.test_event_auth_modes import (
     _SessionCM,
     _event,
     _team,
+    use_real_signup_service,
 )
 
 
@@ -36,18 +37,23 @@ def _wire(monkeypatch, session, user_id=7):
     monkeypatch.setattr(evr, "user_group_association", _ASSOC)
     monkeypatch.setattr(evr, "_bump", lambda *a, **k: None)
     monkeypatch.setattr(evr, "_assert_event_admin", lambda *a, **k: None)
+    use_real_signup_service(monkeypatch)
 
 
 def _script_standard(*, event=None, team=None, players=(), eligible=(), placed=(),
-                     adds=True):
+                     adds=True, guests=False):
     """Query order on a standard event with an unbound team:
-    event, team, player resolve, eligibility, existing placements, and — when
-    at least one name is actually added — the web71a buy-in carry-over UPDATE.
-    (Everything after the resolve is only issued when a name resolved.)"""
+    event, team, player resolve, clan memberships (``(player_id, group_id)``;
+    the event's group is 42), existing placements, the event's guest list
+    when someone joins as a guest (web160a), and — when at least one name is
+    actually added — the web71a buy-in carry-over UPDATE. (Everything after
+    the resolve is only issued when a name resolved.)"""
     batches = [[event or _event()], [team if team is not None else _team(4)], list(players)]
     if players:
-        batches.append(list(eligible))
+        batches.append([(pid, 42) for (pid,) in eligible])
         batches.append(list(placed))
+        if guests:
+            batches.append([])   # existing guests (mark_guests)
         if adds:
             batches.append([])   # buy-in carry-over UPDATE (web71a)
     return _S(*batches)
@@ -90,12 +96,14 @@ class TestBulkAddValidation:
 
 class TestBulkAddOutcomes:
     async def test_mixed_outcomes_report_per_name(self, client, monkeypatch):
-        # alice+bob resolve and are eligible; bob is already on this team,
-        # carol is on team 9, "ghost" isn't tracked, dave isn't in the clan.
+        # alice+bob resolve and are members; bob is already on this team,
+        # carol is on team 9, "ghost" isn't tracked, dave isn't in the clan
+        # and joins as a guest (web160a).
         s = _script_standard(
             players=[(1, "Alice"), (2, "Bob"), (3, "Carol"), (5, "Dave")],
             eligible=[(1,), (2,), (3,)],
             placed=[(2, 4), (3, 9)],
+            guests=True,
         )
         _wire(monkeypatch, s)
         r = await client.post(
@@ -103,14 +111,17 @@ class TestBulkAddOutcomes:
         )
         assert r.status_code == 200
         body = await r.get_json()
-        assert body["added"] == [{"id": 1, "name": "Alice"}]
+        assert body["added"] == [{"id": 1, "name": "Alice", "guest": False},
+                                 {"id": 5, "name": "Dave", "guest": True}]
         reasons = {row["name"]: row["reason"] for row in body["skipped"]}
         assert reasons["Bob"] == "Already on this team."
         assert reasons["Carol"] == "Already on another team in this event."
         assert reasons["ghost"] == "No tracked player by that name."
-        assert reasons["Dave"] == "Not a member of a participating clan."
-        # One membership row + one audit row; committed.
-        assert len(s.added) == 2
+        assert "Dave" not in reasons
+        # Two membership rows + Dave's guest row + one audit row; committed.
+        kinds = [type(o).__name__ for o in s.added]
+        assert kinds.count("EventTeamMember") == 2 and kinds.count("EventGuest") == 1
+        assert len(s.added) == 4
         assert s.committed
         # Exactly the scripted queries were consumed.
         assert s._batches == []
@@ -125,7 +136,7 @@ class TestBulkAddOutcomes:
         r = await client.post(BULK, json={"names": ["Alice", " alice ", "ALICE"]})
         assert r.status_code == 200
         body = await r.get_json()
-        assert body["added"] == [{"id": 1, "name": "Alice"}]
+        assert body["added"] == [{"id": 1, "name": "Alice", "guest": False}]
         assert body["skipped"] == []
         assert len(s.added) == 2  # one member + one audit — not three
 
@@ -144,8 +155,8 @@ class TestBulkAddOutcomes:
         assert r.status_code == 200
         body = await r.get_json()
         assert body["added"] == [
-            {"id": 5766416, "name": "1 19"},
-            {"id": 5755902, "name": "tzuk kal lag"},
+            {"id": 5766416, "name": "1 19", "guest": False},
+            {"id": 5755902, "name": "tzuk kal lag", "guest": False},
         ]
         assert body["skipped"] == []
 
@@ -160,21 +171,41 @@ class TestBulkAddOutcomes:
         assert s.added == []
         assert not s.committed
 
-    async def test_clan_bound_team_reason(self, client, monkeypatch):
-        # Team bound to clan 9; the resolved player is not in it.
-        s = _script_standard(
-            team=_team(4, group_id=9),
-            players=[(1, "Alice")],
-            eligible=[],
-            placed=[],
-            adds=False,     # nobody eligible -> no carry-over UPDATE
+    async def test_a_rival_clans_member_is_refused(self, client, monkeypatch):
+        # Clan-vs-clan: team 4 is clan 43's; Alice plays for clan 42.
+        s = _S(
+            [_event(mode="clan_vs_clan")],
+            [_team(4, group_id=43)],
+            [(1, "Alice")],   # player resolve
+            [(42,), (43,)],   # participating groups
+            [(1, 42)],        # Alice's clan memberships
+            [],               # placements
         )
         _wire(monkeypatch, s)
         r = await client.post(BULK, json={"names": ["alice"]})
         assert r.status_code == 200
         body = await r.get_json()
         assert body["added"] == []
-        assert body["skipped"][0]["reason"] == "Not a member of the clan this team represents."
+        assert body["skipped"][0]["reason"] == "In another clan taking part in this event."
+        assert not s.committed
+
+    async def test_someone_in_no_clan_joins_a_clan_team_as_a_guest(self, client, monkeypatch):
+        s = _S(
+            [_event(mode="clan_vs_clan")],
+            [_team(4, group_id=43)],
+            [(1, "Alice")],   # player resolve
+            [(42,), (43,)],   # participating groups
+            [],               # in none of them
+            [],               # placements
+            [],               # existing guests
+            [],               # buy-in carry-over UPDATE (web71a)
+        )
+        _wire(monkeypatch, s)
+        r = await client.post(BULK, json={"names": ["alice"]})
+        body = await r.get_json()
+        assert body["added"] == [{"id": 1, "name": "Alice", "guest": True}]
+        assert s.committed
+        assert s._batches == []
 
     async def test_clan_vs_clan_reads_participants(self, client, monkeypatch):
         # cvc adds one EventGroup query between the team lookup and resolve.
@@ -183,7 +214,7 @@ class TestBulkAddOutcomes:
             [_team(4)],
             [(1, "Alice")],   # player resolve
             [(42,), (43,)],   # participating groups
-            [(1,)],           # eligibility
+            [(1, 42)],        # clan memberships
             [],               # placements
             [],               # buy-in carry-over UPDATE (web71a)
         )
@@ -191,7 +222,7 @@ class TestBulkAddOutcomes:
         r = await client.post(BULK, json={"names": ["alice"]})
         assert r.status_code == 200
         body = await r.get_json()
-        assert body["added"] == [{"id": 1, "name": "Alice"}]
+        assert body["added"] == [{"id": 1, "name": "Alice", "guest": False}]
         assert s._batches == []
 
 

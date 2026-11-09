@@ -769,6 +769,28 @@ class EventSignup(Base):
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
+class EventGuest(Base):
+    """A player a manager put in an event although they are in none of its
+    clans (web160a). Only a manager's manual add makes one; self sign-up stays
+    members-only. The row is what keeps a guest in: the clan roster sync
+    leaves them alone, and on a clan_vs_clan event they may sit on a team of
+    a clan they are not in. Kept after a removal as the record of who added
+    them; re-adding the same player reuses it."""
+
+    __tablename__ = "web_event_guests"
+    __table_args__ = (
+        Index("uq_web_event_guest", "event_id", "player_id", unique=True),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("web_events.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(Integer, ForeignKey("players.player_id", ondelete="CASCADE"),
+                       nullable=False)
+    added_by = Column(Integer, ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
 class EventSignupMessage(Base):
     """A sign-up prompt the bot posted to Discord (web70a).
 

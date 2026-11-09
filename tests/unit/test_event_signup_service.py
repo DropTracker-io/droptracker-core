@@ -265,12 +265,19 @@ def mini_db(monkeypatch):
         group_id = Column(Integer)
         status = Column(String(16))
 
+    class EventGuest(Base):
+        __tablename__ = "event_guests"
+        id = Column(Integer, primary_key=True)
+        event_id = Column(Integer)
+        player_id = Column(Integer)
+        added_by = Column(Integer)
+
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     fake = types.ModuleType("db.models")
     for name, obj in dict(Player=Player, user_group_association=uga, EventTeam=EventTeam,
                           EventTeamMember=EventTeamMember, EventSignup=EventSignup,
-                          EventGroup=EventGroup).items():
+                          EventGroup=EventGroup, EventGuest=EventGuest).items():
         setattr(fake, name, obj)
     monkeypatch.setitem(sys.modules, "db.models", fake)
     monkeypatch.setattr(sus, "sync_buyin_teams", lambda *a, **k: None)
@@ -382,24 +389,26 @@ class TestAddSignups:
         mini_db.member(2, 5, uid=70)               # 1's alt: same person
         mini_db.member(3, 5)                       # already signed up
         mini_db.member(4, 5)                       # already on a team
-        mini_db.member(6, 99)                      # another clan
+        mini_db.member(6, 99)                      # outside the event's clan: a guest
         s.add(m.EventTeam(id=1, event_id=1, group_id=5))
         s.add(m.EventTeamMember(team_id=1, player_id=4, event_id=1))
         s.add(m.EventSignup(event_id=1, player_id=3, group_id=5, source="web"))
         s.commit()
         players = [(1, "A", 70), (2, "B", 70), (3, "C", None), (4, "D", None),
                    (6, "F", None)]
-        res = sus.add_signups(s, self._pool(), players)
+        res = sus.add_signups(s, self._pool(), players, added_by=11)
         s.commit()
-        assert res["added"] == [1]
+        assert res["added"] == [1, 6]
+        assert res["guests"] == [6]
         assert res["skipped"] == {
             2: "Another of their accounts is already in this event.",
             3: "Already signed up.",
             4: "Already on a team in this event.",
-            6: "Not a member of a participating clan.",
         }
         row = s.query(m.EventSignup).filter(m.EventSignup.player_id == 1).one()
         assert (row.group_id, row.user_id, row.source) == (5, 70, "manual")
+        guest = s.query(m.EventGuest).one()
+        assert (guest.player_id, guest.added_by) == (6, 11)
         assert s.query(m.EventTeamMember).count() == 1   # never placed
 
     def test_only_pool_events(self, mini_db):
@@ -446,10 +455,90 @@ class TestAddSignups:
         res = sus.add_signups(s, ev, [(1, "A", None), (2, "B", None), (3, "C", None)],
                               scope_group_ids={10})
         assert res["added"] == [1, 3]
-        assert res["skipped"] == {2: "Not a member of your clan."}
+        assert res["skipped"] == {2: "Plays for another clan in this event."}
         with pytest.raises(sus.SignupError) as exc:
             sus.add_signups(s, ev, [(1, "A", None)], scope_group_ids={30})
         assert exc.value.status == 422
+
+
+class TestGuests:
+    """web160a: managers may add players who are in none of the event's clans."""
+
+    def _cvc(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        mini_db.member(1, 10)
+        mini_db.member(9, 77)                      # in no participating clan
+        s.add_all([m.EventGroup(event_id=1, group_id=10, status="accepted"),
+                   m.EventGroup(event_id=1, group_id=20, status="accepted"),
+                   m.EventTeam(id=1, event_id=1, group_id=10),
+                   m.EventTeam(id=2, event_id=1, group_id=20)])
+        s.commit()
+        return _ev(mode="clan_vs_clan", formation_mode="signup_pool", group_id=None)
+
+    @pytest.fixture(autouse=True)
+    def _no_buyins(self, monkeypatch):
+        monkeypatch.setattr(sus, "sync_buyin_team", lambda *a, **k: None)
+
+    def test_admission_kinds(self, mini_db):
+        ev = self._cvc(mini_db)
+        mini_db.member(2, 20)
+        mini_db.s.commit()
+        assert sus.admission(mini_db.s, ev, [1, 2, 9]) == {
+            1: sus.MEMBER, 2: sus.MEMBER, 9: sus.GUEST}
+        assert sus.admission(mini_db.s, ev, [1, 2, 9], {10}) == {
+            1: sus.MEMBER, 2: sus.OTHER_CLAN, 9: sus.GUEST}
+
+    def test_a_global_event_has_no_guests(self, mini_db):
+        mini_db.member(9, 77)
+        mini_db.s.commit()
+        assert sus.admission(mini_db.s, _ev(group_id=None), [9]) == {9: sus.MEMBER}
+
+    def test_a_clan_managers_guest_plays_for_that_clan(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        ev = self._cvc(mini_db)
+        res = sus.add_signups(s, ev, [(9, "G", None)], scope_group_ids={20})
+        s.commit()
+        assert res["guests"] == [9]
+        assert s.query(m.EventSignup).one().group_id == 20
+        with pytest.raises(sus.SignupError):
+            sus.assign_from_pool(s, ev, 9, 1)      # clan 10's team
+        sus.assign_from_pool(s, ev, 9, 2)          # their clan's team
+        assert s.query(m.EventTeamMember).one().team_id == 2
+
+    def test_staffs_guest_can_go_on_any_team(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        ev = self._cvc(mini_db)
+        sus.add_signups(s, ev, [(9, "G", None)])
+        s.commit()
+        assert s.query(m.EventSignup).one().group_id is None
+        sus.assign_from_pool(s, ev, 9, 1)
+        assert s.query(m.EventTeamMember).one().team_id == 1
+
+    def test_mark_guests_is_idempotent(self, mini_db):
+        s, m = mini_db.s, mini_db.m
+        ev = _ev()
+        sus.mark_guests(s, ev, [9, 9])
+        s.commit()
+        sus.mark_guests(s, ev, [9])
+        sus.mark_guests(s, ev, [])
+        s.commit()
+        assert s.query(m.EventGuest).count() == 1
+
+    def test_the_clan_roster_sync_keeps_guests(self, mini_db, monkeypatch):
+        s, m = mini_db.s, mini_db.m
+        for pid in (1, 2, 3):
+            mini_db.member(pid, 5)
+        s.add_all([m.EventSignup(event_id=1, player_id=pid, group_id=5, source="web")
+                   for pid in (1, 2, 3)])
+        s.add(m.EventSignup(event_id=1, player_id=9, group_id=5, source="manual"))
+        s.add(m.EventGuest(event_id=1, player_id=9))
+        s.commit()
+        removed = []
+        monkeypatch.setattr(sus, "remove_signup", lambda s, ev, pid: removed.append(pid))
+        monkeypatch.setattr(sus, "signup_all_members",
+                            lambda s, ev: {"added": 0, "placed": 0, "per_team": {}})
+        sus.sync_clan_roster(s, _ev(formation_mode="signup_pool"))
+        assert removed == []
 
 
 class TestSolo:

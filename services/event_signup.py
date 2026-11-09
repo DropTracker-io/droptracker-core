@@ -608,6 +608,7 @@ def list_pool(session, ev) -> list:
     if not rows:
         return []
     pids = [s.player_id for s, *_ in rows]
+    guests = guest_player_ids(session, ev)
     # Current placement for each signed-up player on THIS event.
     placement = dict(
         session.query(EventTeamMember.player_id, EventTeamMember.team_id)
@@ -623,6 +624,7 @@ def list_pool(session, ev) -> list:
             "group_name": gname,
             "team_id": placement.get(s.player_id),
             "source": s.source,
+            "guest": s.player_id in guests,
             "signed_up_at": int(s.created_at.timestamp()) if s.created_at else None,
             "ehb": round(float(ehb), 1) if ehb is not None else None,
             "total_level": int(total_level) if total_level is not None else None,
@@ -680,7 +682,18 @@ def assign_from_pool(session, ev, player_id: int, team_id: int) -> None:
     if not team:
         raise SignupError(404, "Team not found", f"No team {team_id} in this event.")
     if _is_clan_vs_clan(ev):
-        if not team.group_id or team.group_id not in player_group_ids(session, player_id):
+        if player_id in guest_player_ids(session, ev):
+            # A guest plays for the clan that added them (any team when staff
+            # added them to the whole event).
+            from db.models import EventSignup
+
+            side = (session.query(EventSignup.group_id)
+                    .filter(EventSignup.event_id == ev.id,
+                            EventSignup.player_id == player_id).scalar())
+            if side is not None and team.group_id != side:
+                raise SignupError(422, "Wrong clan",
+                                  "That guest was added by a different clan.")
+        elif not team.group_id or team.group_id not in player_group_ids(session, player_id):
             raise SignupError(422, "Wrong clan",
                               "That team belongs to a different clan than the player.")
     _place(session, ev.id, player_id, team_id)
@@ -1118,18 +1131,82 @@ def signup_all_members(session, ev, group_id: Optional[int] = None) -> dict:
     }
 
 
-def add_signups(session, ev, players, *, scope_group_ids: Optional[set] = None) -> dict:
+# ---------------------------------------------------------------------------- #
+# Guests (web160a): players a manager adds although they are in none of the
+# event's clans. Only manual adds make them; self sign-up stays members-only.
+# ---------------------------------------------------------------------------- #
+MEMBER, GUEST, OTHER_CLAN = "member", "guest", "other_clan"
+
+
+def admission(session, ev, player_ids, clan_ids: Optional[set] = None) -> dict:
+    """How a manager's manual add treats each player: ``{player_id: kind}``.
+
+    ``member``: in a clan the add is for (``clan_ids``, e.g. the team's clan
+    or the manager's own; default every participating clan). ``guest``: in
+    none of the event's clans, so they join as a guest. ``other_clan``: in a
+    different participating clan of a clan_vs_clan event, which the add must
+    not poach. A global event has no clans, so everyone is a member there."""
+    ids = list(dict.fromkeys(player_ids))
+    gids = participating_group_ids(session, ev)
+    if not gids:
+        return {pid: MEMBER for pid in ids}
+    # A clan the event doesn't actually include (a stray team tag) narrows
+    # nothing: fall back to every participating clan.
+    target = ((set(clan_ids) & gids) if clan_ids is not None else gids) or gids
+    clans = {pid: set() for pid in ids}
+    if ids:
+        from db.models import user_group_association
+
+        for pid, gid in (
+            session.query(user_group_association.c.player_id,
+                          user_group_association.c.group_id)
+            .filter(user_group_association.c.player_id.in_(ids),
+                    user_group_association.c.group_id.in_(list(gids)))
+            .all()
+        ):
+            clans[pid].add(gid)
+    return {
+        pid: MEMBER if clans[pid] & target else GUEST if not clans[pid] else OTHER_CLAN
+        for pid in ids
+    }
+
+
+def guest_player_ids(session, ev) -> set:
+    """The event's guests (players a manager added from outside its clans)."""
+    from db.models import EventGuest
+
+    return {pid for (pid,) in
+            session.query(EventGuest.player_id).filter(EventGuest.event_id == ev.id).all()}
+
+
+def mark_guests(session, ev, player_ids, added_by: Optional[int] = None) -> None:
+    """Record these players as the event's guests (idempotent)."""
+    ids = list(dict.fromkeys(player_ids))
+    if not ids:
+        return
+    from db.models import EventGuest
+
+    have = guest_player_ids(session, ev)
+    for pid in ids:
+        if pid not in have:
+            session.add(EventGuest(event_id=ev.id, player_id=pid, added_by=added_by))
+            have.add(pid)
+
+
+def add_signups(session, ev, players, *, scope_group_ids: Optional[set] = None,
+                added_by: Optional[int] = None) -> dict:
     """Manager action: put chosen players into a sign-up pool by hand (the
     pool panel's "Add players" box). Pool events only; other formation modes
     add straight to a team.
 
     ``players`` are ``(player_id, player_name, user_id)`` rows, already
     resolved. Each is checked like a self sign-up, but reported rather than
-    raised so a pasted list lands whatever it can: membership of a
-    participating clan (any tracked player on a global event), one account
-    per person, and on a clan_vs_clan event exactly one clan to sign up
-    under. ``scope_group_ids`` narrows the clans (a staff-hosted event's clan
-    manager adds only their own). Returns ``{"added": [player_id, ...],
+    raised so a pasted list lands whatever it can: one account per person,
+    and on a clan_vs_clan event exactly one clan to sign up under. A player
+    in none of the event's clans joins as a guest (:func:`mark_guests`); one
+    in a rival clan of a clan_vs_clan event is refused. ``scope_group_ids``
+    narrows the clans (a staff-hosted event's clan manager adds for their
+    own). Returns ``{"added": [player_id, ...], "guests": [player_id, ...],
     "skipped": {player_id: reason}}``. The caller owns the commit."""
     from db.models import EventSignup, EventTeam, EventTeamMember, Player
 
@@ -1147,8 +1224,9 @@ def add_signups(session, ev, players, *, scope_group_ids: Optional[set] = None) 
     clan_vs_clan = _is_clan_vs_clan(ev)
     ids = [pid for pid, _, _ in players]
     if not ids:
-        return {"added": [], "skipped": {}}
+        return {"added": [], "guests": [], "skipped": {}}
 
+    kinds = admission(session, ev, ids, scope_group_ids)
     member_of: dict = {}
     if groups:
         from db.models import user_group_association
@@ -1182,6 +1260,7 @@ def add_signups(session, ev, players, *, scope_group_ids: Optional[set] = None) 
     } if entered else set()
 
     added: list = []
+    guests: list = []
     skipped: dict = {}
     for pid, _name, uid in players:
         if pid in signed:
@@ -1190,26 +1269,37 @@ def add_signups(session, ev, players, *, scope_group_ids: Optional[set] = None) 
         if pid in placed:
             skipped[pid] = "Already on a team in this event."
             continue
-        clans = member_of.get(pid, set())
-        if groups and not clans:
-            skipped[pid] = ("Not a member of your clan." if scope_group_ids is not None
-                            else "Not a member of a participating clan.")
+        kind = kinds.get(pid, GUEST)
+        if kind == OTHER_CLAN:
+            skipped[pid] = "Plays for another clan in this event."
             continue
-        if clan_vs_clan and len(clans) > 1:
+        clans = member_of.get(pid, set())
+        if kind == MEMBER and clan_vs_clan and len(clans) > 1:
             skipped[pid] = ("In more than one clan in this event. Add them from the "
                             "clan they play for.")
             continue
         if uid is not None and uid in entered_users:
             skipped[pid] = "Another of their accounts is already in this event."
             continue
-        group_id = next(iter(clans)) if clan_vs_clan else ev.group_id
+        if not clan_vs_clan:
+            group_id = ev.group_id
+        elif kind == MEMBER:
+            group_id = next(iter(clans))
+        else:
+            # A guest plays for the clan that added them; staff adding one to
+            # the whole event leave it open (placed by hand on any team).
+            group_id = next(iter(groups)) if scope_group_ids is not None else None
         session.add(EventSignup(event_id=ev.id, player_id=pid, group_id=group_id,
                                 user_id=uid, source="manual"))
         signed.add(pid)
         if uid is not None:
             entered_users.add(uid)
         added.append(pid)
-    return {"added": added, "skipped": skipped}
+        if kind == GUEST:
+            guests.append(pid)
+    if guests:
+        mark_guests(session, ev, guests, added_by)
+    return {"added": added, "guests": guests, "skipped": skipped}
 
 
 # Clan roster sync (web152a). A removal pass that would take out more than this
@@ -1282,6 +1372,8 @@ def sync_clan_roster(session, ev) -> dict:
                 EventTeam.auto_clan.is_(False))
         .all()
     }
+    # Guests (web160a) are in none of the clans by design: never "departed".
+    entrants -= guest_player_ids(session, ev)
     to_remove, held = plan_clan_sync_removals(entrants, members)
     result["removal_held"] = held
     for pid in sorted(to_remove):

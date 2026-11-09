@@ -59,6 +59,7 @@ from db import (
     EventLeaderVote,
     EventPlayerPoints,
     EventProgress,
+    EventGuest,
     EventSignup,
     EventSignupMessage,
     EventTask,
@@ -763,6 +764,10 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
         # are never computed, so they cannot leak through a stray key.
         effort = (effort_by_player(s, ev.id, [m.player_id for m, _ in member_rows])
                   if show_effort else {})
+        # Guests (web160a): players a manager added from outside the clans.
+        guests = {pid for (pid,) in
+                  s.query(EventGuest.player_id).filter(EventGuest.event_id == ev.id).all()
+                  } if member_rows else set()
         for m, player_name in member_rows:
             members_by_team.setdefault(m.team_id, []).append({
                 "player_id": m.player_id,
@@ -773,6 +778,7 @@ def _detail(s, ev: Event, viewer_id: int | None = None) -> dict:
                 "player_name": player_name or f"Player {m.player_id}",
                 "joined_at": _ts(m.joined_at),
                 "role": getattr(m, "role", None),
+                **({"guest": True} if m.player_id in guests else {}),
                 **({
                     "effort_ehb": (effort.get(m.player_id) or {}).get("ehb_hours", 0.0),
                     # Portion priced with derived (non-WOM) rates — >0 means the
@@ -7779,22 +7785,17 @@ async def admin_add_member(event_id: int, team_id: int):
             player = s.query(Player).filter(Player.player_id == player_id).first()
             if not player:
                 abort_problem(404, "Player not found", f"No player {player_id}.")
-            _assert_player_eligible(s, ev, player_id)
+            from services.event_signup import GUEST, OTHER_CLAN, admission, mark_guests
+
+            # A clan-bound team takes members of THAT clan; anyone in none of
+            # the event's clans joins as a guest (web160a). Only a member of a
+            # rival clan is refused.
             team_gid = getattr(team, "group_id", None)
-            if team_gid:
-                # Clan-bound team: membership of THAT clan specifically, not
-                # just any participating clan.
-                in_clan = (
-                    s.query(user_group_association.c.id)
-                    .filter(
-                        user_group_association.c.player_id == player_id,
-                        user_group_association.c.group_id == team_gid,
-                    )
-                    .first()
-                )
-                if not in_clan:
-                    abort_problem(403, "Wrong clan",
-                                  "That player is not a member of the clan this team represents.")
+            kind = admission(s, ev, [player_id],
+                             {team_gid} if team_gid else None)[player_id]
+            if kind == OTHER_CLAN:
+                abort_problem(403, "Wrong clan",
+                              "That player is in another clan taking part in this event.")
 
             existing = _event_membership(s, event_id, player_id)
             before = f"team:{existing.team_id}" if existing else None
@@ -7818,6 +7819,8 @@ async def admin_add_member(event_id: int, team_id: int):
                 s.flush()
             s.add(EventTeamMember(team_id=team_id, player_id=player_id,
                                   event_id=event_id))
+            if kind == GUEST:
+                mark_guests(s, ev, [player_id], user_id)
             # web71a: carry a sign-up-time buy-in onto the team the draft (or
             # this move) just put them on.
             _sync_buyin_team(s, event_id, player_id, team_id)
@@ -7931,25 +7934,15 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
             hits = _resolve_bulk_names(s, cleaned, seen_keys)
             resolved_ids = list({h.player_id for h in hits.values() if h is not None})
 
-            # Eligibility mirrors admin_add_member: membership of the team's
-            # own clan when the team is clan-bound, else any participating
-            # clan. Global events (no participating groups) accept any
-            # tracked player.
-            gids = participating_group_ids(s, ev)
+            # Same rule as admin_add_member: members of the team's own clan
+            # (any participating clan for an unbound team), and anyone in
+            # none of the event's clans as a guest (web160a). A member of a
+            # rival clan is refused.
+            from services.event_signup import GUEST, OTHER_CLAN, admission, mark_guests
+
             team_gid = getattr(team, "group_id", None)
-            check_gids = {team_gid} if team_gid else gids
-            eligible_ids: set[int] = set(resolved_ids)
-            if check_gids and resolved_ids:
-                eligible_ids = {
-                    pid for (pid,) in (
-                        s.query(user_group_association.c.player_id)
-                        .filter(
-                            user_group_association.c.player_id.in_(resolved_ids),
-                            user_group_association.c.group_id.in_(list(check_gids)),
-                        )
-                        .all()
-                    )
-                }
+            kinds = admission(s, ev, resolved_ids,
+                              {team_gid} if team_gid else None) if resolved_ids else {}
 
             # Existing placements anywhere on this event (one team per player).
             placed: dict[int, int] = {}
@@ -7972,14 +7965,10 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                     skipped.append({"name": name, "reason": "No tracked player by that name."})
                     continue
                 pid, canonical = hit.player_id, hit.player_name
-                if pid not in eligible_ids:
+                if kinds.get(pid) == OTHER_CLAN:
                     skipped.append({
                         "name": canonical,
-                        "reason": (
-                            "Not a member of the clan this team represents."
-                            if team_gid
-                            else "Not a member of a participating clan."
-                        ),
+                        "reason": "In another clan taking part in this event.",
                     })
                     continue
                 prior = placed.get(pid)
@@ -7996,9 +7985,11 @@ async def admin_add_members_bulk(event_id: int, team_id: int):
                 s.add(EventTeamMember(team_id=team_id, player_id=pid,
                                       event_id=event_id))
                 placed[pid] = team_id
-                added.append({"id": pid, "name": canonical})
+                guest = kinds.get(pid) == GUEST
+                added.append({"id": pid, "name": canonical, "guest": guest})
 
             if added:
+                mark_guests(s, ev, [a["id"] for a in added if a["guest"]], user_id)
                 # web119a: all-or-nothing against the clan's roster limit, so
                 # a pasted list never half-lands.
                 _assert_roster_capacity(s, ev, team_id, [a["id"] for a in added],
@@ -8601,11 +8592,14 @@ async def add_event_signups(event_id: int):
             try:
                 result = add_signups(
                     s, ev, players,
-                    scope_group_ids={scope_gid} if scope_gid is not None else None)
+                    scope_group_ids={scope_gid} if scope_gid is not None else None,
+                    added_by=user_id)
             except SignupError as e:
                 abort_problem(e.status, e.title, e.detail)
             label = {pid: name for pid, name, _ in players}
-            added = [{"id": pid, "name": label[pid]} for pid in result["added"]]
+            guests = set(result.get("guests") or ())
+            added = [{"id": pid, "name": label[pid], "guest": pid in guests}
+                     for pid in result["added"]]
             skipped += [{"name": label[pid], "reason": reason}
                         for pid, reason in result["skipped"].items()]
             if added:

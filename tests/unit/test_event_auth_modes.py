@@ -154,6 +154,24 @@ def _player(user_id=7, player_id=3):
     return SimpleNamespace(player_id=player_id, user_id=user_id, player_name="P")
 
 
+_SIGNUP_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "services", "event_signup.py",
+)
+
+
+def use_real_signup_service(monkeypatch):
+    """Route tests that add players: the route imports its membership rule
+    (``admission``, guests) from services/event_signup.py, which conftest
+    stubs. Load the real file (stdlib-only imports) under that name."""
+    spec = importlib.util.spec_from_file_location("services.event_signup", _SIGNUP_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setitem(sys.modules, "services.event_signup", mod)
+    monkeypatch.setattr(sys.modules["services"], "event_signup", mod, raising=False)
+    return mod
+
+
 class _SessionCM:
     def __init__(self, s):
         self.s = s
@@ -391,11 +409,12 @@ class TestAdminRosterStandard:
             [_event(formation_mode="admin_assign")],
             [_team(4)],
             [_player()],
-            [(1,)],   # eligibility: member of the event's group
+            [(3, 42)],  # membership: in the event's group
             [],       # no existing membership
             [],       # buy-in carry-over UPDATE (web71a)
         )
         _wire(monkeypatch, s)
+        use_real_signup_service(monkeypatch)
         monkeypatch.setattr(evr, "_assert_event_admin", lambda *a, **k: None)
         r = await client.post("/api/v1/events/1/teams/4/members", json={"player_id": 3})
         assert r.status_code == 200

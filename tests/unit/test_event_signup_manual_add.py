@@ -39,11 +39,12 @@ def service(monkeypatch):
     calls = []
     state = {"result": None, "raise": None}
 
-    def add_signups(s, ev, players, *, scope_group_ids=None):
-        calls.append((players, scope_group_ids))
+    def add_signups(s, ev, players, *, scope_group_ids=None, added_by=None):
+        calls.append((players, scope_group_ids, added_by))
         if state["raise"]:
             raise state["raise"]
-        return state["result"] or {"added": [p[0] for p in players], "skipped": {}}
+        return state["result"] or {"added": [p[0] for p in players], "guests": [],
+                                   "skipped": {}}
 
     fake = SimpleNamespace(add_signups=add_signups, SignupError=_SignupError)
     monkeypatch.setitem(sys.modules, "services.event_signup", fake)
@@ -86,9 +87,10 @@ class TestAdd:
         res = await client.post(URL, json={"player_ids": [3, 4, 3]})
         assert res.status_code == 200
         body = await res.get_json()
-        assert body == {"added": [{"id": 3, "name": "Zezima"}, {"id": 4, "name": "Lynx Titan"}],
+        assert body == {"added": [{"id": 3, "name": "Zezima", "guest": False},
+                                  {"id": 4, "name": "Lynx Titan", "guest": False}],
                         "skipped": []}
-        assert service.calls == [([(3, "Zezima", 70), (4, "Lynx Titan", None)], None)]
+        assert service.calls == [([(3, "Zezima", 70), (4, "Lynx Titan", None)], None, 7)]
         assert s.committed
         assert [a.action for a in s.added] == ["event.signup.manual_add"]
 
@@ -111,9 +113,17 @@ class TestAdd:
         _wire(monkeypatch, s)
         res = await client.post(URL, json={"names": ["1-19", "nobody here", "1_19"]})
         body = await res.get_json()
-        assert body["added"] == [{"id": 5, "name": "1 19"}]
+        assert body["added"] == [{"id": 5, "name": "1 19", "guest": False}]
         assert body["skipped"] == [{"name": "nobody here",
                                     "reason": "No tracked player by that name."}]
+
+    async def test_guests_are_flagged(self, client, monkeypatch, service):
+        service.state["result"] = {"added": [3, 4], "guests": [4], "skipped": {}}
+        _wire(monkeypatch, _S([_pool_event()], [(3, "Zezima", None), (4, "Guest", None)]))
+        res = await client.post(URL, json={"player_ids": [3, 4]})
+        body = await res.get_json()
+        assert body["added"] == [{"id": 3, "name": "Zezima", "guest": False},
+                                 {"id": 4, "name": "Guest", "guest": True}]
 
     async def test_a_non_pool_event_is_refused(self, client, monkeypatch, service):
         service.state["raise"] = _SignupError(409, "Not a sign-up pool", "Add to a team.")

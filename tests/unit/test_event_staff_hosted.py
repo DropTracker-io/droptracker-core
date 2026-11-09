@@ -33,7 +33,8 @@ from web_api import event_invite_candidates as cand
 from web_api import event_scope
 from web_api.common import ProblemException
 
-from tests.unit.test_event_auth_modes import _ASSOC, _S, _SessionCM, _event, _team
+from tests.unit.test_event_auth_modes import (_ASSOC, _S, _SessionCM, _event, _team,
+                                            use_real_signup_service)
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -225,11 +226,13 @@ class TestRosterRoutes:
         monkeypatch.setattr(evr, "_clan_manager_group_ids", lambda s, uid, ev: set(clan_ids))
         monkeypatch.setattr(evr, "_team_member_count", lambda s, tid: current)
         _patch_roles(monkeypatch)
+        use_real_signup_service(monkeypatch)
 
     async def test_clan_leader_adds_to_own_team(self, client, monkeypatch):
         team = _team(4, group_id=10)
         # event, team, player, in-clan row, capacity "already on team"
-        s = _S([_staff()], [team], [SimpleNamespace(player_id=101)], [(1,)], [])
+        s = _S([_staff()], [team], [SimpleNamespace(player_id=101)],
+               [(10,), (20,)], [(101, 10)], [])
         self._wire(monkeypatch, s, current=1)
         r = await client.post("/api/v1/events/1/teams/4/members", json={"player_id": 101})
         assert r.status_code == 200
@@ -244,7 +247,7 @@ class TestRosterRoutes:
 
     async def test_full_roster_is_refused(self, client, monkeypatch):
         s = _S([_staff()], [_team(4, group_id=10)], [SimpleNamespace(player_id=101)],
-               [(1,)], [])
+               [(10,), (20,)], [(101, 10)], [])
         self._wire(monkeypatch, s, current=3)
         r = await client.post("/api/v1/events/1/teams/4/members", json={"player_id": 101})
         assert r.status_code == 409
@@ -253,7 +256,7 @@ class TestRosterRoutes:
 
     async def test_clan_leader_cannot_override_the_limit(self, client, monkeypatch):
         s = _S([_staff()], [_team(4, group_id=10)], [SimpleNamespace(player_id=101)],
-               [(1,)], [])
+               [(10,), (20,)], [(101, 10)], [])
         self._wire(monkeypatch, s, current=3)
         r = await client.post("/api/v1/events/1/teams/4/members",
                               json={"player_id": 101, "override": True})

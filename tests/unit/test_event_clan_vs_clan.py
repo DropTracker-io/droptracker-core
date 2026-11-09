@@ -31,6 +31,7 @@ from tests.unit.test_event_auth_modes import (
     _event,
     _player,
     _team,
+    use_real_signup_service,
 )
 
 
@@ -404,11 +405,11 @@ class TestAdminAddMemberClan:
             [_cvc()],                # event
             [_team(4, group_id=20)],  # clan-bound team
             [_player()],             # player exists
-            [(10,), (20,)],          # participants (eligibility)
-            [(1,)],                  # member of a participating clan
-            [],                      # but NOT of clan 20 (team's clan)
+            [(10,), (20,)],          # participants
+            [(3, 10)],               # plays for clan 10, not the team's 20
         )
         _wire_events(monkeypatch, s)
+        use_real_signup_service(monkeypatch)
         monkeypatch.setattr(evr, "_assert_event_admin", lambda *a, **k: None)
         r = await client.post(
             "/api/v1/events/1/teams/4/members", json={"player_id": 3}
@@ -418,12 +419,13 @@ class TestAdminAddMemberClan:
     async def test_right_clan_added(self, client, monkeypatch):
         s = _S(
             [_cvc()], [_team(4, group_id=20)], [_player()],
-            [(10,), (20,)], [(1,)],
-            [(1,)],                  # member of clan 20
+            [(10,), (20,)],          # participants
+            [(3, 20)],               # member of clan 20
             [],                      # no existing membership
             [],                      # buy-in carry-over UPDATE (web71a)
         )
         _wire_events(monkeypatch, s)
+        use_real_signup_service(monkeypatch)
         monkeypatch.setattr(evr, "_assert_event_admin", lambda *a, **k: None)
         r = await client.post(
             "/api/v1/events/1/teams/4/members", json={"player_id": 3}
@@ -431,6 +433,27 @@ class TestAdminAddMemberClan:
         assert r.status_code == 200
         assert len(s.added) == 2  # membership + audit
         assert s.committed
+
+    async def test_someone_in_no_clan_joins_as_a_guest(self, client, monkeypatch):
+        # web160a: a manager may add a player from outside every clan.
+        s = _S(
+            [_cvc()], [_team(4, group_id=20)], [_player()],
+            [(10,), (20,)],          # participants
+            [],                      # in none of them
+            [],                      # no existing membership
+            [],                      # existing guests (mark_guests)
+            [],                      # buy-in carry-over UPDATE (web71a)
+        )
+        _wire_events(monkeypatch, s)
+        use_real_signup_service(monkeypatch)
+        monkeypatch.setattr(evr, "_assert_event_admin", lambda *a, **k: None)
+        r = await client.post(
+            "/api/v1/events/1/teams/4/members", json={"player_id": 3}
+        )
+        assert r.status_code == 200
+        assert sorted(type(o).__name__ for o in s.added) == [
+            "AuditLog", "EventGuest", "EventTeamMember"]
+        assert s._batches == []
 
 
 # ── participant endpoints ────────────────────────────────────────────────────
