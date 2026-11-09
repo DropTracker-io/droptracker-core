@@ -70,6 +70,30 @@ def _fk_tables(s) -> list[tuple[str, str]]:
     return sorted({(t, c) for t, c in rows if t != "groups"})
 
 
+def _grandchild_fks(s, children: list[tuple[str, str]]) -> list[tuple[str, str, str, str, str]]:
+    """(grandchild, gc_col, child, child_ref_col, child_group_col) for FKs onto
+    the group's child tables. Event tables are skipped: _cascade_delete_event
+    owns that teardown and runs first."""
+    by_child = {}
+    for t, c in children:
+        by_child.setdefault(t, c)
+    rows = s.execute(text(
+        "SELECT table_name, column_name, referenced_table_name, referenced_column_name "
+        "FROM information_schema.key_column_usage "
+        "WHERE table_schema = DATABASE() AND referenced_table_name IS NOT NULL"
+    )).all()
+    out = set()
+    for gc, gc_col, child, ref_col in rows:
+        if child in by_child and child not in ("web_events", "events") and gc != child:
+            out.add((gc, gc_col, child, ref_col, by_child[child]))
+    return sorted(out)
+
+
+def _gc_where(gc: str, gc_col: str, child: str, ref_col: str, child_col: str) -> str:
+    return (f"`{gc}`.`{gc_col}` IN (SELECT `{ref_col}` FROM `{child}` "
+            f"WHERE `{child_col}` = :g)")
+
+
 def _count(s, table: str, col: str, gid: int, extra: str = "") -> int:
     return s.execute(
         text(f"SELECT COUNT(*) FROM `{table}` WHERE `{col}` = :g {extra}"), {"g": gid}
@@ -117,7 +141,16 @@ def purge_db(gid: int, expect_name: str | None, apply: bool) -> bool:
         print(f"\nevents (full cascade): {[(e.id, e.name, e.status) for e in events]}")
         print(f"notice chat threads: {list(notice_threads)}")
         print("\nrows by table:")
-        plan = [(t, c, "") for t, c in _fk_tables(s)] + UNLINKED
+        fk_children = _fk_tables(s)
+        grandchildren = _grandchild_fks(s, fk_children)
+        plan = [(t, c, "") for t, c in fk_children] + UNLINKED
+        for gc, gc_col, child, ref_col, child_col in grandchildren:
+            n = s.execute(text(
+                f"SELECT COUNT(*) FROM `{gc}` WHERE "
+                + _gc_where(gc, gc_col, child, ref_col, child_col)
+            ), {"g": gid}).scalar()
+            if n:
+                print(f"  {gc}.{gc_col} (via {child}): {n}")
         for t, c, extra in plan:
             n = _count(s, t, c, gid, extra)
             if n:
@@ -143,6 +176,14 @@ def purge_db(gid: int, expect_name: str | None, apply: bool) -> bool:
         # The owner row carries owner_group_id = its own group_id, so it goes
         # with the group_id sweep; clear any stray pointer first.
         deleted["group_admins.owner_group_id"] = _delete(s, "group_admins", "owner_group_id", gid)
+        # Rows hanging off the group's child rows (group_embed_fields ->
+        # group_embeds is RESTRICT) must go before the children do.
+        for gc, gc_col, child, ref_col, child_col in grandchildren:
+            n = s.execute(text(
+                f"DELETE FROM `{gc}` WHERE " + _gc_where(gc, gc_col, child, ref_col, child_col)
+            ), {"g": gid}).rowcount
+            if n:
+                deleted[f"{gc}.{gc_col} (via {child})"] = n
         for t, c, extra in plan:
             n = _delete(s, t, c, gid, extra)
             if n:
