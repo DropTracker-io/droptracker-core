@@ -283,6 +283,119 @@ def board_partitions(windows: Sequence[Tuple[datetime, datetime]], *,
 
 
 # --------------------------------------------------------------------------- #
+# Boss races (botw)
+# --------------------------------------------------------------------------- #
+
+# Recent-drops entries mirror the Redis ``recent_items`` lists the normal
+# boards read (services/redis_updates.py): stacks worth over 1M, newest 50.
+RECENT_MIN_TOTAL = 1_000_000
+RECENT_LIMIT = 50
+
+
+def race_npc_names(session, event) -> Optional[Tuple[str, ...]]:
+    """Normalized boss names a BOTW race counts, or None for every other
+    kind (those boards carry all of the roster's loot).
+
+    The Redis aggregates the normal boards sum have no NPC dimension, so a
+    BOTW board built from them shows everything the roster looted, not the
+    race's bosses. A BOTW whose race task is missing returns ``()``: an empty
+    board, never the unscoped one."""
+    if (getattr(event, "kind", None) or "") != "botw":
+        return None
+    from services.competition import CompetitionConfig
+    from services.competition_setup import competition_task
+
+    task = competition_task(session, event.id)
+    return CompetitionConfig(task.config if task is not None else None).npcs
+
+
+def race_npc_ids(session, names) -> List[int]:
+    """Every ``npc_list`` id sharing a match key with one of ``names``
+    (``utils/npc_names``), so loot filed under an alias row ("Crystalline
+    Hunllef" for The Gauntlet) still counts towards the boss."""
+    from utils.npc_names import npc_match_variants, npc_slug_sql_expr
+
+    variants = sorted({v for n in (names or ()) for v in npc_match_variants(n)})
+    if not variants:
+        return []
+    from sqlalchemy import bindparam, text
+
+    stmt = text(f"SELECT n.npc_id FROM npc_list n "
+                f"WHERE {npc_slug_sql_expr('n.npc_name')} IN :variants"
+                ).bindparams(bindparam("variants", expanding=True))
+    return sorted({int(r[0]) for r in session.execute(stmt, {"variants": variants})})
+
+
+def fold_scoped_rows(item_rows, recent_rows) -> Tuple[dict, dict, list, int]:
+    """``(group_items, player_totals, recent_drops, total_loot)`` in the shape
+    ``FlexibleBoardGenerator._aggregate_player_data`` returns. Pure.
+
+    ``item_rows`` are ``(player_id, item_id, quantity, total_value)``;
+    ``recent_rows`` ``(drop_id, item_id, npc_id, value, quantity, date_added,
+    partition)``, newest first."""
+    group_items: dict = {}
+    player_totals: dict = {}
+    for pid, item_id, qty, gp in item_rows:
+        qty, gp = int(qty or 0), int(gp or 0)
+        key = str(int(item_id))
+        old_qty, old_gp = (map(int, group_items[key].split(","))
+                           if key in group_items else (0, 0))
+        group_items[key] = f"{old_qty + qty},{old_gp + gp}"
+        player_totals[int(pid)] = player_totals.get(int(pid), 0) + gp
+    player_totals = {pid: gp for pid, gp in player_totals.items() if gp > 0}
+
+    recent = []
+    for drop_id, item_id, npc_id, value, qty, added, partition in recent_rows:
+        value, qty = int(value or 0), int(qty or 0)
+        recent.append({
+            "drop_id": int(drop_id), "item_id": int(item_id),
+            "npc_id": int(npc_id) if npc_id is not None else None,
+            "value": value, "quantity": qty, "total_value": value * qty,
+            "date_added": added.strftime("%Y-%m-%d %H:%M:%S"),
+            "partition": partition,
+        })
+    return group_items, player_totals, recent, sum(player_totals.values())
+
+
+def scoped_board_data(session, player_ids, npc_ids, windows):
+    """Board data for a BOTW: the roster's drops from the race's bosses inside
+    the event's exact windows, read from ``drops`` (indexed on
+    ``(player_id, date_added)``).
+
+    This also keeps the first day honest. The Redis path sums whole daily
+    partitions, so it counts loot from before the event started that day."""
+    from sqlalchemy import func, or_
+
+    from db.models import Drop
+    from lootboard.flexible_generator import BoardData
+
+    pids = sorted({int(p) for p in player_ids if p is not None})
+    spans = [(s, e) for s, e in (windows or []) if s and e and e >= s]
+    item_rows, recent_rows = [], []
+    if pids and npc_ids and spans:
+        gp = Drop.value * Drop.quantity
+        where = (Drop.player_id.in_(pids),
+                 Drop.npc_id.in_(list(npc_ids)),
+                 Drop.hidden != True,  # noqa: E712
+                 or_(*[Drop.date_added.between(s, e) for s, e in spans]))
+        item_rows = (session.query(Drop.player_id, Drop.item_id,
+                                   func.sum(Drop.quantity), func.sum(gp))
+                     .filter(*where)
+                     .group_by(Drop.player_id, Drop.item_id).all())
+        recent_rows = (session.query(Drop.drop_id, Drop.item_id, Drop.npc_id,
+                                     Drop.value, Drop.quantity,
+                                     Drop.date_added, Drop.partition)
+                       .filter(*where, gp > RECENT_MIN_TOTAL)
+                       .order_by(Drop.date_added.desc())
+                       .limit(RECENT_LIMIT).all())
+    items, totals, recent, total = fold_scoped_rows(item_rows, recent_rows)
+    return BoardData(group_items=items, player_totals=totals,
+                     recent_drops=recent, total_loot=total,
+                     metadata={"total_players": len(totals),
+                               "npc_filter": True, "npc_ids": list(npc_ids or ())})
+
+
+# --------------------------------------------------------------------------- #
 # Render
 # --------------------------------------------------------------------------- #
 
@@ -393,17 +506,23 @@ async def render_team_board(session, event, team, *, force: bool = False,
 
     granularity = (TimeGranularity.DAILY if granularity_name == GRANULARITY_DAILY
                    else TimeGranularity.MONTHLY)
-    board_filter = BoardFilter(
-        start_time=min(s for s, _ in windows),
-        end_time=max(e for _, e in windows),
-        time_granularity=granularity,
-    )
-    # _aggregate_player_data, not generate_flexible_board: we already know the
-    # roster, and the public entry point's group-shaped side effects (WOM
-    # roster fetch, gleaderboard zadd, recent_drops_flexible.json) must not
-    # fire for a team.
-    board_data = await FlexibleBoardGenerator()._aggregate_player_data(
-        player_ids, partitions, granularity, board_filter)
+    npc_names = race_npc_names(session, event)
+    if npc_names is not None:
+        # A BOTW board counts the race's bosses only (see race_npc_names).
+        board_data = scoped_board_data(
+            session, player_ids, race_npc_ids(session, npc_names), windows)
+    else:
+        board_filter = BoardFilter(
+            start_time=min(s for s, _ in windows),
+            end_time=max(e for _, e in windows),
+            time_granularity=granularity,
+        )
+        # _aggregate_player_data, not generate_flexible_board: we already know
+        # the roster, and the public entry point's group-shaped side effects
+        # (WOM roster fetch, gleaderboard zadd, recent_drops_flexible.json)
+        # must not fire for a team.
+        board_data = await FlexibleBoardGenerator()._aggregate_player_data(
+            player_ids, partitions, granularity, board_filter)
 
     bg_img, draw = _background(session, config)
     bg_img = await draw_drops_on_image(

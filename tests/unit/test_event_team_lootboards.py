@@ -563,3 +563,60 @@ class TestSweep:
         session = _TargetSession([_event(visibility="private")], [_team(id=1)])
         assert await tb.sweep_team_boards(
             session_factory=lambda: session, force=True) == []
+
+
+# --------------------------------------------------------------------------- #
+# Boss races (botw): the board counts the race's bosses only
+# --------------------------------------------------------------------------- #
+class TestBossRaceScope:
+    def _stub_race(self, monkeypatch, task):
+        import sys
+
+        setup = SimpleNamespace(competition_task=lambda session, event_id: task)
+        comp = SimpleNamespace(CompetitionConfig=lambda raw: SimpleNamespace(
+            npcs=tuple((raw or {}).get("npcs") or ())))
+        monkeypatch.setitem(sys.modules, "services.competition_setup", setup)
+        monkeypatch.setitem(sys.modules, "services.competition", comp)
+
+    @pytest.mark.parametrize("kind", ["standard", "bingo", "sotw", None])
+    def test_other_kinds_are_not_scoped(self, kind):
+        assert tb.race_npc_names(object(), _event(kind=kind)) is None
+
+    def test_botw_scopes_to_the_race_bosses(self, monkeypatch):
+        self._stub_race(monkeypatch, SimpleNamespace(
+            config={"npcs": ["duke sucellus"]}))
+        assert tb.race_npc_names(object(), _event(kind="botw")) == ("duke sucellus",)
+
+    def test_botw_without_a_race_task_is_empty_not_unscoped(self, monkeypatch):
+        # Falling back to the whole-roster board is the bug being fixed.
+        self._stub_race(monkeypatch, None)
+        assert tb.race_npc_names(object(), _event(kind="botw")) == ()
+
+    def test_fold_sums_items_and_players(self):
+        added = datetime(2026, 11, 9, 7, 30, 0)
+        items, totals, recent, total = tb.fold_scoped_rows(
+            [(1, 28321, 1, 5_000_000), (2, 28321, 1, 5_000_000),
+             (2, 526, 3, 0)],
+            [(99, 28321, 12191, 5_000_000, 1, added, 202611)])
+        assert items == {"28321": "2,10000000", "526": "3,0"}
+        assert totals == {1: 5_000_000, 2: 5_000_000}
+        assert total == 10_000_000
+        assert recent == [{
+            "drop_id": 99, "item_id": 28321, "npc_id": 12191,
+            "value": 5_000_000, "quantity": 1, "total_value": 5_000_000,
+            "date_added": "2026-11-09 07:30:00", "partition": 202611,
+        }]
+
+    def test_zero_gp_players_stay_off_the_top_looters(self):
+        _, totals, _, total = tb.fold_scoped_rows([(5, 526, 4, None)], [])
+        assert totals == {} and total == 0
+
+    def test_no_bosses_resolved_reads_nothing(self):
+        class _NoQuery:
+            def query(self, *a, **k):
+                raise AssertionError("no boss ids means no drops query")
+
+        data = tb.scoped_board_data(_NoQuery(), [1, 2], [],
+                                    [(NOW - timedelta(hours=2), NOW)])
+        assert data.total_loot == 0 and data.group_items == {}
+        assert data.player_totals == {} and data.recent_drops == []

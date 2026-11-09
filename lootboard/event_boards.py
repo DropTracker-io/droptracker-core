@@ -25,7 +25,8 @@ Gates, same doctrine as the team boards:
 * ``effort_visibility = 'admins'`` hides KC/EHE from the public board (the
   same rule every public event read follows); the loot half still renders.
 * SOTW/BOTW record no EHE (the race metric IS the effort), so those boards
-  carry loot only.
+  carry loot only. A BOTW board's loot is the race's bosses only, read from
+  ``drops`` over the exact window (``team_boards.scoped_board_data``).
 """
 from __future__ import annotations
 
@@ -42,7 +43,10 @@ from lootboard.team_boards import (
     board_partitions,
     event_is_public,
     event_windows,
+    race_npc_ids,
+    race_npc_names,
     resolve_team_player_ids,
+    scoped_board_data,
 )
 
 FEATURE_FLAG_ENV = "EVENT_LOOTBOARDS"
@@ -259,13 +263,19 @@ async def render_event_board(session, event, *, force: bool = False,
 
     granularity = (TimeGranularity.DAILY if granularity_name == GRANULARITY_DAILY
                    else TimeGranularity.MONTHLY)
-    board_filter = BoardFilter(
-        start_time=min(s for s, _ in windows),
-        end_time=max(e for _, e in windows),
-        time_granularity=granularity,
-    )
-    board_data = await FlexibleBoardGenerator()._aggregate_player_data(
-        player_ids, partitions, granularity, board_filter)
+    npc_names = race_npc_names(session, event)
+    if npc_names is not None:
+        # A BOTW board counts the race's bosses only (team_boards.race_npc_names).
+        board_data = scoped_board_data(
+            session, player_ids, race_npc_ids(session, npc_names), windows)
+    else:
+        board_filter = BoardFilter(
+            start_time=min(s for s, _ in windows),
+            end_time=max(e for _, e in windows),
+            time_granularity=granularity,
+        )
+        board_data = await FlexibleBoardGenerator()._aggregate_player_data(
+            player_ids, partitions, granularity, board_filter)
 
     bg_img, draw = _background(session, config)
     template = bg_img.copy()
