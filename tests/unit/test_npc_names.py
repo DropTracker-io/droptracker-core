@@ -226,6 +226,11 @@ def test_team_size_cap_is_the_games_own_party_ceiling():
     assert team_size_cap("Tombs of Amascut: Entry Mode") == 8
     # Spelling-insensitive, like every other lookup in this module.
     assert team_size_cap("theatre of blood hard mode") == 5
+    for solo_only in ("Alchemical Hydra", "Phosani's Nightmare", "The Gauntlet",
+                      "The Corrupted Gauntlet", "Corrupted Hunllef", "Royal Titans"):
+        assert team_size_cap(solo_only) == 1
+    # Phosani's is solo; the base Nightmare is not.
+    assert team_size_cap("The Nightmare") is None
     # Chambers of Xeric masses legitimately; nothing else is capped.
     assert team_size_cap("Chambers of Xeric") is None
     assert team_size_cap("Chambers of Xeric Challenge Mode") is None
@@ -257,6 +262,13 @@ def test_clamp_team_size_rejects_impossible_raid_teams():
     assert c("Chambers of Xeric", "24+") == "24+"
     assert c("Chambers of Xeric", "11-15") == "11-15"
     assert c("The Nightmare", "6") == "6"
+
+    # Solo-only encounters fold every team label to Solo, brackets included.
+    assert c("Alchemical Hydra", "3") == "Solo"
+    assert c("Phosani's Nightmare", "6+") == "Solo"
+    assert c("The Corrupted Gauntlet", 2) == "Solo"
+    assert c("Royal Titans", "2") == "Solo"
+    assert c("Royal Titans", "Solo") == "Solo"
 
     # Still does sanitize_team_size' job on the way through.
     assert c("Theatre of Blood", "(3 players)") == "3"

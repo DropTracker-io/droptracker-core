@@ -241,7 +241,8 @@ def sanitize_team_size(raw) -> str:
     return s
 
 
-#: Party sizes the game itself enforces, keyed by base-raid match key. A team
+#: Party sizes the game itself enforces (or, for one-board encounters, the
+#: one board the game keeps), keyed by base match key. A team
 #: size above the cap is not a big raid — it is proof the client's roster is
 #: contaminated, because these raids publish a fixed number of member slots
 #: (ToB five health orbs, ToA eight) and cannot hold more players than that.
@@ -252,6 +253,16 @@ RAID_TEAM_SIZE_CAPS = {
     "tombs-of-amascut": 8,
     # The Fractured Archive (2026-10-20): wiki infobox "players = 1-8".
     "fractured-archive": 8,
+    # Solo-only encounters: a team time here is the same roster contamination
+    # (suggestion #140, 2025-09/10 Hydra, Phosani's and Corrupted Gauntlet rows).
+    "alchemical-hydra": 1,
+    "phosani-s-nightmare": 1,
+    "gauntlet": 1,
+    "corrupted-gauntlet": 1,
+    # Royal Titans can be duoed, but the game keeps ONE personal best for both
+    # and its time messages carry no team size, so a duo board can never be
+    # told apart from the solo one. One board, labelled Solo.
+    "royal-titans": 1,
 }
 
 #: Leading integer of a canonical team-size token — "6" and the low end of the
@@ -295,6 +306,8 @@ def clamp_team_size(npc_name: str | None, raw) -> str:
     cap = team_size_cap(npc_name)
     if cap is None or size == "Solo":
         return size
+    if cap == 1:
+        return "Solo"
     lead = _TEAM_SIZE_LEAD.match(size)
     if lead and int(lead.group(1)) > cap:
         return str(cap)
