@@ -367,6 +367,20 @@ _TOA_PB_RE = re.compile(
     r"(?P<phase>Challenge|Overall) personal best: (?P<time>[\d:.]+)\.?$",
     re.IGNORECASE,
 )
+#: The Fractured Archive (2026-10-20) borrows ToA's layout but keeps the
+#: "has": "Zharpus has achieved a new The Fractured Archive (team size: 3)
+#: Normal mode Overall personal best: 17:48.00". It prints only Overall, and
+#: that IS the plugin's stored raid time (its "Total completion time"; matched
+#: against stored rows 2026-11-09). The generic _PB_RE would take the whole
+#: "... Normal mode Overall" tail as the activity, which never resolves, so
+#: this must be listed ahead of it. Any other mode or phase is classify-only
+#: until we know which board it belongs on.
+_TFA_PB_RE = re.compile(
+    r"^(?P<player>.+?) (?:has )?achieved a new (?:The )?Fractured Archive "
+    r"\(team size: (?P<size>[^)]+)\) (?P<mode>\w+) mode "
+    r"(?P<phase>Challenge|Overall) personal best: (?P<time>[\d:.]+)\.?$",
+    re.IGNORECASE,
+)
 _TOA_MODE_ACTIVITY = {
     "entry": "Tombs of Amascut: Entry Mode",
     "normal": "Tombs of Amascut",
@@ -485,6 +499,19 @@ def _pb(m) -> ParsedBroadcast:
     )
 
 
+def _tfa_pb(m) -> ParsedBroadcast:
+    """Normal mode Overall is tracked on the Fractured Archive row; anything
+    else classifies as ``personal_best_overall`` (untracked)."""
+    tracked = m["mode"].lower() == "normal" and m["phase"].lower() == "overall"
+    extra = {
+        "activity": "Fractured Archive",
+        "team_size": m["size"].strip(),
+        "time_text": m["time"].rstrip("."),
+    }
+    kind = "personal_best" if tracked else "personal_best_overall"
+    return ParsedBroadcast(kind=kind, player=m["player"], extra=extra)
+
+
 def _toa_pb(m) -> ParsedBroadcast:
     """Challenge lines are tracked as ``personal_best`` on the mode's own NPC
     row; Overall lines classify as ``personal_best_overall`` (untracked)."""
@@ -576,6 +603,7 @@ _MATCHERS = (
     (_DIARY_RE, _classified("diary")),
     (_XP_RE, _classified("xp_milestone")),
     (_LEVEL_RE, _classified("level_up")),
+    (_TFA_PB_RE, _tfa_pb),
     (_PB_RE, _pb),
     (_TOA_PB_RE, _toa_pb),
     (_DELVE_RE, _delve),

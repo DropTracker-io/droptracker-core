@@ -523,6 +523,35 @@ def test_toa_overall_pb_is_recognized_but_not_tracked():
     assert not parsed.tracked
 
 
+def test_fractured_archive_overall_pb_is_tracked_on_the_raid_row():
+    # Real line, 2026-11-09. The generic PB shape used to swallow the whole
+    # "... Normal mode Overall" tail as the activity, which never resolved.
+    parsed = parse_broadcast(
+        "Zharpus has achieved a new The Fractured Archive (team size: 3) Normal mode "
+        "Overall personal best: 17:48.00"
+    )
+    assert parsed.kind == "personal_best"
+    assert parsed.tracked
+    assert parsed.player == "Zharpus"
+    assert parsed.extra == {
+        "activity": "Fractured Archive", "team_size": "3", "time_text": "17:48.00",
+    }
+    whole = parse_broadcast(
+        "Jihmy has achieved a new The Fractured Archive (team size: 4) Normal mode "
+        "Overall personal best: 24:47."
+    )
+    assert whole.extra["time_text"] == "24:47"
+
+
+def test_fractured_archive_other_phases_are_not_tracked():
+    parsed = parse_broadcast(
+        "Zharpus has achieved a new The Fractured Archive (team size: 3) Hard mode "
+        "Overall personal best: 17:48.00"
+    )
+    assert parsed.kind == "personal_best_overall"
+    assert not parsed.tracked
+
+
 def test_delve_pb():
     parsed = parse_broadcast(
         "Ettuflu achieved a new personal best deep delve at the Doom of Mokhaiotl: Level 27"
