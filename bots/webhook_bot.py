@@ -948,6 +948,10 @@ async def on_startup(event: Startup):
         bot.load_extension("services.suggestion_sync")
     except Exception as e:
         print(f"Error loading suggestion sync: {e}")
+    try:
+        bot.load_extension("services.discord_audit")
+    except Exception as e:
+        print(f"Error loading discord audit log: {e}")
     # Start the nitro-boost reconciler once (Startup can re-fire on reconnects).
     global _nitro_scheduler_started
     if not _nitro_scheduler_started:

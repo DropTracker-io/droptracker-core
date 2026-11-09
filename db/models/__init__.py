@@ -132,6 +132,7 @@ from .group_verification_code import GroupVerificationCode
 from .plugin_admin_session import PluginAdminSession
 from .api_keys import ApiKey, ApiKeyTier, ApiSubmission
 from .discord_relay import DiscordRelayIntegration, DiscordRelayGuild
+from .discord_audit import DiscordAuditConfig, DiscordMessageLog
 from .badge import Badge, PlayerBadge
 from .recap import (
     RecapSnapshot,
@@ -278,6 +279,8 @@ def get_current_partition() -> int:
 __all__ = [
     "DiscordRelayIntegration",
     "DiscordRelayGuild",
+    "DiscordAuditConfig",
+    "DiscordMessageLog",
     "DataRemovalRequest",
     "Base",
     "session",

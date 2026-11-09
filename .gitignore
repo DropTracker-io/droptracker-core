@@ -125,3 +125,6 @@ private/
 
 # Local MCP server (mcp_server/): kept out of the repository on purpose.
 /mcp_server/
+
+# Discord audit log image copies (private, services/discord_audit.py)
+/data/discord_audit_files/
