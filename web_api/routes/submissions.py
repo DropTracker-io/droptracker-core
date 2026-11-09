@@ -229,6 +229,19 @@ async def manual_submission():
             payload["players_included"] = split_players
         if split_size:
             payload["split_size"] = split_size
+        # Raid loot has to say who was in the raid (the intake enforces this
+        # too; checking here answers before anything is forwarded).
+        raid_solo = body.get("raid_solo") is True
+        from data.submissions.manual_policy import raid_party_problem
+
+        party_problem = raid_party_problem(
+            npc_name, players_included=split_players, split_size=split_size,
+            raid_solo=raid_solo,
+        )
+        if party_problem:
+            abort_problem(422, "Raid party needed", party_problem)
+        if raid_solo:
+            payload["raid_solo"] = True
 
     if sub_type == "pb":
         payload["time_ms"] = int(body["time_ms"])

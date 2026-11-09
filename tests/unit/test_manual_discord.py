@@ -67,7 +67,7 @@ def test_drop_payload_full():
     p = build_manual_payload(
         "drop", "Test Player",
         item_name="Dragon claws", npc_name="Chambers of Xeric",
-        quantity=2, value=180_000_000,
+        quantity=2, value=180_000_000, raid_solo=True,
     )
     assert p == {
         "submission_type": "drop",
@@ -77,11 +77,13 @@ def test_drop_payload_full():
         "npc_name": "Chambers of Xeric",
         "quantity": 2,
         "value": 180_000_000,
+        "raid_solo": True,
     }
 
 
 def test_drop_payload_omits_value_for_ge_lookup():
-    p = build_manual_payload("drop", "P", item_name="Twisted bow", npc_name="CoX")
+    p = build_manual_payload("drop", "P", item_name="Twisted bow", npc_name="CoX",
+                             split_with="Teammate")
     assert "value" not in p  # intake defaults to 0 -> GE price recovery
     assert p["quantity"] == 1
 
@@ -168,9 +170,10 @@ def test_payload_to_form_stringifies_for_multipart():
 
 def test_summaries_read_naturally():
     drop = build_manual_payload("drop", "P", item_name="Dragon claws",
-                                npc_name="CoX", quantity=3)
+                                npc_name="CoX", quantity=3, raid_solo=True)
     assert summarize_submission("drop", drop) == "3x **Dragon claws** from **CoX**"
-    single = build_manual_payload("drop", "P", item_name="Dragon claws", npc_name="CoX")
+    single = build_manual_payload("drop", "P", item_name="Dragon claws", npc_name="CoX",
+                                  raid_solo=True)
     assert summarize_submission("drop", single) == "**Dragon claws** from **CoX**"
     pb = build_manual_payload("pb", "P", npc_name="Zulrah", time_ms=83_400)
     assert summarize_submission("pb", pb) == "**1:23.4** at **Zulrah**"
@@ -276,3 +279,27 @@ def test_summary_spells_out_the_unnamed_share():
     summary = summarize_submission("drop", payload)
     assert "split **4 ways**" in summary
     assert "1 unnamed" in summary
+
+
+def test_raid_drop_needs_a_party():
+    with pytest.raises(ValueError, match="raid"):
+        build_manual_payload("drop", "P", item_name="Horn of Bran", npc_name="Fractured Archive")
+
+
+def test_raid_drop_split_satisfies_the_party_rule():
+    p = build_manual_payload("drop", "P", item_name="Horn of Bran", npc_name="Fractured Archive",
+                             split_with="Vendusz, jishieOSRS", split_size=4)
+    assert p["players_included"] == ["Vendusz", "jishieOSRS"]
+    assert p["split_size"] == 4
+    assert "raid_solo" not in p
+
+
+def test_raid_solo_and_split_conflict():
+    with pytest.raises(ValueError, match="solo"):
+        build_manual_payload("drop", "P", item_name="Twisted bow", npc_name="Chambers of Xeric",
+                             split_with="Someone", raid_solo=True)
+
+
+def test_non_raid_drop_does_not_ask_about_a_party():
+    p = build_manual_payload("drop", "P", item_name="Abyssal whip", npc_name="Abyssal demon")
+    assert "raid_solo" not in p

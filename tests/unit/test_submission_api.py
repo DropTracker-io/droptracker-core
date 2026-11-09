@@ -56,6 +56,39 @@ class TestBuildIntakePayload:
                            "item_name": "Abyssal whip", "npc_name": "Abyssal demon",
                            "quantity": 1, "kill_count": 12}
 
+    def test_raid_drop_needs_a_party(self):
+        # A manual submission carries no party, so raid loot must state one.
+        from data_api.routes import submissions as r
+        with pytest.raises(r.SubmissionError) as err:
+            self._build(type="drop", item="Horn of Bran", npc="Fractured Archive")
+        assert err.value.status == 422
+        assert "raid" in str(err.value.detail).lower()
+
+    def test_raid_drop_with_a_split(self):
+        _, payload = self._build(type="drop", item="Horn of Bran", npc="Fractured Archive",
+                                 split_with=["Vendusz", "jishieOSRS"], split_size=4)
+        assert payload["players_included"] == "Vendusz,jishieOSRS"
+        assert payload["split_size"] == 4
+        assert "raid_solo" not in payload
+
+    def test_raid_drop_solo(self):
+        _, payload = self._build(type="drop", item="Twisted bow", npc="Chambers of Xeric",
+                                 raid_solo="true")
+        assert payload["raid_solo"] is True
+        assert "players_included" not in payload
+
+    def test_raid_solo_and_a_split_conflict(self):
+        from data_api.routes import submissions as r
+        with pytest.raises(r.SubmissionError):
+            self._build(type="drop", item="Twisted bow", npc="Chambers of Xeric",
+                        raid_solo=True, split_with="Someone")
+
+    def test_non_raid_drop_split_is_optional(self):
+        _, payload = self._build(type="drop", item="Abyssal whip", npc="Abyssal demon",
+                                 split_with="Friend, Other")
+        assert payload["players_included"] == "Friend,Other"
+        assert payload["split_size"] == 3
+
     def test_drop_needs_item_and_npc(self):
         from data_api.routes import submissions as r
         with pytest.raises(r.SubmissionError) as err:

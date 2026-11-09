@@ -8,6 +8,7 @@ interfere — ``resolve_manual_moderation`` is pure by design.
 import importlib.util
 import os
 import sys
+import pytest
 
 _MODULE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -56,3 +57,50 @@ class TestResolveManualModeration:
         assert mp.resolve_manual_moderation(policies, {7}) == {
             4: "excluded", 5: "excluded", 6: "pending",
         }
+
+
+# ── raid party on manual drops ──────────────────────────────────────────────
+# A manual submission carries no party for the server to read, so raid loot
+# must say who was in the raid (Frontier PvM, 2026-11-01: a 4-man Fractured
+# Archive Horn of Bran submitted by hand scored as solo).
+
+@pytest.mark.parametrize("npc", [
+    "Theatre of Blood", "Theatre of Blood: Hard Mode", "Tombs of Amascut: Expert Mode",
+    "Chambers of Xeric Challenge Mode", "Fractured Archive", "The Fractured Archive",
+    "tombs of amascut expert", "CoX", "ToB HM", "toa expert", "TFA",
+])
+def test_raid_sources(npc):
+    assert mp.is_raid_source(npc) is True
+
+
+@pytest.mark.parametrize("npc", ["Zulrah", "Lunar Chest", "Barrows", "Toad", "Tobias", "", None])
+def test_non_raid_sources(npc):
+    assert mp.is_raid_source(npc) is False
+
+
+def test_raid_without_a_party_is_refused():
+    assert mp.raid_party_problem("Fractured Archive") == mp.RAID_PARTY_REQUIRED
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"raid_solo": True},
+    {"players_included": ["Vendusz"]},
+    {"split_size": 4},
+    {"split_size": "4"},
+])
+def test_raid_with_a_party_is_fine(kwargs):
+    assert mp.raid_party_problem("Fractured Archive", **kwargs) is None
+
+
+def test_solo_plus_split_conflicts():
+    assert mp.raid_party_problem(
+        "Chambers of Xeric", players_included=["A"], raid_solo=True,
+    ) == mp.RAID_SOLO_CONFLICT
+
+
+def test_a_split_size_of_one_is_not_a_split():
+    assert mp.raid_party_problem("Chambers of Xeric", split_size=1) == mp.RAID_PARTY_REQUIRED
+
+
+def test_non_raid_drops_are_never_asked():
+    assert mp.raid_party_problem("Zulrah") is None

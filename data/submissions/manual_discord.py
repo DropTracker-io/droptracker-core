@@ -154,6 +154,7 @@ def build_manual_payload(
     kc: int | None = None,
     split_with: str | None = None,
     split_size: int | None = None,
+    raid_solo: bool = False,
 ) -> dict:
     """Build the intake ``/manual-submit`` payload for one submission.
 
@@ -187,6 +188,17 @@ def build_manual_payload(
             payload["players_included"] = others
         if resolved_size:
             payload["split_size"] = resolved_size
+        # Raid loot must say who was in the raid (solo, or the split above).
+        from data.submissions.manual_policy import raid_party_problem
+
+        problem = raid_party_problem(
+            npc_name, players_included=others, split_size=resolved_size,
+            raid_solo=bool(raid_solo),
+        )
+        if problem:
+            raise ValueError(problem)
+        if raid_solo:
+            payload["raid_solo"] = True
     elif sub_type == "clog":
         if not item_name:
             raise ValueError("A collection log entry needs the item.")

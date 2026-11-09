@@ -35,6 +35,62 @@ MANUAL_POLICIES = ("allow", "confirm", "authorized_only", "block")
 # Group ids the policy never applies to (1 = template group, 2 = global).
 _SYSTEM_GROUP_MAX = 2
 
+# Raid loot submitted by hand has to say who was in the raid. The plugin reads
+# the party from the game; a manual drop carries nothing, so leaving the split
+# blank used to credit a team raid's loot as solo (Frontier PvM, 2026-11-01:
+# a 4-man Fractured Archive Horn of Bran scored as a solo drop).
+RAID_PARTY_REQUIRED = (
+    "This is raid loot, so tell us who was in the raid: list the players you "
+    "split it with, or confirm you did the raid solo."
+)
+RAID_SOLO_CONFLICT = (
+    "You said you did this raid solo but also listed a split. Choose one."
+)
+
+
+# Slug prefixes that name a raid: the four chests plus the abbreviations a
+# person types into a free-text box. Matched as a prefix so any mode or loose
+# spelling ("tombs of amascut expert", "CoX CM") counts too; the pipeline can
+# still resolve those to the raid's row (variant slugs, then a wiki lookup).
+_RAID_SLUG_PREFIXES = (
+    "theatre-of-blood", "tombs-of-amascut", "chambers-of-xeric", "fractured-archive",
+    "tob", "toa", "cox", "tfa",
+)
+
+
+def is_raid_source(npc_name) -> bool:
+    """Whether a drop source is a raid reward chest (any mode or spelling)."""
+    from utils.npc_names import npc_match_key
+
+    key = npc_match_key(npc_name) if npc_name else None
+    if not key:
+        return False
+    if key.startswith("the-"):
+        key = key[len("the-"):]
+    return any(key == p or key.startswith(p + "-") for p in _RAID_SLUG_PREFIXES)
+
+
+def raid_party_problem(npc_name, *, players_included=None, split_size=None,
+                       raid_solo=False):
+    """Why a manual drop's raid party is unusable, or None when it's fine.
+
+    Non-raid sources are never affected. For a raid, the submitter must either
+    name a split (players or a size of 2+) or state the raid was solo, and not
+    both. Pure; shared by the intake endpoint, the website and Discord.
+    """
+    if not is_raid_source(npc_name):
+        return None
+    try:
+        sized = int(split_size or 0) >= 2
+    except (TypeError, ValueError):
+        sized = False
+    has_split = bool(players_included) or sized
+    if raid_solo and has_split:
+        return RAID_SOLO_CONFLICT
+    if raid_solo or has_split:
+        return None
+    return RAID_PARTY_REQUIRED
+
 
 def resolve_manual_moderation(policies: dict, authorized_group_ids: set) -> dict:
     """Group id -> withhold status for a MANUAL submission (pure; no I/O).

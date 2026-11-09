@@ -658,6 +658,12 @@ class SubmissionCommands(Extension):
         min_value=2,
         max_value=MAX_SPLIT_SIZE,
     )
+    @slash_option(
+        name="raid_solo",
+        description="Raid loot only: set True if you did the raid on your own",
+        opt_type=OptionType.BOOLEAN,
+        required=False,
+    )
     async def submit_drop(
         self,
         ctx: SlashContext,
@@ -668,6 +674,7 @@ class SubmissionCommands(Extension):
         value: int | None = None,
         split_with: str | None = None,
         split_size: int | None = None,
+        raid_solo: bool | None = None,
         proof: Attachment | None = None,
     ):
         # split_with and split_size are independent on purpose: naming everyone
@@ -679,6 +686,7 @@ class SubmissionCommands(Extension):
             item_name=item.strip(), npc_name=npc.strip(),
             quantity=quantity, value=value,
             split_with=split_with, split_size=split_size,
+            raid_solo=bool(raid_solo),
         )
 
     # ------------------------------------------------------------------

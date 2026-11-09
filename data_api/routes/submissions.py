@@ -165,6 +165,48 @@ def parse_time_ms(value) -> int | None:
     return int(round(((hours * 60 + minutes) * 60 + seconds) * 1000))
 
 
+def _split_fields(body: dict, npc: str) -> dict:
+    """A drop's split and raid party as intake fields, or raise SubmissionError.
+
+    ``split_with`` is the OTHER players (a list or comma-separated text),
+    ``split_size`` the total ways including the receiver, ``raid_solo`` that
+    the raid was done alone. Raid loot needs a split or ``raid_solo``. The
+    names go to the intake as comma-separated text, which survives both the
+    JSON and the multipart (with-image) forward.
+    """
+    from data.submissions.manual_discord import parse_split_players, resolve_split_size
+    from data.submissions.manual_policy import raid_party_problem
+
+    raw = body.get("split_with")
+    if isinstance(raw, list):
+        if not all(isinstance(n, str) for n in raw):
+            raise _bad("'split_with' must be player names.")
+        raw = ",".join(raw)
+    elif raw is not None and not isinstance(raw, str):
+        raise _bad("'split_with' must be player names.")
+    size = _int(body, "split_size", 2, 100)
+    raid_solo = _bool(body, "raid_solo", False)
+    try:
+        # The receiver isn't known yet; a name equal to theirs is dropped by
+        # the pipeline's own split resolution.
+        others = parse_split_players(raw, "")
+        size = resolve_split_size(size, others)
+    except ValueError as e:
+        raise _bad(str(e))
+    problem = raid_party_problem(npc, players_included=others, split_size=size,
+                                 raid_solo=raid_solo)
+    if problem:
+        raise _bad(problem)
+    out: dict = {}
+    if others:
+        out["players_included"] = ",".join(others)
+    if size:
+        out["split_size"] = size
+    if raid_solo:
+        out["raid_solo"] = True
+    return out
+
+
 def build_intake_payload(body: dict) -> tuple[str, dict]:
     """``(public_type, intake_payload)`` from a request body, or raise
     :class:`SubmissionError`. The player and the api_* fields are added by
@@ -189,6 +231,7 @@ def build_intake_payload(body: dict) -> tuple[str, dict]:
         kc = _int(body, "kc", 0)
         if kc is not None:
             payload["kill_count"] = kc
+        payload.update(_split_fields(body, npc))
     elif sub_type == "clog":
         if not item:
             raise _bad("A collection log submission needs 'item'.")

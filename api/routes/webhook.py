@@ -18,6 +18,7 @@ from data.submissions.dispatch import (
     normalize_submission_type,
     normalize_world_type,
 )
+from data.submissions.manual_policy import raid_party_problem
 from db import Player, Drop
 from db.ops import resolve_upload_player
 from utils.format import find_player_by_rsn
@@ -1259,7 +1260,16 @@ async def _process_manual_submission(req_start):
                     nearby_players = _parse_nearby_players(
                         data.get("nearby_players") or data.get("players_included") or data.get("members")
                     )
-                    
+                    # Raid loot must say who was in the raid; a blank split
+                    # would otherwise score a team raid as solo.
+                    raid_solo = str(data.get("raid_solo") or "").strip().lower() in ("1", "true", "yes", "on")
+                    party_problem = raid_party_problem(
+                        npc_name, players_included=nearby_players,
+                        split_size=data.get("split_size"), raid_solo=raid_solo,
+                    )
+                    if party_problem:
+                        return jsonify({"success": False, "error": party_problem}), 400
+
                     processed_data.update({
                         "type": "drop",
                         "item_name": item_name,
