@@ -952,9 +952,14 @@ def _run_chat_clog(monkeypatch, inferred):
     monkeypatch.setattr(cb, "_images_gate_blocks", _no_gate)
     monkeypatch.setattr(cb, "create_notification", _notify)
     monkeypatch.setattr(cb, "_inferred_drop_source", lambda _name, from_raid=False: inferred)
+
+    async def _no_record(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(cb, "_record_chat_clog", _no_record)
     parsed = SimpleNamespace(item_name="Dragon pickaxe", extra={"log_slots": 518, "log_total": 1717})
     subject = SimpleNamespace(player_name="Sebby", player_id=7)
-    asyncio.run(cb._process_chat_clog(None, False, parsed, subject, [381], [381], "cc:x"))
+    asyncio.run(cb._process_chat_clog(None, False, parsed, subject, [381], [381], "cc:x", None))
     return sent
 
 
@@ -967,6 +972,100 @@ def test_chat_clog_uses_the_items_only_source(monkeypatch):
 def test_chat_clog_without_a_sole_source_says_clan_broadcast(monkeypatch):
     sent = _run_chat_clog(monkeypatch, None)
     assert [d["npc_name"] for d in sent] == [cb.SENTINEL_NPC_NAME] == ["Clan Broadcast"]
+
+
+# ── chat clog slots count on the Clan Log ───────────────────────────────────
+
+class _ClogSession:
+    """Just enough Session for _record_chat_clog: one owned-row lookup and
+    a savepointed insert."""
+
+    def __init__(self, owned=False, fail_insert=False):
+        self.owned, self.fail_insert = owned, fail_insert
+        self.added, self.commits = [], 0
+
+    def query(self, *_a):
+        return self
+
+    def filter(self, *_a):
+        return self
+
+    def first(self):
+        return (1,) if self.owned else None
+
+    def begin_nested(self):
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+    def add(self, row):
+        self.added.append(row)
+
+    def flush(self):
+        if self.fail_insert:
+            raise RuntimeError("Duplicate entry for key uq_collection_unique_id")
+
+    def commit(self):
+        self.commits += 1
+
+
+def _record_clog(monkeypatch, session, *, guid_free=True, npc=(321, "Tormented Demon"), sentinel=999):
+    import asyncio
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    async def _can_create(_s, _guid, kind):
+        assert kind == "clog"
+        return guid_free
+
+    async def _sentinel(_s):
+        return sentinel
+
+    monkeypatch.setattr(cb, "ensure_can_create", _can_create)
+    monkeypatch.setattr(cb, "_equivalent_item_ids", lambda _s, item: [item.item_id])
+    monkeypatch.setattr(cb, "_inferred_drop_source", lambda _name, from_raid=False: npc[1])
+    monkeypatch.setattr(cb, "_resolve_npc", lambda _s, _name: npc)
+    monkeypatch.setattr(cb, "_ensure_sentinel_npc_id", _sentinel)
+    parsed = SimpleNamespace(item_name="Dragon pickaxe", extra={"log_slots": 518, "log_total": 1717})
+    subject = SimpleNamespace(player_name="Sebby", player_id=7)
+    stamp = datetime(2026, 11, 9, 19, 0)
+    asyncio.run(cb._record_chat_clog(
+        session, False, parsed, subject, SimpleNamespace(item_id=11920), "cc:x", stamp))
+    return stamp
+
+
+def test_chat_clog_slot_is_recorded_for_the_clan_log(monkeypatch):
+    session = _ClogSession()
+    stamp = _record_clog(monkeypatch, session)
+    [row] = session.added
+    assert (row.player_id, row.item_id, row.npc_id) == (7, 11920, 321)
+    assert row.unique_id == "cc:x" and row.used_api is False
+    assert row.reported_slots == 518 and row.date_added == stamp
+    assert session.commits == 1
+
+
+def test_chat_clog_slot_already_owned_writes_nothing(monkeypatch):
+    session = _ClogSession(owned=True)
+    _record_clog(monkeypatch, session)
+    assert session.added == []
+
+
+def test_chat_clog_replay_writes_nothing(monkeypatch):
+    session = _ClogSession()
+    _record_clog(monkeypatch, session, guid_free=False)
+    assert session.added == []
+
+
+def test_chat_clog_without_a_sole_source_lands_on_the_sentinel(monkeypatch):
+    session = _ClogSession()
+    _record_clog(monkeypatch, session, npc=(None, None), sentinel=999)
+    assert [r.npc_id for r in session.added] == [999]
+
+
+def test_chat_clog_insert_race_never_breaks_the_notification(monkeypatch):
+    session = _ClogSession(fail_insert=True)
+    _record_clog(monkeypatch, session)  # must not raise
+    assert session.commits == 0
 
 
 # ── clan bank coffer sync (web144a) ─────────────────────────────────────────

@@ -104,6 +104,7 @@ from .common import (
     get_true_item_value,
     received_at,
     redis_updates,
+    reraise_if_session_broken,
     screenshot_required,
     select_session_and_flag,
 )
@@ -1254,7 +1255,7 @@ async def _record_for_subject(
     if parsed.kind == "collection_log":
         return await _process_chat_clog(
             session, use_external_session, parsed, subject, subject_group_ids,
-            bound_groups, cc_guid,
+            bound_groups, cc_guid, stamp,
         )
     if parsed.kind == "personal_best":
         return await _process_chat_pb(
@@ -1727,23 +1728,79 @@ async def _process_chat_pet(
     return SubmissionResponse(True, f"Recorded chat pet for {subject.player_name} ({notified} groups)")
 
 
+async def _record_chat_clog(session, use_external_session, parsed, subject, item, cc_guid, stamp):
+    """Write the broadcast's collection-log slot unless the subject has it."""
+    from db.models import CollectionLogEntry
+
+    if not await ensure_can_create(session, cc_guid, "clog"):
+        _stat("duplicate_guid")
+        return
+    owned = (
+        session.query(CollectionLogEntry.log_id)
+        .filter(
+            CollectionLogEntry.player_id == subject.player_id,
+            CollectionLogEntry.item_id.in_(_equivalent_item_ids(session, item)),
+        )
+        .first()
+    )
+    if owned is not None:
+        _stat("clog_already_owned")
+        return
+    # The line names no source: the item's only real source when it has one,
+    # else the sentinel (never a minted boss row).
+    npc_id, _name = _resolve_npc(session, _inferred_drop_source(parsed.item_name))
+    if npc_id is None:
+        npc_id = await _ensure_sentinel_npc_id(session)
+        if npc_id is None:
+            return
+    try:
+        # SAVEPOINT like the pet path: a GUID replay discards only this row.
+        with session.begin_nested():
+            session.add(CollectionLogEntry(
+                player_id=subject.player_id,
+                item_id=item.item_id,
+                npc_id=npc_id,
+                reported_slots=parsed.extra.get("log_slots"),
+                unique_id=cc_guid,
+                used_api=False,
+                date_added=stamp,
+                date_updated=stamp,
+            ))
+            session.flush()
+        if use_external_session:
+            session.flush()
+        else:
+            session.commit()
+        _stat("clogs_recorded")
+    except Exception as e:
+        reraise_if_session_broken(e)
+        debug_print(f"[ClanBroadcast] Clog row create failed (likely replay): {e}")
+
+
 async def _process_chat_clog(
     session, use_external_session, parsed, subject, subject_group_ids,
-    bound_groups, cc_guid,
+    bound_groups, cc_guid, stamp,
 ):
-    """Collection-log broadcasts are notification-only in v1: writing
-    CollectionLogEntry rows from text would fight the plugin clog pipeline's
-    slot-count reconciliation, and the subject's totals already come from WOM
-    (``log_slots``)."""
+    """Record the unlocked slot, then notify.
+
+    The row is what makes the slot count on the Clan Log (services/clan_log
+    reads ``collection``), the same way a pet broadcast writes ``player_pets``.
+    It is written only when the subject holds no row for that item: a slot is
+    unlocked once, and a plugin user's own copy was already given the grace
+    window by ``_plugin_copy_exists``. The player's slot totals still come from
+    WOM / state sync, never from counting these rows.
+    """
     try:
-        # No DB row means no GUID backstop — persist the dedupe in Redis for a
-        # day so a queue replay hours later stays silent.
+        # Kept alongside the row's GUID: a slot the subject already owned
+        # writes no row, and its replay must stay silent too.
         if not redis_client.client.set(f"clanchat:clognotif:{cc_guid}", "1", nx=True, ex=86400):
             return SubmissionResponse(True, "Collection log broadcast already notified")
     except Exception:
         pass
 
     item = await ensure_item_by_name(session, parsed.item_name)
+    if item is not None:
+        await _record_chat_clog(session, use_external_session, parsed, subject, item, cc_guid, stamp)
     # The line never names a source, so {npc_name} used to render as "None"
     # (ticket #476). Use the item's only real source when it has one, like
     # the drop path does, else say where it came from.
