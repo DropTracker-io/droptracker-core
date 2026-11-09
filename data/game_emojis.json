@@ -24425,12 +24425,13 @@
       "rescued": false
     },
     {
-      "name": "Sol Heredit",
-      "key": "sol_heredit",
+      "name": "Fortis Colosseum",
+      "key": "fortis_colosseum",
       "emoji": "npc_sol_heredit",
       "id": 12821,
       "ids": [
-        12821
+        12821,
+        13741
       ],
       "rank": 138,
       "mentions": 944,

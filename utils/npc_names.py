@@ -59,6 +59,10 @@ NPC_ALIASES = {
     # It collapses into the real reward pool in NPC pickers so it can't be
     # chosen as a manual-submission source.
     "npc-reward-pool-tempoross": "reward-pool-tempoross",
+    # The Colosseum's PB ("Colosseum duration") was stored under the final
+    # boss while its loot lands on the activity, splitting one board in two
+    # (bug #140). The activity is the canonical row.
+    "sol-heredit": "fortis-colosseum",
 }
 
 #: Multi-boss encounters where the plugin/source may name the individual boss
@@ -87,7 +91,18 @@ ENCOUNTER_NAME_ALIASES = {
     # A manual submission that picked the stray row stored its drop on 13952,
     # and event tasks scoped to the reward pool never matched it.
     "NPC Reward pool (Tempoross)": "Reward pool (Tempoross)",
+    # See NPC_ALIASES: Colosseum PBs and loot share the activity's row.
+    "Sol Heredit": "Fortis Colosseum",
 }
+
+#: npc_list carried the Doom delve levels misspelt "Mokhaitol" until bug #140.
+#: Names saved before the rename (group Hall of Fame lists, event tasks) still
+#: reach the corrected rows.
+LEGACY_NAME_FIXES = {
+    f"Doom of Mokhaitol (Level: {level})": f"Doom of Mokhaiotl (Level: {level})"
+    for level in range(1, 9)
+}
+ENCOUNTER_NAME_ALIASES.update(LEGACY_NAME_FIXES)
 
 #: ``ENCOUNTER_NAME_ALIASES`` keyed by slug, so a source that disagrees on
 #: capitalisation or punctuation ("corrupted hunllef") still folds.

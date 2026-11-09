@@ -139,6 +139,14 @@ async def adventure_log_processor(adventure_log_data, external_session=None):
                     f"boss='{boss_name}', team='{team_size}', time_ms={time_ms}"
                 )
                 continue
+            from utils.pb_floors import below_floor
+
+            if below_floor(boss_name, time_ms):
+                debug_print(
+                    f"Adventure log PB skipped (faster than any whole run): "
+                    f"boss='{boss_name}', time_ms={time_ms}"
+                )
+                continue
 
             existing_pb = (
                 session.query(PersonalBestEntry)

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from utils.app_emojis import emoji as app_emoji
+from utils.npc_names import canonical_encounter_name
 
 # Logical message keys stored in group_personal_best_message.boss_name for the
 # directory messages.  These values are already present in production rows, so
@@ -140,6 +141,9 @@ def canonical_display_name(boss_name: str) -> str:
     """
     if SEPULCHRE_FLOOR_RE.match(boss_name):
         return SEPULCHRE_CANONICAL
+    # A name the catalogue folded into another row ('Sol Heredit' -> 'Fortis
+    # Colosseum', the old 'Mokhaitol' spellings) shares that row's message.
+    boss_name = canonical_encounter_name(boss_name) or boss_name
     for candidate in npc_name_candidates(boss_name):
         canonical = RAID_VARIANT_TO_CANONICAL.get(candidate)
         if canonical:
@@ -176,6 +180,9 @@ def npc_name_candidates(name: str) -> List[str]:
     name = (name or "").strip()
     if not name:
         return []
+    # Folded names resolve to the row that holds their data; the raw name
+    # would find a catalogue row with no personal bests left on it.
+    name = canonical_encounter_name(name) or name
     candidates = [name]
     if name.casefold().startswith("the "):
         candidates.append(name[4:])

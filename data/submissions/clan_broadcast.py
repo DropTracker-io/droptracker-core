@@ -1494,6 +1494,11 @@ async def _process_chat_pb(
         return SubmissionResponse(
             True, f"PB activity {parsed.extra.get('activity')!r} is not a known boss; skipped"
         )
+    from utils.pb_floors import below_floor
+
+    if below_floor(boss_name, time_ms):
+        _stat("pb_below_floor")
+        return SubmissionResponse(True, f"PB time is faster than any whole {boss_name} run; skipped")
     team_size = _pb_bracket(parsed)
     # The broadcast prints the achiever's own timing mode: hundredths when
     # precise timing is on, whole seconds when it is off.

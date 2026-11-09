@@ -46,6 +46,9 @@ TEAM_SIZE_PATTERN = re.compile(
 # Archive, whose "Total completion time" IS the raid time.
 TOTAL_COMPLETION_PATTERN = re.compile(r"(?<!Fractured Archive: )total completion time", _I)
 COMPLETION_TIME_PATTERN = re.compile(r"(?<!total )completion time:", _I)
+# One Colosseum wave, never the run: with no "Colosseum duration" line in the
+# kill, the first-timed-line fallback used to file it as the run (bug #140).
+WAVE_SPLIT_PATTERN = re.compile(r"\bWave duration\b", _I)
 DELVE_LEVEL_PATTERN = re.compile(r"Delve level:\s*(?P<level>\d+)(?P<deep>\+)?(?:\s*\((?P<actual>\d+)\))?", re.ASCII)
 DELVE_TOTAL_PATTERN = re.compile(r"Delve level\s+\d+\s*-\s*\d+\s+duration", re.ASCII)
 
@@ -159,7 +162,7 @@ def _parse_boss_count(message):
 def _select_time_line(message, completion_only):
     first = None
     for line in message.split("\n"):
-        if TOTAL_COMPLETION_PATTERN.search(line):
+        if TOTAL_COMPLETION_PATTERN.search(line) or WAVE_SPLIT_PATTERN.search(line):
             continue
         if completion_only and not COMPLETION_TIME_PATTERN.search(line):
             continue
@@ -198,7 +201,8 @@ def _boss_from_context(message):
     if "Challenge duration" in message:
         return "Crystalline Hunllef"
     if "Colosseum duration" in message:
-        return "Sol Heredit"
+        # The whole run, so it lives on the activity with the loot (bug #140).
+        return "Fortis Colosseum"
     if "Delve level" in message:
         return delve_boss(message)
     return None

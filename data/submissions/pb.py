@@ -316,6 +316,13 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     except Exception:
         # Fail open: a blocklist read error must never break PB intake.
         pass
+    # A partial time (one Colosseum wave, one Doom delve level) filed as the
+    # whole run would top the board forever (bug #140).
+    from utils.pb_floors import below_floor
+
+    if below_floor(npc_name, time_ms):
+        debug_print(f"PB {time_ms}ms for {npc_name} is faster than any whole run; dropped")
+        return
     player, authed, user_exists = await ensure_player_by_name_then_auth(
         session, player_name, account_hash, auth_key, world_type=world_type
     )
@@ -325,6 +332,29 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
     if not user_exists or not authed:
         return
     apply_account_type(player, pb_data.get("account_type"), world_type)
+
+    # The Doom 1 - 8 total can't beat the player's own level bests added up;
+    # one that does is a single level from a client that mis-named it.
+    from utils.doom_delve import DOOM_NPC_ID
+
+    if npc_id == DOOM_NPC_ID and not side_world:
+        try:
+            from db.models import PersonalBestEntry
+            from utils.pb_floors import DOOM_LEVELS, below_level_sum
+
+            level_bests = [
+                best for (best,) in session.query(PersonalBestEntry.personal_best).filter(
+                    PersonalBestEntry.player_id == player_id,
+                    PersonalBestEntry.npc_id.between(DOOM_NPC_ID + 1, DOOM_NPC_ID + DOOM_LEVELS),
+                ).all()
+            ]
+            if below_level_sum(time_ms, level_bests):
+                debug_print(f"Doom 1-8 total {time_ms}ms beats player {player_id}'s level bests; dropped")
+                return
+        except Exception as e:
+            # Fail open: this check must never break PB intake.
+            reraise_if_session_broken(e)
+            debug_print(f"Doom level-sum check failed for player {player_id}: {e}")
 
     # Doom of Mokhaiotl: every timed delve level is a completion, PB or not,
     # so it can raise the player's deepest delve (the Hall of Fame board).
