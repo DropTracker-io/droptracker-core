@@ -112,6 +112,11 @@ def test_legacy_mokhaitol_names_reach_the_corrected_rows():
         assert npc_name_candidates(old)[0] == f"Doom of Mokhaiotl (Level: {level})"
 
 
+def test_the_misspelt_boss_name_reaches_the_1_to_8_board():
+    assert canonical_encounter_name("Doom of Mokhaitol") == "Doom of Mokhaiotl"
+    assert npc_name_candidates("Doom of Mokhaitol")[0] == "Doom of Mokhaiotl"
+
+
 def test_old_and_new_colosseum_names_share_one_hof_message():
     plan = build_boss_plan(["Sol Heredit", "Fortis Colosseum", "Zulrah"])
     assert [e.display_name for e in plan] == ["Fortis Colosseum", "Zulrah"]

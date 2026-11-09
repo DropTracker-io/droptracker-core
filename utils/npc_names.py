@@ -102,6 +102,8 @@ LEGACY_NAME_FIXES = {
     f"Doom of Mokhaitol (Level: {level})": f"Doom of Mokhaiotl (Level: {level})"
     for level in range(1, 9)
 }
+# Hall of Fame lists also carry the boss itself with the same misspelling.
+LEGACY_NAME_FIXES["Doom of Mokhaitol"] = "Doom of Mokhaiotl"
 ENCOUNTER_NAME_ALIASES.update(LEGACY_NAME_FIXES)
 
 #: ``ENCOUNTER_NAME_ALIASES`` keyed by slug, so a source that disagrees on

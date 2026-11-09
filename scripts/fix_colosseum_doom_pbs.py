@@ -179,21 +179,24 @@ def merge_colosseum_other(s, apply):
     if not apply:
         return counts, drop_ids
 
+    # Reading the source through a derived table: MariaDB will not resolve an
+    # ON DUPLICATE KEY column when INSERT ... SELECT reads its own table.
     s.execute(text(
         "INSERT INTO player_npc_kc (player_id, npc_id, kill_count, updated_at) "
-        "SELECT player_id, :c, kill_count, updated_at FROM player_npc_kc WHERE npc_id=:s "
-        "ON DUPLICATE KEY UPDATE kill_count=GREATEST(player_npc_kc.kill_count, VALUES(kill_count)), "
-        "updated_at=GREATEST(player_npc_kc.updated_at, VALUES(updated_at))"
+        "SELECT * FROM (SELECT player_id, :c AS npc_id, kill_count, updated_at "
+        "FROM player_npc_kc WHERE npc_id=:s) AS src "
+        "ON DUPLICATE KEY UPDATE kill_count=GREATEST(player_npc_kc.kill_count, src.kill_count), "
+        "updated_at=GREATEST(player_npc_kc.updated_at, src.updated_at)"
     ), {"c": COLOSSEUM_ID, "s": SOL_ID})
     s.execute(text("DELETE FROM player_npc_kc WHERE npc_id=:s"), {"s": SOL_ID})
     s.execute(text(
         "INSERT INTO player_npc_hourly_totals (player_id, npc_id, date_hour, `partition`, total_value, "
         "drop_count, last_drop_time) "
-        "SELECT player_id, :c, date_hour, `partition`, total_value, drop_count, last_drop_time "
-        "FROM player_npc_hourly_totals WHERE npc_id=:s "
-        "ON DUPLICATE KEY UPDATE total_value=player_npc_hourly_totals.total_value+VALUES(total_value), "
-        "drop_count=player_npc_hourly_totals.drop_count+VALUES(drop_count), "
-        "last_drop_time=GREATEST(player_npc_hourly_totals.last_drop_time, VALUES(last_drop_time))"
+        "SELECT * FROM (SELECT player_id, :c AS npc_id, date_hour, `partition`, total_value, drop_count, "
+        "last_drop_time FROM player_npc_hourly_totals WHERE npc_id=:s) AS src "
+        "ON DUPLICATE KEY UPDATE total_value=player_npc_hourly_totals.total_value+src.total_value, "
+        "drop_count=player_npc_hourly_totals.drop_count+src.drop_count, "
+        "last_drop_time=GREATEST(player_npc_hourly_totals.last_drop_time, src.last_drop_time)"
     ), {"c": COLOSSEUM_ID, "s": SOL_ID})
     s.execute(text("DELETE FROM player_npc_hourly_totals WHERE npc_id=:s"), {"s": SOL_ID})
     for i in range(0, len(drop_ids), 500):
