@@ -994,6 +994,32 @@ def _notify_enabled_groups(session, group_ids, key):
     return {gid for gid in gids if gc.is_truthy(bulk.get((gid, key)))}
 
 
+def _config_values(session, group_ids, key):
+    """``{group_id: stored value}`` for one key, registry default when unset."""
+    from utils import group_config as gc
+
+    gids = sorted(set(group_ids))
+    if not gids:
+        return {}
+    bulk = gc.get_bulk_effective(session, gids, [key])
+    return {gid: bulk.get((gid, key)) for gid in gids}
+
+
+def _outside_group_top(session, group_id, npc_id, team_size, player_id, stored) -> bool:
+    """pb_processor's ``pb_notify_top_ranks`` gate (suggestion #239), fail-open."""
+    from utils.pb_rank import outside_group_top, top_ranks_limit
+
+    top = top_ranks_limit(stored)
+    if not top:
+        return False
+    try:
+        return outside_group_top(session, group_id, npc_id, team_size, player_id, top)
+    except Exception as e:
+        reraise_if_session_broken(e)
+        debug_print(f"[ClanBroadcast] PB top-ranks check failed for group {group_id}: {e}")
+        return False
+
+
 def _notification_gate(group_id, group_config_values, unit_value, total_value):
     """Mirror drop_processor's per-group announce criteria."""
     from utils import group_config as gc
@@ -1589,11 +1615,15 @@ async def _process_chat_pb(
 
     # Group notifications: same notify_pbs + screenshot gates as pb_processor.
     enabled = _notify_enabled_groups(session, subject_group_ids, "notify_pbs")
+    top_ranks = _config_values(session, enabled, "pb_notify_top_ranks")
     notified = 0
     for gid in sorted(set(subject_group_ids)):
         if gid not in enabled:
             continue
         if await _images_gate_blocks(session, gid):
+            continue
+        if _outside_group_top(session, gid, npc_id, team_size, subject.player_id, top_ranks.get(gid)):
+            _stat("pb_below_group_top")
             continue
         notification_data = {
             "player_name": subject.player_name,
@@ -1807,9 +1837,24 @@ async def _process_chat_clog(
     source = _inferred_drop_source(parsed.item_name) or SENTINEL_NPC_NAME
     _stat("clogs_notified")
     enabled = _notify_enabled_groups(session, subject_group_ids, "notify_clogs")
+    # Same page-completion rule as clog_processor (suggestion #238).
+    from utils.clog_collections import NOTIFY_MODE_KEY, completed_page, notify_mode
+
+    completed_collection = None
+    try:
+        completed_collection = completed_page(
+            session, subject.player_id, item.item_id if item else None, parsed.item_name, source,
+        )
+    except Exception as e:
+        reraise_if_session_broken(e)
+        debug_print(f"[ClanBroadcast] Collection log page check failed: {e}")
+    modes = _config_values(session, enabled, NOTIFY_MODE_KEY)
     notified = 0
     for gid in sorted(set(subject_group_ids)):
         if gid not in enabled:
+            continue
+        if notify_mode(modes.get(gid)) == "completed" and not completed_collection:
+            _stat("clog_page_incomplete")
             continue
         if await _images_gate_blocks(session, gid):
             continue
@@ -1825,6 +1870,8 @@ async def _process_chat_clog(
             "item_id": item.item_id if item else None,
             "log_slots": parsed.extra.get("log_slots"),
             "log_total": parsed.extra.get("log_total"),
+            "completed_collection": completed_collection,
+            "collection_name": completed_collection,
             "group_points_awarded": 0,
             "group_points_receiver_total": 0,
             "group_points_member_count": 0,

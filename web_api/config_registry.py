@@ -323,13 +323,23 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "default": True,
         "seasonal": True,
     },
+    # Suggestion #238: utils/clog_collections.completed_page.
+    {
+        "key": "clog_notify_mode",
+        "label": "Which collection log slots to post",
+        "category": "achievements",
+        "type": "select",
+        "help": "Every new slot, or only the slot that completes a collection log page. Completed pages are only spotted for members who have opened their collection log with the plugin since joining, or whose every slot on that page we saw them get.",
+        "default": "all",
+        "options": ["all", "completed"],
+    },
     # Members' own and the group's collection log messages (db/member_messages.py).
     {
         "key": "clog_message_variants",
         "label": "Collection log messages",
         "category": "achievements",
         "type": "messagelist",
-        "help": "Your own collection log messages, one picked at random each time. Placeholders like {player_name}, {item_name}, {source}, {kill_count}, {slots_unlocked} and {slots_total} are filled in. A message is skipped when one of its placeholders is blank, so you can write lines that only fit some collection log slots. Leave empty for the default message. In a custom embed or a Components layout, place the picked message with {clog_message}.",
+        "help": "Your own collection log messages, one picked at random each time. Placeholders like {player_name}, {item_name}, {source}, {kill_count}, {slots_unlocked}, {slots_total} and {completed_collection} (only on the slot that completes a page) are filled in. A message is skipped when one of its placeholders is blank, so you can write lines that only fit some collection log slots. Leave empty for the default message. In a custom embed or a Components layout, place the picked message with {clog_message}.",
         "default": "",
     },
     {
@@ -681,6 +691,17 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "help": "Post personal-best notifications in Discord. Available to all groups.",
         "default": True,
         "seasonal": True,
+    },
+    # Suggestion #239: utils/pb_rank.outside_group_top. 0 = every PB.
+    {
+        "key": "pb_notify_top_ranks",
+        "label": "Only post top-ranked PBs",
+        "category": "pbs",
+        "type": "int",
+        "help": "Post a personal best only when it places in your clan's top this many for that boss and team size. 0 posts every personal best. The time is still recorded either way.",
+        "default": 0,
+        "min": 0,
+        "max": 100,
     },
     # Members' own and the group's personal best messages (db/member_messages.py).
     {

@@ -661,10 +661,18 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         player_groups = get_player_groups_with_global(session, player)
         group_ids = [g.group_id for g in player_groups]
         pb_notify_configs = {}
+        pb_top_ranks = {}
         if group_ids:
             from utils import group_config as gc
-            bulk = gc.get_bulk_effective(session, group_ids, [f"{config_prefix}notify_pbs"])
-            pb_notify_configs = {gid: val for (gid, _key), val in bulk.items()}
+            from utils.pb_rank import TOP_RANKS_KEY, top_ranks_limit
+            notify_key = f"{config_prefix}notify_pbs"
+            bulk = gc.get_bulk_effective(session, group_ids, [notify_key, TOP_RANKS_KEY])
+            pb_notify_configs = {gid: val for (gid, key), val in bulk.items() if key == notify_key}
+            if not side_world:
+                pb_top_ranks = {
+                    gid: top_ranks_limit(val)
+                    for (gid, key), val in bulk.items() if key == TOP_RANKS_KEY
+                }
 
         # Per-group manual policy (suggestion #45): suppress this group's
         # notification for a manual submission it doesn't trust (non-drop
@@ -720,8 +728,20 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     print(f"Couldn't perform check against group point awards... e: {e}")
                     pass
             notify_reason = "config" if is_truthy_config(pb_notify_configs.get(group_id)) else None
+            if notify_reason == "config" and pb_top_ranks.get(group_id):
+                # The group only posts PBs that place in its own top N for
+                # this boss (suggestion #239). Recorded and scored either way.
+                try:
+                    from utils.pb_rank import outside_group_top
+
+                    if outside_group_top(session, group_id, npc_id, team_size, player_id,
+                                         pb_top_ranks[group_id]):
+                        notify_reason = None
+                except Exception as e:
+                    reraise_if_session_broken(e)
+                    debug_print(f"PB top-ranks check failed for group {group_id}: {e}")
             if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
-                # notify_pbs is off but points landed: the notify_points_awarded
+                # notify_pbs is off (or the PB missed the group's top ranks) but points landed: the notify_points_awarded
                 # toggle (opt-in, default OFF) announces the PB so points are never
                 # awarded silently.
                 from .common import points_notify_enabled
