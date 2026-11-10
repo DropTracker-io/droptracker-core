@@ -603,6 +603,11 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     # Personal best
     "personal_best": {"help": "The new best time", "sample": "14:23.40"},
     "team_size": {"help": "Team size for the kill", "sample": "4"},
+    "speed_tier": {
+        "help": "The hardest combat achievement speed tier the time meets (Elite, Master or Grandmaster)",
+        "sample": "Grandmaster",
+        "optional": True,
+    },
     "total_ranked_global": {"help": "Players ranked globally at this boss", "sample": "4120"},
     "total_ranked_group": {"help": "Group members ranked at this boss", "sample": "22"},
     # Combat achievements
@@ -808,7 +813,7 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "group": "Achievements",
         "description": "Posted when a member sets a new personal best time.",
         "tokens": ("pb_message", "npc_name", "npc_link", "npc_id", "personal_best", "team_size", "kill_count",
-                   "global_rank", "total_ranked_global", "group_rank",
+                   "speed_tier", "global_rank", "total_ranked_global", "group_rank",
                    "total_ranked_group", "gear_image_url") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
     "ca": {

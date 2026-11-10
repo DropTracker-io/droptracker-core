@@ -209,6 +209,55 @@ def _store_loadout(session, pb_entry, equipment_raw, inventory_raw, kill_set_bes
     return item_ids
 
 
+def pb_post_filter(session, group_ids, *, npc_id, npc_name, team_size, player_id,
+                   time_ms, old_time_ms):
+    """``({group_id: reason}, speed tier)`` for a new PB (suggestion #239).
+
+    A group in the dict withholds the post for that reason
+    (``utils.pb_notify_filter``); the speed tier ("grandmaster", ...) is the
+    hardest combat achievement speed target the time meets, for the message.
+    The global rank is looked up at most once, each clan rank only for a group
+    that asks for one, and a failed lookup counts as met (fail-open).
+    """
+    from utils.ca_speed import speed_tier
+    from utils.pb_notify_filter import load_rules, withheld_reason
+    from utils.pb_rank import clan_rank, pb_board_rank
+
+    tier = speed_tier(npc_name, team_size, time_ms)
+    rules = load_rules(session, group_ids)
+    if not any(r.active for r in rules.values()):
+        return {}, tier
+
+    cache = {}
+
+    def _lookup(key, fn):
+        if key not in cache:
+            try:
+                cache[key] = fn()
+            except Exception as e:
+                reraise_if_session_broken(e)
+                debug_print(f"PB rank lookup {key} failed: {e}")
+                cache[key] = None
+        return cache[key]
+
+    def _global():
+        ranked = pb_board_rank(session, npc_id, team_size, player_id)
+        return ranked[0] if ranked else None
+
+    withheld = {}
+    for gid, group_rules in rules.items():
+        reason = withheld_reason(
+            group_rules, npc_name=npc_name, team_size=team_size, time_ms=time_ms,
+            old_time_ms=old_time_ms,
+            clan_rank=lambda gid=gid: _lookup(("clan", gid), lambda: clan_rank(
+                session, gid, npc_id, team_size, player_id)),
+            global_rank=lambda: _lookup("global", _global),
+        )
+        if reason:
+            withheld[gid] = reason
+    return withheld, tier
+
+
 async def pb_processor(pb_data, external_session=None, world_type="main"):
     from .pb_lines import expand, has_lines
 
@@ -661,18 +710,23 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         player_groups = get_player_groups_with_global(session, player)
         group_ids = [g.group_id for g in player_groups]
         pb_notify_configs = {}
-        pb_top_ranks = {}
+        pb_withheld, pb_speed_tier = {}, None
         if group_ids:
             from utils import group_config as gc
-            from utils.pb_rank import TOP_RANKS_KEY, top_ranks_limit
-            notify_key = f"{config_prefix}notify_pbs"
-            bulk = gc.get_bulk_effective(session, group_ids, [notify_key, TOP_RANKS_KEY])
-            pb_notify_configs = {gid: val for (gid, key), val in bulk.items() if key == notify_key}
+            bulk = gc.get_bulk_effective(session, group_ids, [f"{config_prefix}notify_pbs"])
+            pb_notify_configs = {gid: val for (gid, _key), val in bulk.items()}
             if not side_world:
-                pb_top_ranks = {
-                    gid: top_ranks_limit(val)
-                    for (gid, key), val in bulk.items() if key == TOP_RANKS_KEY
-                }
+                # Which PBs each group posts (suggestion #239). Recorded and
+                # scored either way; this only decides the announcement.
+                try:
+                    pb_withheld, pb_speed_tier = pb_post_filter(
+                        session, group_ids, npc_id=npc_id, npc_name=npc_name,
+                        team_size=team_size, player_id=player_id,
+                        time_ms=time_ms, old_time_ms=old_time,
+                    )
+                except Exception as e:
+                    reraise_if_session_broken(e)
+                    debug_print(f"PB post filter failed: {e}")
 
         # Per-group manual policy (suggestion #45): suppress this group's
         # notification for a manual submission it doesn't trust (non-drop
@@ -728,20 +782,11 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     print(f"Couldn't perform check against group point awards... e: {e}")
                     pass
             notify_reason = "config" if is_truthy_config(pb_notify_configs.get(group_id)) else None
-            if notify_reason == "config" and pb_top_ranks.get(group_id):
-                # The group only posts PBs that place in its own top N for
-                # this boss (suggestion #239). Recorded and scored either way.
-                try:
-                    from utils.pb_rank import outside_group_top
-
-                    if outside_group_top(session, group_id, npc_id, team_size, player_id,
-                                         pb_top_ranks[group_id]):
-                        notify_reason = None
-                except Exception as e:
-                    reraise_if_session_broken(e)
-                    debug_print(f"PB top-ranks check failed for group {group_id}: {e}")
+            if notify_reason == "config" and group_id in pb_withheld:
+                debug_print(f"PB not posted for group {group_id}: {pb_withheld[group_id]}")
+                notify_reason = None
             if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
-                # notify_pbs is off (or the PB missed the group's top ranks) but points landed: the notify_points_awarded
+                # notify_pbs is off (or the group's PB filters held it back) but points landed: the notify_points_awarded
                 # toggle (opt-in, default OFF) announces the PB so points are never
                 # awarded silently.
                 from .common import points_notify_enabled
@@ -774,6 +819,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),
                     "group_points_members_awarded": group_points_result.get("awarded_members", []) or [],
                     "notify_reason": notify_reason,
+                    "speed_tier": pb_speed_tier,
                     "world_type": world_type,
                     "plugin_version": plugin_version,
                 }

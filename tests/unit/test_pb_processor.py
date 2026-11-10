@@ -87,7 +87,7 @@ def _payload(current_ms, pb_ms, is_pb, npc_name="Theatre of Blood", team_size="4
     }
 
 
-def _run(payload, row=None, npc=(13699, "Theatre of Blood"), config=None, outside_top=None):
+def _run(payload, row=None, npc=(13699, "Theatre of Blood"), rules=None, clan_rank=None):
     import data.submissions.pb as pb
 
     player = _FakePlayer()
@@ -114,11 +114,12 @@ def _run(payload, row=None, npc=(13699, "Theatre of Blood"), config=None, outsid
         p("is_truthy_config", new=MagicMock(return_value=True))
         stack.enter_context(patch("utils.pb_blocklist.is_blocked", return_value=False))
         stack.enter_context(patch("utils.group_config.get_bulk",
-                                  return_value={(2, "notify_pbs"): "true",
-                                                **{(2, k): v for k, v in (config or {}).items()}}))
+                                  return_value={(2, "notify_pbs"): "true"}))
         stack.enter_context(patch("utils.pb_rank.pb_board_rank", return_value=None))
-        if outside_top is not None:
-            stack.enter_context(patch("utils.pb_rank.outside_group_top", outside_top))
+        from utils.pb_notify_filter import PbNotifyRules
+        stack.enter_context(patch("utils.pb_notify_filter.load_rules", return_value={
+            2: PbNotifyRules.from_config(rules or {})}))
+        stack.enter_context(patch("utils.pb_rank.clan_rank", clan_rank or MagicMock(return_value=None)))
         stack.enter_context(
             patch("data.submissions.common.check_group_point_system_active",
                   return_value=False)
@@ -542,29 +543,55 @@ def test_chat_line_submissions_run_once_per_parsed_kill():
     assert all("chat_line_1" not in d for d, _ in calls)
 
 
-class TestTopRanksFilter:
-    """Suggestion #239: a group can post only PBs in its own top N."""
+class TestPostFilters:
+    """Suggestion #239: a group chooses which PBs it posts (utils.pb_notify_filter)."""
 
     def _pb(self, **kw):
-        return _run(_payload(current_ms=888000, pb_ms=0, is_pb=True), row=_existing_row(904800), **kw)
+        _, notify = _run(_payload(current_ms=888000, pb_ms=0, is_pb=True), row=_existing_row(904800), **kw)
+        return notify
 
     def test_a_pb_outside_the_clan_top_is_recorded_but_not_posted(self):
-        outside = MagicMock(return_value=True)
-        _, notify = self._pb(config={"pb_notify_top_ranks": "3"}, outside_top=outside)
+        clan = MagicMock(return_value=4)
+        notify = self._pb(rules={"pb_notify_top_ranks": "3"}, clan_rank=clan)
         assert notify.await_count == 0
-        assert outside.call_args.args[1:] == (2, 13699, "4", _FakePlayer.player_id, 3)
+        assert clan.call_args.args[1:] == (2, 13699, "4", _FakePlayer.player_id)
 
     def test_a_pb_inside_the_clan_top_is_posted(self):
-        _, notify = self._pb(config={"pb_notify_top_ranks": "3"}, outside_top=MagicMock(return_value=False))
+        notify = self._pb(rules={"pb_notify_top_ranks": "3"}, clan_rank=MagicMock(return_value=3))
         assert notify.await_count == 1
 
-    def test_no_limit_never_ranks(self):
-        outside = MagicMock(return_value=True)
-        _, notify = self._pb(outside_top=outside)
-        assert notify.await_count == 1
-        outside.assert_not_called()
+    def test_no_rules_never_ranks(self):
+        clan = MagicMock(return_value=99)
+        assert self._pb(clan_rank=clan).await_count == 1
+        clan.assert_not_called()
 
-    def test_a_failed_rank_check_still_posts(self):
-        _, notify = self._pb(config={"pb_notify_top_ranks": "3"},
-                             outside_top=MagicMock(side_effect=RuntimeError("db hiccup")))
+    def test_a_failed_rank_lookup_still_posts(self):
+        notify = self._pb(rules={"pb_notify_top_ranks": "3"},
+                          clan_rank=MagicMock(side_effect=RuntimeError("db hiccup")))
         assert notify.await_count == 1
+
+    def test_the_improvement_limit_uses_the_previous_best(self):
+        # 904.8s -> 888.0s is a 16.8s improvement.
+        assert self._pb(rules={"pb_notify_min_improvement": "20"}).await_count == 0
+        assert self._pb(rules={"pb_notify_min_improvement": "15"}).await_count == 1
+
+    def test_the_speed_tier_rides_on_the_notification(self):
+        # ToB 4-scale Grandmaster is under 15:00; 888.0s is 14:48.
+        notify = self._pb()
+        assert notify.await_args.args[2]["speed_tier"] == "grandmaster"
+
+
+def test_post_filter_ranks_globally_once_for_every_group():
+    import data.submissions.pb as pb
+    from utils.pb_notify_filter import PbNotifyRules
+
+    rules = {gid: PbNotifyRules.from_config({"pb_notify_global_top_ranks": "10"}) for gid in (2, 7, 9)}
+    board = MagicMock(return_value=(12, 400))
+    with patch("utils.pb_notify_filter.load_rules", return_value=rules), \
+         patch("utils.pb_rank.pb_board_rank", board):
+        withheld, tier = pb.pb_post_filter(
+            MagicMock(), [2, 7, 9], npc_id=8061, npc_name="Vorkath", team_size="Solo",
+            player_id=1, time_ms=53_400, old_time_ms=60_000,
+        )
+    assert set(withheld) == {2, 7, 9} and tier == "grandmaster"
+    assert board.call_count == 1

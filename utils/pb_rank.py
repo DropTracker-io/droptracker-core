@@ -110,31 +110,12 @@ def pb_board_rank(session, npc_id: int, team_size, player_id: int, among=None) -
     return None
 
 
-#: Group config: post a personal best only when it places in the clan's top N
-#: for that boss and team size (suggestion #239). 0 or unset = every PB.
-TOP_RANKS_KEY = "pb_notify_top_ranks"
-
-
-def top_ranks_limit(value) -> int:
-    """The stored ``pb_notify_top_ranks`` value as a limit; 0 means none."""
-    try:
-        return max(int(str(value).strip()), 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def outside_group_top(session, group_id: int, npc_id: int, team_size, player_id: int, top: int) -> bool:
-    """Whether this PB ranks below the group's top ``top`` on its board.
-
-    Ranked among the group's current members (plus the player, who may not be
-    linked to the group yet). A player off the board is never withheld.
-    Callers fail open on errors, the same way: a missed announcement is worse
-    than an extra one.
-    """
-    if top <= 0:
-        return False
+def clan_rank(session, group_id: int, npc_id: int, team_size, player_id: int) -> int | None:
+    """The player's rank on this board among the group's current members (plus
+    the player, who may not be linked to the group yet), or None when the
+    player is not on the board."""
     from db.point_standings import member_player_ids
 
     members = member_player_ids(session, group_id) | {int(player_id)}
     ranked = pb_board_rank(session, npc_id, team_size, player_id, among=members)
-    return ranked is not None and ranked[0] > top
+    return ranked[0] if ranked else None

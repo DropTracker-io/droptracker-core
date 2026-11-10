@@ -1005,21 +1005,6 @@ def _config_values(session, group_ids, key):
     return {gid: bulk.get((gid, key)) for gid in gids}
 
 
-def _outside_group_top(session, group_id, npc_id, team_size, player_id, stored) -> bool:
-    """pb_processor's ``pb_notify_top_ranks`` gate (suggestion #239), fail-open."""
-    from utils.pb_rank import outside_group_top, top_ranks_limit
-
-    top = top_ranks_limit(stored)
-    if not top:
-        return False
-    try:
-        return outside_group_top(session, group_id, npc_id, team_size, player_id, top)
-    except Exception as e:
-        reraise_if_session_broken(e)
-        debug_print(f"[ClanBroadcast] PB top-ranks check failed for group {group_id}: {e}")
-        return False
-
-
 def _notification_gate(group_id, group_config_values, unit_value, total_value):
     """Mirror drop_processor's per-group announce criteria."""
     from utils import group_config as gc
@@ -1615,15 +1600,26 @@ async def _process_chat_pb(
 
     # Group notifications: same notify_pbs + screenshot gates as pb_processor.
     enabled = _notify_enabled_groups(session, subject_group_ids, "notify_pbs")
-    top_ranks = _config_values(session, enabled, "pb_notify_top_ranks")
+    # The group's own PB filters (suggestion #239), as pb_processor applies them.
+    withheld, speed_tier = {}, None
+    try:
+        from .pb import pb_post_filter
+
+        withheld, speed_tier = pb_post_filter(
+            session, sorted(enabled), npc_id=npc_id, npc_name=boss_name, team_size=team_size,
+            player_id=subject.player_id, time_ms=time_ms, old_time_ms=old_time,
+        )
+    except Exception as e:
+        reraise_if_session_broken(e)
+        debug_print(f"[ClanBroadcast] PB post filter failed: {e}")
     notified = 0
     for gid in sorted(set(subject_group_ids)):
         if gid not in enabled:
             continue
         if await _images_gate_blocks(session, gid):
             continue
-        if _outside_group_top(session, gid, npc_id, team_size, subject.player_id, top_ranks.get(gid)):
-            _stat("pb_below_group_top")
+        if gid in withheld:
+            _stat("pb_filtered_by_group")
             continue
         notification_data = {
             "player_name": subject.player_name,
@@ -1642,6 +1638,7 @@ async def _process_chat_pb(
             "group_points_receiver_total": 0,
             "group_points_member_count": 0,
             "group_points_members_awarded": [],
+            "speed_tier": speed_tier,
             "world_type": "main",
             "plugin_version": None,
             "via_clan_broadcast": True,

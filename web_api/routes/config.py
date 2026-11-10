@@ -71,6 +71,7 @@ _LONG_VALUE_BASE_KEYS = {
     "clog_message_variants",
     "pb_message_variants",
     "notify_pet_duplicate_pets",
+    "pb_notify_bosses",
 }
 
 

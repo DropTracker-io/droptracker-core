@@ -5006,6 +5006,8 @@ class NotificationService:
             image_url = data.get('image_url')
             team_size = data.get('team_size')
             npc_id = data.get('npc_id')
+            from utils.pb_notify_filter import tier_label
+
             # Format times. A whole-second time (precise timing off) is
             # stored as the slowest tick it could stand for, so it is shown
             # as approximate.
@@ -5097,6 +5099,9 @@ class NotificationService:
                 # the KC-milestone feature; empty for older queued rows).
                 "{kill_count}": f"{self._coerce_int(data.get('kill_count')):,}"
                 if self._coerce_int(data.get("kill_count")) is not None else "",
+                # The hardest combat achievement speed tier the time meets
+                # ("Grandmaster"); None drops a line written for it.
+                "{speed_tier}": tier_label(data.get("speed_tier")) or None,
             }
             replacements.update(self._group_points_placeholder_map(data))
             replacements.update(self._plugin_version_placeholder_map(data))

@@ -202,10 +202,12 @@ MESSAGE_KINDS: dict = {
             {"token": "{time}", "help": "Your new best time", "sample": "1:02.40"},
             {"token": "{team_size}", "help": "Team size", "sample": "Solo"},
             {"token": "{kill_count}", "help": "Your kill count there", "sample": "1,204"},
+            {"token": "{speed_tier}", "help": "The combat achievement speed tier the time meets", "sample": "Grandmaster"},
         ),
         aliases={"{npc_name}": "{boss}", "{personal_best}": "{time}"},
         data_tokens=frozenset({
             "{boss}", "{npc_name}", "{time}", "{personal_best}", "{team_size}", "{kill_count}",
+            "{speed_tier}",
         }),
         client_tokens=frozenset({"{boss}", "{npc_name}", "{team_size}", "{player_name_plain}"}),
         example="{player_name} shaved {boss} down to {time}",
