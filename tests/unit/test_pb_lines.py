@@ -285,6 +285,24 @@ def test_each_delve_level_is_its_own_kill():
     assert [k["guid"] for k in out] == ["g", "g-1"]
 
 
+def test_colour_macros_keep_the_standing_best():
+    # Bug #242: since the 2026-08-26 game update the values open with a
+    # "@mes_hl_red@" macro, which the plugin's removeTags leaves in place.
+    raw = [
+        "Delve level: 8 duration: <col=ef1020>@mes_hl_red@1:18.0</col>. Personal best: @mes_hl_red@0:54.0</col>",
+        "Delve level 1 - 8 duration: @mes_hl_red@9:19.8</col>. Personal best: @mes_hl_red@6:56.4</col>",
+    ]
+    out = pl.expand(submission(*(line(sanitize(m)) for m in raw)), no_dupes)
+    assert [(k["boss_name"], k["kill_time"], k["best_time"]) for k in out] == [
+        ("Doom of Mokhaiotl (Level:8)", "01:18", "00:54"),
+        ("Doom of Mokhaiotl", "09:19", "06:56"),
+    ]
+    kill = pl.parse_message(sanitize("Your Vorkath kill count is: @mes_hl_red@12</col>."))
+    assert (kill.boss, kill.count) == ("Vorkath", 12)
+    kill = pl.parse_message(sanitize("Delve level: 3 duration: @mes_hl_red@1:05.4</col> (new personal best)"))
+    assert kill.time == 65400 and kill.pb
+
+
 def test_ignored_lines_and_count_only_kills_send_nothing():
     assert pl.expand(submission(line("Preparation time: 1:00"),
                                 line("Your Vorkath kill count is: 3.")), no_dupes) == []

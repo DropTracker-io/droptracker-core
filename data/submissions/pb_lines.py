@@ -49,6 +49,12 @@ COMPLETION_TIME_PATTERN = re.compile(r"(?<!total )completion time:", _I)
 # One Colosseum wave, never the run: with no "Colosseum duration" line in the
 # kill, the first-timed-line fallback used to file it as the run (bug #140).
 WAVE_SPLIT_PATTERN = re.compile(r"\bWave duration\b", _I)
+# Jagex colour macros (game update 2026-08-26): a value now opens with
+# "@mes_hl_red@" instead of "<col=ff0000>". The plugin's Text.removeTags
+# strips the closing </col> but leaves the macro, so "Personal best:
+# @mes_hl_red@0:54.0" never matched and every Doom delve line lost its
+# standing best (bug #242). No name or time can contain "@".
+MACRO_PATTERN = re.compile(r"@[A-Za-z0-9_]+@")
 DELVE_LEVEL_PATTERN = re.compile(r"Delve level:\s*(?P<level>\d+)(?P<deep>\+)?(?:\s*\((?P<actual>\d+)\))?", re.ASCII)
 DELVE_TOTAL_PATTERN = re.compile(r"Delve level\s+\d+\s*-\s*\d+\s+duration", re.ASCII)
 
@@ -258,6 +264,7 @@ def _team_size(message, boss, party):
 
 def parse_message(message, party=None):
     """One game message → a partial Kill, or None (PbHandler.parseMessage)."""
+    message = MACRO_PATTERN.sub("", message)
     if message.startswith("Preparation") or "target time" in message:
         return None
     count = _parse_boss_count(message)
