@@ -30,6 +30,17 @@ FLOORS_MS = {
     # The 1 - 8 total. The fastest time ever stored on each level sums to
     # 4:29; a single level is under three minutes.
     "doom-of-mokhaiotl": 4 * 60_000,
+    # Raids print a duration for every room as well as the whole raid, and a
+    # client that files a room time as the raid sits on top of the board
+    # (ticket 521: a 0:42.6 solo Theatre of Blood). Stored runs on every team
+    # size start near twelve minutes; room times are under seven.
+    "theatre-of-blood": 10 * 60_000 + 30_000,
+    "theatre-of-blood-hard-mode": 10 * 60_000 + 30_000,
+    "theatre-of-blood-entry-mode": 8 * 60_000,
+    # The fastest stored expert raid is 13 minutes, normal 10, entry 8.
+    "tombs-of-amascut-expert-mode": 10 * 60_000,
+    "tombs-of-amascut": 7 * 60_000,
+    "tombs-of-amascut-entry-mode": 6 * 60_000,
 }
 
 #: Doom of Mokhaiotl levels 1-8 have their own boards (utils.doom_delve).

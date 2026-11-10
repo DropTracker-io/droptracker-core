@@ -215,6 +215,9 @@ class GroupHOFConfig:
     pb_entries: int = 5
     # Fold awakened DT2 bosses into their parent's message (suggestion #199).
     group_awakened: bool = False
+    # The directory messages above and below the boss messages (ticket 521).
+    # Only consulted in individual-boss mode; directory-only mode always has one.
+    show_directory: bool = True
 
 
 @dataclass
@@ -989,7 +992,7 @@ class HallOfFame(Extension):
             self.bot.http, channel, group_id=group_id, feature="hall_of_fame",
         ) in THREAD_PROBLEM_STATES:
             return
-        directory_url = self._directory_jump_url(group)
+        directory_url = self._directory_jump_url(group) if cfg.show_directory else None
         entry, npcs = match
         components = self._render_boss_entry(group, entry, npcs, directory_url, cfg)
         if not components:
@@ -1065,6 +1068,7 @@ class HallOfFame(Extension):
                 "hof_individual_boss_messages",
                 "number_of_pbs_to_display",
                 "hof_group_awakened_bosses",
+                "hof_show_directory",
             ]),
         ).all()
         for row in rows:
@@ -1076,6 +1080,8 @@ class HallOfFame(Extension):
                 cfg.individual_messages = str(row.config_value).strip().lower() not in ("0", "false", "no", "off")
             elif row.config_key == "hof_group_awakened_bosses":
                 cfg.group_awakened = str(row.config_value).strip().lower() in ("1", "true", "yes", "on")
+            elif row.config_key == "hof_show_directory":
+                cfg.show_directory = str(row.config_value).strip().lower() not in ("0", "false", "no", "off")
             elif row.config_key == "number_of_pbs_to_display":
                 # Legacy sentinel: nearly every group carries '0' (cloned from
                 # the template group), which has always meant "unset — use the
@@ -1169,18 +1175,23 @@ class HallOfFame(Extension):
                       group_id, len(cfg.boss_names))
             return
         entry_by_key = {entry.display_name: (entry, npcs) for entry, npcs in resolved}
-        plan = build_message_plan([entry.display_name for entry, _ in resolved], cfg.individual_messages)
+        plan = build_message_plan(
+            [entry.display_name for entry, _ in resolved], cfg.individual_messages, cfg.show_directory,
+        )
+        has_directory = DIRECTORY_KEY in plan
 
         scan = await self._scan_channel(channel)
         slots = await self._load_verified_slots(group, channel, scan, stats)
         await self._delete_orphans(group, channel, scan, {str(r.message_id) for r in slots}, stats)
 
         # Slot 0 (the directory) must exist first so boss messages can link to it.
-        if not slots:
-            slots.append(await self._send_new_message(
-                group, channel, DIRECTORY_KEY, self._render_placeholder(), stats,
-            ))
-        directory_url = self._jump_url(group, slots[0])
+        directory_url = None
+        if has_directory:
+            if not slots:
+                slots.append(await self._send_new_message(
+                    group, channel, DIRECTORY_KEY, self._render_placeholder(), stats,
+                ))
+            directory_url = self._jump_url(group, slots[0])
 
         # Boss messages: edit in place (positional), append new ones at the bottom.
         for index, key in enumerate(plan):
@@ -1207,6 +1218,8 @@ class HallOfFame(Extension):
         # Directories last, once every boss message id is final.  The sync note
         # rides on whichever directory is physically last in the channel: the
         # bottom one in individual-boss mode, the only one otherwise.
+        if not has_directory:
+            return
         row_by_key = {row.boss_name: row for row in slots}
         last_key = plan[-1]
         if DIRECTORY_BOTTOM_KEY in plan:

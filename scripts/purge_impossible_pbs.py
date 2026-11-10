@@ -5,6 +5,11 @@ raid completion times faster than the speedrunning world records. Anything
 faster than the floors below (sourced from the speedrun Discord's records,
 2026-07) is impossible and gets removed.
 
+Every raid mode with an intake floor in ``utils.pb_floors`` is checked
+against that floor too, on every team size: a time under it is a single room
+or wave filed as the whole raid (ticket 521), which the floors below miss on
+the team sizes they do not list.
+
 A row is impossible when its *effective* displayed time — ``personal_best``
 or ``kill_time``, whichever positive value is smaller (matching how the site
 picks the display time) — is below the floor for its boss + team size.
@@ -18,19 +23,24 @@ Usage
     python -m scripts.purge_impossible_pbs           # dry run (default)
     python -m scripts.purge_impossible_pbs --apply   # delete rows
 
-Idempotent; prints every affected (player, team_size, time) in dry-run.
+Idempotent; prints every affected (player, team_size, time) in dry-run, and
+writes the rows to logs/ before anything is deleted. A time just under a
+record (``--margin``, default 2%) is listed for review, never deleted.
 """
 
 import argparse
+import json
+import os
 import sys
-from collections import defaultdict
+from datetime import datetime
 
 sys.path.insert(0, ".")
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from db import Session
 from utils.npc_names import npc_match_key
+from utils.pb_floors import FLOORS_MS
 
 
 def ms(minutes: int, seconds: float) -> int:
@@ -70,53 +80,113 @@ EFFECTIVE = (
     "WHEN personal_best > 0 THEN personal_best ELSE COALESCE(kill_time, 0) END"
 )
 
+ROW_COLUMNS = (
+    "id, player_id, npc_id, team_size, kill_time, personal_best, new_pb, "
+    "image_url, date_added, used_api, unique_id"
+)
+
 
 def fmt(msv: int) -> str:
     m, rem = divmod(int(msv), 60_000)
     return f"{m}:{rem // 1000:02d}.{(rem % 1000) // 100}"
 
 
+def classify(key, team_size, eff, margin):
+    """Why a row is impossible, or why it is kept for review, or None.
+
+    Returns ``("delete", reason)``, ``("review", reason)`` or ``None``. A time
+    under the intake floor (``utils.pb_floors``) is a room or wave time, never
+    a run. A time under a team size's world record is impossible too, unless
+    it is within ``margin`` of the record: that may be a new record, or the
+    record list may be out of date, so it is printed rather than deleted.
+    """
+    floor = FLOORS_MS.get(key)
+    if floor is not None and 0 < eff < floor:
+        return "delete", f"under the {fmt(floor)} intake floor"
+    record = FLOORS.get(key, {}).get(team_size)
+    if record is not None and 0 < eff < record:
+        if eff >= record * (1 - margin):
+            return "review", f"within {margin:.0%} of the {fmt(record)} record"
+        return "delete", f"faster than the {fmt(record)} record"
+    return None
+
+
+def delete_rows(s, ids):
+    """Drop PB rows and what hangs off them (both foreign keys are RESTRICT)."""
+    for i in ids:
+        s.execute(text("UPDATE notified SET pb_id = NULL WHERE pb_id = :i"), {"i": i})
+        s.execute(text("DELETE FROM personal_best_loadouts WHERE pb_id = :i"), {"i": i})
+        s.execute(text("DELETE FROM personal_best WHERE id = :i"), {"i": i})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="delete rows (default: dry run)")
+    parser.add_argument("--margin", type=float, default=0.02,
+                        help="keep times this close under a record for review (default 0.02)")
     args = parser.parse_args()
     mode = "APPLY" if args.apply else "DRY RUN"
 
     s = Session()
-    # Resolve every npc id belonging to each targeted family.
-    ids_by_key = defaultdict(list)
-    for nid, name in s.execute(text("SELECT npc_id, npc_name FROM npc_list")).fetchall():
-        key = npc_match_key(name)
-        if key in FLOORS:
-            ids_by_key[key].append(int(nid))
+    try:
+        # Resolve every npc id belonging to each targeted family.
+        keys = set(FLOORS) | set(FLOORS_MS)
+        key_by_id = {}
+        for nid, name in s.execute(text("SELECT npc_id, npc_name FROM npc_list")).fetchall():
+            key = npc_match_key(name)
+            if key in keys:
+                key_by_id[int(nid)] = key
+        if not key_by_id:
+            print(f"[{mode}] no npc rows found")
+            return
 
-    total = 0
-    for key, floors in FLOORS.items():
-        ids = ids_by_key.get(key)
-        if not ids:
-            print(f"[{mode}] {key}: no npc rows found — skipped")
-            continue
-        id_list = ",".join(map(str, ids))
-        for team_size, floor in floors.items():
-            rows = s.execute(text(
-                f"SELECT pb.id, pb.player_id, p.player_name, {EFFECTIVE} AS eff "
-                f"FROM personal_best pb LEFT JOIN players p ON p.player_id = pb.player_id "
-                f"WHERE pb.npc_id IN ({id_list}) AND pb.team_size = :ts "
-                f"HAVING eff > 0 AND eff < :floor ORDER BY eff ASC"
-            ), {"ts": team_size, "floor": floor}).fetchall()
-            if not rows:
+        cols = [c.strip() for c in ROW_COLUMNS.split(",")]
+        id_list = ",".join(map(str, key_by_id))
+        rows = [dict(zip(cols + ["eff"], r)) for r in s.execute(text(
+            f"SELECT {ROW_COLUMNS}, {EFFECTIVE} AS eff FROM personal_best "
+            f"WHERE npc_id IN ({id_list}) ORDER BY npc_id, team_size, eff"
+        )).fetchall()]
+
+        names = dict(s.execute(text(
+            "SELECT player_id, player_name FROM players WHERE player_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": list({r["player_id"] for r in rows}) or [-1]}).fetchall())
+
+        junk, review = [], []
+        for r in rows:
+            verdict = classify(key_by_id[r["npc_id"]], r["team_size"], r["eff"] or 0, args.margin)
+            if verdict is None:
                 continue
-            print(f"[{mode}] {key} {team_size}: {len(rows)} rows faster than {fmt(floor)}")
-            for row_id, pid, pname, eff in rows:
-                print(f"    pb#{row_id} {pname or pid}: {fmt(eff)}")
-                if args.apply:
-                    s.execute(text("DELETE FROM personal_best WHERE id = :i"), {"i": row_id})
-            total += len(rows)
+            kind, reason = verdict
+            r["key"], r["reason"] = key_by_id[r["npc_id"]], reason
+            (junk if kind == "delete" else review).append(r)
 
-    if args.apply:
-        s.commit()
-    s.close()
-    print(f"\n[{mode}] {total} impossible PB rows {'deleted' if args.apply else 'found'}.")
+        for title, group in (("impossible", junk), ("kept for review", review)):
+            print(f"[{mode}] {len(group)} rows {title}")
+            for r in group:
+                who = names.get(r["player_id"], r["player_id"])
+                print(f"    pb#{r['id']} {r['key']} {r['team_size']} {who}: "
+                      f"{fmt(r['eff'])} ({r['reason']})")
+
+        os.makedirs("logs", exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        path = f"logs/purge_impossible_pbs_{'apply' if args.apply else 'dryrun'}_{stamp}.json"
+        with open(path, "w") as fh:
+            json.dump({"deleted": junk, "review": review}, fh, indent=1, default=str)
+        print(f"[{mode}] backup: {path}")
+
+        if args.apply:
+            delete_rows(s, [r["id"] for r in junk])
+            s.commit()
+        else:
+            s.rollback()
+    except BaseException:
+        s.rollback()
+        raise
+    finally:
+        s.close()
+    print(f"\n[{mode}] {len(junk)} impossible PB rows {'deleted' if args.apply else 'found'}. "
+          "Boss-record badges move on the next badge pass.")
 
 
 if __name__ == "__main__":

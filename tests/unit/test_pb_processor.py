@@ -407,7 +407,7 @@ class TestLoadoutModel:
         # nothing else covers (cf. the envelope-key drop, 2026-08-02).
         import data.submissions.pb as pb
 
-        payload = dict(_payload(600_000, 0, True), model_fingerprint="2f3ab1c")
+        payload = dict(_payload(900_000, 0, True), model_fingerprint="2f3ab1c")
         with patch.object(pb, "_store_loadout", return_value=set()) as store:
             _run(payload)
         assert store.call_args.args[6] == "2f3ab1c"
@@ -422,9 +422,11 @@ class TestLoadoutOnlyFromTheKillThatSetTheBest:
     def _flags(self, payload, row=None):
         import data.submissions.pb as pb
 
-        payload = dict(payload, equipment="0-11802-1")
+        # A boss without a pb_floors floor: these times are about gear, and a
+        # one-minute Theatre of Blood would be refused as a room time.
+        payload = dict(payload, equipment="0-11802-1", npc_name="The Leviathan", team_size="Solo")
         with patch.object(pb, "_store_loadout", return_value=set()) as store:
-            _run(payload, row=row)
+            _run(payload, row=row, npc=(12214, "The Leviathan"))
         return store.call_args.args[4], store.call_args.args[5]
 
     def test_a_new_best_writes_its_gear(self):

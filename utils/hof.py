@@ -261,18 +261,22 @@ def build_boss_plan(boss_names: List[str], group_awakened: bool = False) -> List
     return sorted(entries.values(), key=lambda e: e.display_name.casefold())
 
 
-def build_message_plan(display_names: List[str], individual_messages: bool) -> List[str]:
+def build_message_plan(display_names: List[str], individual_messages: bool,
+                       show_directory: bool = True) -> List[str]:
     """Return the ordered list of logical message keys a group's channel should hold.
 
     Individual mode:   directory, then one message per boss (alphabetical),
                        then a second directory at the bottom of the channel.
-    Directory-only:    a single directory message.
+                       With ``show_directory`` off, just the boss messages
+                       (``hof_show_directory``, ticket 521).
+    Directory-only:    a single directory message. ``show_directory`` is
+                       ignored here: the directory is the whole Hall of Fame.
     """
-    plan = [DIRECTORY_KEY]
-    if individual_messages and display_names:
-        plan.extend(display_names)
-        plan.append(DIRECTORY_BOTTOM_KEY)
-    return plan
+    if not (individual_messages and display_names):
+        return [DIRECTORY_KEY]
+    if not show_directory:
+        return list(display_names)
+    return [DIRECTORY_KEY, *display_names, DIRECTORY_BOTTOM_KEY]
 
 
 def fit_directory_lines(linked_lines: List[str], plain_lines: List[str],

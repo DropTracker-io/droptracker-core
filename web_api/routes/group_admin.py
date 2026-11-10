@@ -880,11 +880,76 @@ async def remove_event_manager(group_id: int):
 # --------------------------------------------------------------------------- #
 # Members + hidden players
 # --------------------------------------------------------------------------- #
+# Members page (ticket 521): who has linked a Discord account and who runs the
+# plugin. Plugin sightings (player_plugin_versions) start on 2026-10-04; an
+# account that only submitted before then reads "inactive" with no last-seen.
+_MEMBER_PLUGIN_ACTIVE_DAYS = 30
+MEMBER_STATUS_FILTERS = ("linked", "not_linked", "plugin", "plugin_active", "no_plugin")
+
+
+def _member_plugin_state(s, roster_ids) -> tuple[dict, set]:
+    """Per player: the latest plugin sighting, and who ever had drops tracked.
+
+    Returns ``({player_id: (last_seen, version)}, {player_id, ...})``. The
+    sightings table only exists since 2026-10-04, so an account that tracked
+    drops before then and has not submitted since is in the second set only.
+    """
+    if not roster_ids:
+        return {}, set()
+    seen = {}
+    for pid, version, last_seen in s.execute(
+        text(
+            "SELECT player_id, version, last_seen FROM player_plugin_versions "
+            "WHERE player_id IN :pids"
+        ).bindparams(bindparam("pids", expanding=True)),
+        {"pids": roster_ids},
+    ).fetchall():
+        if pid not in seen or last_seen > seen[pid][0]:
+            seen[pid] = (last_seen, version)
+    # Same loose index scan as the Diagnostics "tracked ever" count.
+    tracked = {
+        pid for (pid,) in s.execute(
+            text(
+                "SELECT DISTINCT player_id FROM player_npc_hourly_totals "
+                "WHERE player_id IN :pids"
+            ).bindparams(bindparam("pids", expanding=True)),
+            {"pids": roster_ids},
+        ).fetchall()
+    }
+    return seen, tracked
+
+
+def member_plugin_status(last_seen, tracked: bool, now: datetime) -> str:
+    """'active' (seen in the last 30 days), 'inactive' (used it before) or 'never'."""
+    if last_seen is not None and now - last_seen <= timedelta(days=_MEMBER_PLUGIN_ACTIVE_DAYS):
+        return "active"
+    if last_seen is not None or tracked:
+        return "inactive"
+    return "never"
+
+
+def member_matches_status(member: dict, status: str) -> bool:
+    if status == "linked":
+        return member["discord_linked"]
+    if status == "not_linked":
+        return not member["discord_linked"]
+    if status == "plugin":
+        return member["plugin"] != "never"
+    if status == "plugin_active":
+        return member["plugin"] == "active"
+    if status == "no_plugin":
+        return member["plugin"] == "never"
+    return True
+
+
 @group_admin_bp.get("/groups/<int:group_id>/members")
 async def group_members(group_id: int):
     user_id = current_user_id()
     page, limit = parse_page(request)
     q = (request.args.get("q") or "").strip().lower()
+    status = (request.args.get("status") or "").strip().lower()
+    if status not in MEMBER_STATUS_FILTERS:
+        status = ""
 
     def _load():
         with db_session() as s:
@@ -900,27 +965,54 @@ async def group_members(group_id: int):
                 .filter(IgnoredPlayer.group_id == group_id).all()
             }
             partition = period_to_partition("all")
+            # Linked = the account is claimed by a DropTracker user, and every
+            # user signs in with Discord. user_id 0 is a real user: test the
+            # joined row, never the id's truthiness.
             rows = (
-                s.query(Player.player_id, Player.player_name)
+                s.query(Player.player_id, Player.player_name, User.user_id)
                 .join(Player.groups)
+                .outerjoin(User, User.user_id == Player.user_id)
                 .filter(Group.group_id == group_id)
                 .all()
             )
-            members = [
-                {
+            seen, tracked = _member_plugin_state(s, [pid for pid, _, _ in rows])
+            now = datetime.now()
+
+            members = []
+            for pid, name, linked_user in rows:
+                last_seen, version = seen.get(pid, (None, None))
+                members.append({
                     "id": pid,
                     "name": name,
-                    "total_loot": money(player_month_total(pid, partition)),
                     "hidden": pid in hidden_ids,
-                }
-                for pid, name in rows
-                if not q or rsn_contains(name or "", q)
+                    "discord_linked": linked_user is not None,
+                    "plugin": member_plugin_status(last_seen, pid in tracked, now),
+                    "plugin_last_seen_ts": int(last_seen.timestamp()) if last_seen else None,
+                    "plugin_version": version,
+                })
+            summary = {
+                "total": len(members),
+                "discord_linked": sum(m["discord_linked"] for m in members),
+                "plugin": sum(m["plugin"] != "never" for m in members),
+                "plugin_active": sum(m["plugin"] == "active" for m in members),
+                "linked_and_plugin": sum(
+                    m["discord_linked"] and m["plugin"] != "never" for m in members
+                ),
+            }
+            members = [
+                m for m in members
+                if (not q or rsn_contains(m["name"] or "", q))
+                and (not status or member_matches_status(m, status))
             ]
+            # Loot is read from Redis only for the rows that survive the filters.
+            for m in members:
+                m["total_loot"] = money(player_month_total(m["id"], partition))
             members.sort(key=lambda m: m["total_loot"]["value"], reverse=True)
             total = len(members)
             start = (page - 1) * limit
             return {
                 "members": members[start:start + limit],
+                "summary": summary,
                 "meta": {"page": page, "limit": limit, "total": total},
             }
 

@@ -145,6 +145,15 @@ class TestBuildMessagePlan:
         assert build_message_plan(["Kraken", "Zulrah"], False)[-1] == DIRECTORY_KEY
         assert build_message_plan([], True)[-1] == DIRECTORY_KEY
 
+    def test_hidden_directory_leaves_only_boss_messages(self):
+        # Ticket 521: a clan wanted the boss messages without the directories.
+        plan = build_message_plan(["Kraken", "Zulrah"], True, show_directory=False)
+        assert plan == ["Kraken", "Zulrah"]
+
+    def test_hidden_directory_is_ignored_when_the_directory_is_everything(self):
+        assert build_message_plan(["Kraken"], False, show_directory=False) == [DIRECTORY_KEY]
+        assert build_message_plan([], True, show_directory=False) == [DIRECTORY_KEY]
+
 
 class TestSyncNoteText:
     """The wording/formatting here is owner-specified — pin it exactly."""

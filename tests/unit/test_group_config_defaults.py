@@ -62,6 +62,7 @@ def test_registry_booleans_defaulting_on_are_known():
         "use_gp_colors", "clan_broadcast_notify_without_images",
         "clan_chat_relay_muted", "event_wom_reconciliation",
         "bank_show_on_profile", "bank_show_donors",
+        "hof_show_directory",  # GroupHOFConfig.show_directory defaults on
     }
     on = {f["key"] for f in GROUP_CONFIG_FIELDS
           if f["type"] == "boolean" and f.get("default") is True}
