@@ -141,9 +141,14 @@ class TestBoardSortKey:
     def test_time_first(self):
         assert board_sort_key(60_000, False, 9) < board_sort_key(60_600, True, 1)
 
-    def test_measured_before_approximate_or_unknown_on_a_tie(self):
+    def test_measured_before_approximate_on_a_tie(self):
         assert board_sort_key(60_600, True, 9) < board_sort_key(60_600, False, 1)
-        assert board_sort_key(60_600, True, 9) < board_sort_key(60_600, None, 1)
+        assert board_sort_key(60_600, None, 9) < board_sort_key(60_600, False, 1)
+
+    def test_unknown_precision_ties_go_to_the_earlier_date(self):
+        # Suggestion #240: whoever set the time first keeps the higher rank.
+        assert board_sort_key(60_600, None, 1) < board_sort_key(60_600, True, 9)
+        assert board_sort_key(60_600, True, 1) < board_sort_key(60_600, None, 9)
 
     def test_then_the_earlier_date(self):
         assert board_sort_key(60_600, False, 1) < board_sort_key(60_600, False, 2)

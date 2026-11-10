@@ -127,12 +127,14 @@ class TestPreciseTiming:
         ]))
         assert [e["player_id"] for e in entries] == [2, 1]
 
-    def test_unknown_precision_ranks_with_the_approximate(self, build):
+    def test_unknown_precision_tie_goes_to_whoever_set_it_first(self, build):
+        # Suggestion #240: rows from before precise_timing existed say
+        # neither, and must not lose a tie to a later measured time.
         entries = solo_entries(build([
             row(1, 1, 60_600, precise=None, when=datetime(2026, 9, 1)),
             row(2, 2, 60_600, precise=True, when=datetime(2026, 9, 2)),
         ]))
-        assert [e["player_id"] for e in entries] == [2, 1]
+        assert [e["player_id"] for e in entries] == [1, 2]
 
     def test_a_faster_time_still_wins_regardless(self, build):
         entries = solo_entries(build([

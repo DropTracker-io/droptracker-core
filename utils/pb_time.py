@@ -114,12 +114,17 @@ def time_is_precise(value, flag=None):
 
 
 def board_sort_key(time_ms, precise, date_ts=0):
-    """Ordering for a PB board: fastest first, then a measured time ahead of an
-    approximate or unknown one, then the earlier date.
+    """Ordering for a PB board: fastest first, then a time known to be
+    approximate behind any other, then the earlier date.
 
     A whole-second time is already credited with the slowest tick it could
     stand for, so when it lands on exactly the same value as a precise time the
     two genuinely cannot be told apart. The tie goes to the one that was
     measured.
+
+    Only a time known to be rounded (``precise`` False) gives way. Rows from
+    before 2026-10-05 say neither (None), and treating unknown as rounded put
+    a later tie above the player who set the time first (suggestion #240), so
+    those fall through to the date.
     """
-    return (int(time_ms or 0), 0 if precise is True else 1, int(date_ts or 0))
+    return (int(time_ms or 0), 1 if precise is False else 0, int(date_ts or 0))
