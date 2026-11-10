@@ -20,6 +20,7 @@ from .common import (
     select_session_and_flag,
     ensure_can_create,
     debug_print,
+    reraise_if_session_broken,
     award_points_to_player,
     get_config_prefix,
     envelope_from_plugin,
@@ -332,6 +333,23 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                 )
             except Exception as e:
                 print(f"[ManualPolicy] clog suppression check failed: {e}")
+        # The page this slot completes, if any: named in every group's message
+        # and the only slot a "completed pages" group posts (suggestion #238).
+        completed_collection = None
+        clog_modes = {}
+        if not side_world:
+            from utils import group_config as gc
+            from utils.clog_collections import NOTIFY_MODE_KEY, completed_page, notify_mode
+
+            try:
+                completed_collection = completed_page(session, player_id, item_id, item_name, npc)
+            except Exception as e:
+                reraise_if_session_broken(e)
+                print(f"Couldn't check collection log page completion: {e}")
+            group_ids = [g.group_id for g in player_groups]
+            if group_ids:
+                bulk = gc.get_bulk_effective(session, group_ids, [NOTIFY_MODE_KEY])
+                clog_modes = {gid: notify_mode(val) for (gid, _key), val in bulk.items()}
         for group in player_groups:
             print(f"CLOG: Checking group: {group}")
             group_id = group.group_id
@@ -375,8 +393,10 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                 if gc.is_truthy(gc.get_effective(session, group_id, f"{config_prefix}notify_clogs"))
                 else None
             )
+            if notify_reason == "config" and clog_modes.get(group_id) == "completed" and not completed_collection:
+                notify_reason = None
             if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
-                # notify_clogs is off but points landed: the notify_points_awarded
+                # notify_clogs is off (or the slot completes no page) but points landed: the notify_points_awarded
                 # toggle (opt-in, default OFF) announces the slot so points are never
                 # awarded silently.
                 from .common import points_notify_enabled
@@ -400,6 +420,10 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                     "item_id": item_id,
                     "log_slots": slots_unlocked,
                     "log_total": slots_total,
+                    "completed_collection": completed_collection,
+                    # None lets the sender derive it; a completed page names itself
+                    # (the item can sit on several pages).
+                    "collection_name": completed_collection,
                     "group_points_awarded": int(group_points_result.get("receiver_points_awarded", 0)),
                     "group_points_receiver_total": int(group_points_result.get("receiver_current_points", 0)),
                     "group_points_member_count": len(group_points_result.get("awarded_members", []) or []),

@@ -578,6 +578,13 @@ TOKEN_DOCS: Dict[str, Dict[str, Any]] = {
     "user_count": {"help": "Tracked members in the group", "sample": "`86`"},
     # Collection log
     "collection_name": {"help": "The collection the item belongs to", "sample": "Chambers of Xeric"},
+    # Only on the slot that completes a page, so a line holding it disappears
+    # on every other slot (suggestion #238).
+    "completed_collection": {
+        "help": "The collection log page this slot completed (blank unless it was the last slot)",
+        "sample": "Royal Titans",
+        "optional": True,
+    },
     "kc_received": {"help": "Kill count when the slot was filled", "sample": "412"},
     # Optional: the client sends these only when it could read the game's
     # counters, so a "813/1,612" line has to be able to disappear.
@@ -792,8 +799,8 @@ TYPE_META: Dict[str, Dict[str, Any]] = {
         "label": "Collection log",
         "group": "Loot",
         "description": "Posted when a member fills a collection log slot.",
-        "tokens": ("clog_message", "item_name", "item_link", "item_emoji", "item_id", "item_rarity", "collection_name", "npc_name",
-                   "npc_link", "kc_received", "slots_unlocked", "slots_total",
+        "tokens": ("clog_message", "item_name", "item_link", "item_emoji", "item_id", "item_rarity", "collection_name", "completed_collection",
+                   "npc_name", "npc_link", "kc_received", "slots_unlocked", "slots_total",
                    "player_loot_month", "total_tracked") + _POINTS_TOKENS + _MEDIA_TOKENS,
     },
     "pb": {

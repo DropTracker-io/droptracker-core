@@ -5605,6 +5605,9 @@ class NotificationService:
                 # them, which drops a line holding only these.
                 "{slots_unlocked}": self._format_slot_count(data.get('log_slots')),
                 "{slots_total}": self._format_slot_count(data.get('log_total')),
+                # The page this slot completed (suggestion #238); blank on any
+                # other slot, which drops a line written for completions.
+                "{completed_collection}": data.get('completed_collection') or None,
             }
             replacements.update(self._group_points_placeholder_map(data))
             replacements.update(self._plugin_version_placeholder_map(data))
@@ -5640,8 +5643,11 @@ class NotificationService:
             )
 
             # Send message
+            completed = data.get('completed_collection')
             content = self._message_text(group_id, "clog", replacements, formatted_name,
                                          custom_embeds=upgrade_active,
+                                         fallback=(notification_text.completed_clog_content(completed, formatted_name)
+                                                   if completed else None),
                                          line=clog_content_line or None,
                                          line_in_embed=clog_line_in_embed)
             notification_text.apply_footer(embed, group_id, "clog", replacements)

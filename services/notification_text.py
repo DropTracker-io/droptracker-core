@@ -159,6 +159,17 @@ def default_content(embed_type: str, player_mention: str) -> str:
     return DEFAULT_CONTENT[embed_type].replace(PLAYER_MENTION, player_mention)
 
 
+#: The built-in line for the slot that completes a collection log page.
+COMPLETED_CLOG_CONTENT = "{player_mention} has completed the {completed_collection} collection log!"
+
+
+def completed_clog_content(page: str, player_mention: str) -> str:
+    """:data:`COMPLETED_CLOG_CONTENT`, rendered (suggestion #238)."""
+    return COMPLETED_CLOG_CONTENT.replace(PLAYER_MENTION, player_mention).replace(
+        "{completed_collection}", page
+    )
+
+
 # --- message text lookup -----------------------------------------------------
 
 def _row_content(group_id: int, embed_type: str) -> Tuple[bool, Optional[str]]:
@@ -359,6 +370,7 @@ PLAIN_CONTENT: Dict[str, Tuple[str, ...]] = {
         "{player_mention} received {item_emoji} **{item_name}** ({item_value})",
     ),
     "clog": (
+        "{player_mention} completed the **{completed_collection}** collection log with **{item_name}**",
         "{player_mention} added **{item_name}** to their collection log ({slots_unlocked}/{slots_total})",
         "{player_mention} added **{item_name}** to their collection log",
     ),

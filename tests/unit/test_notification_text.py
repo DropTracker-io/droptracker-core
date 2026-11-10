@@ -242,3 +242,26 @@ def test_footer_document_validation():
     for bad in ({"types": {"nope": {"mode": "none"}}}, {"all": {"mode": "custom", "text": ""}}):
         with pytest.raises(HTTPException):
             nf._validate_body(bad)
+
+
+class TestCompletedCollectionLog:
+    """Suggestion #238: the slot that completes a page says so."""
+
+    def test_built_in_line(self):
+        assert nt.completed_clog_content("Royal Titans", "**Roalfe**") == (
+            "**Roalfe** has completed the Royal Titans collection log!"
+        )
+
+    def test_plain_text_names_the_page(self):
+        values = {"{item_name}": "Bran", "{completed_collection}": "Royal Titans",
+                  "{slots_unlocked}": "", "{slots_total}": ""}
+        assert nt.plain_content("clog", values, "**Roalfe**") == (
+            "**Roalfe** completed the **Royal Titans** collection log with **Bran**"
+        )
+
+    def test_plain_text_for_an_ordinary_slot_is_unchanged(self):
+        values = {"{item_name}": "Bran", "{completed_collection}": None,
+                  "{slots_unlocked}": "813", "{slots_total}": "1,612"}
+        assert nt.plain_content("clog", values, "**Roalfe**") == (
+            "**Roalfe** added **Bran** to their collection log (813/1,612)"
+        )

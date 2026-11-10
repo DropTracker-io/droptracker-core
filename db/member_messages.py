@@ -167,11 +167,12 @@ MESSAGE_KINDS: dict = {
             {"token": "{kill_count}", "help": "Your kill count there", "sample": "412"},
             {"token": "{slots_unlocked}", "help": "Your collection log slots", "sample": "1,024"},
             {"token": "{slots_total}", "help": "Collection log slots in the game", "sample": "1,692"},
+            {"token": "{completed_collection}", "help": "The collection log page this slot completed (only on the last slot of a page)", "sample": "Royal Titans"},
         ),
         aliases={"{npc_name}": "{source}", "{kc_received}": "{kill_count}"},
         data_tokens=frozenset({
             "{source}", "{npc_name}", "{kill_count}", "{kc_received}",
-            "{slots_unlocked}", "{slots_total}",
+            "{slots_unlocked}", "{slots_total}", "{completed_collection}",
         }),
         client_tokens=frozenset({"{item_name}", "{source}", "{npc_name}", "{player_name_plain}"}),
         example="{player_name} finally saw a {item_name} after {kill_count} kills",

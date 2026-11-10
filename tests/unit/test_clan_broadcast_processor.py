@@ -931,8 +931,9 @@ def test_delve_skips_plugin_reconciliation(team_flow):
 
 # ── chat clog notifications name a source (ticket #476) ─────────────────────
 
-def _run_chat_clog(monkeypatch, inferred):
+def _run_chat_clog(monkeypatch, inferred, mode=None, completed=None):
     import asyncio
+    import utils.clog_collections as clog_collections
     from types import SimpleNamespace
 
     sent = []
@@ -952,6 +953,8 @@ def _run_chat_clog(monkeypatch, inferred):
     monkeypatch.setattr(cb, "_images_gate_blocks", _no_gate)
     monkeypatch.setattr(cb, "create_notification", _notify)
     monkeypatch.setattr(cb, "_inferred_drop_source", lambda _name, from_raid=False: inferred)
+    monkeypatch.setattr(cb, "_config_values", lambda _s, gids, _k: {g: mode for g in gids})
+    monkeypatch.setattr(clog_collections, "completed_page", lambda *_a, **_k: completed)
 
     async def _no_record(*_a, **_k):
         return None
@@ -972,6 +975,23 @@ def test_chat_clog_uses_the_items_only_source(monkeypatch):
 def test_chat_clog_without_a_sole_source_says_clan_broadcast(monkeypatch):
     sent = _run_chat_clog(monkeypatch, None)
     assert [d["npc_name"] for d in sent] == [cb.SENTINEL_NPC_NAME] == ["Clan Broadcast"]
+
+
+def test_chat_clog_completed_pages_group_skips_an_ordinary_slot(monkeypatch):
+    """Suggestion #238."""
+    assert _run_chat_clog(monkeypatch, None, mode="completed", completed=None) == []
+
+
+def test_chat_clog_completed_pages_group_posts_the_completing_slot(monkeypatch):
+    sent = _run_chat_clog(monkeypatch, None, mode="completed", completed="Kalphite Queen")
+    assert [(d["completed_collection"], d["collection_name"]) for d in sent] == [
+        ("Kalphite Queen", "Kalphite Queen")]
+
+
+def test_chat_clog_every_slot_group_still_posts_and_names_a_completion(monkeypatch):
+    assert len(_run_chat_clog(monkeypatch, None, mode="all", completed=None)) == 1
+    sent = _run_chat_clog(monkeypatch, None, mode=None, completed="Kalphite Queen")
+    assert sent[0]["completed_collection"] == "Kalphite Queen"
 
 
 # ── chat clog slots count on the Clan Log ───────────────────────────────────

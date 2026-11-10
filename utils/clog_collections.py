@@ -79,3 +79,104 @@ def collection_for_item(item_id=None, item_name=None, source=None) -> Optional[s
             if wanted and wanted in {npc_match_key(part) for part in [page, *page.split(" and ")]}:
                 return page
     return pages[0]
+
+
+#: Group config: which collection log slots a group posts (suggestion #238).
+#: ``all`` (default, or unset) = every new slot; ``completed`` = only the slot
+#: that completes a collection log page.
+NOTIFY_MODE_KEY = "clog_notify_mode"
+NOTIFY_MODES = ("all", "completed")
+
+
+def notify_mode(value) -> str:
+    """The stored ``clog_notify_mode`` as a known mode, ``all`` when unset or unknown."""
+    mode = str(value or "").strip().lower()
+    return mode if mode in NOTIFY_MODES else "all"
+
+
+@lru_cache(maxsize=1)
+def _layout() -> tuple[list, dict]:
+    """``([(page title, item ids, lower-case names)], {id: its other id})``.
+
+    The other-id map pairs each stored slot id with the id it is drawn as (see
+    ``_index``), both ways, so a slot counts whichever one a source recorded.
+    """
+    try:
+        with open(STRUCTURE_PATH, encoding="utf-8") as f:
+            structure = json.load(f)
+    except (OSError, ValueError):
+        return [], {}
+    other: dict[int, int] = {}
+    for k, v in (structure.get("replacements") or {}).items():
+        other[int(k)], other[int(v)] = int(v), int(k)
+    pages = []
+    for tab in structure.get("tabs") or []:
+        for page in tab.get("pages") or []:
+            title, items = page.get("name"), [int(i) for i in page.get("items") or []]
+            if title and items:
+                names = [str(n).strip().lower() for n in page.get("names") or []]
+                pages.append((title, items, names))
+    return pages, other
+
+
+def completed_page(session, player_id, item_id=None, item_name=None, source=None) -> Optional[str]:
+    """The collection log page this new slot completes, or ``None``.
+
+    A slot counts as filled when the player's synced log holds it
+    (``player_clog_items``, written when they open the log with the plugin) or
+    we recorded its unlock (``collection``), plus the slot being announced now,
+    which the synced copy may not have caught up with. A player who never
+    synced only completes a page whose every slot we saw them unlock, so the
+    answer leans to "not complete": this feeds a noise filter, and a page we
+    cannot vouch for is better left unannounced than announced wrongly.
+
+    When the item sits on several pages and more than one is now complete, the
+    page matching ``source`` wins, as in :func:`collection_for_item`.
+    """
+    pages, other = _layout()
+    if not pages:
+        return None
+    try:
+        new_id = int(item_id) if item_id not in (None, "") else None
+    except (TypeError, ValueError):
+        new_id = None
+    new_name = str(item_name or "").strip().lower()
+
+    def is_new(index, slot_id, names):
+        if new_id is not None and new_id in (slot_id, other.get(slot_id)):
+            return True
+        return bool(new_name) and index < len(names) and names[index] == new_name
+
+    candidates = [
+        (title, items, names) for title, items, names in pages
+        if any(is_new(i, slot, names) for i, slot in enumerate(items))
+    ]
+    if not candidates:
+        return None
+
+    from sqlalchemy import text
+
+    rows = session.execute(
+        text(
+            "SELECT item_id FROM player_clog_items WHERE player_id = :pid AND quantity > 0 "
+            "UNION SELECT item_id FROM collection WHERE player_id = :pid"
+        ),
+        {"pid": int(player_id)},
+    ).fetchall()
+    held = {int(r[0]) for r in rows if r[0] is not None}
+
+    complete = [
+        title for title, items, names in candidates
+        if all(
+            slot in held or other.get(slot) in held or is_new(i, slot, names)
+            for i, slot in enumerate(items)
+        )
+    ]
+    if len(complete) > 1 and source:
+        from utils.npc_names import npc_match_key
+
+        wanted = npc_match_key(str(source))
+        for title in complete:
+            if wanted and wanted in {npc_match_key(part) for part in [title, *title.split(" and ")]}:
+                return title
+    return complete[0] if complete else None
