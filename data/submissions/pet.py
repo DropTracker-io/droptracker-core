@@ -1,6 +1,6 @@
 """Pet submissions processor."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 
@@ -48,6 +48,43 @@ def pet_from_candidates(pet_name, candidates):
         if known:
             return known
     return pet_name
+
+
+#: How long after a "New item added to your collection log" row the pet
+#: submission for the same item may still arrive (the plugin waits a few
+#: ticks for the clan broadcast before it sends the pet).
+_NEW_SLOT_LOOKBACK = timedelta(minutes=2)
+
+
+def _new_to_collection_log(session, pet_data, player_id, pet_item_id, world_type) -> bool:
+    """Whether the game said "New item added to your collection log" for this
+    pet (bug #244): the plugin's own field (6.1.25+), else the marker the
+    collection log processor left, else that processor's fresh row."""
+    from utils.pet_notifications import flag_is_true, new_clog_slot_seen
+
+    if flag_is_true(pet_data.get("collection_log_new")):
+        return True
+    if not pet_item_id or player_id is None:
+        return False
+    if new_clog_slot_seen(player_id, pet_item_id):
+        return True
+    try:
+        from db.models import CollectionLogEntry
+
+        clog_model = get_world_model(world_type, "collection_log", CollectionLogEntry)
+        row = (
+            session.query(clog_model.player_id)
+            .filter(
+                clog_model.player_id == player_id,
+                clog_model.item_id == pet_item_id,
+                clog_model.date_added >= datetime.now() - _NEW_SLOT_LOOKBACK,
+            )
+            .first()
+        )
+        return row is not None
+    except Exception as e:
+        debug_print(f"collection log lookup for pet failed: {e}")
+        return False
 
 
 async def pet_processor(pet_data, external_session=None, world_type="main"):
@@ -283,8 +320,21 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     # announced is each group's call (notify_pet_duplicates, below).
     if replayed:
         return SubmissionResponse(success=True, message="Pet already processed.", notice="")
-    from utils.pet_notifications import group_announces_duplicate, is_duplicate
-    pet_is_duplicate = is_duplicate(is_new_pet, pet_data.get("duplicate"))
+    from utils.pet_notifications import flag_is_true, group_announces_duplicate, is_duplicate
+    # Only a roll the game or DropTracker calls a duplicate needs the check.
+    new_to_log = (flag_is_true(duplicate) or not is_new_pet) and _new_to_collection_log(
+        session, pet_data, player_id, pet_item_id, world_type
+    )
+    pet_is_duplicate = is_duplicate(is_new_pet, pet_data.get("duplicate"), new_to_log)
+    if new_to_log and flag_is_true(duplicate):
+        # Bug #244: a follower out plus a full inventory sends a NEW pet to
+        # Probita, and the game prints the duplicate line for it. The plugin
+        # read that line as a duplicate; the pet's new collection log slot
+        # says otherwise, so the announcement reads as a new pet.
+        debug_print(f"Pet {pet_name}: duplicate line but a new collection log slot, announcing as new")
+        duplicate = False
+        previously_owned = False
+        game_message = "has a funny feeling like they're being followed"
     debug_print(f"Creating notifications for pet submission")
     player_groups = get_player_groups_with_global(session, player)
     # Per-group manual policy (suggestion #45): suppress this group's

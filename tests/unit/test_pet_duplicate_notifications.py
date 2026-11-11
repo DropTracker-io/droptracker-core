@@ -160,9 +160,10 @@ def _session(player):
     return session
 
 
-def _drive(payload, settings):
+def _drive(payload, settings, new_to_log=False):
     """Run pet_processor with notify_pets on and ``settings`` as the group's
-    duplicate settings; return the group notifications it queued."""
+    duplicate settings; return the group notifications it queued.
+    ``new_to_log`` is what the collection log says (bug #244)."""
     import data.submissions.pet as pet
 
     player = _FakePlayer()
@@ -170,6 +171,7 @@ def _drive(payload, settings):
     notify = AsyncMock()
     with ExitStack() as stack:
         p = lambda name, **kw: stack.enter_context(patch.object(pet, name, **kw))
+        p("_new_to_collection_log", new=MagicMock(return_value=new_to_log))
         p("select_session_and_flag", new=MagicMock(return_value=(session, True)))
         p("ensure_player_by_name_then_auth", new=AsyncMock(return_value=(player, True, True)))
         p("ensure_item_by_name", new=AsyncMock(return_value=MagicMock(item_id=20851)))
@@ -219,6 +221,53 @@ class TestProcessorGate:
 # --------------------------------------------------------------------------- #
 # Clan broadcast line
 # --------------------------------------------------------------------------- #
+class TestProbitaPetIsAnnouncedAsNew:
+    """Bug #244: the duplicate line next to a new collection log slot."""
+
+    def test_new_slot_overrules_the_plugin_flag(self):
+        sent = _drive(dict(PAYLOAD, duplicate="true", previously_owned="true",
+                           game_message="has a funny feeling like they would have been followed..."),
+                      ("none", ()), new_to_log=True)
+        assert len(sent) == 1  # "none" suppresses duplicates only; this is new
+        data = sent[0].args[2]
+        assert data["is_duplicate"] is False
+        assert data["duplicate"] is False
+        assert data["previously_owned"] is False
+        assert "would have been" not in data["game_message"]
+
+    def test_without_a_new_slot_the_flag_still_wins(self):
+        assert _drive(dict(PAYLOAD, duplicate="true"), ("none", ()), new_to_log=False) == []
+
+
+class TestNewToCollectionLogLookup:
+    def _call(self, payload, marker, row):
+        import data.submissions.pet as pet
+
+        session = MagicMock()
+        q = MagicMock()
+        q.filter.return_value = q
+        q.first.return_value = row
+        session.query.return_value = q
+        model = MagicMock()
+        model.date_added.__ge__ = lambda _self, _other: True  # the lookback filter
+        with patch.object(pn, "new_clog_slot_seen", return_value=marker), \
+                patch.object(pet, "get_world_model", return_value=model):
+            return pet._new_to_collection_log(session, payload, 4297, 33642, "main")
+
+    def test_plugin_field_wins(self):
+        assert self._call({"collection_log_new": "true"}, False, None) is True
+
+    def test_marker_then_row(self):
+        assert self._call({}, True, None) is True
+        assert self._call({}, False, (4297,)) is True
+        assert self._call({}, False, None) is False
+
+    def test_unknown_item_is_never_new(self):
+        import data.submissions.pet as pet
+
+        assert pet._new_to_collection_log(MagicMock(), {}, 4297, None, "main") is False
+
+
 def test_clan_broadcast_flags_the_duplicate_line():
     from utils.clan_broadcasts import parse_broadcast
 
@@ -301,3 +350,52 @@ def test_pet_dupe_fits_the_embed_type_column_and_is_a_layout_type():
     assert pn.DUPE_NOTIFICATION_TYPE in NOTIFICATION_TYPES
     assert "duplicate" in DEFAULT_LAYOUTS["pet_dupe"]["blocks"][0]["content"]
     assert TYPE_META["pet_dupe"]["tokens"] == TYPE_META["pet"]["tokens"]
+
+
+# --------------------------------------------------------------------------- #
+# Bug #244: a new pet that went to Probita prints the duplicate line
+# --------------------------------------------------------------------------- #
+class TestNewCollectionLogSlotOverrulesTheDuplicateLine:
+    def test_a_new_slot_makes_the_pet_new_whatever_the_line_said(self):
+        # Follower out + full inventory: "would have been followed..." for a
+        # pet the player never had, next to "New item added to your collection log".
+        assert pn.is_duplicate(is_new_pet=True, duplicate_flag="true", new_to_collection_log=True) is False
+        # Even when DropTracker already holds a row (an adventure-log sync).
+        assert pn.is_duplicate(is_new_pet=False, duplicate_flag="true", new_to_collection_log=True) is False
+        assert pn.is_duplicate(is_new_pet=False, new_to_collection_log=True) is False
+
+    def test_without_a_new_slot_nothing_changes(self):
+        assert pn.is_duplicate(is_new_pet=True, duplicate_flag="true", new_to_collection_log=False) is True
+        assert pn.is_duplicate(is_new_pet=False, duplicate_flag="false") is False
+
+    def test_marker_round_trip(self, monkeypatch):
+        store = {}
+
+        class _Redis:
+            def setex(self, key, ttl, value):
+                store[key] = (ttl, value)
+
+            def exists(self, key):
+                return 1 if key in store else 0
+
+        import utils.redis as redis_mod
+        monkeypatch.setattr(redis_mod, "redis_client", SimpleNamespace(client=_Redis()), raising=False)
+        assert pn.new_clog_slot_seen(4297, 33642) is False
+        pn.remember_new_clog_slot(4297, 33642)
+        assert store == {"clog:newslot:4297:33642": (pn.NEW_SLOT_TTL_SECONDS, "1")}
+        assert pn.new_clog_slot_seen(4297, 33642) is True
+        assert pn.new_clog_slot_seen(4297, 1) is False
+        # Missing ids never touch Redis.
+        pn.remember_new_clog_slot(None, 33642)
+        assert pn.new_clog_slot_seen(None, 33642) is False
+
+    def test_marker_helpers_fail_closed_without_redis(self, monkeypatch):
+        import utils.redis as redis_mod
+
+        class _Broken:
+            def __getattr__(self, name):
+                raise RuntimeError("down")
+
+        monkeypatch.setattr(redis_mod, "redis_client", SimpleNamespace(client=_Broken()), raising=False)
+        pn.remember_new_clog_slot(1, 2)
+        assert pn.new_clog_slot_seen(1, 2) is False

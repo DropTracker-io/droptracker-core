@@ -284,6 +284,14 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
     session.commit()
 
     if is_new_clog:
+        # A pet's slot: the pet processor reads this to tell a new pet that
+        # went to Probita from a duplicate (bug #244, utils/pet_notifications).
+        try:
+            from utils.pet_notifications import remember_new_clog_slot
+
+            remember_new_clog_slot(player_id, item_id)
+        except Exception:
+            pass
         # Items that never arrive as a drop (eternal glory) are recorded as
         # one from their new slot. Never fails the submission.
         from .clog_drop_mirror import mirror_clog_as_drop

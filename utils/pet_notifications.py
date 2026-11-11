@@ -52,12 +52,58 @@ def flag_is_true(value) -> bool:
     return _norm(value) in _TRUE_STRINGS
 
 
-def is_duplicate(is_new_pet: bool, duplicate_flag=None) -> bool:
+#: Set by the collection log processor when a player unlocks a NEW slot, read
+#: by the pet processor seconds later (bug #244). Short-lived: the two
+#: submissions for one pet arrive within a few seconds of each other.
+NEW_SLOT_KEY_TEMPLATE = "clog:newslot:{player_id}:{item_id}"
+NEW_SLOT_TTL_SECONDS = 300
+
+
+def remember_new_clog_slot(player_id, item_id) -> None:
+    """The game just said "New item added to your collection log" for this
+    item. Best effort: without Redis the pet processor falls back to the
+    collection log row itself."""
+    if player_id is None or not item_id:
+        return
+    try:
+        from utils.redis import redis_client
+
+        redis_client.client.setex(
+            NEW_SLOT_KEY_TEMPLATE.format(player_id=int(player_id), item_id=int(item_id)),
+            NEW_SLOT_TTL_SECONDS, "1",
+        )
+    except Exception:
+        pass
+
+
+def new_clog_slot_seen(player_id, item_id) -> bool:
+    """Whether :func:`remember_new_clog_slot` fired for this pet recently."""
+    if player_id is None or not item_id:
+        return False
+    try:
+        from utils.redis import redis_client
+
+        return bool(redis_client.client.exists(
+            NEW_SLOT_KEY_TEMPLATE.format(player_id=int(player_id), item_id=int(item_id))
+        ))
+    except Exception:
+        return False
+
+
+def is_duplicate(is_new_pet: bool, duplicate_flag=None, new_to_collection_log: bool = False) -> bool:
     """Whether a pet drop is a duplicate. The game's own word wins when the
     plugin sent it ("would have been followed" is a duplicate even for a pet
     DropTracker never recorded, and a first follow is new even if an adventure
     log sync already recorded the pet). Without the flag, a pet DropTracker
-    already has for this player is a duplicate."""
+    already has for this player is a duplicate.
+
+    One exception (bug #244): the game prints the duplicate line for a NEW
+    pet too, when the player has a follower out and a full inventory (the pet
+    goes to Probita instead). That roll also prints "New item added to your
+    collection log", which never happens for a pet already owned, so a new
+    collection log slot for the pet overrules the duplicate line."""
+    if new_to_collection_log:
+        return False
     if duplicate_flag is None or duplicate_flag == "":
         return not is_new_pet
     return flag_is_true(duplicate_flag)
