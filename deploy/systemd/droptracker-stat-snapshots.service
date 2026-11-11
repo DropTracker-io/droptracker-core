@@ -1,0 +1,21 @@
+# Retention for player_stat_snapshots: adds upcoming month partitions, archives
+# days older than 90 days to B2 (dt_stats/snapshots/), then thins them to one
+# row per player per day. A failed archive deletes nothing and fails the unit.
+# Triggered by droptracker-stat-snapshots.timer; do not enable the service itself.
+#
+# Manual dry run:  cd /store/droptracker/disc && venv/bin/python -m scripts.stat_snapshot_retention
+# Manual real run: sudo systemctl start droptracker-stat-snapshots.service
+# Watch it:        journalctl -u droptracker-stat-snapshots.service -f
+
+[Unit]
+Description=DropTracker player stat snapshot retention (partitions, B2 archive, downsample)
+Wants=network-online.target
+After=network-online.target mariadb.service mysql.service
+
+[Service]
+Type=oneshot
+User=user
+WorkingDirectory=/store/droptracker/disc
+ExecStart=/store/droptracker/disc/venv/bin/python -m scripts.stat_snapshot_retention --apply
+TimeoutStartSec=2h
+Nice=10

@@ -14,9 +14,9 @@ safe to retry.
 
 Growth is bounded by design — a player can only have so many collection log
 slots, quests and diary tiers, so these tables converge rather than accumulate.
-The one genuinely unbounded thing (per-skill XP over time) is deliberately NOT
-here: it needs a retention policy first, and ``player_exp`` already holds the
-latest values.
+The one thing that is a history rather than a state is ``PlayerStatSnapshot``:
+stats over time, bounded by the retention job rather than by the game, while
+``player_exp`` keeps the latest values.
 
 Sizing note before this ships to production: ``player_clog_items`` is up to
 ~1,500 rows per player who opens their collection log. Do the arithmetic against
@@ -28,8 +28,11 @@ structure's size plus ``api.routes.state_sync.MAX_UNDEFINED_ITEMS``.
 from __future__ import annotations
 
 from sqlalchemy import (
+    BigInteger,
+    Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     SmallInteger,
@@ -169,3 +172,47 @@ class PlayerDiaryTier(Base):
     tier = Column(SmallInteger, primary_key=True)
     completed_count = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+
+class PlayerStatSnapshot(Base):
+    """One observation of a player's stats from one source (web161a).
+
+    ``player_exp`` holds only the latest XP, which cannot answer "what did
+    they gain this week?". This is the history that can, and the one store
+    every stats reader is meant to use (dev tracker project 40):
+
+    - ``source`` is ``plugin`` (state sync), ``hiscores`` (our poller) or
+      ``wom``;
+    - a plugin row is written only when XP differs from the player's previous
+      plugin row, so "the latest row at or before a time" *is* the XP at that
+      time. Syncs inside one ``utils.stat_snapshots.PLUGIN_BUCKET_MINUTES``
+      window share a row, which converges on the window's closing values;
+    - ``pinned`` rows (event and month boundaries) are never overwritten and
+      never downsampled; ``flagged`` rows failed a plausibility check and are
+      never read as a baseline.
+
+    ``skills`` is a JSON object of skill name -> XP. ``activities`` (hiscores
+    metric -> score, non-zero only) and ``ranks`` (metric -> rank) are JSON
+    too and absent on plugin rows. Text, like the other JSON columns here:
+    never queried into. No foreign key to ``players``: the table is
+    partitioned by month. ``db.player_erasure`` finds it by its ``player_id``
+    column.
+    """
+
+    __tablename__ = "player_stat_snapshots"
+    __table_args__ = ({"extend_existing": True},)
+
+    player_id = Column(Integer, primary_key=True, autoincrement=False)
+    taken_at = Column(DateTime, primary_key=True)
+    source = Column(String(10), primary_key=True)
+    account_type = Column(SmallInteger, nullable=True)
+    total_xp = Column(BigInteger, nullable=False, default=0)
+    total_level = Column(SmallInteger, nullable=False, default=0)
+    skills = Column(Text, nullable=False)
+    activities = Column(Text, nullable=True)
+    ranks = Column(Text, nullable=True)
+    ehp = Column(Float, nullable=True)
+    ehb = Column(Float, nullable=True)
+    flagged = Column(Boolean, nullable=False, default=False)
+    pinned = Column(Boolean, nullable=False, default=False)

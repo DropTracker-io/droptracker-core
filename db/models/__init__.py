@@ -13,6 +13,7 @@ from .player_state import (
     PlayerCombatAchievementVarps,
     PlayerQuestState,
     PlayerDiaryTier,
+    PlayerStatSnapshot,
 )
 from .player import Player, IgnoredPlayer
 from .group import Group
@@ -298,6 +299,7 @@ __all__ = [
     "PlayerCombatAchievementVarps",
     "PlayerQuestState",
     "PlayerDiaryTier",
+    "PlayerStatSnapshot",
     "Player",
     "IgnoredPlayer",
     "Group",

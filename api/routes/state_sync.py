@@ -347,15 +347,15 @@ def _upsert_state(db_session, player_id, snapshot, skills):
     row.last_synced_at = datetime.now()
 
     if skills:
-        _update_player_experience(db_session, player_id, skills)
+        _update_player_experience(db_session, player_id, skills, row.account_type)
 
 
-def _update_player_experience(db_session, player_id, skills):
+def _update_player_experience(db_session, player_id, skills, account_type=None):
     """Refresh the existing latest-only per-skill XP row.
 
     Reuses ``player_exp`` rather than adding a second XP store. Per-skill
-    *history* is intentionally still absent: it is the one unbounded table in
-    this design and wants a retention policy first.
+    history is ``player_stat_snapshots``, written through
+    ``utils.stat_snapshots`` and nowhere else.
     """
     from db.models import PlayerExperience
 
@@ -376,6 +376,22 @@ def _update_player_experience(db_session, player_id, skills):
         if hasattr(PlayerExperience, column) and column not in ("id", "player_id", "last_updated"):
             setattr(row, column, xp)
     row.last_updated = datetime.now()
+
+    # The stat history (web161a): the one writer of player_stat_snapshots
+    # on this path. Bounded by a 15-minute window per player, and skipped
+    # outright when nothing changed since the player's previous row.
+    from utils.stat_snapshots import record_plugin_snapshot
+    from utils.xp_history import skills_from_row
+
+    def boss_scores():
+        from utils.stat_snapshots import plugin_boss_scores
+        from utils.wiseoldman import wom_boss_metric
+
+        return plugin_boss_scores(db_session, player_id, wom_boss_metric)
+
+    db_session.flush()
+    record_plugin_snapshot(db_session, player_id, skills_from_row(row),
+                           account_type=account_type, activities=boss_scores)
 
 
 def _upsert_items(db_session, player_id, previous, incoming):
