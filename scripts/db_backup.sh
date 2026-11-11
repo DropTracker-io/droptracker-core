@@ -3,16 +3,36 @@
 # Nightly MariaDB (+ Redis) backup for DropTracker production.
 #
 # Produces, under /store/droptracker/backups/YYYY-MM-DD/ (UTC date):
-#   data-YYYY-MM-DD.sql.gz         full dump of the `data` schema
+#   data-YYYY-MM-DD.sql.gz         dump of the `data` schema, minus the tables
+#                                  listed under "Credentials" below
+#   data-sanitized-YYYY-MM-DD.sql.gz
+#                                  those tables: structure for all of them, and
+#                                  rows (with the credentials taken out) for the
+#                                  ones that also hold ordinary data. Load it
+#                                  AFTER data-*.sql.gz.
 #   data-schema-YYYY-MM-DD.sql.gz  schema-only dump of `data` (alembic/versions
 #                                  is gitignored, so this is the schema recovery path)
-#   xenforo-YYYY-MM-DD.sql.gz      full dump of the `xenforo` schema
+#   xenforo-YYYY-MM-DD.sql.gz      dump of the `xenforo` schema, same split
+#   xenforo-sanitized-YYYY-MM-DD.sql.gz
 #   redis-YYYY-MM-DD.rdb.gz        Redis RDB snapshot (nice-to-have; skipped with a
 #                                  warning if unreadable — leaderboards are rebuildable)
 #
-# Then uploads the set to B2 under dt_backups/mysql/YYYY-MM-DD/ (the B2 app key
-# is namePrefix-restricted to "dt_") and prunes local (>LOCAL_RETENTION_DAYS)
-# and remote (>REMOTE_RETENTION_DAYS) copies.
+# Then uploads the set to B2 under dt_backups/mysql/<token>/YYYY-MM-DD/ (the B2
+# app key is namePrefix-restricted to "dt_") and prunes local
+# (>LOCAL_RETENTION_DAYS) and remote (>REMOTE_RETENTION_DAYS) copies.
+#
+# THE BUCKET IS PUBLIC. video.droptracker.io serves it key for key, so a backup
+# under a name anyone could guess is a backup anyone can download (found
+# 2026-11-11: the old dt_backups/mysql/DATE/data-DATE.sql.gz names were exactly
+# that). Two defences, both needed:
+#   1. <token> is a keyed hash of the date (HMAC with the B2 application key):
+#      the same every run for a given day, not guessable without the key.
+#      `b2_backup_sync.py check` lists the real paths.
+#   2. Credentials never leave the box. See "Credentials" below. A restore
+#      therefore comes back WITHOUT them: Discord webhooks, users' auth tokens,
+#      group export keys, WOM verification codes, plugin/admin sessions, forum
+#      passwords and the forum's Discord login all have to be re-made.
+#      deploy/BACKUPS.md lists what to redo.
 #
 # Dumps use --single-transaction --quick: consistent InnoDB snapshot, no table
 # locks, safe against live prod. Do NOT run DDL / alembic migrations while a
@@ -45,10 +65,57 @@ SKIP_B2="${SKIP_B2:-0}"
 SKIP_REDIS="${SKIP_REDIS:-0}"
 KEEP_LOCAL_AFTER_UPLOAD="${KEEP_LOCAL_AFTER_UPLOAD:-0}"
 
+# ---------------------------------------------------------------- Credentials
+# What is kept out of every dump. If you add a table or column that stores a
+# secret (a token, a webhook URL, a password, a key someone could use as-is),
+# add it here in the same change.
+#
+# Whole tables: structure is kept (in *-sanitized-*), rows are not.
+DATA_SECRET_TABLES=(
+    webhooks backup_webhooks webhook_pending_deletion new_webhooks   # Discord webhook URLs/tokens
+    api_key_reveals                                                  # one-time key reveals (ciphertext)
+    group_verification_codes plugin_admin_sessions                   # codes and sessions
+    admin_widget_tokens tester_update_keys
+)
+# Tables that hold ordinary data plus a secret: dumped without the secret.
+#   "table|WHERE that keeps the safe rows"
+DATA_FILTERED_TABLES=(
+    "group_configurations|config_key NOT IN ('export_api_key','wom_verification_code')"
+    "audit_log|CONCAT_WS(' ', target, \`before\`, \`after\`) NOT REGEXP 'api/webhooks/'"
+)
+#   "table|column to blank" (the column is NOT NULL; it becomes '')
+DATA_BLANKED_COLUMNS=(
+    "users|auth_token"
+)
+# Deliberately kept: api_keys (SHA-256 of a long random key, not usable as a
+# key) and players.account_hash (an identifier the plugin sends, needed to
+# recognise accounts after a restore).
+
+XF_SECRET_TABLES=(
+    xf_user_authenticate xf_user_remember xf_user_confirmation       # passwords, remember-me, reset links
+    xf_user_tfa xf_user_tfa_trusted xf_passkey                       # two-factor secrets
+    xf_session xf_session_admin xf_session_install                   # sessions
+    xf_api_key xf_api_login_token xf_webhook                         # API keys, webhook secrets
+    xf_oauth_client xf_oauth_code xf_oauth_refresh_token xf_oauth_request xf_oauth_token
+    xf_connected_account_provider xf_user_connected_account          # Discord login secret + linked accounts
+    xf_payment_profile                                               # payment provider keys
+    xf_data_registry                                                 # cache that copies the options; rebuilt
+    xf_error_log xf_admin_log                                        # logs that quote secrets (webhook URLs in traces)
+)
+XF_FILTERED_TABLES=(
+    "xf_option|LOWER(CONVERT(option_id USING utf8mb4)) NOT REGEXP 'secret|key|passw|token|transport|captcha|oauth|stripe|paypal|api|smtp'"
+)
+XF_BLANKED_COLUMNS=(
+    "xf_user|secret_key"
+)
+# Scratch schema the blanked copies are built in. Never a real schema.
+readonly SCRATCH_DB="dt_backup_scratch"
+
 # Fail-loudly floor sizes for the gzipped dumps: a "successful" dump smaller
 # than this means something went badly wrong (empty schema, auth issue, etc).
 DATA_MIN_BYTES=$((200 * 1024 * 1024))   # data full dump: >= 200 MB gz
-XF_MIN_BYTES=$((20 * 1024 * 1024))      # xenforo full dump: >= 20 MB gz
+XF_MIN_BYTES=$((5 * 1024 * 1024))       # xenforo dump: >= 5 MB gz (17 MB once the
+                                        # error log, most of the old 215 MB, was left out)
 SCHEMA_MIN_BYTES=$((10 * 1024))         # data schema-only: >= 10 KB gz
 
 DATE_UTC="$(date -u +%F)"
@@ -154,6 +221,72 @@ dump_schema() {
     log "dumped ${schema}: $(du -h "$outfile" | cut -f1) in $((t1 - t0))s"
 }
 
+dump_sanitized() {
+    # dump_sanitized <schema> <outfile> <SECRET_TABLES name> <FILTERED name> <BLANKED name>
+    #
+    # Writes what dump_schema left out, minus the credentials:
+    #   1. CREATE TABLE for every excluded table (no rows);
+    #   2. rows of each filtered table that pass its WHERE;
+    #   3. rows of each blanked table, read from a scratch copy whose secret
+    #      column has been emptied. The live table is only ever read.
+    local schema=$1 outfile=$2
+    local -n secret_tables=$3 filtered=$4 blanked=$5
+    local entry table clause column structure=()
+
+    [[ "$SCRATCH_DB" == "dt_backup_scratch" ]] || die "scratch schema name was altered"
+    structure=("${secret_tables[@]}")
+    for entry in "${filtered[@]}" "${blanked[@]}"; do structure+=("${entry%%|*}"); done
+
+    log "dumping ${schema} (sanitized) -> ${outfile}"
+    {
+        "${DUMP[@]}" --no-data --skip-triggers "$schema" "${structure[@]}"
+        for entry in "${filtered[@]}"; do
+            table="${entry%%|*}"; clause="${entry#*|}"
+            "${DUMP[@]}" --no-create-info --skip-triggers --where="$clause" "$schema" "$table"
+        done
+        for entry in "${blanked[@]}"; do
+            table="${entry%%|*}"; column="${entry#*|}"
+            # NO_AUTO_VALUE_ON_ZERO: users has a real row with id 0, which a
+            # plain INSERT would renumber.
+            "${MYSQL[@]}" -e "
+                SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_AUTO_VALUE_ON_ZERO');
+                CREATE DATABASE IF NOT EXISTS \`${SCRATCH_DB}\`;
+                DROP TABLE IF EXISTS \`${SCRATCH_DB}\`.\`${table}\`;
+                CREATE TABLE \`${SCRATCH_DB}\`.\`${table}\` LIKE \`${schema}\`.\`${table}\`;
+                INSERT INTO \`${SCRATCH_DB}\`.\`${table}\` SELECT * FROM \`${schema}\`.\`${table}\`;
+                UPDATE \`${SCRATCH_DB}\`.\`${table}\` SET \`${column}\` = '';"
+            "${DUMP[@]}" --no-create-info --skip-triggers "$SCRATCH_DB" "$table"
+            "${MYSQL[@]}" -e "DROP TABLE IF EXISTS \`${SCRATCH_DB}\`.\`${table}\`;"
+        done
+    } | gzip > "$outfile"
+    gzip -t "$outfile"
+    log "dumped ${schema} (sanitized): $(du -h "$outfile" | cut -f1)"
+}
+
+ignore_args() {
+    # ignore_args <schema> <SECRET_TABLES name> <FILTERED name> <BLANKED name>
+    # --ignore-table arguments for everything dump_sanitized handles instead.
+    local schema=$1
+    local -n secret_tables=$2 filtered=$3 blanked=$4
+    local entry
+    for entry in "${secret_tables[@]}"; do printf -- '--ignore-table=%s.%s\n' "$schema" "$entry"; done
+    for entry in "${filtered[@]}" "${blanked[@]}"; do
+        printf -- '--ignore-table=%s.%s\n' "$schema" "${entry%%|*}"
+    done
+}
+
+assert_no_secrets() {
+    # assert_no_secrets <file>...
+    # Last line of defence: a dump that still carries a Discord webhook URL is
+    # not uploaded. Catches a new table or column nobody added to the lists.
+    local file hit
+    for file in "$@"; do
+        hit="$(zcat "$file" | grep -c -m1 -E 'discord(app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]{20,}' || true)"
+        [[ "$hit" == "0" ]] || die "$file contains a Discord webhook URL; not uploading. Find the table and add it to the Credentials lists."
+    done
+    log "credential check: no webhook URLs in $# dump(s)"
+}
+
 # --------------------------------------------------------- redis nice-to-have
 backup_redis() {
     # Best-effort copy of the Redis RDB snapshot. Leaderboards are rebuildable,
@@ -207,9 +340,19 @@ prune_local
 free_space_check
 mkdir -p "$OUT_DIR"
 
-dump_schema data    "$OUT_DIR/data-$DATE_UTC.sql.gz"        "$DATA_MIN_BYTES"
+mapfile -t DATA_IGNORE < <(ignore_args data    DATA_SECRET_TABLES DATA_FILTERED_TABLES DATA_BLANKED_COLUMNS)
+mapfile -t XF_IGNORE   < <(ignore_args xenforo XF_SECRET_TABLES   XF_FILTERED_TABLES   XF_BLANKED_COLUMNS)
+
+dump_schema data    "$OUT_DIR/data-$DATE_UTC.sql.gz"        "$DATA_MIN_BYTES" "${DATA_IGNORE[@]}"
+dump_sanitized data "$OUT_DIR/data-sanitized-$DATE_UTC.sql.gz" \
+    DATA_SECRET_TABLES DATA_FILTERED_TABLES DATA_BLANKED_COLUMNS
 dump_schema data    "$OUT_DIR/data-schema-$DATE_UTC.sql.gz" "$SCHEMA_MIN_BYTES" --no-data
-dump_schema xenforo "$OUT_DIR/xenforo-$DATE_UTC.sql.gz"     "$XF_MIN_BYTES"
+dump_schema xenforo "$OUT_DIR/xenforo-$DATE_UTC.sql.gz"     "$XF_MIN_BYTES" "${XF_IGNORE[@]}"
+dump_sanitized xenforo "$OUT_DIR/xenforo-sanitized-$DATE_UTC.sql.gz" \
+    XF_SECRET_TABLES XF_FILTERED_TABLES XF_BLANKED_COLUMNS
+
+assert_no_secrets "$OUT_DIR/data-$DATE_UTC.sql.gz" "$OUT_DIR/data-sanitized-$DATE_UTC.sql.gz" \
+    "$OUT_DIR/xenforo-$DATE_UTC.sql.gz" "$OUT_DIR/xenforo-sanitized-$DATE_UTC.sql.gz"
 
 if [[ "$SKIP_REDIS" == "1" ]]; then
     log "SKIP_REDIS=1: skipping Redis snapshot"
@@ -223,8 +366,15 @@ ls -l "$OUT_DIR" | while IFS= read -r line; do log "  $line"; done
 if [[ "$SKIP_B2" == "1" ]]; then
     log "SKIP_B2=1: skipping offsite upload and remote prune"
 else
-    log "uploading to B2 under dt_backups/mysql/$DATE_UTC/"
-    "$PYTHON" "$B2_SYNC" upload-dir "$OUT_DIR" "dt_backups/mysql/$DATE_UTC"
+    # The bucket is public through the CDN: the path carries a keyed hash of
+    # the date so it cannot be guessed (see the header).
+    B2_SECRET="$(env_get B2_APPLICATION_KEY)"
+    [[ -n "$B2_SECRET" ]] || die "B2_APPLICATION_KEY not set in $ENV_FILE; refusing to upload under a guessable name"
+    PATH_TOKEN="$(B2_SECRET="$B2_SECRET" "$PYTHON" -c 'import hashlib, hmac, os, sys
+print(hmac.new(os.environ["B2_SECRET"].encode(), sys.argv[1].encode(), hashlib.sha256).hexdigest()[:32])' "$DATE_UTC")"
+    [[ "$PATH_TOKEN" =~ ^[0-9a-f]{32}$ ]] || die "could not derive the upload path token"
+    log "uploading to B2 under dt_backups/mysql/<token>/$DATE_UTC/"
+    "$PYTHON" "$B2_SYNC" upload-dir "$OUT_DIR" "dt_backups/mysql/$PATH_TOKEN/$DATE_UTC"
     log "pruning B2 objects older than ${REMOTE_RETENTION_DAYS} days"
     "$PYTHON" "$B2_SYNC" prune --days "$REMOTE_RETENTION_DAYS"
     # The local set is staging for the upload, not a retained copy. This box runs

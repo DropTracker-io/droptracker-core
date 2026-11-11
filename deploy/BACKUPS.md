@@ -26,7 +26,7 @@ random delay, `Persistent=true` so a missed run replays after boot). It starts
    gzips `/var/lib/redis/dump.rdb` → `redis-YYYY-MM-DD.rdb.gz`. Failures here
    only WARN — leaderboards are rebuildable
    (`scripts/reconcile_*_leaderboards.py`).
-5. Uploads the whole set to B2 `dt_backups/mysql/YYYY-MM-DD/` via
+5. Uploads the whole set to B2 `dt_backups/mysql/<token>/YYYY-MM-DD/` (the token is a keyed hash of the date; the bucket is public through the CDN) via
    `scripts/b2_backup_sync.py` (venv boto3, same S3-compatible setup as
    `utils/b2_storage.py`), verifying each object's size after upload.
 6. Prunes B2 objects older than **3 days** (`REMOTE_RETENTION_DAYS`; 30 until
@@ -112,10 +112,18 @@ non-empty, prints **PASS/FAIL**, then drops the scratch schema.
    ```bash
    cd /store/droptracker/disc
    venv/bin/python scripts/b2_backup_sync.py check   # see what exists
-   venv/bin/python scripts/b2_backup_sync.py download \
-       dt_backups/mysql/2026-07-12/data-2026-07-12.sql.gz /store/restore/data.sql.gz
-   venv/bin/python scripts/b2_backup_sync.py download \
-       dt_backups/mysql/2026-07-12/xenforo-2026-07-12.sql.gz /store/restore/xenforo.sql.gz
+   ```
+
+   Since 2026-11-11 the path carries a token: `dt_backups/mysql/<token>/<date>/`.
+   The bucket is public through the CDN, so the path must not be guessable;
+   `check` prints the real keys. Download all four SQL files of the set:
+
+   ```bash
+   P=dt_backups/mysql/<token>/2026-11-12
+   for f in data data-sanitized xenforo xenforo-sanitized; do
+       venv/bin/python scripts/b2_backup_sync.py download \
+           $P/$f-2026-11-12.sql.gz /store/restore/$f.sql.gz
+   done
    ```
 
    (If the box is a total loss, grab the B2 creds from the `.env` backup /
@@ -128,10 +136,31 @@ non-empty, prints **PASS/FAIL**, then drops the scratch schema.
    ```bash
    mysql -u root -p -e "CREATE DATABASE data CHARACTER SET utf8mb4"
    zcat /store/restore/data.sql.gz | mysql -u root -p data
+   zcat /store/restore/data-sanitized.sql.gz | mysql -u root -p data
 
    mysql -u root -p -e "CREATE DATABASE xenforo CHARACTER SET utf8mb4"
    zcat /store/restore/xenforo.sql.gz | mysql -u root -p xenforo
+   zcat /store/restore/xenforo-sanitized.sql.gz | mysql -u root -p xenforo
    ```
+
+   The `*-sanitized` file goes second. It holds the tables the main dump
+   leaves out: their structure, and their rows with the credentials removed.
+
+   **Backups contain no credentials (since 2026-11-11).** The lists are at the
+   top of `scripts/db_backup.sh`. After a restore, these come back empty and
+   have to be re-made:
+
+   - Discord webhooks (`webhooks`, `new_webhooks`, `backup_webhooks`): the
+     bots must create a fresh pool.
+   - `users.auth_token` (blank), group `export_api_key` and
+     `wom_verification_code` settings (absent): users and groups re-issue them.
+   - Plugin admin sessions, admin widget tokens, verification codes, one-time
+     key reveals: people sign in / request again. API keys themselves survive
+     (only their SHA-256 is stored).
+   - Forum: every password, two-factor setup, passkey and remember-me cookie
+     (members use "forgot password"); the Discord login provider, API keys,
+     webhooks and payment profiles must be configured again; options whose id
+     mentions key/secret/captcha/api revert to defaults.
 
    Use the **MariaDB 10.11+ client** — dumps start with the
    `/*M!999999\- enable the sandbox mode */` line, which very old clients

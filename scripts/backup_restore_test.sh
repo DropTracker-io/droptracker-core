@@ -126,6 +126,16 @@ drop_scratch
 log "restoring into \`$SCRATCH_DB\` (this takes hours for ~165M rows)..."
 t0="$(date -u +%s)"
 zcat "$DUMP" | "${MYSQL[@]}" --database="$SCRATCH_DB"
+# Since 2026-11-11 the tables that hold credentials are left out of the main
+# dump; their structure and credential-free rows are in data-sanitized-*.
+SANITIZED="${DUMP/data-/data-sanitized-}"
+if [[ -f "$SANITIZED" ]]; then
+    log "restoring $SANITIZED on top"
+    gzip -t "$SANITIZED" || die "sanitized dump failed gzip integrity check"
+    zcat "$SANITIZED" | "${MYSQL[@]}" --database="$SCRATCH_DB"
+else
+    log "WARN: no $(basename "$SANITIZED") next to the dump; users/group_configurations checks will fail"
+fi
 log "restore finished in $(( $(date -u +%s) - t0 ))s"
 
 # -------------------------------------------------------------- sanity checks
