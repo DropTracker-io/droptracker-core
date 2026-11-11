@@ -138,6 +138,8 @@ _REFRESH_DEBOUNCE_SECONDS = 2.0
 # Entitlement resolution runs a few subscription queries; cache the result for a
 # short window so the per-cycle and per-refresh gates stay cheap.
 _ENTITLEMENT_TTL_SECONDS = 120
+#: How long a group's WOM kill counts are kept in-process between passes.
+_WOM_KC_TTL_SECONDS = 1800
 
 # Discord Components V2 limits (with head-room).
 _MAX_COMPONENT_COUNT = 38
@@ -277,6 +279,9 @@ class HallOfFame(Extension):
         # group_id -> (monotonic_ts, player_ids). Membership is re-queried once
         # per group per cycle instead of once per boss (was O(bosses) queries).
         self._player_ids_cache: Dict[int, Tuple[float, List[int]]] = {}
+        # Wise Old Man boss kill counts per group for the kill-count board
+        # (bug #245), primed once per group before its bosses render.
+        self._wom_cache: Dict[int, Tuple[float, Dict[int, dict]]] = {}
         # Serialises the periodic sweep against the near-real-time refresh
         # consumer: both mutate the shared DB session and edit the same
         # channels, so they must never interleave at an await boundary (the
@@ -994,6 +999,7 @@ class HallOfFame(Extension):
             return
         directory_url = self._directory_jump_url(group) if cfg.show_directory else None
         entry, npcs = match
+        await self._prime_wom_kill_counts(group_id)
         components = self._render_boss_entry(group, entry, npcs, directory_url, cfg)
         if not components:
             return
@@ -1194,6 +1200,7 @@ class HallOfFame(Extension):
             directory_url = self._jump_url(group, slots[0])
 
         # Boss messages: edit in place (positional), append new ones at the bottom.
+        await self._prime_wom_kill_counts(group_id)
         for index, key in enumerate(plan):
             if key in (DIRECTORY_KEY, DIRECTORY_BOTTOM_KEY):
                 continue
@@ -1570,6 +1577,7 @@ class HallOfFame(Extension):
         collector = HofDataCollector(
             self._db, group.group_id, self._group_player_ids(group.group_id),
             display_name=lambda player: self._player_display(player, group.group_id),
+            wom_bosses=(self._wom_cache.get(group.group_id) or (0.0, {}))[1],
         )
         data = collector.build_entry(entry.display_name, entry.grouped, npcs, needs)
         emojis = resolve_emoji_refs(hof_layout.emoji_refs(layout)) if layout else {}
@@ -1582,6 +1590,29 @@ class HallOfFame(Extension):
             log.error("HOF: %s exceeds Discord limits even at minimum size", label)
             return None
         return to_interactions_components(payload)
+
+    async def _prime_wom_kill_counts(self, group_id: int) -> None:
+        """Load the clan's Wise Old Man hiscores for the kill-count board
+        (bug #245). ``services.recap_ehb.group_hiscores`` caches them six hours
+        in Redis and the clan stats page shares that cache, so a full render
+        pass costs one WOM call per linked group at most. Kept per group for
+        the cycle; a clan without a WOM group is remembered as empty."""
+        cached = self._wom_cache.get(group_id)
+        now = time.monotonic()
+        if cached and now - cached[0] < _WOM_KC_TTL_SECONDS:
+            return
+        data: Dict[int, dict] = {}
+        if group_id == _GLOBAL_GROUP_ID:
+            # The global board is everyone; the watermark alone serves it.
+            self._wom_cache[group_id] = (now, data)
+            return
+        try:
+            from services.recap_ehb import group_hiscores
+
+            data = await group_hiscores(group_id) or {}
+        except Exception as e:
+            log.warning("HOF: WOM kill counts unavailable for group %d: %s", group_id, e)
+        self._wom_cache[group_id] = (now, data)
 
     def _group_player_ids(self, group_id: int) -> List[int]:
         """Member player_ids for a group, cached briefly so a full render pass
@@ -1742,6 +1773,7 @@ class HallOfFame(Extension):
                 )
                 return
             entry, npcs = match
+            await self._prime_wom_kill_counts(group.group_id)
             components = self._render_boss_entry(group, entry, npcs, directory_url=None, cfg=cfg)
             if not components:
                 await ctx.send(

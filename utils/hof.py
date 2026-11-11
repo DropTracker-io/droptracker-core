@@ -23,6 +23,37 @@ DIRECTORY_BOTTOM_KEY = "_hof_directory_bottom"
 SEPULCHRE_CANONICAL = "Hallowed Sepulchre"
 SEPULCHRE_FLOOR_RE = re.compile(r"^Hallowed Sepulchre Floor \d+$")
 
+# Doom of Mokhaiotl is ten NpcList rows: the boss itself (the 1-8 total) and
+# one per delve level (1..8 and the shared 8+ board). They used to be ten Hall
+# of Fame messages; since suggestion #243 they are one grouped message whose
+# modes are the levels, the way a raid's modes are.
+DOOM_CANONICAL = "Doom of Mokhaiotl"
+DOOM_LEVEL_RE = re.compile(r"^Doom of Mokhaiotl \(Level:?\s*(\d+)(\+?)\)$", re.IGNORECASE)
+
+
+def is_doom_variant(boss_name: str) -> bool:
+    """The Doom boss row or any of its level rows."""
+    name = (boss_name or "").strip()
+    return name.casefold() == DOOM_CANONICAL.casefold() or bool(DOOM_LEVEL_RE.match(name))
+
+
+def doom_mode_name(npc_name: str) -> str:
+    """The mode label a Doom row renders under: ``Level 3``, ``Level 8+``, and
+    ``Levels 1-8`` for the boss row (the full-run time)."""
+    match = DOOM_LEVEL_RE.match((npc_name or "").strip())
+    if match:
+        return f"Level {match.group(1)}{match.group(2)}"
+    return "Levels 1-8"
+
+
+def doom_mode_rank(mode_name: str) -> int:
+    """Play order for Doom modes: level 1 first, the 8+ board after 8, the
+    full run last (the total time reads best after its parts)."""
+    match = re.match(r"^Level (\d+)(\+?)$", mode_name or "")
+    if match:
+        return int(match.group(1)) + (1 if match.group(2) else 0)
+    return 1000
+
 # Raid/boss variants that are combined into a single Hall of Fame message.
 # NpcList carries both colon and colon-less spellings for raid modes, and
 # group configs use whichever the NPC row happened to have — include both so
@@ -144,11 +175,38 @@ def canonical_display_name(boss_name: str) -> str:
     # A name the catalogue folded into another row ('Sol Heredit' -> 'Fortis
     # Colosseum', the old 'Mokhaitol' spellings) shares that row's message.
     boss_name = canonical_encounter_name(boss_name) or boss_name
+    if is_doom_variant(boss_name):
+        return DOOM_CANONICAL
     for candidate in npc_name_candidates(boss_name):
         canonical = RAID_VARIANT_TO_CANONICAL.get(candidate)
         if canonical:
             return canonical
     return boss_name
+
+
+def merge_kill_counts(watermark: Dict[int, int], wom: Dict[int, int], rows: int) -> List[Tuple[int, int]]:
+    """The kill-count board from two sources, highest first (bug #245).
+
+    ``watermark`` is ``player_npc_kc``, what the plugin has seen since it
+    started recording kill counts (2026-08-31), ``wom`` is Wise Old Man's
+    count for the same boss. A player's kill count is the higher of the two:
+    the watermark lags for anyone who rarely plays with the plugin, WOM lags
+    until the player's next update. Ties keep the lower player id first so
+    the board does not reshuffle between passes.
+    """
+    if rows <= 0:
+        return []
+    merged: Dict[int, int] = {}
+    for source in (watermark or {}, wom or {}):
+        for player_id, kc in source.items():
+            try:
+                pid, count = int(player_id), int(kc or 0)
+            except (TypeError, ValueError):
+                continue
+            if count > merged.get(pid, 0):
+                merged[pid] = count
+    ranked = sorted(merged.items(), key=lambda item: (-item[1], item[0]))
+    return [(pid, kc) for pid, kc in ranked if kc > 0][:rows]
 
 
 def plan_dedupe_key(display_name: str) -> str:
@@ -244,7 +302,7 @@ def build_boss_plan(boss_names: List[str], group_awakened: bool = False) -> List
     entries: Dict[str, BossPlanEntry] = {}
     for boss in boss_names:
         display = canonical_display_name(boss)
-        grouped = display in RAID_GROUPS or display == SEPULCHRE_CANONICAL
+        grouped = display in RAID_GROUPS or display in (SEPULCHRE_CANONICAL, DOOM_CANONICAL)
         parent = awakened_parent(boss) if group_awakened else None
         if parent:
             display, grouped = parent, True

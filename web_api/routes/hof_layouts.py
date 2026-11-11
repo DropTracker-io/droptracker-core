@@ -302,6 +302,15 @@ async def preview_group_hof_layout(group_id: int):
         abort_problem(422, "Invalid preview", "Body must be an object.")
     layout = {"accent_color": body.get("accent_color") or None, "blocks": body.get("blocks")}
     boss = str(body.get("boss") or "").strip()[:_MAX_BOSS_NAME]
+    # The kill-count board tops the plugin's watermark up with Wise Old Man
+    # (bug #245); the same six-hour cache the clan stats page uses.
+    wom_bosses = None
+    try:
+        from services.recap_ehb import group_hiscores
+
+        wom_bosses = await group_hiscores(group_id)
+    except Exception:
+        wom_bosses = None
 
     def _render():
         with db_session() as s:
@@ -309,12 +318,12 @@ async def preview_group_hof_layout(group_id: int):
             ok, errors = hl.validate_layout(layout)
             if not ok:
                 return {"ok": False, "errors": errors[:8]}
-            return {"ok": True, **_render_preview(s, group_id, layout, boss, hl)}
+            return {"ok": True, **_render_preview(s, group_id, layout, boss, hl, wom_bosses)}
 
     return private_no_store(jsonify(await asyncio.to_thread(_render)))
 
 
-def _render_preview(s, group_id: int, layout: dict, boss: str, hl) -> dict:
+def _render_preview(s, group_id: int, layout: dict, boss: str, hl, wom_bosses=None) -> dict:
     import importlib
 
     from db.models import Group, GroupPersonalBestMessage, NpcList
@@ -366,7 +375,8 @@ def _render_preview(s, group_id: int, layout: dict, boss: str, hl) -> dict:
         except Exception:
             return player.player_name or "Unknown"
 
-    collector = hof_data.HofDataCollector(s, group_id, player_ids, display_name=display)
+    collector = hof_data.HofDataCollector(s, group_id, player_ids, display_name=display,
+                                          wom_bosses=wom_bosses)
     data = collector.build_entry(entry.display_name, entry.grouped, npcs, needs)
 
     directory = (

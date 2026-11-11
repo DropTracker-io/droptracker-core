@@ -89,7 +89,8 @@ BOARDS: Dict[str, Dict[str, str]] = {
     },
     "kc": {
         "label": "Kill count",
-        "help": "Highest kill counts among your members. Kill counts are recorded from the plugin as members play.",
+        "help": "Highest kill counts among your members: recorded from the plugin as members play, "
+                "topped up with Wise Old Man when your group has a Wise Old Man group linked.",
         "value": "the kill count, e.g. 1,204",
     },
     "loot_month": {

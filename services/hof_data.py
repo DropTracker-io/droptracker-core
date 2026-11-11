@@ -42,11 +42,16 @@ from utils.doom_delve import DOOM_NPC_ID, format_level
 from utils.format import NPC_IMG_DIR, convert_from_ms, format_number
 from utils.hof import (
     AWAKENED_MODE,
+    DOOM_CANONICAL,
     RAID_GROUPS,
     SEPULCHRE_CANONICAL,
     awakened_parent,
     canonical_display_name,
+    doom_mode_name,
+    doom_mode_rank,
     is_awakened_parent,
+    is_doom_variant,
+    merge_kill_counts,
     npc_name_candidates,
 )
 from utils.pb_time import board_sort_key
@@ -124,6 +129,8 @@ def variant_mode_name(canonical_name: str, npc_name: str) -> str:
         floor_match = re.search(r"Floor\s+(\d+)", npc_name)
         if floor_match:
             return f"Floor {floor_match.group(1)}"
+    if canonical_name == DOOM_CANONICAL:
+        return doom_mode_name(npc_name)
     if is_awakened_parent(canonical_name):
         return AWAKENED_MODE if awakened_parent(npc_name) else "Normal"
     return npc_name
@@ -156,6 +163,11 @@ def group_thumbnail_npc(canonical_name: str, npcs: List[NpcList]) -> NpcList:
         for npc in npcs:
             if npc.npc_name == variant_name:
                 return npc
+    if canonical_name == DOOM_CANONICAL:
+        # The boss row over its level rows.
+        for npc in npcs:
+            if npc.npc_name == DOOM_CANONICAL:
+                return npc
     if is_awakened_parent(canonical_name):
         for npc in npcs:
             if not awakened_parent(npc.npc_name):
@@ -175,7 +187,13 @@ def npc_image_url(session, npc: NpcList) -> str:
     canonical = canonical_display_name(npc.npc_name)
     # An awakened boss without its own art borrows its parent's.
     parent = awakened_parent(npc.npc_name)
-    for variant_name in ([parent] if parent else RAID_GROUPS.get(canonical) or []):
+    if parent:
+        fallbacks = [parent]
+    elif is_doom_variant(npc.npc_name):
+        fallbacks = [DOOM_CANONICAL]
+    else:
+        fallbacks = RAID_GROUPS.get(canonical) or []
+    for variant_name in fallbacks:
         for candidate in npc_name_candidates(variant_name):
             other = session.query(NpcList).filter(NpcList.npc_name == candidate).first()
             if other and other.npc_id != npc.npc_id and _image_exists(other.npc_id):
@@ -190,7 +208,10 @@ def mode_npcs(canonical_name: str, npcs: List[NpcList]) -> List[Tuple[str, NpcLi
     # keep only the first so a mode never renders twice.
     seen: set = set()
     pairs = [(mode, npc) for mode, npc in pairs if not (mode in seen or seen.add(mode))]
-    pairs.sort(key=lambda item: (_MODE_ORDER.get(item[0], 50), item[0].casefold()))
+    if canonical_name == DOOM_CANONICAL:
+        pairs.sort(key=lambda item: doom_mode_rank(item[0]))
+    else:
+        pairs.sort(key=lambda item: (_MODE_ORDER.get(item[0], 50), item[0].casefold()))
     return pairs
 
 
@@ -264,14 +285,19 @@ class HofDataCollector:
 
     def __init__(self, session, group_id: int, player_ids: List[int],
                  display_name: Callable[[Optional[Player]], str],
-                 redis=None):
+                 redis=None, wom_bosses: Optional[Dict[int, dict]] = None):
         self._db = session
         self.group_id = group_id
         self.player_ids = player_ids
         self._display = display_name
         self._redis = redis
         self._npc_ids_by_name: Dict[str, List[int]] = {}
+        self._npc_names_by_id: Dict[int, str] = {}
         self._players: Dict[int, Optional[Player]] = {}
+        # ``{player_id: {"bosses": {wom_metric: kills}, ...}}`` from
+        # services.recap_ehb.group_hiscores (6h cache shared with the clan
+        # stats page); None or empty when the clan has no WOM group.
+        self._wom_bosses: Dict[int, dict] = wom_bosses or {}
 
     # -- plumbing ---------------------------------------------------------
 
@@ -288,6 +314,8 @@ class HofDataCollector:
             self._npc_ids_by_name[npc_name] = [
                 row[0] for row in self._db.query(NpcList.npc_id).filter(NpcList.npc_name == npc_name).all()
             ]
+            for npc_id in self._npc_ids_by_name[npc_name]:
+                self._npc_names_by_id.setdefault(int(npc_id), npc_name)
         return self._npc_ids_by_name[npc_name]
 
     def _player(self, player_id: int) -> Optional[Player]:
@@ -355,6 +383,10 @@ class HofDataCollector:
     # -- kill count -------------------------------------------------------
 
     def kc_rows(self, npc_ids: List[int], rows: int) -> List[Row]:
+        """Highest kill counts: the plugin's watermark (``player_npc_kc``)
+        topped up with Wise Old Man for clans that linked a WOM group. The
+        watermark alone only knows kills the plugin saw since 2026-08-31, so
+        on its own it crowned whoever happened to run the plugin (bug #245)."""
         if not npc_ids or rows <= 0:
             return []
         query = self._db.query(
@@ -364,13 +396,59 @@ class HofDataCollector:
             if not self.player_ids:
                 return []
             query = query.filter(PlayerNpcKc.player_id.in_(self.player_ids))
-        top = (
-            query.group_by(PlayerNpcKc.player_id)
-            .order_by(func.sum(PlayerNpcKc.kill_count).desc())
-            .limit(rows)
-            .all()
-        )
-        return [self._row(self._player(int(pid)), f"{int(kc):,}") for pid, kc in top if kc]
+        query = query.group_by(PlayerNpcKc.player_id).order_by(func.sum(PlayerNpcKc.kill_count).desc())
+        wom = self._wom_kill_counts(npc_ids)
+        if not wom:
+            top = query.limit(rows).all()
+            return [self._row(self._player(int(pid)), f"{int(kc):,}") for pid, kc in top if kc]
+        watermark = {int(pid): int(kc) for pid, kc in query.all() if kc}
+        return [
+            self._row(self._player(pid), f"{kc:,}")
+            for pid, kc in merge_kill_counts(watermark, wom, rows)
+        ]
+
+    def _wom_kill_counts(self, npc_ids: List[int]) -> Dict[int, int]:
+        """``{player_id: kills}`` from the clan's WOM hiscores for these NPC
+        rows, members only. Empty without WOM data or a WOM boss metric for
+        the boss (Doom's level rows, for instance, have none)."""
+        if not self._wom_bosses or self.group_id == GLOBAL_GROUP_ID:
+            return {}
+        try:
+            from utils.wiseoldman import wom_boss_metric
+        except Exception:
+            return {}
+        metrics = set()
+        for npc_id in npc_ids:
+            name = self._npc_names_by_id.get(int(npc_id))
+            if name is None:
+                row = self._db.query(NpcList.npc_name).filter(NpcList.npc_id == npc_id).first()
+                name = row[0] if row else None
+                if name:
+                    self._npc_names_by_id[int(npc_id)] = name
+            metric = wom_boss_metric(name) if name else None
+            if metric:
+                metrics.add(metric)
+        if not metrics:
+            return {}
+        members = {int(pid) for pid in self.player_ids}
+        out: Dict[int, int] = {}
+        for player_id, entry in self._wom_bosses.items():
+            try:
+                pid = int(player_id)
+            except (TypeError, ValueError):
+                continue
+            if pid not in members or not isinstance(entry, dict):
+                continue
+            bosses = entry.get("bosses") or {}
+            kills = 0
+            for metric in metrics:
+                try:
+                    kills = max(kills, int(bosses.get(metric) or 0))
+                except (TypeError, ValueError):
+                    continue
+            if kills > 0:
+                out[pid] = kills
+        return out
 
     # -- deepest delve ----------------------------------------------------
 

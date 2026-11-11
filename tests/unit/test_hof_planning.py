@@ -380,3 +380,65 @@ class TestAwakenedGrouping:
         assert [(m, n.npc_id) for m, n in mode_npcs("Vardorvis", [awake, normal])] == [
             ("Normal", 12223), ("Awakened", 13976)]
         assert group_thumbnail_npc("Vardorvis", [awake, normal]) is normal
+
+
+# --------------------------------------------------------------------------- #
+# Doom of Mokhaiotl: one grouped message, levels as modes (suggestion #243)
+# --------------------------------------------------------------------------- #
+class TestDoomGrouping:
+    LEVELS = [f"Doom of Mokhaiotl (Level: {n})" for n in range(1, 9)] + ["Doom of Mokhaiotl (Level: 8+)"]
+
+    def test_every_doom_row_shares_one_display_name(self):
+        from utils.hof import DOOM_CANONICAL, canonical_display_name, is_doom_variant
+        for name in ["Doom of Mokhaiotl", *self.LEVELS, "doom of mokhaiotl (level 3)"]:
+            assert is_doom_variant(name), name
+            assert canonical_display_name(name) == DOOM_CANONICAL
+        assert not is_doom_variant("Doom")
+        assert not is_doom_variant("Vardorvis")
+
+    def test_legacy_misspelling_folds_in_too(self):
+        from utils.hof import DOOM_CANONICAL, canonical_display_name
+        assert canonical_display_name("Doom of Mokhaitol (Level: 2)") == DOOM_CANONICAL
+
+    def test_plan_collapses_the_ten_rows_into_one_grouped_entry(self):
+        from utils.hof import build_boss_plan
+        plan = build_boss_plan(["Zulrah", *self.LEVELS, "Doom of Mokhaiotl"])
+        doom = [e for e in plan if e.display_name == "Doom of Mokhaiotl"]
+        assert len(doom) == 1
+        assert doom[0].grouped is True
+        assert len(doom[0].variant_names) == 10
+        assert [e.display_name for e in plan] == ["Doom of Mokhaiotl", "Zulrah"]
+
+    def test_a_lone_level_row_is_still_the_grouped_doom_message(self):
+        from utils.hof import build_boss_plan
+        (entry,) = build_boss_plan(["Doom of Mokhaiotl (Level: 5)"])
+        assert entry.display_name == "Doom of Mokhaiotl" and entry.grouped
+
+    def test_mode_names_and_play_order(self):
+        from utils.hof import doom_mode_name, doom_mode_rank
+        assert doom_mode_name("Doom of Mokhaiotl (Level: 3)") == "Level 3"
+        assert doom_mode_name("Doom of Mokhaiotl (Level: 8+)") == "Level 8+"
+        assert doom_mode_name("Doom of Mokhaiotl") == "Levels 1-8"
+        names = [doom_mode_name(n) for n in ["Doom of Mokhaiotl", *reversed(self.LEVELS)]]
+        ordered = sorted(names, key=doom_mode_rank)
+        assert ordered == [f"Level {n}" for n in range(1, 9)] + ["Level 8+", "Levels 1-8"]
+
+
+# --------------------------------------------------------------------------- #
+# Kill-count board from the plugin watermark and Wise Old Man (bug #245)
+# --------------------------------------------------------------------------- #
+class TestMergeKillCounts:
+    def test_higher_source_wins_per_player(self):
+        from utils.hof import merge_kill_counts
+        watermark = {1: 233, 2: 8}
+        wom = {1: 1900, 3: 4100, 4: 0}
+        assert merge_kill_counts(watermark, wom, 5) == [(3, 4100), (1, 1900), (2, 8)]
+
+    def test_rows_cap_and_stable_ties(self):
+        from utils.hof import merge_kill_counts
+        assert merge_kill_counts({5: 10, 2: 10, 9: 10}, {}, 2) == [(2, 10), (5, 10)]
+        assert merge_kill_counts({1: 5}, {2: 7}, 0) == []
+
+    def test_bad_values_are_skipped(self):
+        from utils.hof import merge_kill_counts
+        assert merge_kill_counts({"x": 3, 1: None}, {2: "12"}, 5) == [(2, 12)]
