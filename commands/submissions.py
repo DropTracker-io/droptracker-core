@@ -31,6 +31,7 @@ and events — applies identically to Discord and web submissions.
 
 import asyncio
 import os
+import secrets
 import time
 
 import httpx
@@ -46,7 +47,7 @@ from interactions import (
     slash_command,
     slash_option,
 )
-from interactions.api.events import MessageCreate
+from interactions.api.events import Component, MessageCreate
 from sqlalchemy import text
 
 from data.submissions.manual_discord import (
@@ -59,6 +60,20 @@ from data.submissions.manual_discord import (
     payload_to_form,
     resolve_pet_input,
     summarize_submission,
+)
+from data.submissions.manual_names import (
+    ITEM_ALIASES,
+    NPC_NAME_ALIASES,
+    PICK_AS_TYPED,
+    PICK_CANCEL,
+    NameCatalog,
+    correction_lines,
+    log_resolution,
+    parse_pick,
+    pick_components,
+    question_text,
+    resolve_fields,
+    suggest_names,
 )
 from data.submissions.manual_proof import (
     PROOF_ATTACH_LOOKBACK_SECONDS,
@@ -97,6 +112,7 @@ _COLOR_SUCCESS = 0x2ECC71
 _COLOR_REJECTED = 0xE67E22
 _COLOR_ERROR = 0xE74C3C
 _COLOR_PROOF_PROMPT = 0x3498DB
+_COLOR_QUESTION = 0x3498DB
 
 _TYPE_LABELS = {
     "drop": "Drop",
@@ -165,6 +181,94 @@ def resolve_pet_field(raw: str, source: str | None):
     """``(pet_name, error, candidates)``: see manual_discord.resolve_pet_input."""
     return resolve_pet_input(raw, source, recorded=recorded_pet_names(),
                              exact_item=_exact_item_name)
+
+
+# ── typed item / NPC names (data/submissions/manual_names.py) ───────────────
+
+# The whole catalog with its "has real submissions" flag, for placing a typed
+# name. ~0.8 s for items, so it is loaded once an hour and kept on failure.
+_ITEM_CATALOG_SQL = text(
+    "SELECT i.item_name, "
+    "       EXISTS(SELECT 1 FROM player_item_hourly_totals t "
+    "              WHERE t.item_id = i.item_id) AS tracked "
+    "FROM items i WHERE i.noted = 0 AND i.item_name IS NOT NULL"
+)
+_NPC_CATALOG_SQL = text(
+    "SELECT n.npc_name, "
+    "       EXISTS(SELECT 1 FROM player_npc_hourly_totals t "
+    "              WHERE t.npc_id = n.npc_id) AS tracked "
+    "FROM npc_list n WHERE n.npc_name IS NOT NULL"
+)
+_CATALOG_TTL = 3600.0
+_CATALOG_RETRY = 60.0
+_catalogs: dict = {}  # kind -> (reload_after, NameCatalog | None)
+
+
+def name_catalog(kind: str):
+    """The cached :class:`NameCatalog` for ``"item"`` or ``"npc"``, or None when
+    it has never loaded (typed names then go to the intake untouched)."""
+    reload_after, catalog = _catalogs.get(kind, (0.0, None))
+    now = time.monotonic()
+    if now < reload_after:
+        return catalog
+    try:
+        if kind == "item":
+            rows = session.execute(_ITEM_CATALOG_SQL).fetchall()
+            catalog = NameCatalog(rows, ITEM_ALIASES)
+        else:
+            rows = session.execute(_NPC_CATALOG_SQL).fetchall()
+            catalog = NameCatalog(rows, NPC_NAME_ALIASES, npc_match_key)
+        _catalogs[kind] = (now + _CATALOG_TTL, catalog)
+    except Exception as e:
+        print(f"[submit] {kind} name catalog load failed: {e}")
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        _catalogs[kind] = (now + _CATALOG_RETRY, catalog)
+    return catalog
+
+
+def resolve_typed_names(sub_type: str, fields: dict, confirmed=(), surface: str = "slash"):
+    """``(fields, corrections, question)``: see manual_names.resolve_fields.
+    Never raises; a failure leaves the names as typed."""
+    try:
+        needs_items = sub_type in ("drop", "clog") and "item_name" not in confirmed
+        out, corrections, question = resolve_fields(
+            sub_type, fields,
+            items=name_catalog("item") if needs_items else None,
+            npcs=name_catalog("npc"), confirmed=confirmed,
+        )
+    except Exception as e:
+        print(f"[submit] typed-name resolution failed: {e}")
+        return dict(fields), [], None
+    conn = getattr(redis_client, "client", None)
+    for field, typed, resolved in corrections:
+        log_resolution(conn, surface=surface, kind=field, raw=typed,
+                       outcome="auto", chosen=resolved)
+    if question:
+        log_resolution(conn, surface=surface, kind=question["field"], raw=question["raw"],
+                       outcome="asked", candidates=question["candidates"])
+    return out, corrections, question
+
+
+# Submissions waiting on a "did you mean?" button, by token:
+# ``(expires_at, discord_id, surface, field, raw, candidates, finish)``.
+# ``finish(ctx, field, chosen, confirmed_field)`` re-runs the submission and
+# returns ``(embed, components, followup)``. In memory on purpose: a restart
+# only means the member submits again.
+_PENDING_NAME_PICKS: dict = {}
+_NAME_PICK_TTL = 600.0
+
+
+def stash_name_pick(discord_id, surface: str, field: str, raw: str, candidates, finish) -> str:
+    now = time.monotonic()
+    for key in [k for k, v in _PENDING_NAME_PICKS.items() if v[0] < now]:
+        _PENDING_NAME_PICKS.pop(key, None)
+    token = secrets.token_urlsafe(8)
+    _PENDING_NAME_PICKS[token] = (now + _NAME_PICK_TTL, str(discord_id), surface,
+                                  field, raw, tuple(candidates), finish)
+    return token
 
 
 def _account_option(required: bool = False):
@@ -383,34 +487,76 @@ class SubmissionCommands(Extension):
     ):
         await ctx.defer(ephemeral=True)
         self._refresh_session()
+        embed, components, followup = await self._run_submission(
+            ctx, sub_type, account, proof, fields)
+        sent = await ctx.send(embed=embed, components=components or [], ephemeral=True)
+        if followup is not None:
+            await followup()
+        return sent
 
+    async def _run_submission(self, ctx, sub_type: str, account: str | None,
+                              proof: Attachment | None, fields: dict,
+                              confirmed: frozenset = frozenset()):
+        """``(embed, components, followup)`` for one /submit attempt.
+
+        Either the submission was sent (or refused) and ``components`` is
+        empty, or a typed name needs the member to choose: nothing has been
+        sent, ``components`` are the "did you mean?" buttons, and the attempt
+        is parked until :meth:`on_name_pick` re-runs it with the answer in
+        ``confirmed``. ``followup`` is an optional coroutine function to await
+        after the reply is on screen (the proof nudge).
+        """
+        fields = dict(fields)
         player, err = self._resolve_player(ctx, account)
         if err:
-            return await ctx.send(embed=self._error_embed(err), ephemeral=True)
+            return self._error_embed(err), [], None
 
         if self._rate_limited(player.user_id):
-            return await ctx.send(
-                embed=self._error_embed("You're submitting too fast — wait a minute and try again."),
-                ephemeral=True,
-            )
+            return self._error_embed(
+                "You're submitting too fast — wait a minute and try again."), [], None
 
-        if sub_type == "pet" and fields.get("item_name"):
-            pet_name, pet_err, _ = resolve_pet_field(fields["item_name"], fields.get("npc_name"))
+        def ask(field, raw, candidates, text_, allow_as_typed=True):
+            async def finish(pick_ctx, chosen):
+                again = {**fields}
+                if chosen is not None:
+                    again[field] = chosen
+                return await self._run_submission(
+                    pick_ctx, sub_type, account, proof, again, confirmed | {field})
+
+            token = stash_name_pick(ctx.author.id, "slash", field, raw, candidates, finish)
+            embed = Embed(title="Did you mean…?", description=text_, color=_COLOR_QUESTION)
+            return embed, pick_components(token, candidates,
+                                          allow_as_typed=allow_as_typed), None
+
+        if sub_type == "pet" and fields.get("item_name") and "item_name" not in confirmed:
+            pet_name, pet_err, candidates = resolve_pet_field(
+                fields["item_name"], fields.get("npc_name"))
             if pet_err:
-                return await ctx.send(embed=self._error_embed(pet_err), ephemeral=True)
+                if 0 < len(candidates) <= 5:
+                    # The processor refuses a pet it can't place, so "keep
+                    # what I typed" would only fail a second time.
+                    return ask("item_name", fields["item_name"], candidates,
+                               f"{pet_err} Nothing has been submitted yet.",
+                               allow_as_typed=False)
+                return self._error_embed(pet_err), [], None
             fields["item_name"] = pet_name
+
+        fields, corrections, question = resolve_typed_names(sub_type, fields, confirmed)
+        if question:
+            return ask(question["field"], question["raw"], question["candidates"],
+                       question_text(question))
 
         try:
             payload = build_manual_payload(sub_type, player.player_name, **fields)
         except ValueError as e:
-            return await ctx.send(embed=self._error_embed(str(e)), ephemeral=True)
+            return self._error_embed(str(e)), [], None
 
         image = None
         proof_warning = None
         if proof is not None:
             content, content_type, filename, err = await self._fetch_proof(proof)
             if err:
-                return await ctx.send(embed=self._error_embed(err), ephemeral=True)
+                return self._error_embed(err), [], None
             if content is not None:
                 image = (filename, content, content_type)
             else:
@@ -423,13 +569,11 @@ class SubmissionCommands(Extension):
 
         ok, result = await self._forward_to_intake(payload, image)
         if not ok:
-            return await ctx.send(
-                embed=self._error_embed(result, title="Submission not accepted"),
-                ephemeral=True,
-            )
+            return self._error_embed(result, title="Submission not accepted"), [], None
 
         summary = summarize_submission(sub_type, payload)
         lines = [f"{summary} for `{player.player_name}`."]
+        lines.extend(correction_lines(corrections))
         message = (result.get("message") or "").strip()
         if message:
             lines.append(message)
@@ -451,12 +595,63 @@ class SubmissionCommands(Extension):
         embed.set_footer(text="Manual submission • notifications post shortly if it was accepted")
         if image is not None and proof is not None:
             embed.set_thumbnail(url=proof.url)
-        sent = await ctx.send(embed=embed, ephemeral=True)
+        followup = None
         if image is None:
             # Only nags when the events engine actually parked this submission
             # for review — a casual submission outside any event stays silent.
-            await self._prompt_for_proof(ctx, player, summary)
-        return sent
+            async def followup():
+                await self._prompt_for_proof(ctx, player, summary)
+        return embed, [], followup
+
+    @listen(Component)
+    async def on_name_pick(self, event: Component):
+        """A "did you mean?" button, from /submit or the Submit button: finish
+        the parked submission with the answer, in place of the question."""
+        ctx = event.ctx
+        parsed = parse_pick(getattr(ctx, "custom_id", "") or "")
+        if parsed is None:
+            return
+        token, choice = parsed
+        try:
+            pending = _PENDING_NAME_PICKS.get(token)
+            if pending is None or pending[0] < time.monotonic():
+                _PENDING_NAME_PICKS.pop(token, None)
+                return await ctx.edit_origin(
+                    embeds=[Embed(title="That expired",
+                                  description="Nothing was submitted. Send it again.",
+                                  color=_COLOR_ERROR)],
+                    components=[])
+            _expires, discord_id, surface, field, raw, candidates, finish = pending
+            if str(ctx.author.id) != discord_id:
+                return await ctx.send("That button isn't for you.", ephemeral=True)
+            if isinstance(choice, int) and choice >= len(candidates):
+                return await ctx.send("That option is no longer available.", ephemeral=True)
+            # One submission per question, however many times it's tapped.
+            _PENDING_NAME_PICKS.pop(token, None)
+            conn = getattr(redis_client, "client", None)
+            if choice == PICK_CANCEL:
+                log_resolution(conn, surface=surface, kind=field, raw=raw,
+                               outcome="cancelled", candidates=candidates)
+                return await ctx.edit_origin(
+                    embeds=[Embed(title="Cancelled", description="Nothing was submitted.",
+                                  color=_COLOR_ERROR)],
+                    components=[])
+            chosen = None if choice == PICK_AS_TYPED else candidates[choice]
+            log_resolution(conn, surface=surface, kind=field, raw=raw,
+                           outcome="as_typed" if chosen is None else "picked",
+                           chosen=chosen, candidates=candidates)
+            await ctx.defer(edit_origin=True)
+            self._refresh_session()
+            embed, components, followup = await finish(ctx, chosen)
+            await ctx.edit_origin(embeds=[embed], components=components or [])
+            if followup is not None:
+                await followup()
+        except Exception as e:
+            print(f"[submit] name pick failed: {e}")
+            try:
+                await ctx.send("Something went wrong. Please try again.", ephemeral=True)
+            except Exception:
+                pass
 
     def _error_embed(self, message: str, title: str = "Couldn't submit that") -> Embed:
         return Embed(title=title, description=message, color=_COLOR_ERROR)
@@ -984,6 +1179,17 @@ class SubmissionCommands(Extension):
             names = self._search_names(sql, f"%{query}%", dedupe_npc=dedupe_npc)
         except Exception:
             names = []
+        try:
+            # What the typed text would resolve to on submit ("tbow", "Zulra"):
+            # first if a plain search missed it, the whole list if it found
+            # nothing.
+            guesses = suggest_names(query, name_catalog("npc" if dedupe_npc else "item"))
+            if not names:
+                names = guesses[:25]
+            elif len(guesses) == 1 and guesses[0] not in names:
+                names = (guesses + names)[:25]
+        except Exception:
+            pass
         await ctx.send(choices=[{"name": n[:100], "value": n[:100]} for n in names])
 
     @submit_drop.autocomplete("item")

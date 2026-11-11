@@ -139,6 +139,7 @@ droptracker/
 │       ├── death.py  diary.py  adventure_log.py
 │       ├── manual_policy.py     # Rules for web/manual (non-plugin) submissions
 │       ├── manual_discord.py    # Pure helpers for the Discord /submit commands
+│       ├── manual_names.py      # Typed item/NPC names: resolve, "did you mean?" buttons, aliases
 │       └── point_awards.py      # check_and_award_points()
 │
 ├── db/

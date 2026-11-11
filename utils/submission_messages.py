@@ -51,18 +51,18 @@ _RULES: tuple[tuple[re.Pattern, str], ...] = (
     ),
     (
         re.compile(r"^item was not found in the database\.?$", re.I),
-        "We don't recognise that item, so it couldn't be recorded. Pick it from "
-        "the suggestions if you typed it in by hand.",
+        "We don't recognise that item, so it couldn't be recorded. Check the "
+        "spelling and use its full in-game name.",
     ),
     (
         re.compile(r"^item\s+(?P<item>.+?)\s+not found in the database\.?$", re.I),
-        "{item} isn't in our item list yet, so it couldn't be recorded. Pick the "
-        "item from the suggestions if you typed it in by hand.",
+        "{item} isn't in our item list yet, so it couldn't be recorded. Check the "
+        "spelling and use its full in-game name.",
     ),
     (
         re.compile(r"^npc id could not be resolved for\s+(?P<npc>.+?),?\s*aborting\.?$", re.I),
-        "We don't recognise “{npc}” as a boss or NPC. Pick one from the "
-        "suggestions if you typed it in by hand.",
+        "We don't recognise “{npc}” as a boss or NPC. Check the spelling and use "
+        "its full in-game name.",
     ),
     (
         re.compile(

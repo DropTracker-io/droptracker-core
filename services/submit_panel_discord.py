@@ -68,6 +68,9 @@ def _stash_pet_pick(discord_id, sub_type, values, attachments, candidates) -> st
     return token
 
 
+#: ``build_manual_payload`` name field -> the modal value it came from.
+_VALUE_KEYS = {"item_name": "item", "npc_name": "npc"}
+
 _LINK_HINT = (
     "Link your RuneScape account first: sign in at https://www.droptracker.io and "
     "claim it, or use `/claim-rsn`. Submissions only count for accounts you own."
@@ -218,28 +221,6 @@ def _patch_modal_context() -> None:
 
 def _embed(title: str, description: str, color: int) -> dict:
     return {"title": title, "description": description[:4000], "color": color}
-
-
-def _canonical_name(sql, raw):
-    """Snap a typed name to the catalog spelling the website search would pick:
-    an exact (case-insensitive) match, else the single best tracked match.
-    Unknown names go through untouched and the intake explains the problem."""
-    if not raw:
-        return raw
-    try:
-        from db.models import session
-
-        rows = session.execute(sql, {"pat": f"%{raw}%"}).fetchall()
-    except Exception:
-        return raw
-    names = [r[0] for r in rows]
-    for name in names:
-        if name.lower() == raw.lower():
-            return name
-    prefixed = [n for n in names if n.lower().startswith(raw.lower())]
-    if len(prefixed) == 1:
-        return prefixed[0]
-    return raw
 
 
 async def _fetch_attachment(attachment: dict):
@@ -422,21 +403,32 @@ class SubmitPanel(Extension):
         return await self._process_values(sub_type, values, attachments, discord_id)
 
     async def _process_values(self, sub_type: str, values: dict, attachments: list,
-                              discord_id, *, pet_confirmed: bool = False):
-        """``(title, text, color[, components])`` for the member's reply."""
+                              discord_id, *, pet_confirmed: bool = False,
+                              confirmed: frozenset = frozenset()):
+        """``(title, text, color[, components])`` for the member's reply.
+
+        ``confirmed`` are the name fields the member already answered a "did
+        you mean?" question about (``commands.submissions.on_name_pick`` re-runs
+        this with the answer), so they are not asked again.
+        """
         from commands.submissions import (
-            _ITEM_AC_SQL,
-            _NPC_AC_SQL,
             claimed_players,
             forward_to_intake,
             policy_notices,
             rate_limited,
             resolve_pet_field,
+            resolve_typed_names,
+            stash_name_pick,
         )
         from data.submissions.manual_discord import (
             build_manual_payload,
             parse_kill_time_ms,
             summarize_submission,
+        )
+        from data.submissions.manual_names import (
+            correction_lines,
+            pick_components,
+            question_text,
         )
         from db.models import session
         from utils.format import pick_player_by_rsn
@@ -470,10 +462,29 @@ class SubmitPanel(Extension):
                                 core.pet_pick_components(token, candidates))
                     return failed, pet_err, _COLOR_ERROR
                 fields["item_name"] = pet_name
-            if fields.get("item_name"):
-                fields["item_name"] = _canonical_name(_ITEM_AC_SQL, fields["item_name"])
-            if fields.get("npc_name"):
-                fields["npc_name"] = _canonical_name(_NPC_AC_SQL, fields["npc_name"])
+            fields, corrections, question = resolve_typed_names(
+                sub_type, fields, confirmed, surface="panel")
+            if question:
+                field = question["field"]
+
+                async def finish(_ctx, chosen):
+                    from interactions import Embed
+
+                    again = dict(values)
+                    if chosen is not None:
+                        again[_VALUE_KEYS[field]] = chosen
+                    result = await self._process_values(
+                        sub_type, again, attachments, discord_id,
+                        pet_confirmed=pet_confirmed, confirmed=confirmed | {field})
+                    title, text, color = result[:3]
+                    components = result[3] if len(result) > 3 else []
+                    return (Embed(title=title, description=text[:4000], color=color),
+                            components, None)
+
+                token = stash_name_pick(discord_id, "panel", field, question["raw"],
+                                        question["candidates"], finish)
+                return ("Did you mean…?", question_text(question), _COLOR_QUESTION,
+                        pick_components(token, question["candidates"]))
             payload = build_manual_payload(sub_type, player.player_name, **fields)
         except ValueError as e:
             return failed, str(e), _COLOR_ERROR
@@ -492,6 +503,7 @@ class SubmitPanel(Extension):
 
         summary = summarize_submission(sub_type, payload)
         lines = [f"{summary} for `{player.player_name}`."]
+        lines.extend(correction_lines(corrections))
         message = (result.get("message") or "").strip()
         if message:
             lines.append(message)
