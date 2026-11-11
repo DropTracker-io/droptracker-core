@@ -139,6 +139,9 @@ def _combat_achievements_for(s, player_id: int):
     by_monster = {}
     by_tier = {}
     completed_total = 0
+    points_total = 0
+    points_done = 0
+    completed_at = _ca_completion_times(s, player_id)
 
     for task in tasks:
         varp = task.get("varp")
@@ -154,7 +157,9 @@ def _combat_achievements_for(s, player_id: int):
             completed_total += 1
 
         tier = task.get("tier") or "Unknown"
-        tier_entry = by_tier.setdefault(tier, {"tier": tier, "completed": 0, "total": 0})
+        tier_entry = by_tier.setdefault(
+            tier, {"tier": tier, "completed": 0, "total": 0, "points": 0}
+        )
         tier_entry["total"] += 1
         if done:
             tier_entry["completed"] += 1
@@ -166,12 +171,22 @@ def _combat_achievements_for(s, player_id: int):
         entry["total"] += 1
         if done:
             entry["completed"] += 1
+        points = _CA_TIER_POINTS.get(tier, 0)
+        points_total += points
+        if done:
+            points_done += points
+            tier_entry["points"] += points
+        name = task.get("name") or ""
         entry["tasks"].append({
-            "name": task.get("name") or "",
+            "name": name,
             "description": task.get("description") or "",
             "tier": tier,
             "type": task.get("type") or "",
+            "points": points,
             "completed": done,
+            # When the plugin reported the completion, if it was running at
+            # the time. A task done before then is complete with no date.
+            "completed_at": completed_at.get(name.casefold()) if done else None,
         })
 
     tier_order = {"Easy": 0, "Medium": 1, "Hard": 2, "Elite": 3, "Master": 4, "Grandmaster": 5}
@@ -185,13 +200,88 @@ def _combat_achievements_for(s, player_id: int):
         key=lambda m: (-(m["completed"] / m["total"] if m["total"] else 0), m["monster"]),
     )
     tiers = sorted(by_tier.values(), key=lambda t: tier_order.get(t["tier"], 9))
+    _attach_monster_icons(monsters)
 
     return {
         "completed": completed_total,
         "total": len(tasks),
+        "points": points_done,
+        "points_total": points_total,
         "tiers": tiers,
         "monsters": monsters,
     }
+
+
+# What a task of each tier is worth, as the game scores them.
+_CA_TIER_POINTS = {"Easy": 1, "Medium": 2, "Hard": 3, "Elite": 4, "Master": 5, "Grandmaster": 6}
+
+
+def _ca_completion_times(s, player_id: int) -> dict:
+    """task name (casefolded) -> unix seconds the plugin reported it done.
+
+    From the ``combat_achievement`` event stream, so it only knows tasks
+    completed while the plugin was running. The earliest row wins: a task can
+    be submitted twice (a retry, a second transport).
+    """
+    from sqlalchemy import func
+
+    from db.models import CombatAchievementEntry
+
+    out = {}
+    try:
+        rows = (
+            s.query(CombatAchievementEntry.task_name,
+                    func.min(CombatAchievementEntry.date_added))
+            .filter(CombatAchievementEntry.player_id == player_id)
+            .group_by(CombatAchievementEntry.task_name)
+            .all()
+        )
+    except Exception:
+        return out
+    for name, when in rows:
+        if name and when is not None:
+            out[str(name).strip().casefold()] = int(when.timestamp())
+    return out
+
+
+# Registry monster names whose art is filed under a different metric name.
+_CA_MONSTER_METRICS = {
+    "Chambers of Xeric: CM": "chambers_of_xeric_challenge_mode",
+    "Theatre of Blood: HM": "theatre_of_blood_hard_mode",
+    "Theatre of Blood: SM": "theatre_of_blood",
+    "Tombs of Amascut: Expert Mode": "tombs_of_amascut_expert",
+    "Tombs of Amascut: Entry Mode": "tombs_of_amascut",
+    "Moons of Peril": "lunar_chests",
+    "TzHaar-Ket-Rak's Challenges": "tztok_jad",
+    "Barrows": "barrows_chests",
+}
+
+
+def _attach_monster_icons(monsters) -> None:
+    """Give each monster the first-party icon the game's boss list would show."""
+    try:
+        from web_api.routes.sites import achievement_icon_url
+    except Exception:
+        return
+    for entry in monsters:
+        name = entry.get("monster") or ""
+        try:
+            metric = _CA_MONSTER_METRICS.get(name) or name.lower().replace("'", "").replace(" ", "_")
+            entry["icon_url"] = achievement_icon_url(metric) or _npc_icon_by_name(name)
+        except Exception:
+            entry["icon_url"] = None
+
+
+def _npc_icon_by_name(name: str):
+    """npcdb icon for a monster the metric art does not cover, or None."""
+    from web_api.routes.sites import _icon_tables
+    from utils.npc_names import npc_match_key
+
+    _, npc_by_key, npc_files = _icon_tables()
+    npc_id = npc_by_key.get(npc_match_key(name))
+    if npc_id and str(npc_id) in npc_files:
+        return f"{IMG_BASE}/npcdb/{npc_id}.png"
+    return None
 
 
 def _collection_log_structure(s):
@@ -536,6 +626,9 @@ async def achievements(player_id: int):
                 .order_by(PlayerDiaryTier.area_id, PlayerDiaryTier.tier)
                 .all()
             )
+            from utils.diary_tasks import tier_totals
+
+            diary_sizes = tier_totals()
             diaries = {}
             for row in diary_rows:
                 area = diaries.setdefault(
@@ -546,10 +639,14 @@ async def achievements(player_id: int):
                         "tiers": [],
                     },
                 )
+                size = diary_sizes.get((row.area_id, row.tier))
                 area["tiers"].append({
                     "tier": row.tier,
                     "name": DIARY_TIER_NAMES[row.tier] if 0 <= row.tier < len(DIARY_TIER_NAMES) else str(row.tier),
                     "completed": row.completed_count,
+                    # How many tasks the tier holds, so the site can say
+                    # "9/12" and mark a finished tier; absent if unknown.
+                    "total": size,
                 })
 
             return {
@@ -564,6 +661,7 @@ async def achievements(player_id: int):
                         else (ca_row.tasks_completed if ca_row else None)
                     ),
                     "total": combat["total"] if combat else None,
+                    **_ca_points_block(ca_row, combat),
                     # Per-tier and per-monster, decoded from the stored varps.
                     "tiers": combat["tiers"] if combat else [],
                     "monsters": combat["monsters"] if combat else [],
@@ -572,10 +670,52 @@ async def achievements(player_id: int):
                 "diaries": sorted(diaries.values(), key=lambda d: d["area_id"]),
             }
 
+    # Asked for here, on the event loop, so a stale threshold table refreshes
+    # in the background; `_load` runs in a thread and only reads the cache.
+    try:
+        from services.ca_tiers import tier_thresholds_nowait
+
+        tier_thresholds_nowait()
+    except Exception:
+        pass
+
     result = await _run(_load)
     if result is None:
         return problem(404, "Player not found")
     return with_cache_headers(jsonify(result), 60)
+
+
+def _ca_points_block(ca_row, combat) -> dict:
+    """Points, tier and progress to the next tier for the achievements payload.
+
+    The stored total (``db/ca_points``: the game's own reading where we have
+    one) wins over the decoded bits, which lag a new task batch until the
+    registry is rebuilt. Thresholds come from ``services.ca_tiers`` without
+    waiting on the wiki.
+    """
+    points = getattr(ca_row, "points", None) if ca_row is not None else None
+    if points is None and combat:
+        points = combat.get("points")
+    block = {
+        "points": points,
+        "points_total": combat.get("points_total") if combat else None,
+        "tier": None,
+        "next_tier": None,
+        "next_tier_points": None,
+        "points_to_next": None,
+        "progress": None,
+        "thresholds": {},
+    }
+    try:
+        from services.ca_tiers import ca_tier_summary, tier_thresholds_nowait
+
+        thresholds = tier_thresholds_nowait()
+        block["thresholds"] = dict(thresholds)
+        if points is not None:
+            block.update(ca_tier_summary(points, thresholds))
+    except Exception:
+        pass
+    return block
 
 
 def pb_model_block(player_id: int, fingerprint, source):
