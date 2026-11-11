@@ -128,6 +128,23 @@ RECENT_MIRROR_MIN_SUBSTRING = 12
 #: local message; unaware builds drop it).
 ENVELOPE_TYPE = "clan_chat_message"
 
+#: A clan broadcast pushed into the game for GUESTS of the clan (suggestion
+#: #234). The game shows broadcasts to members only; a group can choose to
+#: show the ones its members' plugins relay to guests who run the plugin.
+GUEST_ECHO_ENVELOPE_TYPE = "clan_broadcast_echo"
+#: The group config switch for it (web_api/config_registry.py).
+GUEST_ECHO_KEY = "clan_broadcast_guest_echo"
+#: Presence heartbeat of plugins sitting in a clan AS GUESTS, separate from
+#: the members' set so a line is never echoed to someone who saw it natively.
+GUEST_PRESENCE_KEY_TEMPLATE = "chatbridge:guests:{clan_slug}"
+#: One echo per clan per line, however many members relay it.
+GUEST_ECHO_CLAIM_TTL_SECONDS = 60
+GUEST_ECHO_MAX_CHARS = 200
+#: Broadcast kinds never echoed: the intake's ``MIRROR_SUPPRESSED_KINDS``
+#: (data/submissions/clan_broadcast.py) kept here too, since the intake
+#: module is not importable from this one.
+ECHO_SUPPRESSED_KINDS = frozenset({"presence", "channel_notice"})
+
 #: Stamped onto the Discord author's name by the plugin's renderer
 #: (``ChatMessageUtil.DISCORD_SENDER_MARKER``), and the only thing separating
 #: our own echoed line from a clanmate's. An OSRS display name is letters,
@@ -193,14 +210,20 @@ def sanitize_discord_content(content: str) -> str:
 
 # ── presence (plugin ↔ clan) ────────────────────────────────────────────────
 
-def stamp_presence(player_id, clan_slug: str) -> None:
+def _presence_key(clan_slug: str, guest: bool) -> str:
+    template = GUEST_PRESENCE_KEY_TEMPLATE if guest else PRESENCE_KEY_TEMPLATE
+    return template.format(clan_slug=clan_slug)
+
+
+def stamp_presence(player_id, clan_slug: str, guest: bool = False) -> None:
     """Heartbeat: this player's plugin is online in this clan (called from
-    ``GET /notifications`` when the poll carries a ``clan`` param).
+    ``GET /notifications`` when the poll carries a ``clan`` param, or
+    ``guest_clan`` for the clan they are visiting as a guest).
     Best-effort — presence loss only delays Discord→game delivery."""
-    if not player_id or not clan_slug:
+    if player_id is None or not clan_slug:
         return
     try:
-        key = PRESENCE_KEY_TEMPLATE.format(clan_slug=clan_slug)
+        key = _presence_key(clan_slug, guest)
         pipe = _redis().pipeline()
         pipe.zadd(key, {str(int(player_id)): time.time()})
         pipe.expire(key, PRESENCE_KEY_TTL_SECONDS)
@@ -209,12 +232,13 @@ def stamp_presence(player_id, clan_slug: str) -> None:
         pass
 
 
-def online_player_ids(clan_slug: str) -> list:
-    """Player ids whose plugin heartbeat for this clan is fresh."""
+def online_player_ids(clan_slug: str, guest: bool = False) -> list:
+    """Player ids whose plugin heartbeat for this clan is fresh; with
+    ``guest`` the plugins visiting the clan as guests."""
     if not clan_slug:
         return []
     try:
-        key = PRESENCE_KEY_TEMPLATE.format(clan_slug=clan_slug)
+        key = _presence_key(clan_slug, guest)
         now = time.time()
         client = _redis()
         client.zremrangebyscore(key, "-inf", now - PRESENCE_KEY_TTL_SECONDS)
@@ -233,6 +257,72 @@ def online_player_ids(clan_slug: str) -> list:
 
 
 # ── group binding ───────────────────────────────────────────────────────────
+
+def guest_echo_groups(session, relayer_player_id, clan_slug: str) -> list:
+    """Group ids of the RELAYER's groups that show this clan's broadcasts to
+    guests: ``clan_broadcast_guest_echo`` on and ``clan_chat_name`` matching.
+    Same trust shape as the bridge and broadcast binding: only an authed
+    member's line, and only for groups that member belongs to."""
+    from sqlalchemy import text as sql_text
+
+    from utils import group_config as gc
+    from utils.clan_broadcasts import clan_slug as make_slug
+
+    rows = session.execute(
+        sql_text("SELECT DISTINCT group_id FROM user_group_association WHERE player_id = :pid"),
+        {"pid": int(relayer_player_id)},
+    ).all()
+    candidate_ids = [gid for (gid,) in rows if gid and gid > 2]
+    if not candidate_ids:
+        return []
+    values = gc.get_bulk(session, candidate_ids, [GUEST_ECHO_KEY, CLAN_NAME_KEY])
+    return [
+        gid for gid in candidate_ids
+        if gc.is_truthy(values.get((gid, GUEST_ECHO_KEY)))
+        and make_slug(values.get((gid, CLAN_NAME_KEY)) or "") == clan_slug
+    ]
+
+
+def echo_broadcast_to_guests(session, relayer_player_id, clan_slug: str, message: str,
+                             parsed=None) -> int:
+    """Push one clan broadcast into the game for the clan's present GUESTS.
+
+    The game hides broadcasts from guests, so a member's alt sitting in the
+    clan chat never sees the clan's drops and pets. A group that turned
+    ``clan_broadcast_guest_echo`` on has its members' relayed broadcasts
+    shown to guests who run the plugin, as the plugin shows Discord lines.
+    Members are never sent one (they saw it natively); presence lines and
+    the other suppressed kinds stay out, like the bridge. One delivery per
+    clan per line. Returns inboxes pushed.
+    """
+    text = str(message or "").strip()
+    if not clan_slug or not text:
+        return 0
+    if parsed is not None and getattr(parsed, "kind", None) in ECHO_SUPPRESSED_KINDS:
+        return 0
+    if not guest_echo_groups(session, relayer_player_id, clan_slug):
+        return 0
+    guests = online_player_ids(clan_slug, guest=True)
+    if not guests:
+        return 0
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+    try:
+        claimed = _redis().set(
+            f"chatbridge:echo:{clan_slug}:{digest}", "1", nx=True, ex=GUEST_ECHO_CLAIM_TTL_SECONDS,
+        )
+    except Exception:
+        claimed = True  # Redis down: a repeat beats a silent clan
+    if not claimed:
+        return 0
+    from services.plugin_notifications import build_envelope, push_to_inbox
+
+    envelope = build_envelope(GUEST_ECHO_ENVELOPE_TYPE, {"message": text[:GUEST_ECHO_MAX_CHARS]})
+    delivered = 0
+    for player_id in guests:
+        if push_to_inbox(player_id, envelope):
+            delivered += 1
+    return delivered
+
 
 def bridge_bound_groups(session, relayer_player_id, clan_slug: str) -> dict:
     """``{group_id: channel_id}`` of the RELAYER's groups that bridged this

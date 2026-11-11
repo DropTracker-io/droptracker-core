@@ -714,3 +714,112 @@ def test_relay_guid_check_fails_open(monkeypatch):
     monkeypatch.setattr(bridge, "_redis", lambda: _FakeRedis())
     assert bridge.first_relay_delivery(42, None) is True
     assert bridge.first_relay_delivery(42, "") is True
+
+
+# --------------------------------------------------------------------------- #
+# Guest broadcast echo (suggestion #234)
+# --------------------------------------------------------------------------- #
+class _PresenceRedis:
+    """ZSET presence plus the SET NX claim."""
+
+    def __init__(self):
+        self.zsets = {}
+        self.keys = {}
+
+    def pipeline(self):
+        return self
+
+    def zadd(self, key, mapping):
+        self.zsets.setdefault(key, {}).update(mapping)
+
+    def expire(self, *_a):
+        return True
+
+    def execute(self):
+        return []
+
+    def zremrangebyscore(self, key, _lo, hi):
+        z = self.zsets.get(key, {})
+        for member in [m for m, s in z.items() if s <= hi]:
+            del z[member]
+
+    def zrangebyscore(self, key, lo, _hi):
+        return [m.encode() for m, s in self.zsets.get(key, {}).items() if s >= lo]
+
+    def set(self, key, _value, nx=False, ex=None):
+        if nx and key in self.keys:
+            return None
+        self.keys[key] = ex
+        return True
+
+
+def test_guest_presence_is_kept_apart_from_members(monkeypatch):
+    fake = _PresenceRedis()
+    monkeypatch.setattr(bridge, "_redis", lambda: fake)
+    bridge.stamp_presence(11, "pegasus pvm")
+    bridge.stamp_presence(22, "pegasus pvm", guest=True)
+    assert bridge.online_player_ids("pegasus pvm") == [11]
+    assert bridge.online_player_ids("pegasus pvm", guest=True) == [22]
+    assert set(fake.zsets) == {"chatbridge:presence:pegasus pvm", "chatbridge:guests:pegasus pvm"}
+    # Player 0 is a real id; a missing clan is a no-op.
+    bridge.stamp_presence(0, "pegasus pvm", guest=True)
+    assert 0 in bridge.online_player_ids("pegasus pvm", guest=True)
+    bridge.stamp_presence(5, "", guest=True)
+    assert bridge.online_player_ids("", guest=True) == []
+
+
+def _echo_env(monkeypatch, groups, guests):
+    import sys as _sys
+    import types as _types
+
+    fake = _PresenceRedis()
+    pushed = []
+    monkeypatch.setattr(bridge, "_redis", lambda: fake)
+    monkeypatch.setattr(bridge, "guest_echo_groups", lambda *_a, **_k: groups)
+    monkeypatch.setattr(bridge, "online_player_ids",
+                        lambda slug, guest=False: list(guests) if guest else [99])
+    # ``services`` is stubbed in unit tests: stand the envelope module in.
+    notif = _types.ModuleType("services.plugin_notifications")
+    notif.build_envelope = lambda kind, data: {"type": kind, "data": dict(data), "ts": 1}
+    notif.push_to_inbox = lambda pid, env: pushed.append((pid, env)) or True
+    monkeypatch.setitem(_sys.modules, "services.plugin_notifications", notif)
+    return fake, pushed
+
+
+def test_broadcast_echoes_once_to_every_present_guest(monkeypatch):
+    fake, pushed = _echo_env(monkeypatch, [14], [201, 202])
+    line = "Meivara has a funny feeling like she's being followed: Maggot marquess at 308 kills."
+    assert bridge.echo_broadcast_to_guests(None, 1, "pegasus pvm", line) == 2
+    assert [pid for pid, _ in pushed] == [201, 202]
+    envelope = pushed[0][1]
+    assert envelope["type"] == bridge.GUEST_ECHO_ENVELOPE_TYPE
+    assert envelope["data"] == {"message": line}
+    # A second relayer's copy of the same line is claimed away.
+    assert bridge.echo_broadcast_to_guests(None, 2, "pegasus pvm", line) == 0
+    assert len(pushed) == 2
+    # Members (99) never get one.
+    assert all(pid != 99 for pid, _ in pushed)
+
+
+def test_broadcast_echo_needs_a_group_that_opted_in_and_a_guest(monkeypatch):
+    _, pushed = _echo_env(monkeypatch, [], [201])
+    assert bridge.echo_broadcast_to_guests(None, 1, "pegasus pvm", "X received a drop: Y.") == 0
+    _, pushed = _echo_env(monkeypatch, [14], [])
+    assert bridge.echo_broadcast_to_guests(None, 1, "pegasus pvm", "X received a drop: Y.") == 0
+    assert pushed == []
+
+
+def test_broadcast_echo_skips_suppressed_kinds_and_blank_lines(monkeypatch):
+    _, pushed = _echo_env(monkeypatch, [14], [201])
+    kind = next(iter(bridge.ECHO_SUPPRESSED_KINDS))
+    presence = _NS(kind=kind)
+    assert bridge.echo_broadcast_to_guests(None, 1, "pegasus pvm", "Bob has joined.", parsed=presence) == 0
+    assert bridge.echo_broadcast_to_guests(None, 1, "pegasus pvm", "   ") == 0
+    assert bridge.echo_broadcast_to_guests(None, 1, "", "X received a drop: Y.") == 0
+    assert pushed == []
+
+
+def test_broadcast_echo_caps_the_line(monkeypatch):
+    _, pushed = _echo_env(monkeypatch, [14], [201])
+    bridge.echo_broadcast_to_guests(None, 1, "pegasus pvm", "a" * 500)
+    assert len(pushed[0][1]["data"]["message"]) == bridge.GUEST_ECHO_MAX_CHARS

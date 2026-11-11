@@ -940,6 +940,16 @@ def _mirror_to_bridge(
         )
         if mirrored:
             _stat("bridge_mirrored")
+        # Same line, into the game for the clan's guests (suggestion #234):
+        # the retry and rate checks above cover it, its own per-clan claim
+        # keeps N relayers to one echo.
+        try:
+            from services.clan_chat_bridge import echo_broadcast_to_guests
+
+            if echo_broadcast_to_guests(session, relayer.player_id, clan_slug, message, parsed=parsed):
+                _stat("guest_echoed")
+        except Exception as e:
+            print(f"[ClanBroadcast] guest echo failed: {e}")
         return mirrored
     except Exception as e:
         # Mirroring is display; never let it cost the tracking record.

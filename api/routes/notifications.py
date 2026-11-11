@@ -121,6 +121,17 @@ async def get_notifications():
             stamp_presence(player_id, clan_slug(raw_clan))
         except Exception as e:
             print(f"/notifications presence stamp failed: {e}")
+    # Same for a clan the player sits in as a GUEST (``guest_clan``): what
+    # the guest broadcast echo delivers against (suggestion #234).
+    raw_guest_clan = request.args.get("guest_clan")
+    if raw_guest_clan:
+        try:
+            from services.clan_chat_bridge import stamp_presence
+            from utils.clan_broadcasts import clan_slug
+
+            stamp_presence(player_id, clan_slug(raw_guest_clan), guest=True)
+        except Exception as e:
+            print(f"/notifications guest presence stamp failed: {e}")
 
     wait_seconds = parse_wait_seconds(request.args.get("wait"))
 

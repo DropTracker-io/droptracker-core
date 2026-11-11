@@ -1120,6 +1120,14 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "default": False,
     },
     {
+        "key": "clan_broadcast_guest_echo",
+        "label": "Show broadcasts to clan chat guests",
+        "category": "clan_chat",
+        "type": "boolean",
+        "help": "The game hides clan broadcasts (drops, pets, personal bests and the rest) from guests in your clan chat. With this on, broadcasts relayed by your members' plugins are shown in game to guests who run the plugin, so members' alts and visitors see them too. Needs the clan chat name plus broadcast tracking or the chat bridge, so members relay broadcasts.",
+        "default": False,
+    },
+    {
         "key": "clan_broadcast_min_value",
         "label": "Clan broadcast minimum value",
         "category": "clan_chat",
