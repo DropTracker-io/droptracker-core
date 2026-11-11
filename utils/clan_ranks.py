@@ -19,9 +19,12 @@ the DB carry the display spelling (``Beast Owned``).
 
 from utils.format import normalize_player_display_equivalence
 
-#: Roles refresh hourly with the membership sync; hold them long enough that a
-#: WOM outage dims the icons slowly instead of blanking a whole clan at once.
-RANK_TTL_SECONDS = 6 * 60 * 60
+#: Roles refresh with the membership sync: every 12 hours, 6 for subscribed
+#: groups (services/group_sync_gate). Held for three missed free-tier syncs, so
+#: a WOM outage dims the icons slowly instead of blanking a whole clan at once.
+#: Was 6 hours while the sync was hourly; anything under the sync interval
+#: blanks every clan's icons between syncs.
+RANK_TTL_SECONDS = 36 * 60 * 60
 
 #: WOM's default role for an unranked member. It has no wiki icon and no
 #: in-game equivalent, so it is stored as "no rank" rather than as a rank.

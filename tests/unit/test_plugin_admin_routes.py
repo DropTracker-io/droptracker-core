@@ -153,3 +153,10 @@ def test_ago(seconds, text):
     from datetime import datetime, timedelta
 
     assert pa._ago(datetime.now() - timedelta(seconds=seconds)) == text
+
+
+@pytest.mark.parametrize("seconds,text", [
+    (86_400, "24 hours"), (3_601, "2 hours"), (3_600, "1 hour"), (3_599, "60 minutes"), (30, "1 minute"), (None, "1 minute"),
+])
+def test_wom_cooldown_message_speaks_in_hours_for_a_daily_limit(seconds, text):
+    assert pa._wom_cooldown_message(seconds).endswith(f"in {text}.")

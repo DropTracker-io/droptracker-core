@@ -467,7 +467,8 @@ async def handle_exception(e):
     return jsonify(error=str(e)), 500
 
 def should_group_sync():
-    """Whether the hourly WOM membership sync is due.
+    """Whether a WOM membership sync round is due (rounds are hourly; each
+    group syncs every 12h, 6h on a paid tier: services/group_sync_gate).
 
     PURE PREDICATE — it does not touch the gate; claiming is
     ``_claim_group_sync``. See services/group_sync_gate.py for why the two are

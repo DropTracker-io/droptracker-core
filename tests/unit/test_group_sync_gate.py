@@ -121,3 +121,71 @@ def test_a_failing_sync_is_logged_not_propagated():
     assert result["sync_failed"] is True
     assert any(c.startswith("log:") for c in calls), "a lost round must be logged, not silent"
     assert "label" in calls, "a failed sync must not also skip the label"
+
+
+# --------------------------------------------------------------------------- #
+# Per-group cadence (2026-11-11): 12 hours, 6 on a paid tier. WiseOldMan asked
+# us to cut volume and the every-round, every-group fetch was 59% of it.
+# --------------------------------------------------------------------------- #
+import sys
+
+# The real module, as conftest registers it. `import services.x as y` and
+# `from services import x` both resolve through the stub package to a MagicMock.
+gate = sys.modules["services.group_sync_gate"]
+
+HOUR = 3600
+NOW = 1_800_000_000.0
+
+
+class TestGroupSyncDue:
+    def test_never_synced_group_is_due(self):
+        assert gate.group_sync_due(None, None, False, NOW)
+
+    def test_unreadable_stamp_is_due(self):
+        assert gate.group_sync_due(b"garbage", None, False, NOW)
+
+    def test_free_group_waits_twelve_hours(self):
+        assert not gate.group_sync_due(NOW - 6 * HOUR, None, False, NOW)
+        assert not gate.group_sync_due(NOW - 11 * HOUR, None, False, NOW)
+        assert gate.group_sync_due(NOW - 12 * HOUR, None, False, NOW)
+
+    def test_paid_group_waits_six_hours(self):
+        assert not gate.group_sync_due(NOW - 5 * HOUR, None, True, NOW)
+        assert gate.group_sync_due(NOW - 6 * HOUR, None, True, NOW)
+
+    def test_hourly_tick_does_not_slip_a_round(self):
+        # Stamped a few minutes into the round 12 ticks ago: still due now.
+        assert gate.group_sync_due(NOW - 12 * HOUR + 300, None, False, NOW)
+
+    def test_failed_fetch_retries_after_three_hours_not_every_round(self):
+        assert not gate.group_sync_due(None, NOW - 1 * HOUR, False, NOW)
+        assert gate.group_sync_due(None, NOW - 3 * HOUR, False, NOW)
+
+    def test_a_failure_never_brings_a_fresh_group_forward(self):
+        assert not gate.group_sync_due(NOW - 2 * HOUR, NOW - 4 * HOUR, False, NOW)
+
+    def test_redis_bytes_are_read(self):
+        assert not gate.group_sync_due(str(int(NOW - HOUR)).encode(), None, False, NOW)
+
+
+class TestDueWomIds:
+    def test_picks_due_groups_and_keeps_order(self):
+        ok = {b"1": str(int(NOW - 13 * HOUR)).encode(),   # free, due
+              b"2": str(int(NOW - 7 * HOUR)).encode(),    # free, not due
+              b"3": str(int(NOW - 7 * HOUR)).encode()}    # paid, due
+        due = gate.due_wom_ids([3, "2", 1, 4], {"3"}, ok, {}, NOW)
+        assert due == [3, 1, 4]
+
+    def test_empty_schedule_means_everyone(self):
+        assert gate.due_wom_ids([1, 2], set(), {}, None, NOW) == [1, 2]
+
+    def test_a_steady_day_is_two_syncs_free_and_four_paid(self):
+        def syncs_in_a_day(is_paid):
+            last, count = None, 0
+            for tick in range(24):
+                now = NOW + tick * HOUR
+                if gate.group_sync_due(last, None, is_paid, now):
+                    last, count = now + 240, count + 1  # stamped mid-round
+            return count
+        assert syncs_in_a_day(False) == 2
+        assert syncs_in_a_day(True) == 4

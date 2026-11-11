@@ -1,4 +1,9 @@
-"""Scheduling logic for the hourly WOM group-membership sync.
+"""Scheduling logic for the WOM group-membership sync.
+
+The round still fires hourly, but since 2026-11-11 each round only syncs the
+groups that are DUE: every 12 hours, or every 6 for a group on a paid tier
+(see ``group_sync_due`` at the bottom). WiseOldMan asked us to cut request
+volume and this sync was 59% of everything we sent them.
 
 The "pure half" of ``bots.main.start_group_sync`` (same pattern as
 ``services/activity_launch_core.py`` and ``services/channel_name_render.py``):
@@ -24,6 +29,7 @@ and announced the entire backlog at once.
 The invariant this module encodes: **nothing cosmetic may prevent the sync from
 running, and the gate is spent only when a sync actually starts.**
 """
+import os
 from datetime import datetime, timedelta
 from typing import Awaitable, Callable, Optional
 
@@ -92,3 +98,82 @@ async def run_group_sync_round(
         log(f"Couldn't update the WOM refresh channel name: {e}")
 
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Per-group cadence
+#
+# The hourly round used to fetch every WOM-linked group every time (~350 groups
+# x 16 rounds = ~5,500 calls a day). Each group now has its own clock, kept in
+# two Redis hashes keyed by WOM group id (epoch seconds):
+#
+#   wom:member_sync:ok    last sync that got a roster back from WOM
+#   wom:member_sync:fail  last attempt that did not
+#
+# Both are written by db.ops._sync_group_from_wom, so a manual "Sync from WOM"
+# also resets the scheduled clock. The interval is read at check time, so a
+# group that subscribes moves to the faster cadence on the next round.
+# --------------------------------------------------------------------------- #
+SYNC_OK_HASH = "wom:member_sync:ok"
+SYNC_FAIL_HASH = "wom:member_sync:fail"
+
+FREE_SYNC_SECONDS = int(float(os.getenv("WOM_MEMBER_SYNC_HOURS", "12")) * 3600)
+PAID_SYNC_SECONDS = int(float(os.getenv("WOM_MEMBER_SYNC_PAID_HOURS", "6")) * 3600)
+# A fetch that returned nothing (WOM error, empty or deleted group) is retried
+# sooner than a full interval, but not every round.
+FAILED_SYNC_RETRY_SECONDS = int(float(os.getenv("WOM_MEMBER_SYNC_RETRY_HOURS", "3")) * 3600)
+# The round fires on a 60-minute tick, so a group stamped a few minutes into
+# the previous round would otherwise slip a whole extra hour every cycle.
+DUE_SLACK_SECONDS = 600
+
+
+def sync_interval_seconds(is_paid: bool) -> int:
+    return PAID_SYNC_SECONDS if is_paid else FREE_SYNC_SECONDS
+
+
+def _epoch(raw) -> Optional[float]:
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "ignore")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def group_sync_due(last_ok, last_fail, is_paid: bool, now: float) -> bool:
+    """Whether one group's scheduled membership sync is due. PURE.
+
+    A group never synced (or with an unreadable stamp) is due. After a failed
+    attempt it waits FAILED_SYNC_RETRY_SECONDS, never longer than its interval.
+    """
+    interval = sync_interval_seconds(is_paid)
+    ok, fail = _epoch(last_ok), _epoch(last_fail)
+    if ok is not None and now - ok < interval - DUE_SLACK_SECONDS:
+        return False
+    if fail is not None and now - fail < min(FAILED_SYNC_RETRY_SECONDS, interval) - DUE_SLACK_SECONDS:
+        return False
+    return True
+
+
+def due_wom_ids(wom_ids, paid_wom_ids, ok_stamps, fail_stamps, now: float) -> list:
+    """The subset of ``wom_ids`` due now, in the order given. PURE.
+
+    ``ok_stamps``/``fail_stamps`` are the two Redis hashes as read (keys and
+    values may be bytes or str).
+    """
+    def _norm(stamps):
+        out = {}
+        for k, v in (stamps or {}).items():
+            if isinstance(k, bytes):
+                k = k.decode("utf-8", "ignore")
+            out[str(k)] = v
+        return out
+
+    ok, fail = _norm(ok_stamps), _norm(fail_stamps)
+    paid = {str(w) for w in (paid_wom_ids or ())}
+    return [
+        w for w in wom_ids
+        if group_sync_due(ok.get(str(w)), fail.get(str(w)), str(w) in paid, now)
+    ]

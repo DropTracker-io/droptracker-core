@@ -32,6 +32,7 @@ from sqlalchemy.orm import joinedload
 import interactions
 from interactions import Embed
 import os
+import time
 import asyncio
 from datetime import datetime, timedelta
 
@@ -919,6 +920,53 @@ async def notify_group(bot: interactions.Client, type: str, group: Group, member
 WOM_MEMBER_SYNC_STAMP_KEY = "last_wom_member_sync"
 
 
+def _stamp_member_sync(wom_id, ok: bool) -> None:
+    """Record a sync attempt for the per-group schedule (services/group_sync_gate).
+
+    Written for EVERY caller, so a manual sync also resets the group's
+    scheduled clock. Best-effort: an unwritten stamp only means the group is
+    synced again sooner.
+    """
+    try:
+        from services.group_sync_gate import SYNC_FAIL_HASH, SYNC_OK_HASH
+
+        redis_client.client.hset(SYNC_OK_HASH if ok else SYNC_FAIL_HASH, str(int(wom_id)), int(time.time()))
+        if ok:
+            redis_client.client.hdel(SYNC_FAIL_HASH, str(int(wom_id)))
+    except Exception:
+        pass
+
+
+def _scheduled_sync_due(wom_ids: list) -> list:
+    """The WOM group ids whose scheduled sync is due this round.
+
+    12 hours between syncs, 6 for a group on a paid tier. Fails open: if the
+    schedule cannot be read, every group syncs, as it did before 2026-11-11.
+    """
+    try:
+        from db.entitlements import effective_group_tiers
+        from services.group_sync_gate import SYNC_FAIL_HASH, SYNC_OK_HASH, due_wom_ids
+
+        rows = session.query(Group.group_id, Group.wom_id).filter(Group.wom_id != None).all()
+        wom_by_group = {int(gid): str(wom) for gid, wom in rows}
+        paid = {wom_by_group[int(gid)] for gid in effective_group_tiers(session, list(wom_by_group))
+                if int(gid) in wom_by_group}
+        due = due_wom_ids(
+            wom_ids, paid,
+            redis_client.client.hgetall(SYNC_OK_HASH),
+            redis_client.client.hgetall(SYNC_FAIL_HASH),
+            time.time(),
+        )
+        app_logger.log(log_type="access",
+                       data=f"Scheduled WOM member sync: {len(due)} of {len(wom_ids)} groups due ({len(paid)} on a paid tier)",
+                       app_name="core", description="update_group_members")
+        return due
+    except Exception as e:
+        app_logger.log(log_type="error", data=f"Couldn't read the member-sync schedule, syncing every group: {e}",
+                       app_name="core", description="update_group_members")
+        return wom_ids
+
+
 async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove=None) -> dict:
     """
     Core logic for syncing a single group's membership from the WOM API.
@@ -996,7 +1044,9 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
     group_wom_ids = await fetch_group_members(wom_id, force_refresh=True, provision_missing=provision_missing)
     if not group_wom_ids:
         print(f"Failed to fetch member list for group {group_name} (WOM ID: {wom_id})")
-        return {"added": 0, "removed": 0, "skipped_removals": False}
+        _stamp_member_sync(wom_id, ok=False)
+        return {"added": 0, "removed": 0, "skipped_removals": False, "fetched": False}
+    _stamp_member_sync(wom_id, ok=True)
 
     # Safety check: if WOM's own reported member_count differs from the number of
     # memberships returned in the same response, the list is incomplete (e.g. due to
@@ -1117,7 +1167,7 @@ async def _sync_group_from_wom(group: Group, wom_id: int, on_add=None, on_remove
         )
         session.rollback()
 
-    return {"added": added_count, "removed": removed_count, "skipped_removals": skip_removals}
+    return {"added": added_count, "removed": removed_count, "skipped_removals": skip_removals, "fetched": True}
 
 
 def _sync_badge_groups():
@@ -1179,7 +1229,7 @@ async def update_group_members(bot: interactions.Client, forced_id: int = None):
     if forced_id:
         group_ids = [forced_id]
     else:
-        group_ids = session.scalars(session.query(Group.wom_id)).all()
+        group_ids = _scheduled_sync_due(session.scalars(session.query(Group.wom_id)).all())
 
     for wom_id in group_ids:
         try:
@@ -1333,14 +1383,45 @@ async def update_group_members_silent(forced_id: int = None):
     _sync_badge_groups()
 
 
-_WOM_SYNC_COOLDOWN_SECONDS = 3600  # 1 hour
+# One manual refresh per group per 24 hours (was 1 hour until 2026-11-11, when
+# the scheduled sync moved to 12h/6h and WiseOldMan asked us to cut volume).
+_WOM_SYNC_COOLDOWN_SECONDS = int(os.getenv("WOM_MANUAL_SYNC_COOLDOWN_SECONDS", "86400"))
+
+
+class WomRosterUnavailable(RuntimeError):
+    """WOM returned no roster, so no sync happened and no cooldown was spent."""
+
+
+def manual_wom_sync_cooldown_remaining(group_db_id: int) -> int:
+    """Seconds until this group may run a manual WOM sync again (0 = now).
+
+    Read-only; for surfaces that ask the admin to confirm before spending the
+    daily refresh. sync_group_from_wom_with_stats remains the enforcement.
+    """
+    try:
+        cfg = session.query(GroupConfiguration).filter(
+            GroupConfiguration.group_id == int(group_db_id),
+            GroupConfiguration.config_key == "last_wom_sync",
+        ).first()
+        value = cfg.config_value if cfg else None
+        session.rollback()
+        if not value:
+            return 0
+        elapsed = (datetime.utcnow() - datetime.fromisoformat(value)).total_seconds()
+        return max(0, int(_WOM_SYNC_COOLDOWN_SECONDS - elapsed))
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return 0
 
 
 async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
     """
     Sync a single group from WOM and return a detailed result dict.
 
-    Enforces a 1-hour per-group cooldown tracked via GroupConfiguration
+    Enforces a 24-hour per-group cooldown tracked via GroupConfiguration
     (key: ``last_wom_sync``).  Callers should check the ``on_cooldown``
     key before using the rest of the result.
 
@@ -1420,6 +1501,15 @@ async def sync_group_from_wom_with_stats(wom_id: int) -> dict:
         raise
 
     duration = (datetime.utcnow() - started_at).total_seconds()
+
+    if stats.get("fetched") is False:
+        # Nothing came back from WOM, so nothing was synced. With one manual
+        # refresh a day, an outage on their side must not use it up.
+        session.rollback()
+        raise WomRosterUnavailable(
+            "WiseOldMan didn't return the member list, so nothing was synced. "
+            "Your daily refresh has not been used; try again shortly."
+        )
 
     # --- Update cooldown timestamp ---
     now_iso = datetime.utcnow().isoformat()

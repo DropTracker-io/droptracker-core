@@ -45,7 +45,7 @@ Rules the owner settled on (dev tracker #38, t383):
   only after it has had no members for :data:`DELETE_GRACE_SECONDS`.
 * One group per Discord server runs the sync.
 
-Safety: a missing rank cache (WOM down, the 6-hour TTL lapsed) skips the
+Safety: a missing rank cache (WOM down, the 36-hour TTL lapsed) skips the
 group instead of reading as "nobody has a rank", and a pass that would take
 roles off an unusual number of members without the map having changed holds
 those removals back until a leader presses "Sync now".

@@ -18,9 +18,11 @@ Module-level imports are stdlib only; Redis and the DB are reached lazily.
 
 import time
 
-#: Refreshed hourly with the membership sync. Held long enough that a WOM
-#: outage doesn't empty a clan for the races running on it.
-ROSTER_TTL_SECONDS = 6 * 60 * 60
+#: Refreshed with the membership sync: every 12 hours, 6 for subscribed groups
+#: (services/group_sync_gate). Held for three missed free-tier syncs, so a WOM
+#: outage doesn't empty a clan for the races running on it. Must stay well
+#: above the sync interval or the roster is empty between syncs.
+ROSTER_TTL_SECONDS = 36 * 60 * 60
 
 #: Per-process memo of both sides. A raid sends a party list per item, so the
 #: events worker asks about the same clan many times a minute.

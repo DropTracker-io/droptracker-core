@@ -163,3 +163,47 @@ class TestWomSyncResponse:
         })
         body = await (await client.post("/api/v1/groups/42/wom-sync")).get_json()
         assert body["skipped_removals"] is True
+
+
+# ── One manual refresh a day (2026-11-11) ────────────────────────────────────
+#
+# The scheduled sync moved to every 12 hours (6 on a paid tier) when WiseOldMan
+# asked us to cut volume, and the manual refresh became the escape hatch: one
+# per group per 24 hours. ``db.ops`` is a MagicMock under conftest, so these
+# pin the source, like the parity guards in test_wom_sync_detached_group.
+
+import ast
+from pathlib import Path
+
+_OPS = (Path(__file__).resolve().parents[2] / "db" / "ops.py").read_text()
+
+
+def _fn(name):
+    for node in ast.walk(ast.parse(_OPS)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found")
+
+
+class TestDailyManualRefresh:
+    def test_the_default_cooldown_is_24_hours(self):
+        assert '_WOM_SYNC_COOLDOWN_SECONDS = int(os.getenv("WOM_MANUAL_SYNC_COOLDOWN_SECONDS", "86400"))' in _OPS
+
+    def test_a_wom_outage_does_not_spend_the_daily_refresh(self):
+        # The "no roster came back" raise must come BEFORE the cooldown stamp.
+        src = ast.get_source_segment(_OPS, _fn("sync_group_from_wom_with_stats"))
+        assert src.index("raise WomRosterUnavailable") < src.index('config_key="last_wom_sync",\n            config_value=now_iso')
+
+    def test_the_sync_reports_whether_wom_answered(self):
+        returns = [ast.get_source_segment(_OPS, n) for n in ast.walk(_fn("_sync_group_from_wom"))
+                   if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)]
+        assert len(returns) == 2 and all('"fetched"' in r for r in returns)
+
+    def test_every_sync_stamps_the_schedule_so_a_manual_one_resets_the_clock(self):
+        src = ast.get_source_segment(_OPS, _fn("_sync_group_from_wom"))
+        assert "_stamp_member_sync(wom_id, ok=True)" in src and "_stamp_member_sync(wom_id, ok=False)" in src
+
+    def test_only_the_scheduled_round_is_filtered_never_a_forced_sync(self):
+        src = ast.get_source_segment(_OPS, _fn("update_group_members"))
+        forced, scheduled = src.index("group_ids = [forced_id]"), src.index("_scheduled_sync_due(")
+        assert forced < scheduled and src.count("_scheduled_sync_due(") == 1

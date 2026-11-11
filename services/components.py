@@ -151,7 +151,7 @@ async def build_help_components(bot=None):
                 content=(
                     "**Group Leader / Admin Commands**\n"
                     f"-# </group-setup:{group_setup_id}> - Set up your clan's group, or change its settings, right here in Discord.\n"
-                    f"-# </sync-wom:{sync_wom_id}> - Request an immediate WiseOldMan membership sync (1-hour cooldown).\n"
+                    f"-# </sync-wom:{sync_wom_id}> - Refresh your member list from WiseOldMan now (once every 24 hours).\n"
                     f"-# </force-group-sync:{force_sync_id}> - Force a WiseOldMan membership sync for your group.\n"
                     f"-# </toggle-split-tracking:{split_tracking_id}> - Enable or disable split GP tracking for your group.\n"
                     f"-# </add-group-points:{add_points_id}> - Manually add points to a member's balance.\n"

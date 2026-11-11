@@ -766,6 +766,20 @@ async def admin_member_hidden(group_id: int, player_id: int):
         return _refuse(e)
 
 
+WOM_CONFIRM_WINDOW_SECONDS = 60
+
+
+def _wom_cooldown_message(seconds) -> str:
+    seconds = int(seconds or 0)
+    if seconds >= 3600:
+        hours = -(-seconds // 3600)
+        when = f"{hours} hour{'s' if hours != 1 else ''}"
+    else:
+        minutes = max(1, -(-seconds // 60))
+        when = f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"Today's manual refresh is used. You can refresh again in {when}."
+
+
 @plugin_admin_bp.post("/plugin/admin/groups/<int:group_id>/wom-sync")
 @rate_limit(limit=6, period=timedelta(seconds=60))
 async def admin_wom_sync(group_id: int):
@@ -784,16 +798,37 @@ async def admin_wom_sync(group_id: int):
         wom_id = await _run(work)
     except Refusal as e:
         return _refuse(e)
-    try:
-        from db.ops import sync_group_from_wom_with_stats
+    from db.ops import manual_wom_sync_cooldown_remaining, sync_group_from_wom_with_stats
 
+    remaining = manual_wom_sync_cooldown_remaining(group_id)
+    if remaining > 0:
+        return jsonify({"message": _wom_cooldown_message(remaining), "tone": "warn"}), 200
+
+    # One manual refresh per 24 hours, so the first press only asks; a second
+    # press within the window runs it. Done server-side so released plugin
+    # builds get the confirmation without an update.
+    confirm_key = f"wom:manual_confirm:{group_id}"
+    try:
+        confirmed = bool(_redis().delete(confirm_key))
+        if not confirmed:
+            _redis().setex(confirm_key, WOM_CONFIRM_WINDOW_SECONDS, "1")
+    except Exception:
+        confirmed = True  # Redis down: don't lock admins out of the button.
+    if not confirmed:
+        return jsonify({
+            "message": "Members update automatically. You can force a refresh once every 24 hours: "
+                       "press Sync again within a minute to use today's.",
+            "tone": "warn",
+        }), 200
+
+    try:
         result = await sync_group_from_wom_with_stats(wom_id=wom_id)
     except Exception:
-        return jsonify({"message": "WiseOldMan didn't answer. Try again in a minute.", "tone": "warn"}), 200
+        return jsonify({"message": "WiseOldMan didn't answer, so today's refresh was not used. "
+                        "Try again in a minute.", "tone": "warn"}), 200
     if result.get("on_cooldown"):
-        minutes = max(1, -(-int(result.get("cooldown_remaining_seconds") or 0) // 60))
-        return jsonify({"message": f"Synced recently. You can sync again in {minutes} minute"
-                        f"{'s' if minutes != 1 else ''}.", "tone": "warn"}), 200
+        return jsonify({"message": _wom_cooldown_message(result.get("cooldown_remaining_seconds")),
+                        "tone": "warn"}), 200
     added, removed = len(result.get("added") or []), len(result.get("removed") or [])
     message = f"Synced: {added} joined, {removed} left, {int(result.get('total_members') or 0):,} members."
     if result.get("skipped_removals"):

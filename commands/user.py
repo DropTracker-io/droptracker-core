@@ -15,6 +15,7 @@ import json
 from datetime import datetime
 from secrets import token_hex
 from data.submissions import try_create_player
+import asyncio
 from interactions import AutocompleteContext, SlashContext, Embed, OptionType, Extension, slash_command, slash_option
 from db.models import Session, User, Group, Guild, Player, UserConfiguration, session
 from db.player_claims import claim_player, unclaim_player
@@ -479,8 +480,9 @@ class UserCommands(Extension):
                         f"Claiming links `{player_name}` to you and tracks it on the website; "
                         "posting in this server's channels needs the account on that roster.\n\n"
                         f"Ask a clan leader to add `{player_name}` on "
-                        f"[wiseoldman.net]({wom_url}). We re-sync every hour, so posting "
-                        "starts within an hour of them adding you."
+                        f"[wiseoldman.net]({wom_url}). The member list refreshes every "
+                        "12 hours (6 for subscribed groups), or straight away if a leader "
+                        "runs `/sync-wom` (once a day)."
                     ),
                     inline=False,
                 )
@@ -599,14 +601,15 @@ class UserCommands(Extension):
 
     @slash_command(
         name="sync-wom",
-        description="Request an immediate WiseOldMan membership sync for this group (1-hour cooldown)",
+        description="Refresh this group's member list from WiseOldMan now (once every 24 hours)",
     )
     async def sync_wom_cmd(self, ctx: SlashContext):
         """
         Trigger a WiseOldMan membership sync for the group linked to this Discord server.
 
         Available to guild administrators and users listed in the group's ``authed_users``
-        configuration.  Enforces a 1-hour per-group cooldown to avoid hammering the WOM API.
+        configuration.  One manual refresh per group per 24 hours (the scheduled sync runs
+        every 12 hours, 6 for subscribed groups), so the admin confirms before spending it.
         The response is deferred so the interaction won't time out during a long sync.
         """
         self._refresh_session()
@@ -641,30 +644,85 @@ class UserCommands(Extension):
 
         await ctx.defer(ephemeral=True)
 
+        from interactions import ActionRow, Button, ButtonStyle
+        from db.ops import (
+            WomRosterUnavailable,
+            manual_wom_sync_cooldown_remaining,
+            sync_group_from_wom_with_stats,
+        )
+
+        group_name = group.group_name
+        wom_group_id = int(group.wom_id)
+
+        def _cooldown_embed(remaining: int) -> Embed:
+            hours, rem = divmod(int(remaining), 3600)
+            minutes = max(1, rem // 60)
+            time_str = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+            return Embed(
+                title="Manual refresh already used",
+                description=(
+                    f"**{group_name}** has used its manual refresh for today.\n"
+                    f"You can refresh again in **{time_str}**. The member list still "
+                    f"updates automatically in the meantime."
+                ),
+                color=0xE67E22,
+            )
+
+        remaining = manual_wom_sync_cooldown_remaining(int(group.group_id))
+        if remaining > 0:
+            return await ctx.send(embed=_cooldown_embed(remaining), ephemeral=True)
+
+        # One manual refresh a day, so make sure the admin means it.
+        token = f"womsync:{ctx.id}"
+        row = ActionRow(
+            Button(style=ButtonStyle.GREEN, label="Refresh now", custom_id=f"{token}:go"),
+            Button(style=ButtonStyle.GREY, label="Cancel", custom_id=f"{token}:cancel"),
+        )
+        prompt = await ctx.send(
+            embed=Embed(
+                title="Refresh members from WiseOldMan?",
+                description=(
+                    f"**{group_name}**'s member list updates automatically (every 12 hours, "
+                    f"or every 6 for subscribed groups).\n\n"
+                    f"You can request an instant refresh **once every 24 hours**. "
+                    f"Use it now?"
+                ),
+                color=0x3498DB,
+            ),
+            components=[row],
+            ephemeral=True,
+        )
         try:
-            from db.ops import sync_group_from_wom_with_stats
-            result = await sync_group_from_wom_with_stats(wom_id=int(group.wom_id))
+            pressed = await self.bot.wait_for_component(messages=prompt, components=row, timeout=60)
+        except asyncio.TimeoutError:
+            return await ctx.edit(
+                prompt, content="No refresh was run, and your daily refresh is still available.",
+                embeds=[], components=[],
+            )
+        btn_ctx = pressed.ctx
+        if btn_ctx.custom_id.endswith(":cancel"):
+            return await btn_ctx.edit_origin(
+                content="Cancelled. Your daily refresh is still available.", embeds=[], components=[],
+            )
+        await btn_ctx.edit_origin(
+            content="Refreshing from WiseOldMan…", embeds=[], components=[],
+        )
+
+        try:
+            result = await sync_group_from_wom_with_stats(wom_id=wom_group_id)
+        except WomRosterUnavailable as e:
+            return await ctx.send(str(e), ephemeral=True)
         except Exception as e:
-            print(f"WOM sync failed for WOM group {group.wom_id}: {e}")
+            print(f"WOM sync failed for WOM group {wom_group_id}: {e}")
             return await ctx.send(
-                "WOM sync failed — please try again in a few minutes.",
+                "WOM sync failed — please try again in a few minutes. "
+                "Your daily refresh has not been used.",
                 ephemeral=True,
             )
 
         if result["on_cooldown"]:
-            remaining = result["cooldown_remaining_seconds"]
-            hours, rem = divmod(remaining, 3600)
-            minutes = rem // 60
-            time_str = f"{hours}h {minutes}m" if hours else f"{minutes}m"
-            embed = Embed(
-                title="Sync on Cooldown",
-                description=(
-                    f"**{group.group_name}** was synced recently.\n"
-                    f"Please wait **{time_str}** before requesting another sync."
-                ),
-                color=0xE67E22,
-            )
-            return await ctx.send(embed=embed, ephemeral=True)
+            return await ctx.send(
+                embed=_cooldown_embed(result["cooldown_remaining_seconds"]), ephemeral=True)
 
         added = result["added"]
         removed = result["removed"]
