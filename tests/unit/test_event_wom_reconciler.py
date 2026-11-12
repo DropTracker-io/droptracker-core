@@ -593,3 +593,89 @@ class TestPluginCoveredSkip:
         out, seen, upd = self._run({901}, min_stale=0)
         assert seen.await_count == 0
         assert upd.await_count == 2
+
+
+class TestStatsSourceSwitch:
+    """STATS_SOURCE_EVENTS: wom (default) | shadow | ours."""
+
+    NOW = datetime(2026, 7, 10)
+
+    def _run(self, monkeypatch, mode, wom_rows=None):
+        import asyncio
+        import utils.wiseoldman as wom_module
+
+        calls = {"wom": 0, "shadow": 0, "ours": 0}
+
+        async def fake_bulk(gid, start, end):
+            calls["wom"] += 1
+            return wom_rows if wom_rows is not None else [ROW_RANKED]
+
+        def fake_shadow(target, rows, start, end):
+            calls["shadow"] += 1
+            calls["shadow_rows"] = len(rows)
+            return 0
+
+        def fake_ours(target, start, end):
+            calls["ours"] += 1
+            return [{"player": {"id": 2188996, "username": "btw fe male",
+                                "updatedAt": "2026-07-09T00:00:00.000Z"},
+                     "endDate": "2026-07-09T00:00:00.000Z",
+                     "data": [{"metric": "zulrah", "start": 250, "end": 260, "gained": 10}]}]
+
+        if mode is None:
+            monkeypatch.delenv("STATS_SOURCE_EVENTS", raising=False)
+        else:
+            monkeypatch.setenv("STATS_SOURCE_EVENTS", mode)
+        monkeypatch.setattr(wom_module, "get_group_bulk_gained", fake_bulk, raising=False)
+        monkeypatch.setattr(recon, "_shadow_compare_db", fake_shadow)
+        monkeypatch.setattr(recon, "_snapshot_rows_db", fake_ours)
+        r = _FakeRedis()
+        stats = recon._new_stats()
+        rows = asyncio.run(recon._reconcile_target(r, _target(), now=self.NOW, force=True, stats=stats))
+        return calls, r, rows
+
+    def test_default_reads_wom_and_compares_nothing(self, monkeypatch):
+        calls, r, _ = self._run(monkeypatch, None)
+        assert (calls["wom"], calls["shadow"], calls["ours"]) == (1, 0, 0)
+        assert all(e["source"] == "wom" for e in r.pushed)
+
+    def test_shadow_still_credits_from_wom_and_records_a_comparison(self, monkeypatch):
+        baseline, r0, _ = self._run(monkeypatch, None)
+        calls, r, _ = self._run(monkeypatch, "shadow")
+        assert (calls["wom"], calls["shadow"], calls["ours"]) == (1, 1, 0)
+        assert calls["shadow_rows"] == 1
+        # Exactly the envelopes the default mode pushes: shadow changes no credit.
+        assert r.pushed == r0.pushed
+
+    def test_a_failing_comparison_does_not_touch_the_live_path(self, monkeypatch):
+        import asyncio
+        import utils.wiseoldman as wom_module
+
+        async def fake_bulk(gid, start, end):
+            return [ROW_RANKED]
+
+        def boom(*args):
+            raise RuntimeError("table missing")
+
+        monkeypatch.setenv("STATS_SOURCE_EVENTS", "shadow")
+        monkeypatch.setattr(wom_module, "get_group_bulk_gained", fake_bulk, raising=False)
+        monkeypatch.setattr(recon, "_shadow_compare_db", boom)
+        r = _FakeRedis()
+        rows = asyncio.run(recon._reconcile_target(r, _target(), now=self.NOW, force=True,
+                                                   stats=recon._new_stats()))
+        assert len(rows) == 1
+
+    def test_ours_builds_the_envelopes_from_our_store_without_calling_wom(self, monkeypatch):
+        calls, r, rows = self._run(monkeypatch, "ours")
+        assert (calls["wom"], calls["shadow"], calls["ours"]) == (0, 0, 1)
+        (envelope,) = r.pushed
+        assert envelope["kind"] == "wom_kc" and envelope["player_id"] == 901
+        assert (envelope["data"]["kc"], envelope["data"]["kc_start"]) == (260, 250)
+
+    def test_participants_and_relevant_metrics(self):
+        target = _target(participants_by_name={"x": (902, "Name Only", None, True)},
+                         effort_metrics={"vorkath"})
+        assert recon._participants(target) == [
+            {"player_id": 901, "name": "btw fe male", "wom_id": 2188996},
+            {"player_id": 902, "name": "Name Only", "wom_id": None}]
+        assert recon._relevant_slugs(target) == ["attack", "runecrafting", "vorkath", "zulrah"]

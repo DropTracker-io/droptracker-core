@@ -194,6 +194,8 @@ def _store_db(player_id: int, account_varbit, reading, pinned: bool, now: dateti
             session, player_id, reading.skills, reading.activities, reading.ranks,
             total_xp=reading.total_xp, total_level=reading.total_level,
             account_type=account_varbit, pinned=pinned, now=now)
+        if outcome == "written":
+            _shadow_player_ehb(session, player_id, reading, account_varbit)
         session.commit()
         return outcome
     except Exception:
@@ -201,6 +203,32 @@ def _store_db(player_id: int, account_varbit, reading, pinned: bool, now: dateti
         raise
     finally:
         session.close()
+
+
+def _shadow_player_ehb(session, player_id: int, reading, account_varbit) -> None:
+    """Shadow mode for ``player_ehb``: the EHB WOM gave us for this player
+    (``players.ehb``, copied whenever WOM is consulted) beside the one we
+    compute from the reading just stored. Never raises."""
+    try:
+        from utils import stats_shadow
+
+        if stats_shadow.source("player_ehb") != stats_shadow.SHADOW:
+            return
+        from db.models import Player
+        from utils.stat_snapshots import efficiency_for
+
+        scored = efficiency_for(reading.skills, reading.activities, account_varbit)
+        wom_ehb = session.query(Player.ehb).filter(Player.player_id == player_id).scalar()
+        if scored is None or wom_ehb is None:
+            return
+        with session.begin_nested():
+            stats_shadow.record(session, "player_ehb", f"type:{scored['type']}", [
+                stats_shadow.entry("ehb", float(wom_ehb), scored["ehb"], player_id=player_id,
+                                   our_source="hiscores", our_age_seconds=0,
+                                   detail=f"build {scored['build']}; players.ehb is WOM's figure "
+                                          "as of whenever we last asked WOM")])
+    except Exception:
+        log.debug("player_ehb shadow comparison failed", exc_info=True)
 
 
 def _pin_latest_db(player_id: int) -> bool:

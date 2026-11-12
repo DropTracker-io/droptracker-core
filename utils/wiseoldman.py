@@ -1834,6 +1834,40 @@ def _ehb_rates_needs_refresh(key: str) -> Optional[bool]:
     return ttl <= EHB_RATES_REFRESH_BEFORE
 
 
+def _our_ehb_rates(key: str) -> Dict[str, float]:
+    """Our own EHB rates (utils/efficiency, WOM's tables kept in the repo),
+    but only when the owner has switched this consumer over
+    (``STATS_SOURCE_EHB_RATES=ours``). ``{}`` otherwise, or if they cannot be
+    read, in which case the WOM path below carries on as before."""
+    try:
+        from utils import stats_shadow
+
+        if stats_shadow.source("ehb_rates") != stats_shadow.OURS:
+            return {}
+        from utils import efficiency
+
+        return {boss: float(rate) for boss, rate in efficiency.ehb_rates(key).items()}
+    except Exception as e:
+        logger.warning("Own EHB rates unavailable, using WOM's: %s", e)
+        return {}
+
+
+def _shadow_ehb_rates(key: str, wom_rates: Dict[str, float]) -> None:
+    """Shadow mode: record WOM's freshly fetched rates beside ours. Never raises."""
+    try:
+        from utils import stats_shadow
+
+        if stats_shadow.source("ehb_rates") != stats_shadow.SHADOW:
+            return
+        from utils import efficiency
+
+        stats_shadow.record_safely(
+            "ehb_rates", f"type:{key}",
+            stats_shadow.compare_ehb_rates(wom_rates, efficiency.ehb_rates(key)))
+    except Exception as e:
+        logger.debug("EHB rates shadow comparison failed: %s", e)
+
+
 def get_ehb_rates_sync(account_type: str = "main") -> Dict[str, float]:
     """Cached EHB rates without any network I/O — ``{}`` when never fetched.
 
@@ -1847,6 +1881,9 @@ def get_ehb_rates_sync(account_type: str = "main") -> Dict[str, float]:
     to decide whether the shared cache still needs refreshing.
     """
     key = str(account_type or "main").strip().lower() or "main"
+    ours = _our_ehb_rates(key)
+    if ours:
+        return ours
     memo = _ehb_rates_memo.get(key)
     if memo and (time.time() - memo[0]) < _EHB_RATES_MEMO_TTL:
         return memo[1]
@@ -1872,6 +1909,9 @@ async def get_ehb_rates(account_type: str = "main") -> Dict[str, float]:
     submission."""
     key = str(account_type or "main").strip().lower() or "main"
     cached = get_ehb_rates_sync(key)
+    if _our_ehb_rates(key):
+        # Rates come from our own tables: there is nothing to fetch.
+        return cached
 
     # Freshness is decided from the SHARED cache's TTL, never from `cached`.
     # `cached` may be this process's own memo, which get_ehb_rates_sync keeps
@@ -1921,6 +1961,7 @@ async def get_ehb_rates(account_type: str = "main") -> Dict[str, float]:
         logger.debug("WOM EHB rates cache write failed: %s", e)
     _ehb_rates_memo[key] = (time.time(), rates)
     logger.info("WOM EHB rates refreshed: %d bosses (type=%s)", len(rates), key)
+    _shadow_ehb_rates(key, rates)
     return rates
 
 

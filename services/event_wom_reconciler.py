@@ -362,6 +362,12 @@ def scoring_bounds(target: ReconcileTarget, now: datetime, *,
     return None
 
 
+def _events_source() -> str:
+    from utils import stats_shadow
+
+    return stats_shadow.source("events")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Envelope emission
 # ══════════════════════════════════════════════════════════════════════════════
@@ -545,6 +551,20 @@ async def _reconcile_target(redis_conn, target: ReconcileTarget, *,
         # Sub-windows are half-open [start, end) in the matcher, so a stamp
         # landing exactly on the close would read as out-of-window.
         clamp_epoch -= 1
+    from utils import stats_shadow
+
+    mode = stats_shadow.source("events")
+    if mode == stats_shadow.OURS:
+        # Cut over (owner sign-off, dev tracker t427): the same envelopes,
+        # built from our own stat store instead of a WOM fetch.
+        rows = await asyncio.to_thread(_snapshot_rows_db, target, start_at, end_at)
+        pushed = 0
+        for row in rows:
+            pushed += _emit_for_row(redis_conn, target, row, clamp_epoch=clamp_epoch,
+                                    clamp_lo=clamp_lo, force=force, stats=stats)
+        stats["envelopes"] += pushed
+        return rows
+
     all_rows = []
     for _group_id, wom_gid, _code in target.wom_groups:
         rows = await get_group_bulk_gained(wom_gid, start_at, end_at)
@@ -561,7 +581,89 @@ async def _reconcile_target(redis_conn, target: ReconcileTarget, *,
                                         clamp_lo=clamp_lo,
                                         force=force, stats=stats)
         stats["envelopes"] += pushed
+    if mode == stats_shadow.SHADOW and all_rows:
+        # Compare, never credit: what WOM just reported next to what our own
+        # store says for the same participants and window.
+        try:
+            await asyncio.to_thread(_shadow_compare_db, target, all_rows, start_at, end_at)
+        except Exception:
+            log.exception("events shadow comparison failed (event %s)", target.event_id)
     return all_rows
+
+
+def _participants(target: ReconcileTarget) -> list:
+    """``[{"player_id", "name", "wom_id"}]`` for a target, each player once."""
+    seen, out = set(), []
+    for wom_id, entry in target.participants_by_wom.items():
+        if entry[0] not in seen:
+            seen.add(entry[0])
+            out.append({"player_id": entry[0], "name": entry[1], "wom_id": wom_id})
+    for entry in target.participants_by_name.values():
+        if entry[0] not in seen:
+            seen.add(entry[0])
+            out.append({"player_id": entry[0], "name": entry[1], "wom_id": None})
+    return out
+
+
+def _relevant_slugs(target: ReconcileTarget) -> list:
+    return sorted(set(target.skills.values()) | set(target.boss_metrics) | set(target.effort_metrics))
+
+
+def _snapshot_rows_db(target: ReconcileTarget, start_at: datetime, end_at: datetime) -> list:
+    """Bulk-gained-shaped rows for a target from our own stat store.
+    Blocking; run in a worker thread."""
+    from db.models.base import Session
+    from services.player_stats import bulk_gained_rows
+
+    session = Session()
+    try:
+        return bulk_gained_rows(session, _participants(target), start_at, end_at)
+    finally:
+        session.close()
+
+
+def _shadow_compare_db(target: ReconcileTarget, wom_rows: list, start_at: datetime,
+                       end_at: datetime) -> int:
+    """Record, per participant and relevant metric, WOM's gain beside ours.
+    Blocking; run in a worker thread."""
+    from db.models.base import Session
+    from services.player_stats import gained
+    from utils import stats_shadow
+
+    slugs = _relevant_slugs(target)
+    wom_by_player = {}
+    for row in wom_rows:
+        entry = _match_participant(target, row.get("player") or {})
+        if entry is None:
+            continue
+        metrics = {}
+        for m in row.get("data") or []:
+            if not isinstance(m, dict) or m.get("metric") not in slugs:
+                continue
+            try:
+                start, end = int(m.get("start") or 0), int(m.get("end") or 0)
+            except (TypeError, ValueError):
+                continue
+            if end <= 0:
+                continue   # WOM has no reading: the live path credits nothing
+            metrics[m["metric"]] = {"start": start, "end": end,
+                                    "gained": max(0, end - start) if start > 0 else None}
+        if metrics:
+            wom_by_player[entry[0]] = metrics
+    if not wom_by_player:
+        return 0
+    session = Session()
+    try:
+        ours = {pid: gained(session, pid, start_at, end_at) for pid in wom_by_player}
+        entries = stats_shadow.compare_gained_rows(wom_by_player, ours, slugs)
+        count = stats_shadow.record(session, "events", f"event:{target.event_id}", entries)
+        session.commit()
+        return count
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def _new_stats() -> dict:
@@ -584,7 +686,9 @@ async def reconcile_once(state, redis_conn, now: Optional[datetime] = None) -> d
         stats["targets"] += 1
         rows = await _reconcile_target(redis_conn, target, now=now,
                                        force=False, stats=stats)
-        if update_cap > 0:
+        # On our own store there is nothing to refresh at WOM: the hiscores
+        # poller keeps participants current.
+        if update_cap > 0 and _events_source() != "ours":
             fresh = await _freshness_for_target(redis_conn, target, rows,
                                                 max_updates=update_cap)
             stats["updates_requested"] += fresh["player_updates"]

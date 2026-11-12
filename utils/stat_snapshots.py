@@ -342,12 +342,17 @@ def record_hiscores_snapshot(db_session, player_id: int, skills: Mapping[str, in
                 decode_skills(trusted.skills), decode_activities(trusted.activities),
                 trusted.taken_at, skills, decode_activities(activities_json), now)
 
+    # A hiscores reading is complete (every skill and boss the player is
+    # ranked in), so it can carry the player's EHP and EHB with it.
+    scored = efficiency_for(skills, decode_activities(activities_json),
+                            account_type if isinstance(account_type, int) else None) or {}
     db_session.add(PlayerStatSnapshot(
         player_id=player_id, taken_at=now, source=SOURCE_HISCORES,
         account_type=account_type if isinstance(account_type, int) else None,
         total_xp=known_total,
         total_level=total_level if isinstance(total_level, int) and total_level > 0 else 0,
         skills=skills_json, activities=activities_json, ranks=encode_metrics(ranks),
+        ehp=scored.get("ehp"), ehb=scored.get("ehb"),
         flagged=problem is not None, pinned=bool(pinned) and problem is None,
     ))
     db_session.flush()
@@ -366,3 +371,80 @@ def pin_latest(db_session, player_id: int) -> bool:
         row.pinned = True
         db_session.flush()
     return True
+
+
+# --------------------------------------------------------------------------- #
+# What a player's stats were at a moment
+# --------------------------------------------------------------------------- #
+
+def values_at(db_session, player_id: int, when: datetime) -> Optional[dict]:
+    """A player's stats at ``when``, from every source we have:
+    ``{"skills", "activities", "taken_at", "source"}``, or None with no rows.
+
+    The plugin and the hiscores each know things the other does not: the
+    plugin has exact XP but only the bosses it has seen killed; the hiscores
+    have every boss but lag until logout. XP and kill counts only ever go up,
+    so the two newest rows (one per source) are merged by taking the higher
+    value of each metric. ``source`` names whichever row is newer.
+    """
+    from db.models import PlayerStatSnapshot
+
+    rows = []
+    for name in (SOURCE_PLUGIN, SOURCE_HISCORES, SOURCE_WOM):
+        row = (
+            _usable(db_session, player_id)
+            .filter(PlayerStatSnapshot.source == name, PlayerStatSnapshot.taken_at <= when)
+            .order_by(PlayerStatSnapshot.taken_at.desc())
+            .first()
+        )
+        if row is not None:
+            rows.append(row)
+    if not rows:
+        return None
+    skills: Dict[str, int] = {}
+    activities: Dict[str, int] = {}
+    for row in rows:
+        for skill, xp in decode_skills(row.skills).items():
+            # A plugin row lists every skill, with 0 for one it could not
+            # read: 0 is "unknown" unless nothing better exists.
+            if xp > skills.get(skill, -1):
+                skills[skill] = xp
+        for metric, score in decode_activities(row.activities).items():
+            if score > activities.get(metric, 0):
+                activities[metric] = score
+    newest = max(rows, key=lambda r: r.taken_at)
+    return {"skills": skills, "activities": activities,
+            "taken_at": newest.taken_at, "source": newest.source}
+
+
+def first_values_between(db_session, player_id: int, start: datetime, end: datetime) -> Optional[dict]:
+    """The earliest usable row strictly inside ``(start, end]``, shaped like
+    `values_at`. The fallback baseline for a player whose history begins
+    after a window opened."""
+    from db.models import PlayerStatSnapshot
+
+    row = (
+        _usable(db_session, player_id)
+        .filter(PlayerStatSnapshot.taken_at > start, PlayerStatSnapshot.taken_at <= end)
+        .order_by(PlayerStatSnapshot.taken_at.asc())
+        .first()
+    )
+    if row is None:
+        return None
+    return {"skills": decode_skills(row.skills), "activities": decode_activities(row.activities),
+            "taken_at": row.taken_at, "source": row.source}
+
+
+def efficiency_for(skills: Mapping[str, int], activities: Mapping[str, int],
+                   account_varbit: Optional[int] = None) -> Optional[dict]:
+    """EHP and EHB for a set of stats (`utils.efficiency`), or None if the
+    rate tables cannot be read. ``account_varbit`` is ``player_state.account_type``."""
+    try:
+        from utils import efficiency
+        from utils.account_types import account_type_from_varbit
+
+        return efficiency.player_efficiency(
+            efficiency.from_our_skills(skills), activities,
+            account_type=account_type_from_varbit(account_varbit))
+    except Exception:
+        return None

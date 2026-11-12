@@ -16,6 +16,7 @@ from .player_state import (
     PlayerStatSnapshot,
 )
 from .player import Player, IgnoredPlayer
+from .stats_shadow import StatsShadowDiff
 from .group import Group
 from .user_configuration import UserConfiguration
 from .group_patreon import GroupPatreon
@@ -300,6 +301,7 @@ __all__ = [
     "PlayerQuestState",
     "PlayerDiaryTier",
     "PlayerStatSnapshot",
+    "StatsShadowDiff",
     "Player",
     "IgnoredPlayer",
     "Group",
