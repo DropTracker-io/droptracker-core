@@ -20,6 +20,11 @@ The database is the source of truth and the roles follow it:
   the server, linked account or not. These two are the status roles
   (:data:`STATUS_SPECS`): the seeder never restyles or moves Registered, and
   only creates Unregistered directly beneath it.
+* **API Consumer** goes to the customer behind each live data-API key: the
+  owner of a user key, whoever minted a key (staff mints excluded), whoever
+  a key's claim link was addressed to or opened by, and the hand-recorded
+  contacts in :data:`MANUAL_KEY_CONTACTS` for keys handed over in a ticket.
+  Revoking or expiring the key takes the role away again.
 
 Role ids live in :data:`ROLE_MAP_PATH`, written by
 ``scripts/seed_discord_roles.py``. The seeder creates, renames, styles and
@@ -90,6 +95,7 @@ REGISTERED = "registered"
 #: Everyone on the server not owed Registered. Worked out per member while
 #: planning, since the database has no row for someone it has never seen.
 UNREGISTERED = "unregistered"
+API_CONSUMER = "api_consumer"
 _TIER_GRANTS = (GROUP_PAYER, GROUP_MEMBER)
 
 
@@ -130,7 +136,29 @@ ROLE_SPECS: Tuple[RoleSpec, ...] = (
     RoleSpec("sponsor_member", "Sponsor (Member)", GROUP_MEMBER, "t2", 0xFFD966, icon_from="sponsor"),
     RoleSpec("supporter_member", "Supporter (Member)", GROUP_MEMBER, "basic", 0xD99A5B,
              icon_from="supporter"),
+    # Uncoloured, not hoisted and no icon, so it never changes how a name is
+    # shown (most holders are clan leaders whose colour and icon come from
+    # roles further down).
+    RoleSpec("api_consumer", "API Consumer", API_CONSUMER),
 )
+
+#: Staff, whose mints are made on a customer's behalf and whose own test keys
+#: make no one a customer. User 0 is the owner (``is None`` checks, not
+#: truthiness: see the user-id-zero note in db/).
+API_STAFF_USER_IDS = frozenset({0})
+
+#: api_keys.id -> the customer's user ids, for keys whose rows name no one
+#: but staff: minted by hand and delivered in a support ticket rather than
+#: through a claim link. Only consulted while the key is live. A key minted
+#: from now on through the admin page records its customer by itself (the
+#: claim link's viewer), so this list should not need to grow.
+MANUAL_KEY_CONTACTS: Dict[int, Tuple[int, ...]] = {
+    2: (2950,),    # IronPursuit (group 299) bot: TrueGritty, ticket #381
+    10: (2950,),   # IronPursuit (group 299) bot v2: TrueGritty, ticket #381
+    6: (3432,),    # OSRSClans global key: saltis., ticket #411 (reissue of user key 3)
+    11: (3918,),   # Veritas (group 356) plugin: JinxMeh, ticket #445
+    17: (2392,),   # Merit (group 379): Haywarrd, ticket #482 (opened the link as staff)
+}
 
 #: The claimed-RSN status roles. They are not part of the tier block: the
 #: seeder leaves the existing "Registered" as the server has it and puts
@@ -232,8 +260,50 @@ class RoleInputs:
     bug_testers: Set[int] = field(default_factory=set)
     #: users with at least one claimed RSN
     registered: Set[int] = field(default_factory=set)
+    #: customers behind a live data-API key
+    api_consumers: Set[int] = field(default_factory=set)
     #: user_id -> Discord id
     discord_ids: Dict[int, str] = field(default_factory=dict)
+
+
+def key_is_live(key: Any, now: Optional[datetime] = None) -> bool:
+    if getattr(key, "revoked_at", None) is not None:
+        return False
+    expires = getattr(key, "expires_at", None)
+    return expires is None or expires > (now or datetime.utcnow())
+
+
+def api_consumer_user_ids(keys: Iterable[Any], reveals: Iterable[Any] = (),
+                          manual: Mapping[int, Sequence[int]] = MANUAL_KEY_CONTACTS,
+                          staff: Iterable[int] = API_STAFF_USER_IDS,
+                          now: Optional[datetime] = None) -> Set[int]:
+    """The users behind live keys (rows of ``api_keys`` / ``api_key_reveals``).
+
+    A key counts for its owner (user keys), its minter, the user a claim link
+    was addressed to, the user who opened it, and its :data:`MANUAL_KEY_CONTACTS`.
+    Staff never count: their mints and link views are on a customer's behalf.
+    """
+    staff = set(staff)
+    live: Set[int] = set()
+    out: Set[int] = set()
+
+    def _add(uid: Any) -> None:
+        if uid is not None and int(uid) not in staff:
+            out.add(int(uid))
+
+    for key in keys:
+        if not key_is_live(key, now):
+            continue
+        live.add(int(key.id))
+        _add(getattr(key, "owner_user_id", None))
+        _add(getattr(key, "created_by_user_id", None))
+        for uid in manual.get(int(key.id), ()):
+            _add(uid)
+    for reveal in reveals:
+        if int(reveal.api_key_id) in live:
+            _add(getattr(reveal, "audience_user_id", None))
+            _add(getattr(reveal, "viewed_by_user_id", None))
+    return out
 
 
 def load_role_inputs(session) -> RoleInputs:
@@ -244,6 +314,8 @@ def load_role_inputs(session) -> RoleInputs:
         subscription_is_live,
     )
     from db.models import (
+        ApiKey,
+        ApiKeyReveal,
         Badge,
         GroupSubscription,
         Player,
@@ -312,7 +384,15 @@ def load_role_inputs(session) -> RoleInputs:
         session.query(Player.user_id).filter(Player.user_id.isnot(None)).distinct().all()
     }
 
-    wanted: Set[int] = set(inputs.user_tier) | inputs.bug_testers | inputs.registered
+    inputs.api_consumers = api_consumer_user_ids(
+        session.query(ApiKey.id, ApiKey.owner_user_id, ApiKey.created_by_user_id,
+                      ApiKey.revoked_at, ApiKey.expires_at).all(),
+        session.query(ApiKeyReveal.api_key_id, ApiKeyReveal.audience_user_id,
+                      ApiKeyReveal.viewed_by_user_id).all(),
+    )
+
+    wanted: Set[int] = (set(inputs.user_tier) | inputs.bug_testers | inputs.registered
+                        | inputs.api_consumers)
     for users in list(inputs.group_payers.values()) + list(inputs.group_members.values()):
         wanted |= users
     ordered = sorted(wanted)
@@ -363,6 +443,9 @@ def desired_role_keys(inputs: RoleInputs,
                 by_user[uid].add(spec.key)
         elif spec.grant == REGISTERED:
             for uid in inputs.registered:
+                by_user[uid].add(spec.key)
+        elif spec.grant == API_CONSUMER:
+            for uid in inputs.api_consumers:
                 by_user[uid].add(spec.key)
 
     out: Dict[str, Set[str]] = {}

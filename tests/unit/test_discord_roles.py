@@ -36,7 +36,8 @@ FULL_MAP = {s.key: str(9000 + i) for i, s in enumerate(dr.ALL_SPECS)}
 def _inputs(**kwargs):
     inputs = dr.RoleInputs(**kwargs)
     if not inputs.discord_ids:
-        users = set(inputs.user_tier) | set(inputs.bug_testers) | set(inputs.registered)
+        users = (set(inputs.user_tier) | set(inputs.bug_testers) | set(inputs.registered)
+                 | set(inputs.api_consumers))
         for group in list(inputs.group_payers.values()) + list(inputs.group_members.values()):
             users |= set(group)
         inputs.discord_ids = {uid: str(100000 + uid) for uid in users}
@@ -87,6 +88,47 @@ class TestWhoHoldsWhat:
         # Group 2 holds every player on the site.
         inputs = _inputs(group_tier={2: "t3", 1: "t2"}, group_members={2: {1, 2}, 1: {3}})
         assert dr.desired_role_keys(inputs) == {}
+
+
+def _key(kid, owner=None, minted_by=None, revoked=False, expires=None):
+    from datetime import datetime
+    return SimpleNamespace(id=kid, owner_user_id=owner, created_by_user_id=minted_by,
+                           revoked_at=datetime(2026, 1, 1) if revoked else None, expires_at=expires)
+
+
+def _reveal(kid, audience=None, viewer=None):
+    return SimpleNamespace(api_key_id=kid, audience_user_id=audience, viewed_by_user_id=viewer)
+
+
+class TestApiConsumer:
+    def test_owner_minter_and_link_viewer_of_a_live_key_count(self):
+        users = dr.api_consumer_user_ids(
+            [_key(1, owner=5, minted_by=0), _key(2, minted_by=6), _key(3, minted_by=0)],
+            [_reveal(3, audience=7), _reveal(3, viewer=8)], manual={})
+        assert users == {5, 6, 7, 8}
+
+    def test_staff_mints_and_views_make_no_one_a_customer(self):
+        users = dr.api_consumer_user_ids([_key(1, owner=0, minted_by=0)],
+                                         [_reveal(1, audience=0, viewer=0)], manual={})
+        assert users == set()
+
+    def test_revoked_and_expired_keys_count_for_no_one(self):
+        from datetime import datetime
+        users = dr.api_consumer_user_ids(
+            [_key(1, minted_by=5, revoked=True), _key(2, minted_by=6, expires=datetime(2000, 1, 1)),
+             _key(3, minted_by=0)],
+            [_reveal(1, viewer=7)], manual={1: (8,), 3: (9,)})
+        assert users == {9}
+
+    def test_the_role_follows_the_inputs_and_sits_alongside_others(self):
+        inputs = _inputs(registered={1}, api_consumers={1, 2})
+        assert dr.desired_role_keys(inputs) == {_d(1): {"registered", "api_consumer"},
+                                                _d(2): {"api_consumer"}}
+
+    def test_it_is_not_a_tier_role(self):
+        spec = dr.SPECS_BY_KEY["api_consumer"]
+        assert spec.grant == dr.API_CONSUMER and not spec.hoist and spec.primary_color == 0
+        assert spec.unicode_emoji is None and spec.icon_from is None
 
 
 def _member(uid, roles=(), bot=False):
