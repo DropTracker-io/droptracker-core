@@ -404,8 +404,16 @@ class TestLibraryInGenerate:
                 seen.add(r["source"])
                 if r["source"] == "library":
                     assert r["key"].startswith("lib:")
-                    assert isinstance(r["task"]["config"], (str, type(None)))
+                    assert isinstance(r["task"].get("config"), (str, type(None)))
         assert seen == {"generated", "library"}
+
+    def test_library_rows_without_a_target_send_no_nulls(self):
+        # The web parses each task with EventTaskInput, where target and
+        # target_value are optional but not nullable.
+        for seed in range(20):
+            res = _gen(seed=seed, capacity=200, kinds={"uniques"}, library=self.LIB)
+            for r in res["tasks"]:
+                assert None not in r["task"].values(), r["task"]
 
     def test_same_item_is_never_on_the_board_twice(self):
         for seed in range(40):

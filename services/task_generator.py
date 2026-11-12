@@ -958,7 +958,10 @@ def select(pool: list[dict], *, count: int, mix: dict, rng: random.Random,
 def finalize(c: dict) -> dict:
     """The response row: the task payload with difficulty + default points,
     plus the explanation fields the preview renders."""
-    task = dict(c["task"])
+    # Absent, not null: the web's EventTaskInput has target/target_value as
+    # optional strings/ints, so one library row with no target (an item list,
+    # a loot_value total) failed the whole preview there.
+    task = {k: v for k, v in c["task"].items() if v is not None}
     # The web's EventTaskInput carries config as a JSON string (the task
     # routes accept either form).
     if task.get("config") is not None:
