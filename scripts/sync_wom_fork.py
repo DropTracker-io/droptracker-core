@@ -356,6 +356,35 @@ def report_status(ok: bool, changes: list[str], error: str | None = None) -> Non
         log(f"automation status report failed: {e}")
 
 
+def sync_efficiency_rates(apply: bool) -> None:
+    """Keep data/efficiency/rates.json (WOM's EHP/EHB tables, which
+    utils/efficiency.py computes from) in step with WOM's repository. Its own
+    step with its own rollback: a problem here never stops the fork sync.
+    Nothing needs restarting; the tables are reloaded when the file changes."""
+    try:
+        from scripts.sync_wom_efficiency import sync
+
+        result = sync(apply)
+    except Exception as e:
+        log(f"efficiency rates: {type(e).__name__}: {e}")
+        return
+    log(f"efficiency rates: {result['status']} {result['sha'][:7]} {result['detail'][:200]}")
+    for line in result["changes"]:
+        log(f"  {line}")
+    if not apply:
+        return
+    if result["status"] == "updated":
+        notify("EHP/EHB rates updated from Wise Old Man",
+               f"Synced to {result['sha'][:7]}: {result['detail']}",
+               *result["changes"][:6])
+        report_status(True, [f"EHP/EHB rates synced to WOM {result['sha'][:7]}"])
+    elif result["status"] in ("rolled_back", "error"):
+        notify("EHP/EHB rate sync FAILED",
+               f"BLOCKED: {result['status']}: {result['detail'][-500:]}",
+               "The previous rates are still in use.")
+        report_status(False, [], f"EHP/EHB rate sync {result['status']}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -384,6 +413,8 @@ def main() -> int:
                        "The upstream metric check is succeeding again.")
             if _upstream_failures():
                 _upstream_failures(0)
+
+    sync_efficiency_rates(args.apply)
 
     remote = remote_head()
     if not remote:

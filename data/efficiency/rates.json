@@ -1,0 +1,7311 @@
+{
+ "source": {
+  "repo": "https://github.com/wise-old-man/wise-old-man",
+  "commit": "f930946d4152e7c449df1dd367405f1351f2eeaf",
+  "license": "MIT, Copyright (c) 2020 Ruben Amendoeira",
+  "synced_at": "2026-11-12T10:58:00Z"
+ },
+ "skills": [
+  "overall",
+  "attack",
+  "defence",
+  "strength",
+  "hitpoints",
+  "ranged",
+  "prayer",
+  "magic",
+  "cooking",
+  "woodcutting",
+  "fletching",
+  "fishing",
+  "firemaking",
+  "crafting",
+  "smithing",
+  "mining",
+  "herblore",
+  "agility",
+  "thieving",
+  "slayer",
+  "farming",
+  "runecrafting",
+  "hunter",
+  "construction",
+  "sailing"
+ ],
+ "bosses": [
+  "abyssal_sire",
+  "alchemical_hydra",
+  "amoxliatl",
+  "araxxor",
+  "artio",
+  "barrows_chests",
+  "brutus",
+  "bryophyta",
+  "callisto",
+  "calvarion",
+  "cerberus",
+  "chambers_of_xeric",
+  "chambers_of_xeric_challenge_mode",
+  "chaos_elemental",
+  "chaos_fanatic",
+  "commander_zilyana",
+  "corporeal_beast",
+  "crazy_archaeologist",
+  "dagannoth_prime",
+  "dagannoth_rex",
+  "dagannoth_supreme",
+  "deranged_archaeologist",
+  "doom_of_mokhaiotl",
+  "duke_sucellus",
+  "general_graardor",
+  "giant_mole",
+  "grotesque_guardians",
+  "hespori",
+  "kalphite_queen",
+  "king_black_dragon",
+  "kraken",
+  "kreearra",
+  "kril_tsutsaroth",
+  "lunar_chests",
+  "mad_angel",
+  "maggot_king",
+  "mimic",
+  "nex",
+  "nightmare",
+  "phosanis_nightmare",
+  "obor",
+  "phantom_muspah",
+  "sarachnis",
+  "scorpia",
+  "scurrius",
+  "shellbane_gryphon",
+  "skotizo",
+  "sol_heredit",
+  "spindel",
+  "tempoross",
+  "the_gauntlet",
+  "the_corrupted_gauntlet",
+  "the_fractured_archive",
+  "the_hueycoatl",
+  "the_leviathan",
+  "the_royal_titans",
+  "the_whisperer",
+  "theatre_of_blood",
+  "theatre_of_blood_hard_mode",
+  "thermonuclear_smoke_devil",
+  "tombs_of_amascut",
+  "tombs_of_amascut_expert",
+  "tzkal_zuk",
+  "tztok_jad",
+  "vardorvis",
+  "venenatis",
+  "vetion",
+  "vorkath",
+  "wintertodt",
+  "yama",
+  "zalcano",
+  "zulrah"
+ ],
+ "member_skills": [
+  "fletching",
+  "herblore",
+  "agility",
+  "thieving",
+  "slayer",
+  "farming",
+  "hunter",
+  "construction",
+  "sailing"
+ ],
+ "f2p_bosses": [
+  "brutus",
+  "bryophyta",
+  "obor"
+ ],
+ "ehp": {
+  "main": [
+   {
+    "skill": "attack",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 37224,
+      "rate": 38000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 100000,
+      "rate": 55000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 1000000,
+      "rate": 65000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 315000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 505000,
+      "description": "Bonus XP from Slayer"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "defence",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 420000,
+      "description": "Chinning in Kruk's Dungeon"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "defence",
+      "bonusSkill": "ranged",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1.25
+     },
+     {
+      "originSkill": "defence",
+      "bonusSkill": "prayer",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.154
+     }
+    ]
+   },
+   {
+    "skill": "strength",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15000,
+      "description": "Quests"
+     },
+     {
+      "startExp": 37224,
+      "rate": 38000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 61512,
+      "rate": 145000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 449428,
+      "rate": 245000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 300000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 6517253,
+      "rate": 335000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 415000,
+      "description": "Bonus XP from Slayer"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "ranged",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 250000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 6517253,
+      "rate": 330000,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 1190000,
+      "description": "Chinning maniacal monkeys"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "prayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 1670000,
+      "description": "Dagannoth bones at the chaos altar"
+     },
+     {
+      "startExp": 737627,
+      "rate": 2000000,
+      "description": "Superior dragon bones at the chaos altar"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "cooking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 172800,
+      "description": "1t poison karambwan"
+     },
+     {
+      "startExp": 13363,
+      "rate": 519100,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 37224,
+      "rate": 591600,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 101333,
+      "rate": 663600,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 273742,
+      "rate": 735700,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 737627,
+      "rate": 808000,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 880400,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 948100,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 980000,
+      "description": "1t karambwan"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "woodcutting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 29000,
+      "description": "Quests and trees"
+     },
+     {
+      "startExp": 2411,
+      "rate": 56000,
+      "description": "2t oaks (average rate)"
+     },
+     {
+      "startExp": 22406,
+      "rate": 93174,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 41171,
+      "rate": 114728,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 111945,
+      "rate": 127339,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 302288,
+      "rate": 172507,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 814445,
+      "rate": 194022,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 207636,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 221977,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 235000,
+      "description": "1.5t teaks"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fishing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 29200,
+      "description": "Quests"
+     },
+     {
+      "startExp": 14612,
+      "rate": 46592,
+      "description": "3t fly fishing"
+     },
+     {
+      "startExp": 75127,
+      "rate": 84686,
+      "description": "Drift net fishing (67.7k hunter & 58k fishing xp/h)"
+     },
+     {
+      "startExp": 106046,
+      "rate": 97867,
+      "description": "Drift net fishing (84.7k hunter & 67k fishing xp/h)"
+     },
+     {
+      "startExp": 229685,
+      "rate": 112877,
+      "description": "Drift net fishing (98.7k hunter & 74.9k fishing xp/h)"
+     },
+     {
+      "startExp": 302288,
+      "rate": 128082,
+      "description": "Drift net fishing (112.8k hunter & 83.3k fishing xp/h)"
+     },
+     {
+      "startExp": 593234,
+      "rate": 139313,
+      "description": "Drift net fishing (123k hunter & 90.5k fishing xp/h)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 132800,
+      "description": "Drift net fishing (123k hunter & 93.3k fishing xp/h) + 2t swordfish & tuna"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "firemaking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 73700,
+      "description": "Colored logs"
+     },
+     {
+      "startExp": 22406,
+      "rate": 138900,
+      "description": "Teak logs"
+     },
+     {
+      "startExp": 45529,
+      "rate": 184250,
+      "description": "Arctic pine logs"
+     },
+     {
+      "startExp": 61512,
+      "rate": 198990,
+      "description": "Maple logs"
+     },
+     {
+      "startExp": 101333,
+      "rate": 403745,
+      "description": "Artefacts with firemaking (160.5k thieving & 135.9k firemaking xp/h)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 551169,
+      "description": "Artefacts with firemaking (191k thieving & 174.7k firemaking xp/h)"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 775388,
+      "description": "Artefacts with firemaking (220.6k thieving & 262.1k firemaking xp/h)"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 872198,
+      "description": "Artefacts with firemaking (242.2k thieving & 302k firemaking xp/h)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 789944,
+      "realRate": 302000,
+      "description": "Artefacts with firemaking (255k thieving & 302k firemaking xp/h)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "firemaking",
+      "bonusSkill": "thieving",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.8443
+     }
+    ]
+   },
+   {
+    "skill": "crafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 37000,
+      "description": "Leather items"
+     },
+     {
+      "startExp": 4470,
+      "rate": 139000,
+      "description": "Sapphires"
+     },
+     {
+      "startExp": 9730,
+      "rate": 187650,
+      "description": "Emeralds"
+     },
+     {
+      "startExp": 20224,
+      "rate": 236300,
+      "description": "Rubies"
+     },
+     {
+      "startExp": 50339,
+      "rate": 298850,
+      "description": "Diamonds"
+     },
+     {
+      "startExp": 368599,
+      "rate": 335230,
+      "description": "Green d'hide bodies"
+     },
+     {
+      "startExp": 814445,
+      "rate": 378490,
+      "description": "Blue d'hide bodies"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 421740,
+      "description": "Red d'hide bodies"
+     },
+     {
+      "startExp": 2951373,
+      "rate": 465000,
+      "description": "Black d'hide bodies"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "smithing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 46500,
+      "description": "Quests"
+     },
+     {
+      "startExp": 37224,
+      "rate": 475000,
+      "description": "Dolo Blast Furnace gold"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 505000,
+      "description": "Dolo Blast Furnace gold"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "mining",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 20000,
+      "description": "Quests"
+     },
+     {
+      "startExp": 35025,
+      "rate": 50600,
+      "description": "Motherlode Mine for the prospector kit and Shooting Stars for the celestial ring"
+     },
+     {
+      "startExp": 393485,
+      "rate": 106540,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 112166,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 116760,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 8771558,
+      "rate": 119438,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 126000,
+      "description": "3t granite"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "mining",
+      "bonusSkill": "smithing",
+      "startExp": 1210421,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.08
+     }
+    ]
+   },
+   {
+    "skill": "herblore",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 11100,
+      "description": "Quests"
+     },
+     {
+      "startExp": 8025,
+      "rate": 218750,
+      "description": "Serum 207's"
+     },
+     {
+      "startExp": 123660,
+      "rate": 293750,
+      "description": "Super energies"
+     },
+     {
+      "startExp": 166636,
+      "rate": 312500,
+      "description": "Super strengths"
+     },
+     {
+      "startExp": 368599,
+      "rate": 356250,
+      "description": "Super restores"
+     },
+     {
+      "startExp": 496254,
+      "rate": 375000,
+      "description": "Super defences"
+     },
+     {
+      "startExp": 668051,
+      "rate": 393750,
+      "description": "Antifire potions"
+     },
+     {
+      "startExp": 899257,
+      "rate": 406250,
+      "description": "Ranging potions"
+     },
+     {
+      "startExp": 1336443,
+      "rate": 431250,
+      "description": "Magic potions"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 535500,
+      "description": "1t stamina potions"
+     },
+     {
+      "startExp": 2951373,
+      "rate": 577500,
+      "description": "1t extended antifires"
+     },
+     {
+      "startExp": 3972294,
+      "rate": 630000,
+      "description": "1t anti-venoms"
+     },
+     {
+      "startExp": 11805606,
+      "rate": 840000,
+      "description": "1t extended super antifires"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "agility",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15100,
+      "description": "Quests"
+     },
+     {
+      "startExp": 75127,
+      "rate": 35000,
+      "description": "Wilderness Agility Course"
+     },
+     {
+      "startExp": 123660,
+      "rate": 45000,
+      "description": "Hallowed Sepulchre"
+     },
+     {
+      "startExp": 333804,
+      "rate": 56300,
+      "description": "Hallowed Sepulchre"
+     },
+     {
+      "startExp": 899257,
+      "rate": 68900,
+      "description": "Hallowed Sepulchre"
+     },
+     {
+      "startExp": 2421087,
+      "rate": 79700,
+      "description": "Hallowed Sepulchre"
+     },
+     {
+      "startExp": 6517253,
+      "rate": 102000,
+      "description": "Hallowed Sepulchre with ancient & forgotten brews"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "agility",
+      "bonusSkill": "herblore",
+      "startExp": 6517253,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.6485
+     }
+    ]
+   },
+   {
+    "skill": "thieving",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15000,
+      "description": "Quests, fruit stalls"
+     },
+     {
+      "startExp": 61512,
+      "rate": 80000,
+      "description": "Blackjacking"
+     },
+     {
+      "startExp": 91721,
+      "rate": 241906,
+      "description": "Artefacts with firemaking (160.5k thieving & 135.9k firemaking xp/h)"
+     },
+     {
+      "startExp": 295315,
+      "rate": 279597,
+      "description": "Artefacts with firemaking (191k thieving & 174.7k firemaking xp/h)"
+     },
+     {
+      "startExp": 1319012,
+      "rate": 333283,
+      "description": "Artefacts with firemaking (220.6k thieving & 262.1k firemaking xp/h)"
+     },
+     {
+      "startExp": 4799743,
+      "rate": 370532,
+      "description": "Artefacts with firemaking (242.2k thieving & 302k firemaking xp/h)"
+     },
+     {
+      "startExp": 10966391,
+      "rate": 363882,
+      "description": "Artefacts with ancient brews (255.6k thieving & 250k herblore xp/h)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 370169,
+      "description": "Artefacts with ancient brews after 200m firemaking (260k thieving & 250k herblore xp/h)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "slayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 5000,
+      "description": "Efficient slayer"
+     },
+     {
+      "startExp": 37224,
+      "rate": 12000,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 101333,
+      "rate": 40000,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 449428,
+      "rate": 74250,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 79000,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 86500,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 87000,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 7195629,
+      "rate": 93000,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 105800,
+      "description": "Efficient Slayer"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "attack",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "strength",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "defence",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.493
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "ranged",
+      "startExp": 0,
+      "endExp": 1986068,
+      "end": false,
+      "ratio": 0.3299
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "ranged",
+      "startExp": 1986068,
+      "endExp": 3258594,
+      "end": false,
+      "ratio": 0.2494
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "ranged",
+      "startExp": 3258594,
+      "endExp": 5346332,
+      "end": false,
+      "ratio": 0.1896
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "ranged",
+      "startExp": 5346332,
+      "endExp": 7195629,
+      "end": false,
+      "ratio": 0.174
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "ranged",
+      "startExp": 7195629,
+      "endExp": 13034431,
+      "end": false,
+      "ratio": 0.1521
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "ranged",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.11
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "prayer",
+      "startExp": 0,
+      "endExp": 1986068,
+      "end": false,
+      "ratio": 0.0673
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "prayer",
+      "startExp": 1986068,
+      "endExp": 3258594,
+      "end": false,
+      "ratio": 0.0824
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "prayer",
+      "startExp": 3258594,
+      "endExp": 5346332,
+      "end": false,
+      "ratio": 0.11917
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "prayer",
+      "startExp": 5346332,
+      "endExp": 7195629,
+      "end": false,
+      "ratio": 0.21689
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "prayer",
+      "startExp": 7195629,
+      "endExp": 13034431,
+      "end": false,
+      "ratio": 0.18914
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "prayer",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.21605
+     }
+    ]
+   },
+   {
+    "skill": "farming",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 16000,
+      "description": "Quests"
+     },
+     {
+      "startExp": 32500,
+      "rate": 304000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 61512,
+      "rate": 506000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 166636,
+      "rate": 719000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 273742,
+      "rate": 1083000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 605032,
+      "rate": 1362000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 1896000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 2192818,
+      "rate": 2314000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 2475000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 2500000,
+      "description": "Tree runs"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "runecrafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 13600,
+      "description": "Quests"
+     },
+     {
+      "startExp": 33210,
+      "rate": 45000,
+      "description": "GotR rewards"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 75400,
+      "description": "Solo mud runes"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 106100,
+      "description": "Solo mud runes"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 162000,
+      "description": "Duo lava runes"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "hunter",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 30000,
+      "description": "Varrock museum and birdhouses"
+     },
+     {
+      "startExp": 2107,
+      "rate": 83000,
+      "description": "Oak birdhouses"
+     },
+     {
+      "startExp": 7028,
+      "rate": 110000,
+      "description": "Willow birdhouses"
+     },
+     {
+      "startExp": 20224,
+      "rate": 138000,
+      "description": "Teak birdhouses"
+     },
+     {
+      "startExp": 55649,
+      "rate": 215112,
+      "description": "Drift net fishing (67.7k hunter & 58.0k fishing xp/h)"
+     },
+     {
+      "startExp": 91721,
+      "rate": 268770,
+      "description": "Drift net fishing (84.7k hunter & 67.0k fishing xp/h)"
+     },
+     {
+      "startExp": 24886,
+      "rate": 293310,
+      "description": "Drift net fishing (98.7k hunter & 74.9k fishing xp/h)"
+     },
+     {
+      "startExp": 343551,
+      "rate": 322424,
+      "description": "Drift net fishing (112.8k hunter & 83.3k fishing xp/h)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 350697,
+      "description": "Drift net fishing (123.0k hunter & 90.5k fishing xp/h)"
+     },
+     {
+      "startExp": 933979,
+      "rate": 265000,
+      "realRate": 123000,
+      "description": "Drift net fishing (123k hunter & 93.3k fishing xp/h), scales to black chinchompas"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "hunter",
+      "bonusSkill": "fishing",
+      "startExp": 933979,
+      "endExp": 200000000,
+      "maxBonus": 32414530,
+      "end": true,
+      "ratio": 0.75862069443
+     }
+    ]
+   },
+   {
+    "skill": "construction",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 54700,
+      "description": "Low-level furniture"
+     },
+     {
+      "startExp": 18247,
+      "rate": 450000,
+      "description": "Oak larders"
+     },
+     {
+      "startExp": 123660,
+      "rate": 950000,
+      "description": "Mahogany tables"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 1070000,
+      "description": "Mahogany benches"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "sailing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 10000,
+      "description": "Port tasks, Charting & Quests"
+     },
+     {
+      "startExp": 13363,
+      "rate": 25000,
+      "description": "Barracuda trials (The Tempor Tantrum)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 35000,
+      "description": "Large shipwrecks with boost"
+     },
+     {
+      "startExp": 166636,
+      "rate": 85000,
+      "description": "Barracuda Trials (The Jubbly Jive)"
+     },
+     {
+      "startExp": 899257,
+      "rate": 205000,
+      "description": "Barracuda Trials (The Gwenith Glide) - Camphor hull"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 240000,
+      "description": "Barracuda Trials (The Gwenith Glide) - Rosewood hull"
+     }
+    ],
+    "bonuses": []
+   }
+  ],
+  "ironman": [
+   {
+    "skill": "attack",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 186400,
+      "description": "Chally 2 alt tzhaar (rate based on strength and defence such that chally on shared is 1:1)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "defence",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 768000,
+      "description": "Defensive chinning (378k rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "strength",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 300000,
+      "description": "Chally 2 alt tzhaar"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "ranged",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 17000,
+      "description": "Quests + void"
+     },
+     {
+      "startExp": 203254,
+      "rate": 565900,
+      "description": "Red chins (448k rate)"
+     },
+     {
+      "startExp": 449428,
+      "rate": 842800,
+      "description": "Black chins (641k rate)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 1123600,
+      "description": "Black chins (755k rate)"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 1310100,
+      "description": "Black chins (866k rate)"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 1489400,
+      "description": "Black chins (937k rate)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 1560900,
+      "description": "Black chins (1008k rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "prayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 175900,
+      "description": "Wildy green dragons (340/hr, melees scaled to 600k true rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "cooking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 74300,
+      "description": "2t cook fish from wt"
+     },
+     {
+      "startExp": 13363,
+      "rate": 232200,
+      "description": "Multi Client Shop hop 1t karambwans with alt"
+     },
+     {
+      "startExp": 37224,
+      "rate": 264800,
+      "description": "Multi Client Shop hop 1t karambwans with alt"
+     },
+     {
+      "startExp": 101333,
+      "rate": 297400,
+      "description": "Multi Client Shop hop 1t karambwans with alt"
+     },
+     {
+      "startExp": 273742,
+      "rate": 330000,
+      "description": "Multi Client Shop hop 1t karambwans with alt"
+     },
+     {
+      "startExp": 737627,
+      "rate": 362600,
+      "description": "Multi Client Shop hop 1t karambwans with alt"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 395200,
+      "description": "Multi Client Shop hop 1t karambwans with alt"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 425600,
+      "description": "Multi Client Shop hop 1t karambwans with alt"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 440000,
+      "description": "Multi Client Shop hop 1t karambwans with alt"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "woodcutting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 7000,
+      "description": "Trees"
+     },
+     {
+      "startExp": 2411,
+      "rate": 25000,
+      "description": "Oak trees"
+     },
+     {
+      "startExp": 22406,
+      "rate": 45000,
+      "description": "Teak trees"
+     },
+     {
+      "startExp": 75416,
+      "rate": 0,
+      "description": "0 time from wt"
+     },
+     {
+      "startExp": 368599,
+      "rate": 158600,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 737627,
+      "rate": 169900,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 182200,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 194000,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 202400,
+      "description": "1.5t redwoods with crystal axe, banking ~80% of logs for artefacts (187.6k wc, 33.7k fm rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fletching",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 1524300,
+      "description": "Broads at sepulchre, hourlies, mahog homes and zmi"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fishing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15000,
+      "description": "Quests + Fly fishing"
+     },
+     {
+      "startExp": 22406,
+      "rate": 32000,
+      "description": "Tempoross for barrel"
+     },
+     {
+      "startExp": 302288,
+      "rate": 67200,
+      "description": "Aerial for angler"
+     },
+     {
+      "startExp": 737627,
+      "rate": 115500,
+      "description": "Decant Barblore (93.0k rate)"
+     },
+     {
+      "startExp": 2951373,
+      "rate": 126400,
+      "description": "Decant Barblore (98.6k rate)"
+     },
+     {
+      "startExp": 5902831,
+      "rate": 133800,
+      "description": "Decant Barblore (102.2k rate)"
+     },
+     {
+      "startExp": 10692629,
+      "rate": 138300,
+      "description": "Decant Barblore (104.3k rate)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 141800,
+      "description": "Decant Barblore (107.0k rate)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "strength",
+      "startExp": 737627,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.0885
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "cooking",
+      "startExp": 737627,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.1192
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "agility",
+      "startExp": 737627,
+      "endExp": 13034431,
+      "end": false,
+      "ratio": 0.0885
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "agility",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.0885
+     }
+    ]
+   },
+   {
+    "skill": "firemaking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 45000,
+      "description": "Reg, oak, teak logs"
+     },
+     {
+      "startExp": 101333,
+      "rate": 233900,
+      "description": "World hop wt (223.1k rate)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 274800,
+      "description": "World hop wt (273.9k rate)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 317100,
+      "description": "World hop wt (316.0k rate)"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 359300,
+      "description": "World hop wt (358.0k rate)"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 398800,
+      "description": "World hop wt (397.4k rate)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 462400,
+      "description": "World hop wt (420.0k rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "crafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 50000,
+      "description": "Quests + celastrus bark & daily bstaves for early gp (~1.5k staves) + no-superglassmake glassblow"
+     },
+     {
+      "startExp": 333804,
+      "rate": 347700,
+      "description": "Superglassmake, gems from mining cut 0 time with gem bag, misc jewellry, bh xp, diamond amulet (u)"
+     },
+     {
+      "startExp": 3539592,
+      "rate": 260100,
+      "description": "Lantern lens at zmi"
+     },
+     {
+      "startExp": 3972294,
+      "rate": 331100,
+      "description": "Light orb at zmi"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 207200,
+      "description": "Light orb at zmi"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "smithing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 72800,
+      "description": "Quests, wt ore + gold"
+     },
+     {
+      "startExp": 273742,
+      "rate": 350000,
+      "description": "2 client gold"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 375000,
+      "description": "2 client gold"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "mining",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 25000,
+      "description": "Quests + 1.5t stars for celestial ring + 3t sandstone (drop all)"
+     },
+     {
+      "startExp": 27473,
+      "rate": 70600,
+      "description": "3s1g (Keep 1kg)"
+     },
+     {
+      "startExp": 150872,
+      "rate": 72600,
+      "description": "3s1g (Drop 1kg)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 17000,
+      "description": "1.5t Daeyalt for 99 rc (505k essence)"
+     },
+     {
+      "startExp": 1283073,
+      "rate": 99600,
+      "description": "3t gem rocks"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 45200,
+      "description": "MLM for outfit, gem bag, coal bag"
+     },
+     {
+      "startExp": 4385776,
+      "rate": 108700,
+      "description": "3t gem rocks"
+     },
+     {
+      "startExp": 11441686,
+      "rate": 90200,
+      "description": "Sandstone for 99 crafting"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 125000,
+      "description": "3t granite"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "herblore",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 70000,
+      "description": "Contracts, spirit seeds, kingdom, herbtodt etc"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 76000,
+      "description": "Contracts, spirit seeds, kingdom, herbtodt etc"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "agility",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 10000,
+      "description": "Quests"
+     },
+     {
+      "startExp": 61512,
+      "rate": 45000,
+      "description": "BXP from fishing"
+     },
+     {
+      "startExp": 123660,
+      "rate": 45000,
+      "description": "BXP from fishing"
+     },
+     {
+      "startExp": 333804,
+      "rate": 56300,
+      "description": "BXP from fishing"
+     },
+     {
+      "startExp": 899257,
+      "rate": 66700,
+      "description": "BXP from fishing"
+     },
+     {
+      "startExp": 1152279,
+      "rate": 69700,
+      "description": "Sepulchre with looting + multiskill, thieving ehp, nail/plank time for bridges (64.0k real time rate)"
+     },
+     {
+      "startExp": 2421087,
+      "rate": 76600,
+      "description": "Sepulchre with looting + multiskill, thieving ehp, nail/plank time for bridges (72.6k real time rate)"
+     },
+     {
+      "startExp": 6517253,
+      "rate": 93300,
+      "description": "Sepulchre with looting + multiskill, thieving ehp, nail/plank time for bridges (89.0k real time rate)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 97600,
+      "description": "Sepulchre with looting + multiskill, thieving ehp, nail/plank time for bridges (94.0k real time rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "thieving",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 26000,
+      "description": "Quests + fruit stall"
+     },
+     {
+      "startExp": 61512,
+      "rate": 80000,
+      "description": "Blackjacking"
+     },
+     {
+      "startExp": 91721,
+      "rate": 193200,
+      "description": "Artefact + glassblow (152k, 71k rate)"
+     },
+     {
+      "startExp": 247886,
+      "rate": 219700,
+      "description": "Artefact + glassblow (172k, 71k rate)"
+     },
+     {
+      "startExp": 668051,
+      "rate": 246200,
+      "description": "Artefact + glassblow (193k, 71k rate)"
+     },
+     {
+      "startExp": 1798808,
+      "rate": 272700,
+      "description": "Artefact + glassblow (214k, 71k rate)"
+     },
+     {
+      "startExp": 4842295,
+      "rate": 299200,
+      "description": "Artefact + glassblow (235k, 71k rate)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 381200,
+      "description": "Artefact + glassblow (245k, 71k rate) & banked redwood logs (250k, 305k rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "slayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 5156,
+      "description": "Efficient Slayer + torso, defender, fire cape & turael boosting for early point unlocks"
+     },
+     {
+      "startExp": 101333,
+      "rate": 16000,
+      "description": "Efficient Slayer (19.9k rate) + quest & misc time"
+     },
+     {
+      "startExp": 273742,
+      "rate": 21000,
+      "description": "Efficient Slayer (27.4k rate) + quest & misc time"
+     },
+     {
+      "startExp": 449428,
+      "rate": 23500,
+      "description": "Efficient Slayer (31.5k rate) + quest & misc time"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 24200,
+      "description": "Efficient Slayer (32.4k rate) + quest & misc time"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 27000,
+      "description": "Efficient Slayer (32.3k rate) + quest & misc time"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 33800,
+      "description": "Efficient Slayer (42.2k rate) + quest & misc time"
+     },
+     {
+      "startExp": 7195629,
+      "rate": 34500,
+      "description": "Efficient Slayer (50.7k rate) + quest & misc time"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 81500,
+      "description": "Efficient slayer + pvm for upgrades, including stored ehp, konar every 50, 0 cox, 850 zulrah, 50 muspah (58.4k rate)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "defence",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "attack",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "strength",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.9115
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "ranged",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.055
+     }
+    ]
+   },
+   {
+    "skill": "farming",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 500000,
+      "description": "Low level trees + giant seaweed"
+     },
+     {
+      "startExp": 150872,
+      "rate": 66000,
+      "description": "Tithe for seed box + autoweed"
+     },
+     {
+      "startExp": 407015,
+      "rate": 2000000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 3445600,
+      "description": "Highest xp trees, farming from herblore, contracts etc, 4 years of hardwoods, volcanic ash, hespori"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "runecrafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 16000,
+      "description": "Quests + Arceuus Favour"
+     },
+     {
+      "startExp": 33648,
+      "rate": 84600,
+      "description": "1.5t Daeyalt Lavas"
+     },
+     {
+      "startExp": 101333,
+      "rate": 99600,
+      "description": "1.5t Daeyalt Lavas"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 70000,
+      "description": "GOTR for outfit"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 115000,
+      "description": "1.5t Daeyalt ZMI"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 119100,
+      "description": "1.5t Daeyalt ZMI"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 80100,
+      "description": "1.5t Daeyalt ZMI (123k rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "hunter",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 136800,
+      "description": "Low tier bh + History quiz"
+     },
+     {
+      "startExp": 91721,
+      "rate": 192000,
+      "description": "Mahogany bh"
+     },
+     {
+      "startExp": 668051,
+      "rate": 84400,
+      "description": "Aerial for angler"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 192000,
+      "description": "Mahogany+ bh"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 156900,
+      "description": "Red chins for ranged"
+     },
+     {
+      "startExp": 2421087,
+      "rate": 207900,
+      "description": "Black chins"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 241000,
+      "description": "Black chins"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 255000,
+      "description": "Average of black chins (260k rate), rumours (240k rate) and birdhouses"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "construction",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 20000,
+      "description": "Planks"
+     },
+     {
+      "startExp": 18247,
+      "rate": 75000,
+      "description": "Oak larders"
+     },
+     {
+      "startExp": 37224,
+      "rate": 0,
+      "description": "Bonus xp from wt"
+     },
+     {
+      "startExp": 101333,
+      "rate": 240000,
+      "description": "Myth cape racks + kingdom mahog homes & some benches/tables"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 279100,
+      "description": "1.5t teak myth capes (421k rate) + kingdom mahogany homes (285k rate), con from sep, & misc time"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "sailing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 10000,
+      "description": "Port tasks & Quests"
+     },
+     {
+      "startExp": 13363,
+      "rate": 25000,
+      "description": "Barracuda trials (The Tempor Tantrum)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 35000,
+      "description": "Large shipwrecks with boost"
+     },
+     {
+      "startExp": 166636,
+      "rate": 85000,
+      "description": "Barracuda Trials (The Jubbly Jive)"
+     },
+     {
+      "startExp": 899257,
+      "rate": 205000,
+      "description": "Barracuda Trials (The Gwenith Glide) - Camphor hull"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 240000,
+      "description": "Barracuda Trials (The Gwenith Glide) - Rosewood hull"
+     }
+    ],
+    "bonuses": []
+   }
+  ],
+  "ultimate": [
+   {
+    "skill": "attack",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 207800,
+      "description": "Chally TzHaar with 2 alts"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "defence",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 539100,
+      "description": "Defensive chinning (286k defence rate, incl. passive XP)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "strength",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 300000,
+      "description": "Chally TzHaar with 2 alts"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "ranged",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 21000,
+      "description": "Quests, Pest Control for void"
+     },
+     {
+      "startExp": 273742,
+      "rate": 533000,
+      "description": "Chinning (478k ranged rate, incl. prayer XP)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 628000,
+      "description": "Chinning (551k ranged rate, incl. prayer XP)"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 716000,
+      "description": "Chinning (617k ranged rate, incl. prayer XP)"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 801000,
+      "description": "Chinning (678k ranged rate, incl. prayer XP)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 1085000,
+      "description": "Chinning (776k ranged rate, incl. prayer XP)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "prayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 30000,
+      "description": "Quests, blue dragons"
+     },
+     {
+      "startExp": 50339,
+      "rate": 50000,
+      "description": "Wilderness green dragons & chaos altar, passive XP from early slayer, DT2"
+     },
+     {
+      "startExp": 737627,
+      "rate": 122900,
+      "description": "Wilderness green dragons & chaos altar (108.3k prayer rate, incl. defence XP)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 137800,
+      "description": "Wilderness green dragons & chaos altar (108.3k prayer rate, incl. melee XP)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "cooking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 50000,
+      "description": "Quests, sardines, fly fishing"
+     },
+     {
+      "startExp": 13363,
+      "rate": 211200,
+      "description": "Buying and cooking karambwan with an alt"
+     },
+     {
+      "startExp": 41171,
+      "rate": 240800,
+      "description": "Buying and cooking karambwan with an alt"
+     },
+     {
+      "startExp": 101333,
+      "rate": 270400,
+      "description": "Buying and cooking karambwan with an alt"
+     },
+     {
+      "startExp": 273742,
+      "rate": 300100,
+      "description": "Buying and cooking karambwan with an alt"
+     },
+     {
+      "startExp": 737627,
+      "rate": 329700,
+      "description": "Buying and cooking karambwan with an alt"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 359300,
+      "description": "Buying and cooking karambwan with an alt"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 385900,
+      "description": "Buying and cooking karambwan with an alt"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 400000,
+      "description": "Buying and cooking karambwan with an alt"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "woodcutting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 29000,
+      "description": "Monk's Friend and regular trees"
+     },
+     {
+      "startExp": 2411,
+      "rate": 35500,
+      "description": "2t oaks & burning logs"
+     },
+     {
+      "startExp": 13363,
+      "rate": 44300,
+      "description": "2t oaks & burning logs"
+     },
+     {
+      "startExp": 64249,
+      "rate": 130900,
+      "description": "Wintertodt (1.5t teaks rate)"
+     },
+     {
+      "startExp": 302288,
+      "rate": 75000,
+      "description": "Forestry for the log basket"
+     },
+     {
+      "startExp": 602288,
+      "rate": 164700,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 737627,
+      "rate": 168600,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 181100,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 5902831,
+      "rate": 193400,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 204500,
+      "description": "1.5t teaks"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fletching",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 300000,
+      "description": "Headless arrows"
+     },
+     {
+      "startExp": 123660,
+      "rate": 880000,
+      "description": "Broad arrows with Sepulchre, hunter, and artefacts"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 980000,
+      "description": "Broad arrows with Sepulchre, hunter, and artefacts"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fishing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 53300,
+      "description": "Quests and 3t fly fishing"
+     },
+     {
+      "startExp": 83014,
+      "rate": 42700,
+      "description": "Eat-cut barbarian fishing"
+     },
+     {
+      "startExp": 224466,
+      "rate": 70900,
+      "description": "Eat-cut barbarian fishing"
+     },
+     {
+      "startExp": 737627,
+      "rate": 92600,
+      "description": "Eat-cut barbarian fishing"
+     },
+     {
+      "startExp": 2183968,
+      "rate": 153100,
+      "description": "Decant barblore (88.3k fishing rate & 400 caviar/h + potion noting time)"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 169600,
+      "description": "Decant barblore (92.2k fishing rate & 432 caviar/h + potion noting time)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 183000,
+      "description": "Decant barblore (98.2k fishing rate & 456 caviar/h + potion noting time)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "cooking",
+      "startExp": 83014,
+      "endExp": 13034431,
+      "end": true,
+      "ratio": 0.13
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "cooking",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.1355
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "agility",
+      "startExp": 83014,
+      "endExp": 224466,
+      "end": false,
+      "ratio": 0.1
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "agility",
+      "startExp": 224466,
+      "endExp": 737627,
+      "end": false,
+      "ratio": 0.093
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "agility",
+      "startExp": 737627,
+      "endExp": 2183968,
+      "end": false,
+      "ratio": 0.091
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "agility",
+      "startExp": 2183968,
+      "endExp": 13034431,
+      "end": true,
+      "ratio": 0.091
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "agility",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.0885
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "strength",
+      "startExp": 83014,
+      "endExp": 224466,
+      "end": false,
+      "ratio": 0.1
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "strength",
+      "startExp": 224466,
+      "endExp": 737627,
+      "end": false,
+      "ratio": 0.093
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "strength",
+      "startExp": 737627,
+      "endExp": 13034431,
+      "end": false,
+      "ratio": 0.091
+     },
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "strength",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.0885
+     }
+    ]
+   },
+   {
+    "skill": "firemaking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 7200,
+      "description": "Burning regular logs"
+     },
+     {
+      "startExp": 2411,
+      "rate": 66500,
+      "description": "2t oaks & burning oak logs"
+     },
+     {
+      "startExp": 50339,
+      "rate": 80500,
+      "description": "2t oaks & burning oak logs"
+     },
+     {
+      "startExp": 101333,
+      "rate": 181300,
+      "description": "Dolo Wintertodt (164k firemaking rate, incl. passive & stored XP)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 215000,
+      "description": "Dolo Wintertodt (193k firemaking rate, incl. passive & stored XP)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 249500,
+      "description": "Dolo Wintertodt (223k firemaking rate, incl. passive & stored XP)"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 287600,
+      "description": "Dolo Wintertodt (255k firemaking rate, incl. passive & stored XP)"
+     },
+     {
+      "startExp": 5848876,
+      "rate": 459700,
+      "description": "World-hop Wintertodt (360k firemaking rate, incl. passive & stored XP)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 522000,
+      "description": "World-hop Wintertodt (400k firemaking rate + passive & stored XP)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "firemaking",
+      "bonusSkill": "fletching",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.025
+     }
+    ]
+   },
+   {
+    "skill": "crafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15200,
+      "description": "Quests, Port Phasmatys charters"
+     },
+     {
+      "startExp": 91721,
+      "rate": 44000,
+      "description": "Port Phasmatys lantern lenses"
+     },
+     {
+      "startExp": 302288,
+      "rate": 83800,
+      "description": "Charters (2-client hopping)"
+     },
+     {
+      "startExp": 3972294,
+      "rate": 103800,
+      "description": "Charters (2-client hopping)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 130000,
+      "description": "Dorgesh-Kaan lamps (109k crafting, 81.9k firemaking & 1.6k thieving rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "smithing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 75200,
+      "description": "Quests, Giants' Foundry"
+     },
+     {
+      "startExp": 273742,
+      "rate": 315000,
+      "description": "Blast Furnace gold (2-client hopping)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 330000,
+      "description": "Blast Furnace gold (2-client hopping)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "mining",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 8000,
+      "description": "Quests"
+     },
+     {
+      "startExp": 13363,
+      "rate": 59158,
+      "description": "3t iron"
+     },
+     {
+      "startExp": 61512,
+      "rate": 85500,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 101333,
+      "rate": 89151,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 302288,
+      "rate": 97923,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 737627,
+      "rate": 103751,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 109143,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 40000,
+      "description": "Motherlode Mine for the prospector kit"
+     },
+     {
+      "startExp": 3808594,
+      "rate": 113287,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 115638,
+      "description": "3t granite"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 125000,
+      "description": "3t granite"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "herblore",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 21800,
+      "description": "Quests, lamps, and master farmers"
+     },
+     {
+      "startExp": 737627,
+      "rate": 38169,
+      "description": "Master farmers"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 40300,
+      "description": "Master farmers, mole, and herbiboar + ToA time for fang"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "agility",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 10900,
+      "description": "Bonus XP from fishing (Quests, low-level rooftops)"
+     },
+     {
+      "startExp": 123660,
+      "rate": 44900,
+      "description": "Bonus XP from fishing (Sepulchre rate)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 40000,
+      "description": "Seers' rooftop for the graceful outfit"
+     },
+     {
+      "startExp": 737627,
+      "rate": 48000,
+      "description": "Pollnivneach rooftop for the graceful outfit"
+     },
+     {
+      "startExp": 1282357,
+      "rate": 65700,
+      "description": "Sepulchre"
+     },
+     {
+      "startExp": 2421087,
+      "rate": 77500,
+      "description": "Sepulchre looting (76.4k agility rate, incl. passive XP)"
+     },
+     {
+      "startExp": 6517253,
+      "rate": 92300,
+      "description": "Sepulchre looting (88.1k agility rate, incl. passive XP)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "thieving",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 26000,
+      "description": "Quests, fruit stalls"
+     },
+     {
+      "startExp": 61512,
+      "rate": 80000,
+      "description": "Blackjacking"
+     },
+     {
+      "startExp": 166636,
+      "rate": 130000,
+      "description": "Blackjacking"
+     },
+     {
+      "startExp": 449428,
+      "rate": 200000,
+      "description": "Blackjacking"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 225000,
+      "description": "Blackjacking"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 245000,
+      "description": "Blackjacking, Pyramid Plunder for a sceptre"
+     },
+     {
+      "startExp": 7944614,
+      "rate": 339866,
+      "description": "Artefacts with glassblowing (215.3k thieving & 54.6k crafting rate, incl. supply time)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 357725,
+      "description": "Artefacts with glassblowing (215.4k thieving & 78.7k crafting rate, incl. supply time)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "slayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 7100,
+      "description": "Turael & Konar point boosting for 200 tasks (12.6k avg. slayer rate) + quest and gear time"
+     },
+     {
+      "startExp": 404857,
+      "rate": 21300,
+      "description": "Konar slayer (19.5k slayer rate)"
+     },
+     {
+      "startExp": 668051,
+      "rate": 16400,
+      "description": "Nieve slayer (33.2k slayer rate) + quest time and unlocks"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 38300,
+      "description": "Nieve slayer (33.8k slayer rate)"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 42400,
+      "description": "Duradel slayer (33.9k slayer rate)"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 58300,
+      "description": "Duradel slayer (35.6k slayer rate)"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 36800,
+      "description": "Duradel slayer (33.7k slayer rate) + PVM time"
+     },
+     {
+      "startExp": 7195629,
+      "rate": 63000,
+      "description": "Duradel slayer (38.6k slayer rate)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 71800,
+      "description": "Duradel slayer (43.3k slayer rate) + passive & stored XP, PVM upgrades, and supply time)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "ranged",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.025
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "attack",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "strength",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.911
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "defence",
+      "startExp": 0,
+      "endExp": 13034431,
+      "end": false,
+      "ratio": 0.605
+     },
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "defence",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.663
+     }
+    ]
+   },
+   {
+    "skill": "farming",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 115000,
+      "description": "Quests, low-level trees"
+     },
+     {
+      "startExp": 313818,
+      "rate": 65000,
+      "description": "Tithe Farm rewards"
+     },
+     {
+      "startExp": 496254,
+      "rate": 800000,
+      "description": "Tree runs from mole seeds"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 1090000,
+      "description": "Tree runs from mole seeds"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "runecrafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 13100,
+      "description": "Quests"
+     },
+     {
+      "startExp": 37224,
+      "rate": 36100,
+      "description": "GotR small teams / dolos (35.2k runecraft rate + passive XP & looting time)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 53000,
+      "description": "GotR small teams / dolos (43.2k runecraft rate + passive XP & looting time)"
+     },
+     {
+      "startExp": 449428,
+      "rate": 58300,
+      "description": "GotR small teams / dolos (47.5k runecraft rate + passive XP & looting time)"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 59900,
+      "description": "GotR small teams / solos (56.1k runecraft rate + passive XP & looting time)"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 60600,
+      "description": "GotR small teams / solos (56.7k runecraft rate + passive XP & looting time)"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 74400,
+      "description": "GotR small teams / solos (69.5k runecraft rate + passive XP & looting time)"
+     },
+     {
+      "startExp": 8771558,
+      "rate": 78600,
+      "description": "GotR small teams / solos (73.4k runecraft rate + passive XP & looting time)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 76000,
+      "description": "GotR small teams / solos (77.0k runecraft rate + looting time)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "runecrafting",
+      "bonusSkill": "crafting",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.095
+     },
+     {
+      "originSkill": "runecrafting",
+      "bonusSkill": "mining",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.0364
+     }
+    ]
+   },
+   {
+    "skill": "hunter",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 72200,
+      "description": "Low-level birdhouses"
+     },
+     {
+      "startExp": 91721,
+      "rate": 103800,
+      "description": "Mahogany birdhouses, red salamanders"
+     },
+     {
+      "startExp": 737627,
+      "rate": 104600,
+      "description": "Red chinchompas"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 158300,
+      "description": "Red chinchompas"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 183300,
+      "description": "Red chinchompas"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 235000,
+      "description": "Hunters\u2019 Rumours, red chinchompas for ranged"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "construction",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 3800,
+      "description": "Quests, low-level furniture"
+     },
+     {
+      "startExp": 4470,
+      "rate": 0,
+      "description": "Dolo Wintertodt"
+     },
+     {
+      "startExp": 223678,
+      "rate": 128100,
+      "description": "1.5t teaks & Mahogany Homes (107k base rate, no plank sack)"
+     },
+     {
+      "startExp": 508945,
+      "rate": 138400,
+      "description": "1.5t teaks & Mahogany Homes (114k base rate)"
+     },
+     {
+      "startExp": 1336443,
+      "rate": 144600,
+      "description": "1.5t teaks & Mahogany Homes (119k base rate)"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 219944,
+      "description": "1.5t teaks & mythical capes (125k base rate)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 250500,
+      "description": "1.5t mahogany MH with Plank Make (175k construction & 61.7k woodcutting rate)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "sailing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 10000,
+      "description": "Port tasks & Quests"
+     },
+     {
+      "startExp": 13363,
+      "rate": 25000,
+      "description": "Barracuda trials (The Tempor Tantrum)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 35000,
+      "description": "Large shipwrecks with boost"
+     },
+     {
+      "startExp": 166636,
+      "rate": 85000,
+      "description": "Barracuda Trials (The Jubbly Jive)"
+     },
+     {
+      "startExp": 899257,
+      "rate": 205000,
+      "description": "Barracuda Trials (The Gwenith Glide) - Camphor hull"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 240000,
+      "description": "Barracuda Trials (The Gwenith Glide) - Rosewood hull"
+     }
+    ],
+    "bonuses": []
+   }
+  ],
+  "lvl3": [
+   {
+    "skill": "cooking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 172800,
+      "description": "1t poison karambwan"
+     },
+     {
+      "startExp": 13363,
+      "rate": 519100,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 37224,
+      "rate": 591600,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 101333,
+      "rate": 663600,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 273742,
+      "rate": 735700,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 737627,
+      "rate": 808000,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 880400,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 948100,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 980000,
+      "description": "1t karambwan"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "woodcutting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 8000,
+      "description": "Quests (Monks friend, Enlightened journey, Children of the Sun + The Ribbiting Tale of a Lily Pad Labour Dispute, and Gertrude's Cat + Icthlarin's Little Helper)"
+     },
+     {
+      "startExp": 9500,
+      "rate": 56000,
+      "description": "2t oaks + Mithril/Adamant felling axe"
+     },
+     {
+      "startExp": 22406,
+      "rate": 93170,
+      "description": "1.5t teaks + Adamant felling axe"
+     },
+     {
+      "startExp": 41171,
+      "rate": 114724,
+      "description": "1.5t teaks + Rune felling axe"
+     },
+     {
+      "startExp": 111945,
+      "rate": 127335,
+      "description": "1.5t teaks + Rune felling axe"
+     },
+     {
+      "startExp": 302288,
+      "rate": 172502,
+      "description": "1.5t teaks + Dragon felling axe"
+     },
+     {
+      "startExp": 814445,
+      "rate": 186565,
+      "description": "1.5t teaks + Dragon felling axe"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 199286,
+      "description": "1.5t teaks + Dragon felling axe"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 212789,
+      "description": "1.5t teaks + Dragon felling axe"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 225000,
+      "description": "1.5t teaks + Dragon felling axe"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fishing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 29200,
+      "description": "Quests"
+     },
+     {
+      "startExp": 14612,
+      "rate": 46592,
+      "description": "3t fly fishing"
+     },
+     {
+      "startExp": 75127,
+      "rate": 84686,
+      "description": "Drift net fishing (67.7k hunter & 58k fishing xp/h)"
+     },
+     {
+      "startExp": 106046,
+      "rate": 97867,
+      "description": "Drift net fishing (84.7k hunter & 67k fishing xp/h)"
+     },
+     {
+      "startExp": 229685,
+      "rate": 112877,
+      "description": "Drift net fishing (98.7k hunter & 74.9k fishing xp/h)"
+     },
+     {
+      "startExp": 302288,
+      "rate": 128082,
+      "description": "Drift net fishing (112.8k hunter & 83.3k fishing xp/h)"
+     },
+     {
+      "startExp": 593234,
+      "rate": 139313,
+      "description": "Drift net fishing (123k hunter & 90.5k fishing xp/h)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 132800,
+      "description": "Drift net fishing (123k hunter & 93.3k fishing xp/h) + 2t swordfish & tuna"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "cooking",
+      "startExp": 737627,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.216
+     }
+    ]
+   },
+   {
+    "skill": "firemaking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 58960,
+      "description": "Logs"
+     },
+     {
+      "startExp": 2411,
+      "rate": 88440,
+      "description": "Oak logs"
+     },
+     {
+      "startExp": 13363,
+      "rate": 132660,
+      "description": "Willow logs"
+     },
+     {
+      "startExp": 22406,
+      "rate": 154770,
+      "description": "Teak logs"
+     },
+     {
+      "startExp": 61512,
+      "rate": 198990,
+      "description": "Maple logs"
+     },
+     {
+      "startExp": 101333,
+      "rate": 365272,
+      "description": "Firebwan (Mahogany logs) - 232k firemaking, 240k cooking"
+     },
+     {
+      "startExp": 273742,
+      "rate": 469636,
+      "description": "Firebwan (Yew logs) - 298k firemaking, 265k cooking"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 704569,
+      "description": "Firebwan (Magic logs) - 448k firemaking, 304k cooking"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 794566,
+      "realRate": 310000,
+      "description": "Firebwan (Redwood logs) - 505k firemaking, 353.5k cooking"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "firemaking",
+      "bonusSkill": "thieving",
+      "startExp": 5346332,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.8387
+     }
+    ]
+   },
+   {
+    "skill": "crafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 37000,
+      "description": "Leather items"
+     },
+     {
+      "startExp": 4470,
+      "rate": 139000,
+      "description": "Sapphires"
+     },
+     {
+      "startExp": 9730,
+      "rate": 187650,
+      "description": "Emeralds"
+     },
+     {
+      "startExp": 20224,
+      "rate": 236300,
+      "description": "Rubies"
+     },
+     {
+      "startExp": 50339,
+      "rate": 298850,
+      "description": "Diamonds"
+     },
+     {
+      "startExp": 368599,
+      "rate": 335230,
+      "description": "Green d'hide bodies"
+     },
+     {
+      "startExp": 814445,
+      "rate": 378490,
+      "description": "Blue d'hide bodies"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 421740,
+      "description": "Red d'hide bodies"
+     },
+     {
+      "startExp": 2951373,
+      "rate": 465000,
+      "description": "Black d'hide bodies"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "smithing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 47450,
+      "description": "Quests (The Knight's Sword, Sleeping Giants, and Elemental Workshop I)"
+     },
+     {
+      "startExp": 23725,
+      "rate": 116000,
+      "description": "Iron Platebodies w/ alt"
+     },
+     {
+      "startExp": 83014,
+      "rate": 174000,
+      "description": "Steel platebodies w/ alt"
+     },
+     {
+      "startExp": 605032,
+      "rate": 232000,
+      "description": "Mithril platebodies w/ alt"
+     },
+     {
+      "startExp": 4385776,
+      "rate": 290000,
+      "description": "Adamant platebodies w/ alt"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 505000,
+      "description": "Dolo Blast Furnace gold"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "mining",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 24500,
+      "description": "Quests (Client of Kourend + X Marks the Spot + The Forsaken Tower, Doric's Quest, Plague City, The Dig Site + Rune Mysteries + Goblin Diplomacy + The Lost Tribe)"
+     },
+     {
+      "startExp": 22525,
+      "rate": 53780,
+      "description": "3t Iron"
+     },
+     {
+      "startExp": 61512,
+      "rate": 77708,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 101333,
+      "rate": 81026,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 302288,
+      "rate": 88329,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 737627,
+      "rate": 93586,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 98450,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 46500,
+      "description": "Motherlode Mine for Prospector kit"
+     },
+     {
+      "startExp": 3693744,
+      "rate": 103620,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 105100,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 114100,
+      "description": "3t4g at Desert Quarry"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "mining",
+      "bonusSkill": "smithing",
+      "startExp": 302288,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.08
+     }
+    ]
+   },
+   {
+    "skill": "herblore",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 6000,
+      "description": "Quests (Druidic Ritual + Jungle Potion, The Dig Site)"
+     },
+     {
+      "startExp": 3025,
+      "rate": 125000,
+      "description": "Strength potions"
+     },
+     {
+      "startExp": 30408,
+      "rate": 218750,
+      "description": "Prayer potions"
+     },
+     {
+      "startExp": 61512,
+      "rate": 250000,
+      "description": "Super attack potions"
+     },
+     {
+      "startExp": 123660,
+      "rate": 293750,
+      "description": "Super energies"
+     },
+     {
+      "startExp": 166636,
+      "rate": 312500,
+      "description": "Super strengths"
+     },
+     {
+      "startExp": 368599,
+      "rate": 356250,
+      "description": "Super restores"
+     },
+     {
+      "startExp": 496254,
+      "rate": 375000,
+      "description": "Super defences"
+     },
+     {
+      "startExp": 668051,
+      "rate": 393750,
+      "description": "Antifire potions"
+     },
+     {
+      "startExp": 899257,
+      "rate": 406250,
+      "description": "Ranging potions"
+     },
+     {
+      "startExp": 1336443,
+      "rate": 431250,
+      "description": "Magic potions"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 535500,
+      "description": "1t stamina potions"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 810000,
+      "description": "Ancient brew artefacts - 195k thieving, 270k herblore"
+     },
+     {
+      "startExp": 5902831,
+      "rate": 660000,
+      "description": "Forgotten +Ancient brew artefacts - 205k thieving, 300k herblore"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 644841,
+      "description": "Forgotten + Ancient brew artefacts - 220k thieving, 300k herblore"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "agility",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 9000,
+      "description": "Draynor Village Course"
+     },
+     {
+      "startExp": 2411,
+      "rate": 11000,
+      "description": "Al Kharid Agility Course"
+     },
+     {
+      "startExp": 7842,
+      "rate": 14000,
+      "description": "Varrock Agility Course"
+     },
+     {
+      "startExp": 37224,
+      "rate": 28000,
+      "description": "Shayzien Agility Course"
+     },
+     {
+      "startExp": 61512,
+      "rate": 34000,
+      "description": "Falador Agility Course"
+     },
+     {
+      "startExp": 166636,
+      "rate": 44000,
+      "description": "Seers' Village Agility Course"
+     },
+     {
+      "startExp": 449428,
+      "rate": 56000,
+      "description": "Pollnivneach Agility Course"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 59000,
+      "description": "Pollnivneach Agility Course"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 66000,
+      "description": "Ardougne Agility Course"
+     },
+     {
+      "startExp": 9684577,
+      "rate": 70000,
+      "description": "Ardougne Agility Course"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "thieving",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15505,
+      "description": "Quests (Gertrude\u2019s Cat + Icthlarin's Little Helper + Ratcatchers Plague City + Biohazard, Tribal Totem, Hazeel Cult, The Feud, X Marks the Spot + Client of Kourend + The Queen of Thieves, Shield of Arrav + Children of the Sun + Ethically Acquired Antiquities + Death on the Isle)"
+     },
+     {
+      "startExp": 46525,
+      "rate": 39000,
+      "description": "Fruit Stall"
+     },
+     {
+      "startExp": 61512,
+      "rate": 55000,
+      "description": "Blackjacking"
+     },
+     {
+      "startExp": 91721,
+      "rate": 210000,
+      "description": "Artefacts with firemaking (130k thieving & 140k firemaking)"
+     },
+     {
+      "startExp": 293865,
+      "rate": 243000,
+      "description": "Artefacts with firemaking (150k thieving & 180k firemaking)"
+     },
+     {
+      "startExp": 1309988,
+      "rate": 291000,
+      "description": "Artefacts with firemaking (180k thieving & 270k firemaking)"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 375000,
+      "description": "Artefacts with firemaking (205k thieving & 360k firemaking)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 411393,
+      "description": "Artefacts with firemaking (225k thieving & 360k firemaking)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "farming",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 24000,
+      "description": "Quests, bagged plants, and low-level trees"
+     },
+     {
+      "startExp": 17470,
+      "rate": 288000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 61512,
+      "rate": 498000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 166636,
+      "rate": 679000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 273742,
+      "rate": 1045000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 605032,
+      "rate": 1261000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 1875000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 2192818,
+      "rate": 2167000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 2265000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 2300000,
+      "description": "Tree runs"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "runecrafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 7000,
+      "description": "Quests (X Marks the Spot + Client of Kourend + The Ascent of Arceuus, Rune Mysteries + Enter the Abyss + Temple of the Eye)"
+     },
+     {
+      "startExp": 6500,
+      "rate": 145000,
+      "description": "Duo lava runes"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "hunter",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 30080,
+      "description": "Varrock museum and birdhouses"
+     },
+     {
+      "startExp": 2107,
+      "rate": 82849,
+      "description": "Oak birdhouses"
+     },
+     {
+      "startExp": 7028,
+      "rate": 110466,
+      "description": "Willow birdhouses"
+     },
+     {
+      "startExp": 20224,
+      "rate": 138082,
+      "description": "Teak birdhouses"
+     },
+     {
+      "startExp": 55649,
+      "rate": 215112,
+      "description": "Drift net fishing (67.7k hunter & 58.0k fishing xp/h)"
+     },
+     {
+      "startExp": 91721,
+      "rate": 268770,
+      "description": "Drift net fishing (84.7k hunter & 67.0k fishing xp/h)"
+     },
+     {
+      "startExp": 24886,
+      "rate": 293310,
+      "description": "Drift net fishing (98.7k hunter & 74.9k fishing xp/h)"
+     },
+     {
+      "startExp": 343551,
+      "rate": 322424,
+      "description": "Drift net fishing (112.8k hunter & 83.3k fishing xp/h)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 350697,
+      "description": "Drift net fishing (123.0k hunter & 90.5k fishing xp/h)"
+     },
+     {
+      "startExp": 933979,
+      "rate": 265000,
+      "realRate": 123000,
+      "description": "Drift net fishing (123k hunter & 93.3k fishing xp/h), scales to black chinchompas"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "hunter",
+      "bonusSkill": "fishing",
+      "startExp": 933979,
+      "endExp": 200000000,
+      "maxBonus": 43163290,
+      "end": true,
+      "ratio": 0.75862069443
+     }
+    ]
+   },
+   {
+    "skill": "construction",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 54700,
+      "description": "Low-level furniture"
+     },
+     {
+      "startExp": 18247,
+      "rate": 450000,
+      "description": "Oak larders"
+     },
+     {
+      "startExp": 123660,
+      "rate": 950000,
+      "description": "Mahogany tables"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 1070000,
+      "description": "Mahogany benches"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "sailing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 5000,
+      "description": "Port tasks & Quests"
+     },
+     {
+      "startExp": 13363,
+      "rate": 25000,
+      "description": "Barracuda trials (The Tempor Tantrum)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 35000,
+      "description": "Large shipwrecks with boost"
+     },
+     {
+      "startExp": 166636,
+      "rate": 80000,
+      "description": "Barracuda Trials (The Jubbly Jive)"
+     },
+     {
+      "startExp": 922895,
+      "rate": 130000,
+      "description": "Barracuda shipwrecks"
+     }
+    ],
+    "bonuses": []
+   }
+  ],
+  "f2p": [
+   {
+    "skill": "attack",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 12000,
+      "description": "Vampyre Slayer"
+     },
+     {
+      "startExp": 4825,
+      "rate": 30000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 37224,
+      "rate": 90000,
+      "description": "Castle Wars Alt. Killing"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "defence",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 90000,
+      "description": "Castle Wars Alt. Killing"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "strength",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 12000,
+      "description": "Dragon Slayer"
+     },
+     {
+      "startExp": 18650,
+      "rate": 25000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 37224,
+      "rate": 40500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 50339,
+      "rate": 43500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 75127,
+      "rate": 49000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 123660,
+      "rate": 52000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 166636,
+      "rate": 55000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 273742,
+      "rate": 58000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 407015,
+      "rate": 61000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 547953,
+      "rate": 66500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 899257,
+      "rate": 69500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 1336443,
+      "rate": 72500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 75500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 2951373,
+      "rate": 78500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 4385776,
+      "rate": 84000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 7195629,
+      "rate": 87000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 9684577,
+      "rate": 90000,
+      "description": "Castle Wars Alt. Killing"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "ranged",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 8000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 13363,
+      "rate": 30000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 20224,
+      "rate": 34000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 33648,
+      "rate": 40500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 55649,
+      "rate": 44500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 91721,
+      "rate": 48500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 150872,
+      "rate": 52500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 273742,
+      "rate": 56500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 449428,
+      "rate": 63000,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 737627,
+      "rate": 66500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 70500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 74500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 78500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 85500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 8771558,
+      "rate": 89500,
+      "description": "Castle Wars Alt. Killing"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 90000,
+      "description": "Castle Wars Alt. Killing"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "prayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 160000,
+      "description": "Bury Big bones & Vile ashes during melees"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "cooking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 130000,
+      "description": "1t Beef"
+     },
+     {
+      "startExp": 22406,
+      "rate": 450000,
+      "description": "Wines with Failing"
+     },
+     {
+      "startExp": 605032,
+      "rate": 500000,
+      "description": "Wines 100% Success Rate"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "woodcutting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 8365,
+      "description": "4t trees"
+     },
+     {
+      "startExp": 2411,
+      "rate": 35000,
+      "description": "2t Oaks (steel axe)"
+     },
+     {
+      "startExp": 5018,
+      "rate": 45000,
+      "description": "2t oaks (mith axe)"
+     },
+     {
+      "startExp": 14833,
+      "rate": 60000,
+      "description": "2t oaks (addy axe)"
+     },
+     {
+      "startExp": 41171,
+      "rate": 80000,
+      "description": "2t oaks (rune axe)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 98000,
+      "description": "2t oaks (rune axe)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 105000,
+      "description": "2t oaks (100% success)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fishing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 3000,
+      "description": "Shrimp"
+     },
+     {
+      "startExp": 388,
+      "rate": 5000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 1154,
+      "rate": 12000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 4470,
+      "rate": 21000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 13363,
+      "rate": 41000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 37224,
+      "rate": 50000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 101333,
+      "rate": 58000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 273742,
+      "rate": 65000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 737627,
+      "rate": 71000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 78000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 5902831,
+      "rate": 84000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 90000,
+      "description": "3t fish 0t cook trout+salmon"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "cooking",
+      "startExp": 13363,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1.15
+     }
+    ]
+   },
+   {
+    "skill": "firemaking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 20000,
+      "description": "Logs @ GE w/scatter"
+     },
+     {
+      "startExp": 2411,
+      "rate": 40000,
+      "description": "Oak logs @ GE w/scatter"
+     },
+     {
+      "startExp": 13363,
+      "rate": 100000,
+      "description": "Willow logs @ GE w/scatter"
+     },
+     {
+      "startExp": 61512,
+      "rate": 195750,
+      "description": "Maple logs @ GE w/scatter"
+     },
+     {
+      "startExp": 273742,
+      "rate": 293625,
+      "description": "Yew logs @ GE w/scatter"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "firemaking",
+      "bonusSkill": "prayer",
+      "startExp": 61512,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.12
+     }
+    ]
+   },
+   {
+    "skill": "crafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 37000,
+      "description": "Leather"
+     },
+     {
+      "startExp": 4470,
+      "rate": 139000,
+      "description": "Sapphires"
+     },
+     {
+      "startExp": 9730,
+      "rate": 187650,
+      "description": "Emeralds"
+     },
+     {
+      "startExp": 20224,
+      "rate": 236300,
+      "description": "Rubies"
+     },
+     {
+      "startExp": 50339,
+      "rate": 298850,
+      "description": "Diamonds"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "smithing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 38175,
+      "description": "Knight's Sword"
+     },
+     {
+      "startExp": 12725,
+      "rate": 59970,
+      "description": "Bronze Platebodies w/ alt"
+     },
+     {
+      "startExp": 18247,
+      "rate": 119950,
+      "description": "Iron Platebodies w/ alt"
+     },
+     {
+      "startExp": 83014,
+      "rate": 179900,
+      "description": "Steel Platebodies w/ alt"
+     },
+     {
+      "startExp": 605032,
+      "rate": 239900,
+      "description": "Mithril Platebodies w/ alt"
+     },
+     {
+      "startExp": 4385776,
+      "rate": 300000,
+      "description": "Adamant Platebodies w/ alt"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "mining",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 4000,
+      "description": "Tin/copper"
+     },
+     {
+      "startExp": 2411,
+      "rate": 50750,
+      "description": "3t Iron w/ Cake (All Rocks)"
+     },
+     {
+      "startExp": 5018,
+      "rate": 53600,
+      "description": "3t Iron w/ Cake (All Rocks)"
+     },
+     {
+      "startExp": 14833,
+      "rate": 57550,
+      "description": "3t Iron w/ Cake (All Rocks)"
+     },
+     {
+      "startExp": 41171,
+      "rate": 60900,
+      "description": "3t Iron w/ Cake (Adjacent Rocks)"
+     },
+     {
+      "startExp": 302288,
+      "rate": 65000,
+      "description": "3t Iron w/ Cake (Adjacent Rocks) or 3.5t Iron w/ Superheat"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "runecrafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 75000,
+      "description": "Dolo Pvp World Body Tiaras"
+     }
+    ],
+    "bonuses": []
+   }
+  ],
+  "f2p_lvl3": [
+   {
+    "skill": "cooking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 130000,
+      "description": "1t Beef"
+     },
+     {
+      "startExp": 22406,
+      "rate": 450000,
+      "description": "Wines with Failing"
+     },
+     {
+      "startExp": 605032,
+      "rate": 500000,
+      "description": "Wines 100% Success Rate"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "woodcutting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 8365,
+      "description": "4t trees"
+     },
+     {
+      "startExp": 2411,
+      "rate": 35000,
+      "description": "2t Oaks (steel axe)"
+     },
+     {
+      "startExp": 5018,
+      "rate": 45000,
+      "description": "2t oaks (mith axe)"
+     },
+     {
+      "startExp": 14833,
+      "rate": 60000,
+      "description": "2t oaks (addy axe)"
+     },
+     {
+      "startExp": 41171,
+      "rate": 80000,
+      "description": "2t oaks (rune axe)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 98000,
+      "description": "2t oaks (rune axe)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 105000,
+      "description": "2t oaks (100% success)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fishing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 3000,
+      "description": "Shrimp"
+     },
+     {
+      "startExp": 388,
+      "rate": 5000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 1154,
+      "rate": 12000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 4470,
+      "rate": 21000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 13363,
+      "rate": 41000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 37224,
+      "rate": 50000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 101333,
+      "rate": 58000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 273742,
+      "rate": 65000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 737627,
+      "rate": 71000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 78000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 5902831,
+      "rate": 84000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 90000,
+      "description": "3t fish 0t cook trout+salmon"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "cooking",
+      "startExp": 13363,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1.15
+     }
+    ]
+   },
+   {
+    "skill": "firemaking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 20000,
+      "description": "Logs @ GE"
+     },
+     {
+      "startExp": 2411,
+      "rate": 40000,
+      "description": "Oak logs @ GE"
+     },
+     {
+      "startExp": 13363,
+      "rate": 100000,
+      "description": "Willow logs @ GE"
+     },
+     {
+      "startExp": 61512,
+      "rate": 197000,
+      "description": "Maple logs @ GE"
+     },
+     {
+      "startExp": 273742,
+      "rate": 296000,
+      "description": "Yew logs @ GE"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "crafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 37000,
+      "description": "Leather"
+     },
+     {
+      "startExp": 4470,
+      "rate": 139000,
+      "description": "Sapphires"
+     },
+     {
+      "startExp": 9730,
+      "rate": 187650,
+      "description": "Emeralds"
+     },
+     {
+      "startExp": 20224,
+      "rate": 236300,
+      "description": "Rubies"
+     },
+     {
+      "startExp": 50339,
+      "rate": 298850,
+      "description": "Diamonds"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "smithing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 38175,
+      "description": "Knight's Sword"
+     },
+     {
+      "startExp": 12725,
+      "rate": 59970,
+      "description": "Bronze Platebodies w/ alt"
+     },
+     {
+      "startExp": 18247,
+      "rate": 119950,
+      "description": "Iron Platebodies w/ alt"
+     },
+     {
+      "startExp": 83014,
+      "rate": 179900,
+      "description": "Steel Platebodies w/ alt"
+     },
+     {
+      "startExp": 605032,
+      "rate": 239900,
+      "description": "Mithril Platebodies w/ alt"
+     },
+     {
+      "startExp": 4385776,
+      "rate": 300000,
+      "description": "Adamant Platebodies w/ alt"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "mining",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 4000,
+      "description": "Tin/copper"
+     },
+     {
+      "startExp": 2411,
+      "rate": 50750,
+      "description": "3t Iron w/ Cake (All Rocks)"
+     },
+     {
+      "startExp": 5018,
+      "rate": 53600,
+      "description": "3t Iron w/ Cake (All Rocks)"
+     },
+     {
+      "startExp": 14833,
+      "rate": 57550,
+      "description": "3t Iron w/ Cake (All Rocks)"
+     },
+     {
+      "startExp": 41171,
+      "rate": 60900,
+      "description": "3t Iron w/ Cake (Adjacent Rocks)"
+     },
+     {
+      "startExp": 302288,
+      "rate": 65000,
+      "description": "3t Iron w/ Cake (Adjacent Rocks)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "runecrafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 60000,
+      "description": "Dolo Pvp World Body Tiaras"
+     }
+    ],
+    "bonuses": []
+   }
+  ],
+  "f2p_ironman": [
+   {
+    "skill": "attack",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 12000,
+      "description": "Vampyre Slayer"
+     },
+     {
+      "startExp": 4825,
+      "rate": 14000,
+      "description": "Minotaurs"
+     },
+     {
+      "startExp": 37224,
+      "rate": 31200,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 101333,
+      "rate": 36000,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 273742,
+      "rate": 40600,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 737627,
+      "rate": 43000,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 48600,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 49600,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 50700,
+      "description": "Hill Giants + 23m Ogresses"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "attack",
+      "bonusSkill": "prayer",
+      "startExp": 4825,
+      "endExp": 13034431,
+      "end": true,
+      "ratio": 0.129
+     },
+     {
+      "originSkill": "attack",
+      "bonusSkill": "prayer",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.1175
+     },
+     {
+      "originSkill": "attack",
+      "bonusSkill": "crafting",
+      "startExp": 37224,
+      "endExp": 13034431,
+      "end": true,
+      "ratio": 0.0047
+     },
+     {
+      "originSkill": "attack",
+      "bonusSkill": "crafting",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.0081
+     }
+    ]
+   },
+   {
+    "skill": "defence",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 12000,
+      "description": "Dragon Slayer"
+     },
+     {
+      "startExp": 18650,
+      "rate": 20000,
+      "description": "Longrange shortbow at ~70 ranged"
+     },
+     {
+      "startExp": 37224,
+      "rate": 50700,
+      "description": "Hill Giants + 23m Ogresses"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "defence",
+      "bonusSkill": "prayer",
+      "startExp": 37224,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.1176
+     },
+     {
+      "originSkill": "defence",
+      "bonusSkill": "crafting",
+      "startExp": 37224,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.0081
+     }
+    ]
+   },
+   {
+    "skill": "strength",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 12000,
+      "description": "Dragon Slayer"
+     },
+     {
+      "startExp": 18650,
+      "rate": 14000,
+      "description": "Cows/Minotaurs"
+     },
+     {
+      "startExp": 37224,
+      "rate": 23300,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 101333,
+      "rate": 27300,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 273742,
+      "rate": 32100,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 737627,
+      "rate": 36700,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 42000,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 44800,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 46700,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 8771558,
+      "rate": 49600,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 51100,
+      "description": "Hill Giants + 23m Ogresses"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "strength",
+      "bonusSkill": "prayer",
+      "startExp": 18650,
+      "endExp": 13034431,
+      "end": true,
+      "ratio": 0.129
+     },
+     {
+      "originSkill": "strength",
+      "bonusSkill": "prayer",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.1173
+     },
+     {
+      "originSkill": "strength",
+      "bonusSkill": "crafting",
+      "startExp": 37224,
+      "endExp": 13034431,
+      "end": true,
+      "ratio": 0.0047
+     },
+     {
+      "originSkill": "strength",
+      "bonusSkill": "crafting",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.0081
+     }
+    ]
+   },
+   {
+    "skill": "ranged",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 2900,
+      "description": "Chickens"
+     },
+     {
+      "startExp": 388,
+      "rate": 5400,
+      "description": "Cows"
+     },
+     {
+      "startExp": 4470,
+      "rate": 11000,
+      "description": "Minotaurs"
+     },
+     {
+      "startExp": 13363,
+      "rate": 13900,
+      "description": "Minotaurs"
+     },
+     {
+      "startExp": 37224,
+      "rate": 21500,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 101333,
+      "rate": 27300,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 166636,
+      "rate": 30100,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 302288,
+      "rate": 27000,
+      "description": "Ogresses"
+     },
+     {
+      "startExp": 547953,
+      "rate": 30100,
+      "description": "Ogresses"
+     },
+     {
+      "startExp": 992895,
+      "rate": 33200,
+      "description": "Ogresses"
+     },
+     {
+      "startExp": 1798808,
+      "rate": 36400,
+      "description": "Ogresses"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 39500,
+      "description": "Ogresses"
+     },
+     {
+      "startExp": 5902831,
+      "rate": 42500,
+      "description": "Ogresses"
+     },
+     {
+      "startExp": 9684577,
+      "rate": 45400,
+      "description": "Hill Giants"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 44400,
+      "description": "Ogresses + 17.5m Obor"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "ranged",
+      "bonusSkill": "prayer",
+      "startExp": 0,
+      "endExp": 302288,
+      "end": true,
+      "ratio": 0.145
+     },
+     {
+      "originSkill": "ranged",
+      "bonusSkill": "prayer",
+      "startExp": 302288,
+      "endExp": 13034431,
+      "end": true,
+      "ratio": 0.0457
+     },
+     {
+      "originSkill": "ranged",
+      "bonusSkill": "prayer",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.0534
+     },
+     {
+      "originSkill": "ranged",
+      "bonusSkill": "crafting",
+      "startExp": 37224,
+      "endExp": 302288,
+      "end": true,
+      "ratio": 0.0047
+     },
+     {
+      "originSkill": "ranged",
+      "bonusSkill": "crafting",
+      "startExp": 302288,
+      "endExp": 13034431,
+      "end": true,
+      "ratio": 0.0326
+     },
+     {
+      "originSkill": "ranged",
+      "bonusSkill": "crafting",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.0369
+     }
+    ]
+   },
+   {
+    "skill": "prayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 17000,
+      "description": "Boneyard"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "magic",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15000,
+      "description": "Misc spells"
+     },
+     {
+      "startExp": 3973,
+      "rate": 33000,
+      "description": "Curse splash"
+     },
+     {
+      "startExp": 33648,
+      "rate": 43500,
+      "description": "Fire bolt moss giants"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "magic",
+      "bonusSkill": "prayer",
+      "startExp": 33648,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.0516
+     }
+    ]
+   },
+   {
+    "skill": "cooking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 115000,
+      "description": "3t fish 0t cook"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "woodcutting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 8365,
+      "description": "4t trees"
+     },
+     {
+      "startExp": 2411,
+      "rate": 35000,
+      "description": "2t oaks (steel axe)"
+     },
+     {
+      "startExp": 5018,
+      "rate": 45000,
+      "description": "2t oaks (mith axe)"
+     },
+     {
+      "startExp": 14833,
+      "rate": 60000,
+      "description": "2t oaks (addy axe)"
+     },
+     {
+      "startExp": 41171,
+      "rate": 80000,
+      "description": "2t oaks (rune axe)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 98000,
+      "description": "2t oaks (rune axe)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 105000,
+      "description": "2t oaks (100% success)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fishing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 3000,
+      "description": "Shrimp"
+     },
+     {
+      "startExp": 388,
+      "rate": 5000,
+      "description": "Sardine"
+     },
+     {
+      "startExp": 1154,
+      "rate": 12000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 4470,
+      "rate": 21000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 13363,
+      "rate": 41000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 37224,
+      "rate": 50000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 101333,
+      "rate": 58000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 273742,
+      "rate": 65000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 737627,
+      "rate": 71000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 78000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 5902831,
+      "rate": 84000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 90000,
+      "description": "3t fish 0t cook trout+salmon"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "cooking",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1.15
+     }
+    ]
+   },
+   {
+    "skill": "firemaking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15000,
+      "description": "Regular logs"
+     },
+     {
+      "startExp": 2411,
+      "rate": 45000,
+      "description": "Oak logs"
+     },
+     {
+      "startExp": 13363,
+      "rate": 60000,
+      "description": "Willow logs from Woodcutting (77% fm success)"
+     },
+     {
+      "startExp": 50339,
+      "rate": 65000,
+      "description": "Willow logs from Woodcutting (100% fm success)"
+     },
+     {
+      "startExp": 237742,
+      "rate": 70000,
+      "description": "2t yews + fm"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "firemaking",
+      "bonusSkill": "woodcutting",
+      "startExp": 13363,
+      "endExp": 273742,
+      "end": true,
+      "ratio": 0.75
+     },
+     {
+      "originSkill": "firemaking",
+      "bonusSkill": "woodcutting",
+      "startExp": 273742,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.8642
+     }
+    ]
+   },
+   {
+    "skill": "crafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15000,
+      "description": "Leather from cows"
+     },
+     {
+      "startExp": 2746,
+      "rate": 19000,
+      "description": "Unstrung symbols at Varrock Southwest mine"
+     },
+     {
+      "startExp": 6291,
+      "rate": 19500,
+      "description": "Silver tiaras at Varrock Southwest mine"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "crafting",
+      "bonusSkill": "smithing",
+      "startExp": 2746,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.261
+     },
+     {
+      "originSkill": "crafting",
+      "bonusSkill": "mining",
+      "startExp": 2746,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.762
+     },
+     {
+      "originSkill": "crafting",
+      "bonusSkill": "magic",
+      "startExp": 2746,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.044
+     }
+    ]
+   },
+   {
+    "skill": "smithing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 38175,
+      "description": "Knight's sword (assumes 20 min completion)"
+     },
+     {
+      "startExp": 12725,
+      "rate": 16500,
+      "description": "Telegrab nats & Superheating iron (56% mining success)"
+     },
+     {
+      "startExp": 24463,
+      "rate": 20700,
+      "description": "Telegrab nats & Superheating iron (70% mining success)"
+     },
+     {
+      "startExp": 50000,
+      "rate": 23300,
+      "description": "Telegrab nats & Superheating iron (80% mining success)"
+     },
+     {
+      "startExp": 106000,
+      "rate": 25700,
+      "description": "Telegrab nats & Superheating iron (90% mining success)"
+     },
+     {
+      "startExp": 334700,
+      "rate": 27200,
+      "description": "Telegrab nats & Superheating iron (100% mining success). 151m xp superheating at 32k/hr, 786k telegrabs at 950/hr"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "smithing",
+      "bonusSkill": "mining",
+      "startExp": 12725,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.933
+     },
+     {
+      "originSkill": "smithing",
+      "bonusSkill": "magic",
+      "startExp": 12725,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 1.6373
+     }
+    ]
+   },
+   {
+    "skill": "mining",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 4000,
+      "description": "Tin/copper"
+     },
+     {
+      "startExp": 2411,
+      "rate": 40500,
+      "description": "4t leather double roll at hobgoblin mine"
+     },
+     {
+      "startExp": 13363,
+      "rate": 45500,
+      "description": "4t leather double roll at hobgoblin mine"
+     },
+     {
+      "startExp": 37224,
+      "rate": 48000,
+      "description": "3.33t snow mining at al kharid"
+     },
+     {
+      "startExp": 101333,
+      "rate": 54000,
+      "description": "3.33t snow mining at al kharid"
+     },
+     {
+      "startExp": 302288,
+      "rate": 60000,
+      "description": "3.33t snow mining at al kharid"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "runecrafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 5900,
+      "description": "Suicide bodies / minotaurs"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "runecrafting",
+      "bonusSkill": "mining",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.6233
+     }
+    ]
+   }
+  ],
+  "f2p_lvl3_ironman": [
+   {
+    "skill": "cooking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 115000,
+      "description": "3t fish 0t cook"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "woodcutting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 8365,
+      "description": "4t trees"
+     },
+     {
+      "startExp": 2411,
+      "rate": 36000,
+      "description": "2t oaks (steel axe)"
+     },
+     {
+      "startExp": 5018,
+      "rate": 46300,
+      "description": "2t oaks (mith axe)"
+     },
+     {
+      "startExp": 14833,
+      "rate": 61700,
+      "description": "2t oaks (addy axe)"
+     },
+     {
+      "startExp": 41171,
+      "rate": 82300,
+      "description": "2t oaks (rune axe)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 100800,
+      "description": "2t oaks (rune axe)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 108000,
+      "description": "2t oaks (100% success)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fishing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 3000,
+      "description": "Shrimp"
+     },
+     {
+      "startExp": 388,
+      "rate": 5000,
+      "description": "Sardine"
+     },
+     {
+      "startExp": 1154,
+      "rate": 12000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 4470,
+      "rate": 21000,
+      "description": "Sardine & Herring"
+     },
+     {
+      "startExp": 13363,
+      "rate": 41000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 37224,
+      "rate": 50000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 101333,
+      "rate": 58000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 273742,
+      "rate": 65000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 737627,
+      "rate": 71000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 78000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 5902831,
+      "rate": 84000,
+      "description": "3t fish 0t cook trout+salmon"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 90000,
+      "description": "3t fish 0t cook trout+salmon"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "fishing",
+      "bonusSkill": "cooking",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 1.15
+     }
+    ]
+   },
+   {
+    "skill": "firemaking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15000,
+      "description": "Regular logs"
+     },
+     {
+      "startExp": 2411,
+      "rate": 45000,
+      "description": "Oak logs"
+     },
+     {
+      "startExp": 13363,
+      "rate": 60000,
+      "description": "Willow logs from Woodcutting (77% fm success)"
+     },
+     {
+      "startExp": 50339,
+      "rate": 65000,
+      "description": "Willow logs from Woodcutting (100% fm success)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "firemaking",
+      "bonusSkill": "woodcutting",
+      "startExp": 13363,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.75
+     }
+    ]
+   },
+   {
+    "skill": "crafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 6750,
+      "description": "Suicide air tiaras"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "crafting",
+      "bonusSkill": "mining",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.762
+     },
+     {
+      "originSkill": "crafting",
+      "bonusSkill": "runecrafting",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.476
+     },
+     {
+      "originSkill": "crafting",
+      "bonusSkill": "smithing",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.261
+     }
+    ]
+   },
+   {
+    "skill": "smithing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 38175,
+      "description": "Knight's Sword (assumes 20 min completion)"
+     },
+     {
+      "startExp": 12725,
+      "rate": 9500,
+      "description": "RoF iron (Doric's anvil)"
+     },
+     {
+      "startExp": 37224,
+      "rate": 9500,
+      "description": "Wildy double hop gold"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "smithing",
+      "bonusSkill": "mining",
+      "startExp": 12725,
+      "endExp": 37224,
+      "end": true,
+      "ratio": 0.933
+     }
+    ]
+   },
+   {
+    "skill": "mining",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 4000,
+      "description": "Tin/copper"
+     },
+     {
+      "startExp": 2411,
+      "rate": 40500,
+      "description": "4t leather double roll at hobgoblin mine"
+     },
+     {
+      "startExp": 13363,
+      "rate": 45500,
+      "description": "4t leather double roll at hobgoblin mine"
+     },
+     {
+      "startExp": 37224,
+      "rate": 48000,
+      "description": "3.33t snow mining at al kharid"
+     },
+     {
+      "startExp": 101333,
+      "rate": 54000,
+      "description": "3.33t snow mining at al kharid"
+     },
+     {
+      "startExp": 302288,
+      "rate": 60000,
+      "description": "3.33t snow mining at al kharid"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "runecrafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 4550,
+      "description": "Earth runes (assuming 150 XP/hour gained from lamps)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "runecrafting",
+      "bonusSkill": "mining",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.769
+     }
+    ]
+   }
+  ],
+  "def1": [
+   {
+    "skill": "ranged",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 631537,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 744604,
+      "description": "Bonus XP from Slayer"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 857806,
+      "description": "Chinning maniacal monkeys"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "prayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 1670000,
+      "description": "Dagannoth bones at the chaos altar"
+     },
+     {
+      "startExp": 737627,
+      "rate": 2000000,
+      "description": "Superior dragon bones at the chaos altar"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "cooking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 171000,
+      "description": "1t poison karambwan"
+     },
+     {
+      "startExp": 13363,
+      "rate": 513800,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 37224,
+      "rate": 585600,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 101333,
+      "rate": 656800,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 273742,
+      "rate": 728200,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 737627,
+      "rate": 799800,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 871400,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 938400,
+      "description": "1t karambwan"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 970000,
+      "description": "1t karambwan"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "woodcutting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 29000,
+      "description": "Quests and trees"
+     },
+     {
+      "startExp": 2411,
+      "rate": 56000,
+      "description": "2t oaks (average rate)"
+     },
+     {
+      "startExp": 22406,
+      "rate": 93174,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 41171,
+      "rate": 114728,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 111945,
+      "rate": 127339,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 302288,
+      "rate": 172507,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 814445,
+      "rate": 194022,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 207636,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 221977,
+      "description": "1.5t teaks"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 235000,
+      "description": "1.5t teaks"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "fishing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 29200,
+      "description": "Quests"
+     },
+     {
+      "startExp": 14612,
+      "rate": 46592,
+      "description": "3t fly fishing"
+     },
+     {
+      "startExp": 75127,
+      "rate": 81612,
+      "description": "Drift net fishing (65.2k hunter & 55.9k fishing xp/h)"
+     },
+     {
+      "startExp": 106046,
+      "rate": 94314,
+      "description": "Drift net fishing (81.6k hunter & 64.6k fishing xp/h)"
+     },
+     {
+      "startExp": 229685,
+      "rate": 108780,
+      "description": "Drift net fishing (95.1k hunter & 72.2k fishing xp/h)"
+     },
+     {
+      "startExp": 302288,
+      "rate": 123432,
+      "description": "Drift net fishing (108.7k hunter & 80.3k fishing xp/h)"
+     },
+     {
+      "startExp": 593234,
+      "rate": 134256,
+      "description": "Drift net fishing (118.5k hunter & 87.2k fishing xp/h)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 132800,
+      "description": "Drift net fishing (118.5k hunter & 89.9k fishing xp/h) and 2t swordfish & tuna"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "firemaking",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 73700,
+      "description": "Colored logs"
+     },
+     {
+      "startExp": 22406,
+      "rate": 138900,
+      "description": "Teak logs"
+     },
+     {
+      "startExp": 45529,
+      "rate": 184250,
+      "description": "Arctic pine logs"
+     },
+     {
+      "startExp": 61512,
+      "rate": 198990,
+      "description": "Maple logs"
+     },
+     {
+      "startExp": 101333,
+      "rate": 414079,
+      "description": "Artefacts with firemaking (163.6k thieving & 139.5k firemaking xp/h)"
+     },
+     {
+      "startExp": 273742,
+      "rate": 565154,
+      "description": "Artefacts with firemaking (194.6k thieving & 179.4k firemaking xp/h)"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 795098,
+      "description": "Artefacts with firemaking (224.8k thieving & 269.1k firemaking xp/h)"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 894364,
+      "description": "Artefacts with firemaking (246.8k thieving & 310k firemaking xp/h)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 794566,
+      "realRate": 310000,
+      "description": "Artefacts with firemaking (260k thieving & 310k firemaking xp/h), scales to firebwan (505k firemaking & 353.5k cooking xp/h)"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "firemaking",
+      "bonusSkill": "thieving",
+      "startExp": 13034431,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.8387
+     }
+    ]
+   },
+   {
+    "skill": "crafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 57000,
+      "description": "Leather items"
+     },
+     {
+      "startExp": 4470,
+      "rate": 139000,
+      "description": "Sapphires"
+     },
+     {
+      "startExp": 9730,
+      "rate": 187650,
+      "description": "Emeralds"
+     },
+     {
+      "startExp": 20224,
+      "rate": 236300,
+      "description": "Rubies"
+     },
+     {
+      "startExp": 50339,
+      "rate": 298850,
+      "description": "Diamonds"
+     },
+     {
+      "startExp": 368599,
+      "rate": 324420,
+      "description": "Green d'hide bodies"
+     },
+     {
+      "startExp": 814445,
+      "rate": 366280,
+      "description": "Blue d'hide bodies"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 408140,
+      "description": "Red d'hide bodies"
+     },
+     {
+      "startExp": 2951373,
+      "rate": 450000,
+      "description": "Black d'hide bodies"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "smithing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 46500,
+      "description": "Quests"
+     },
+     {
+      "startExp": 37224,
+      "rate": 380000,
+      "description": "Blast Furnace gold"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 410000,
+      "description": "Blast Furnace gold"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "mining",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 30000,
+      "description": "Questing XP"
+     },
+     {
+      "startExp": 13363,
+      "rate": 53780,
+      "description": "3t Iron"
+     },
+     {
+      "startExp": 61512,
+      "rate": 77727,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 101333,
+      "rate": 81046,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 302288,
+      "rate": 88350,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 737627,
+      "rate": 93609,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 98474,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 46500,
+      "description": "Motherlode Mine for Prospector kit"
+     },
+     {
+      "startExp": 3693744,
+      "rate": 103620,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 105125,
+      "description": "3t4g at Desert Quarry"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 114130,
+      "description": "3t4g at Desert Quarry"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "mining",
+      "bonusSkill": "smithing",
+      "startExp": 61512,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.08
+     }
+    ]
+   },
+   {
+    "skill": "herblore",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 6000,
+      "description": "Quests"
+     },
+     {
+      "startExp": 3000,
+      "rate": 125000,
+      "description": "Strength potions"
+     },
+     {
+      "startExp": 30408,
+      "rate": 218750,
+      "description": "Prayer potions"
+     },
+     {
+      "startExp": 61512,
+      "rate": 250000,
+      "description": "Super attack potions"
+     },
+     {
+      "startExp": 123660,
+      "rate": 293750,
+      "description": "Super energies"
+     },
+     {
+      "startExp": 166636,
+      "rate": 312500,
+      "description": "Super strengths"
+     },
+     {
+      "startExp": 368599,
+      "rate": 356250,
+      "description": "Super restores"
+     },
+     {
+      "startExp": 496254,
+      "rate": 375000,
+      "description": "Super defences"
+     },
+     {
+      "startExp": 668051,
+      "rate": 393750,
+      "description": "Antifire potions"
+     },
+     {
+      "startExp": 899257,
+      "rate": 406250,
+      "description": "Ranging potions"
+     },
+     {
+      "startExp": 1336443,
+      "rate": 431250,
+      "description": "Magic potions"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 535500,
+      "description": "1t stamina potions"
+     },
+     {
+      "startExp": 3972294,
+      "rate": 630000,
+      "description": "1t anti-venoms"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "agility",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15100,
+      "description": "Quests"
+     },
+     {
+      "startExp": 75127,
+      "rate": 35000,
+      "description": "Wilderness Agility Course"
+     },
+     {
+      "startExp": 166636,
+      "rate": 55000,
+      "description": "Werewolf course (boosting with Summer pies)"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 66000,
+      "description": "Werewolf course (boosting with Summer pies)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "thieving",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 15000,
+      "description": "Quests, fruit stalls"
+     },
+     {
+      "startExp": 61512,
+      "rate": 80000,
+      "description": "Blackjacking"
+     },
+     {
+      "startExp": 91721,
+      "rate": 246655,
+      "description": "Artefacts with firemaking (163.6k thieving & 139.5k firemaking xp/h)"
+     },
+     {
+      "startExp": 293865,
+      "rate": 285024,
+      "description": "Artefacts with firemaking (194.6k thieving & 179.4k firemaking xp/h)"
+     },
+     {
+      "startExp": 1309988,
+      "rate": 339767,
+      "description": "Artefacts with firemaking (224.8k thieving & 269.1k firemaking xp/h)"
+     },
+     {
+      "startExp": 4765013,
+      "rate": 377739,
+      "description": "Artefacts with firemaking (246.8k thieving & 310k firemaking xp/h)"
+     },
+     {
+      "startExp": 10885948,
+      "rate": 363882,
+      "description": "Artefacts with ancient brews (255.6k thieving & 250k herblore xp/h)"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 370169,
+      "description": "Artefacts with ancient brews after 200m firemaking (260k thieving & 250k herblore xp/h)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "slayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 5000,
+      "description": "Efficient slayer"
+     },
+     {
+      "startExp": 37224,
+      "rate": 12000,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 101333,
+      "rate": 40000,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 449428,
+      "rate": 53171,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 1986068,
+      "rate": 54961,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 60691,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 7195629,
+      "rate": 66330,
+      "description": "Efficient Slayer"
+     },
+     {
+      "startExp": 13034431,
+      "rate": 70609,
+      "description": "Efficient Slayer"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "slayer",
+      "bonusSkill": "ranged",
+      "startExp": 0,
+      "endExp": 200000000,
+      "end": false,
+      "ratio": 0.277
+     }
+    ]
+   },
+   {
+    "skill": "farming",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 16000,
+      "description": "Quests"
+     },
+     {
+      "startExp": 32500,
+      "rate": 285000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 61512,
+      "rate": 491000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 166636,
+      "rate": 679000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 273742,
+      "rate": 1052000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 605032,
+      "rate": 1338000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 1210421,
+      "rate": 1884000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 2192818,
+      "rate": 2309000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 3258594,
+      "rate": 2474000,
+      "description": "Tree runs"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 2500000,
+      "description": "Tree runs"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "runecrafting",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 13600,
+      "description": "Quests"
+     },
+     {
+      "startExp": 6291,
+      "rate": 260000,
+      "description": "0+4 Lava runes (Earth talisman)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "hunter",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 30000,
+      "description": "Varrock museum and birdhouses"
+     },
+     {
+      "startExp": 2107,
+      "rate": 83000,
+      "description": "Oak birdhouses"
+     },
+     {
+      "startExp": 7028,
+      "rate": 110000,
+      "description": "Willow birdhouses"
+     },
+     {
+      "startExp": 20224,
+      "rate": 138000,
+      "description": "Teak birdhouses"
+     },
+     {
+      "startExp": 55649,
+      "rate": 161000,
+      "description": "Drift net fishing (65.2k hunter & 55.9k fishing xp/h)"
+     },
+     {
+      "startExp": 91721,
+      "rate": 207303,
+      "description": "Drift net fishing (81.6k hunter & 64.6k fishing xp/h)"
+     },
+     {
+      "startExp": 24886,
+      "rate": 282663,
+      "description": "Drift net fishing (95.1k hunter & 72.2k fishing xp/h)"
+     },
+     {
+      "startExp": 343551,
+      "rate": 310720,
+      "description": "Drift net fishing (108.7k hunter & 80.3k fishing xp/h)"
+     },
+     {
+      "startExp": 737627,
+      "rate": 337966,
+      "description": "Drift net fishing (118.5k hunter & 87.2k fishing xp/h)"
+     },
+     {
+      "startExp": 933979,
+      "rate": 265000,
+      "realRate": 118535,
+      "description": "Drift net fishing (118.5k hunter & 89.9k fishing xp/h), scales to black chinchompas"
+     }
+    ],
+    "bonuses": [
+     {
+      "originSkill": "hunter",
+      "bonusSkill": "fishing",
+      "startExp": 933979,
+      "endExp": 200000000,
+      "end": true,
+      "ratio": 0.7586
+     }
+    ]
+   },
+   {
+    "skill": "construction",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 54700,
+      "description": "Low-level furniture"
+     },
+     {
+      "startExp": 18247,
+      "rate": 450000,
+      "description": "Oak larders"
+     },
+     {
+      "startExp": 123660,
+      "rate": 950000,
+      "description": "Mahogany tables"
+     },
+     {
+      "startExp": 1475581,
+      "rate": 1050000,
+      "description": "Mahogany benches"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "sailing",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 10000,
+      "description": "Port tasks, Charting & Quests"
+     },
+     {
+      "startExp": 13363,
+      "rate": 25000,
+      "description": "Barracuda trials (The Tempor Tantrum)"
+     },
+     {
+      "startExp": 101333,
+      "rate": 35000,
+      "description": "Large shipwrecks with boost"
+     },
+     {
+      "startExp": 166636,
+      "rate": 85000,
+      "description": "Barracuda Trials (The Jubbly Jive)"
+     },
+     {
+      "startExp": 899257,
+      "rate": 205000,
+      "description": "Barracuda Trials (The Gwenith Glide) - Camphor hull"
+     },
+     {
+      "startExp": 5346332,
+      "rate": 240000,
+      "description": "Barracuda Trials (The Gwenith Glide) - Rosewood hull"
+     }
+    ],
+    "bonuses": []
+   }
+  ]
+ },
+ "ehb": {
+  "main": [
+   {
+    "boss": "abyssal_sire",
+    "rate": 50
+   },
+   {
+    "boss": "alchemical_hydra",
+    "rate": 30
+   },
+   {
+    "boss": "amoxliatl",
+    "rate": 85
+   },
+   {
+    "boss": "araxxor",
+    "rate": 40
+   },
+   {
+    "boss": "artio",
+    "rate": 60
+   },
+   {
+    "boss": "barrows_chests",
+    "rate": 22
+   },
+   {
+    "boss": "brutus",
+    "rate": 250
+   },
+   {
+    "boss": "bryophyta",
+    "rate": 9
+   },
+   {
+    "boss": "callisto",
+    "rate": 142
+   },
+   {
+    "boss": "calvarion",
+    "rate": 55
+   },
+   {
+    "boss": "cerberus",
+    "rate": 65
+   },
+   {
+    "boss": "chambers_of_xeric_challenge_mode",
+    "rate": 3
+   },
+   {
+    "boss": "chambers_of_xeric",
+    "rate": 3.5
+   },
+   {
+    "boss": "chaos_elemental",
+    "rate": 120
+   },
+   {
+    "boss": "chaos_fanatic",
+    "rate": 100
+   },
+   {
+    "boss": "commander_zilyana",
+    "rate": 60
+   },
+   {
+    "boss": "corporeal_beast",
+    "rate": 60
+   },
+   {
+    "boss": "crazy_archaeologist",
+    "rate": 75
+   },
+   {
+    "boss": "dagannoth_prime",
+    "rate": 105
+   },
+   {
+    "boss": "dagannoth_rex",
+    "rate": 105
+   },
+   {
+    "boss": "dagannoth_supreme",
+    "rate": 105
+   },
+   {
+    "boss": "deranged_archaeologist",
+    "rate": 80
+   },
+   {
+    "boss": "doom_of_mokhaiotl",
+    "rate": 20
+   },
+   {
+    "boss": "duke_sucellus",
+    "rate": 39
+   },
+   {
+    "boss": "general_graardor",
+    "rate": 58
+   },
+   {
+    "boss": "giant_mole",
+    "rate": 125
+   },
+   {
+    "boss": "grotesque_guardians",
+    "rate": 37
+   },
+   {
+    "boss": "hespori",
+    "rate": 60
+   },
+   {
+    "boss": "kalphite_queen",
+    "rate": 55
+   },
+   {
+    "boss": "king_black_dragon",
+    "rate": 130
+   },
+   {
+    "boss": "kraken",
+    "rate": 100
+   },
+   {
+    "boss": "kreearra",
+    "rate": 40
+   },
+   {
+    "boss": "kril_tsutsaroth",
+    "rate": 65
+   },
+   {
+    "boss": "lunar_chests",
+    "rate": 18
+   },
+   {
+    "boss": "mad_angel",
+    "rate": 60
+   },
+   {
+    "boss": "maggot_king",
+    "rate": 30
+   },
+   {
+    "boss": "mimic",
+    "rate": 60
+   },
+   {
+    "boss": "nex",
+    "rate": 23.5
+   },
+   {
+    "boss": "nightmare",
+    "rate": 14
+   },
+   {
+    "boss": "obor",
+    "rate": 12
+   },
+   {
+    "boss": "phantom_muspah",
+    "rate": 30
+   },
+   {
+    "boss": "phosanis_nightmare",
+    "rate": 9.6
+   },
+   {
+    "boss": "sarachnis",
+    "rate": 110
+   },
+   {
+    "boss": "scorpia",
+    "rate": 130
+   },
+   {
+    "boss": "scurrius",
+    "rate": 70
+   },
+   {
+    "boss": "shellbane_gryphon",
+    "rate": 95
+   },
+   {
+    "boss": "skotizo",
+    "rate": 45
+   },
+   {
+    "boss": "sol_heredit",
+    "rate": 2.7
+   },
+   {
+    "boss": "spindel",
+    "rate": 55
+   },
+   {
+    "boss": "the_corrupted_gauntlet",
+    "rate": 7.2
+   },
+   {
+    "boss": "the_hueycoatl",
+    "rate": 20
+   },
+   {
+    "boss": "the_gauntlet",
+    "rate": 10
+   },
+   {
+    "boss": "the_leviathan",
+    "rate": 31
+   },
+   {
+    "boss": "the_royal_titans",
+    "rate": 55
+   },
+   {
+    "boss": "the_whisperer",
+    "rate": 22
+   },
+   {
+    "boss": "theatre_of_blood_hard_mode",
+    "rate": 3
+   },
+   {
+    "boss": "theatre_of_blood",
+    "rate": 3.2
+   },
+   {
+    "boss": "thermonuclear_smoke_devil",
+    "rate": 150
+   },
+   {
+    "boss": "tombs_of_amascut_expert",
+    "rate": 3
+   },
+   {
+    "boss": "tombs_of_amascut",
+    "rate": 3.7
+   },
+   {
+    "boss": "tzkal_zuk",
+    "rate": 1
+   },
+   {
+    "boss": "tztok_jad",
+    "rate": 2.5
+   },
+   {
+    "boss": "vardorvis",
+    "rate": 39
+   },
+   {
+    "boss": "venenatis",
+    "rate": 80
+   },
+   {
+    "boss": "vetion",
+    "rate": 50
+   },
+   {
+    "boss": "vorkath",
+    "rate": 34
+   },
+   {
+    "boss": "yama",
+    "rate": 18
+   },
+   {
+    "boss": "zulrah",
+    "rate": 46
+   }
+  ],
+  "ironman": [
+   {
+    "boss": "abyssal_sire",
+    "rate": 44
+   },
+   {
+    "boss": "alchemical_hydra",
+    "rate": 29
+   },
+   {
+    "boss": "amoxliatl",
+    "rate": 71
+   },
+   {
+    "boss": "araxxor",
+    "rate": 38
+   },
+   {
+    "boss": "artio",
+    "rate": 50
+   },
+   {
+    "boss": "barrows_chests",
+    "rate": 22
+   },
+   {
+    "boss": "brutus",
+    "rate": 250
+   },
+   {
+    "boss": "bryophyta",
+    "rate": 9
+   },
+   {
+    "boss": "callisto",
+    "rate": 142
+   },
+   {
+    "boss": "calvarion",
+    "rate": 45
+   },
+   {
+    "boss": "cerberus",
+    "rate": 54
+   },
+   {
+    "boss": "chambers_of_xeric_challenge_mode",
+    "rate": 3
+   },
+   {
+    "boss": "chambers_of_xeric",
+    "rate": 3.5
+   },
+   {
+    "boss": "chaos_elemental",
+    "rate": 48
+   },
+   {
+    "boss": "chaos_fanatic",
+    "rate": 80
+   },
+   {
+    "boss": "commander_zilyana",
+    "rate": 30
+   },
+   {
+    "boss": "corporeal_beast",
+    "rate": 10
+   },
+   {
+    "boss": "crazy_archaeologist",
+    "rate": 95
+   },
+   {
+    "boss": "dagannoth_prime",
+    "rate": 100
+   },
+   {
+    "boss": "dagannoth_rex",
+    "rate": 100
+   },
+   {
+    "boss": "dagannoth_supreme",
+    "rate": 100
+   },
+   {
+    "boss": "deranged_archaeologist",
+    "rate": 95
+   },
+   {
+    "boss": "doom_of_mokhaiotl",
+    "rate": 18
+   },
+   {
+    "boss": "duke_sucellus",
+    "rate": 37
+   },
+   {
+    "boss": "general_graardor",
+    "rate": 31
+   },
+   {
+    "boss": "giant_mole",
+    "rate": 97
+   },
+   {
+    "boss": "grotesque_guardians",
+    "rate": 34
+   },
+   {
+    "boss": "hespori",
+    "rate": 50
+   },
+   {
+    "boss": "kalphite_queen",
+    "rate": 37
+   },
+   {
+    "boss": "king_black_dragon",
+    "rate": 75
+   },
+   {
+    "boss": "kraken",
+    "rate": 90
+   },
+   {
+    "boss": "kreearra",
+    "rate": 30
+   },
+   {
+    "boss": "kril_tsutsaroth",
+    "rate": 32
+   },
+   {
+    "boss": "lunar_chests",
+    "rate": 18
+   },
+   {
+    "boss": "mad_angel",
+    "rate": 60
+   },
+   {
+    "boss": "maggot_king",
+    "rate": 30
+   },
+   {
+    "boss": "mimic",
+    "rate": 50
+   },
+   {
+    "boss": "nex",
+    "rate": 20
+   },
+   {
+    "boss": "nightmare",
+    "rate": 11
+   },
+   {
+    "boss": "obor",
+    "rate": 12
+   },
+   {
+    "boss": "phantom_muspah",
+    "rate": 27
+   },
+   {
+    "boss": "phosanis_nightmare",
+    "rate": 9.3
+   },
+   {
+    "boss": "sarachnis",
+    "rate": 67
+   },
+   {
+    "boss": "scorpia",
+    "rate": 80
+   },
+   {
+    "boss": "scurrius",
+    "rate": 60
+   },
+   {
+    "boss": "shellbane_gryphon",
+    "rate": 95
+   },
+   {
+    "boss": "skotizo",
+    "rate": 38
+   },
+   {
+    "boss": "sol_heredit",
+    "rate": 2.7
+   },
+   {
+    "boss": "spindel",
+    "rate": 50
+   },
+   {
+    "boss": "the_corrupted_gauntlet",
+    "rate": 7.2
+   },
+   {
+    "boss": "the_hueycoatl",
+    "rate": 20
+   },
+   {
+    "boss": "the_gauntlet",
+    "rate": 10
+   },
+   {
+    "boss": "the_leviathan",
+    "rate": 27
+   },
+   {
+    "boss": "the_royal_titans",
+    "rate": 55
+   },
+   {
+    "boss": "the_whisperer",
+    "rate": 21
+   },
+   {
+    "boss": "theatre_of_blood_hard_mode",
+    "rate": 3
+   },
+   {
+    "boss": "theatre_of_blood",
+    "rate": 3.2
+   },
+   {
+    "boss": "thermonuclear_smoke_devil",
+    "rate": 100
+   },
+   {
+    "boss": "tombs_of_amascut_expert",
+    "rate": 3
+   },
+   {
+    "boss": "tombs_of_amascut",
+    "rate": 3.7
+   },
+   {
+    "boss": "tzkal_zuk",
+    "rate": 1
+   },
+   {
+    "boss": "tztok_jad",
+    "rate": 2.2
+   },
+   {
+    "boss": "vardorvis",
+    "rate": 37
+   },
+   {
+    "boss": "venenatis",
+    "rate": 80
+   },
+   {
+    "boss": "vetion",
+    "rate": 39
+   },
+   {
+    "boss": "vorkath",
+    "rate": 34
+   },
+   {
+    "boss": "yama",
+    "rate": 18
+   },
+   {
+    "boss": "zulrah",
+    "rate": 42
+   }
+  ],
+  "ultimate": [
+   {
+    "boss": "abyssal_sire",
+    "rate": 38
+   },
+   {
+    "boss": "alchemical_hydra",
+    "rate": 28
+   },
+   {
+    "boss": "amoxliatl",
+    "rate": 65
+   },
+   {
+    "boss": "araxxor",
+    "rate": 35
+   },
+   {
+    "boss": "artio",
+    "rate": 42
+   },
+   {
+    "boss": "barrows_chests",
+    "rate": 20
+   },
+   {
+    "boss": "brutus",
+    "rate": 250
+   },
+   {
+    "boss": "bryophyta",
+    "rate": 7
+   },
+   {
+    "boss": "callisto",
+    "rate": 45
+   },
+   {
+    "boss": "calvarion",
+    "rate": 40
+   },
+   {
+    "boss": "cerberus",
+    "rate": 48
+   },
+   {
+    "boss": "chambers_of_xeric_challenge_mode",
+    "rate": 2.5
+   },
+   {
+    "boss": "chambers_of_xeric",
+    "rate": 3
+   },
+   {
+    "boss": "chaos_elemental",
+    "rate": 38
+   },
+   {
+    "boss": "chaos_fanatic",
+    "rate": 60
+   },
+   {
+    "boss": "commander_zilyana",
+    "rate": 29
+   },
+   {
+    "boss": "corporeal_beast",
+    "rate": 7.5
+   },
+   {
+    "boss": "crazy_archaeologist",
+    "rate": 62
+   },
+   {
+    "boss": "dagannoth_prime",
+    "rate": 85
+   },
+   {
+    "boss": "dagannoth_rex",
+    "rate": 85
+   },
+   {
+    "boss": "dagannoth_supreme",
+    "rate": 85
+   },
+   {
+    "boss": "deranged_archaeologist",
+    "rate": 85
+   },
+   {
+    "boss": "doom_of_mokhaiotl",
+    "rate": 16
+   },
+   {
+    "boss": "duke_sucellus",
+    "rate": 35
+   },
+   {
+    "boss": "general_graardor",
+    "rate": 30
+   },
+   {
+    "boss": "giant_mole",
+    "rate": 85
+   },
+   {
+    "boss": "grotesque_guardians",
+    "rate": 32
+   },
+   {
+    "boss": "hespori",
+    "rate": 30
+   },
+   {
+    "boss": "kalphite_queen",
+    "rate": 33
+   },
+   {
+    "boss": "king_black_dragon",
+    "rate": 55
+   },
+   {
+    "boss": "kraken",
+    "rate": 80
+   },
+   {
+    "boss": "kreearra",
+    "rate": 25
+   },
+   {
+    "boss": "kril_tsutsaroth",
+    "rate": 28
+   },
+   {
+    "boss": "lunar_chests",
+    "rate": 18
+   },
+   {
+    "boss": "mad_angel",
+    "rate": 50
+   },
+   {
+    "boss": "maggot_king",
+    "rate": 24
+   },
+   {
+    "boss": "mimic",
+    "rate": 25
+   },
+   {
+    "boss": "nex",
+    "rate": 12
+   },
+   {
+    "boss": "nightmare",
+    "rate": 11
+   },
+   {
+    "boss": "obor",
+    "rate": 10
+   },
+   {
+    "boss": "phantom_muspah",
+    "rate": 25
+   },
+   {
+    "boss": "phosanis_nightmare",
+    "rate": 8.5
+   },
+   {
+    "boss": "sarachnis",
+    "rate": 65
+   },
+   {
+    "boss": "scorpia",
+    "rate": 38
+   },
+   {
+    "boss": "scurrius",
+    "rate": 60
+   },
+   {
+    "boss": "shellbane_gryphon",
+    "rate": 85
+   },
+   {
+    "boss": "sol_heredit",
+    "rate": 2
+   },
+   {
+    "boss": "spindel",
+    "rate": 40
+   },
+   {
+    "boss": "the_corrupted_gauntlet",
+    "rate": 7.2
+   },
+   {
+    "boss": "the_hueycoatl",
+    "rate": 20
+   },
+   {
+    "boss": "the_gauntlet",
+    "rate": 10
+   },
+   {
+    "boss": "the_leviathan",
+    "rate": 23
+   },
+   {
+    "boss": "the_royal_titans",
+    "rate": 55
+   },
+   {
+    "boss": "the_whisperer",
+    "rate": 20
+   },
+   {
+    "boss": "theatre_of_blood_hard_mode",
+    "rate": 2.6
+   },
+   {
+    "boss": "theatre_of_blood",
+    "rate": 2.9
+   },
+   {
+    "boss": "thermonuclear_smoke_devil",
+    "rate": 88
+   },
+   {
+    "boss": "tombs_of_amascut_expert",
+    "rate": 2.5
+   },
+   {
+    "boss": "tombs_of_amascut",
+    "rate": 3
+   },
+   {
+    "boss": "tzkal_zuk",
+    "rate": 0.8
+   },
+   {
+    "boss": "tztok_jad",
+    "rate": 2
+   },
+   {
+    "boss": "vardorvis",
+    "rate": 33
+   },
+   {
+    "boss": "venenatis",
+    "rate": 35
+   },
+   {
+    "boss": "vetion",
+    "rate": 35
+   },
+   {
+    "boss": "vorkath",
+    "rate": 28
+   },
+   {
+    "boss": "yama",
+    "rate": 16
+   },
+   {
+    "boss": "zulrah",
+    "rate": 36
+   }
+  ],
+  "def1": [
+   {
+    "boss": "abyssal_sire",
+    "rate": 35
+   },
+   {
+    "boss": "alchemical_hydra",
+    "rate": 25
+   },
+   {
+    "boss": "amoxliatl",
+    "rate": 55
+   },
+   {
+    "boss": "araxxor",
+    "rate": 25
+   },
+   {
+    "boss": "artio",
+    "rate": 50
+   },
+   {
+    "boss": "brutus",
+    "rate": 200
+   },
+   {
+    "boss": "callisto",
+    "rate": 85
+   },
+   {
+    "boss": "calvarion",
+    "rate": 50
+   },
+   {
+    "boss": "cerberus",
+    "rate": 48
+   },
+   {
+    "boss": "chambers_of_xeric",
+    "rate": 2.9
+   },
+   {
+    "boss": "chambers_of_xeric_challenge_mode",
+    "rate": 2.4
+   },
+   {
+    "boss": "chaos_elemental",
+    "rate": 95
+   },
+   {
+    "boss": "chaos_fanatic",
+    "rate": 100
+   },
+   {
+    "boss": "commander_zilyana",
+    "rate": 26
+   },
+   {
+    "boss": "corporeal_beast",
+    "rate": 60
+   },
+   {
+    "boss": "dagannoth_prime",
+    "rate": 75
+   },
+   {
+    "boss": "dagannoth_rex",
+    "rate": 75
+   },
+   {
+    "boss": "dagannoth_supreme",
+    "rate": 75
+   },
+   {
+    "boss": "doom_of_mokhaiotl",
+    "rate": 16
+   },
+   {
+    "boss": "duke_sucellus",
+    "rate": 27
+   },
+   {
+    "boss": "general_graardor",
+    "rate": 52
+   },
+   {
+    "boss": "giant_mole",
+    "rate": 90
+   },
+   {
+    "boss": "grotesque_guardians",
+    "rate": 23
+   },
+   {
+    "boss": "kalphite_queen",
+    "rate": 35
+   },
+   {
+    "boss": "king_black_dragon",
+    "rate": 100
+   },
+   {
+    "boss": "kraken",
+    "rate": 80
+   },
+   {
+    "boss": "kreearra",
+    "rate": 23
+   },
+   {
+    "boss": "kril_tsutsaroth",
+    "rate": 50
+   },
+   {
+    "boss": "lunar_chests",
+    "rate": 18
+   },
+   {
+    "boss": "mad_angel",
+    "rate": 33
+   },
+   {
+    "boss": "nex",
+    "rate": 23
+   },
+   {
+    "boss": "nightmare",
+    "rate": 12
+   },
+   {
+    "boss": "phantom_muspah",
+    "rate": 20
+   },
+   {
+    "boss": "phosanis_nightmare",
+    "rate": 7
+   },
+   {
+    "boss": "sarachnis",
+    "rate": 80
+   },
+   {
+    "boss": "scorpia",
+    "rate": 130
+   },
+   {
+    "boss": "scurrius",
+    "rate": 50
+   },
+   {
+    "boss": "shellbane_gryphon",
+    "rate": 60
+   },
+   {
+    "boss": "skotizo",
+    "rate": 30
+   },
+   {
+    "boss": "sol_heredit",
+    "rate": 2
+   },
+   {
+    "boss": "spindel",
+    "rate": 50
+   },
+   {
+    "boss": "the_corrupted_gauntlet",
+    "rate": 6.5
+   },
+   {
+    "boss": "the_hueycoatl",
+    "rate": 25
+   },
+   {
+    "boss": "the_gauntlet",
+    "rate": 9
+   },
+   {
+    "boss": "the_leviathan",
+    "rate": 22
+   },
+   {
+    "boss": "the_royal_titans",
+    "rate": 50
+   },
+   {
+    "boss": "the_whisperer",
+    "rate": 19
+   },
+   {
+    "boss": "theatre_of_blood_hard_mode",
+    "rate": 2.5
+   },
+   {
+    "boss": "theatre_of_blood",
+    "rate": 2.9
+   },
+   {
+    "boss": "thermonuclear_smoke_devil",
+    "rate": 110
+   },
+   {
+    "boss": "tombs_of_amascut_expert",
+    "rate": 2.5
+   },
+   {
+    "boss": "tombs_of_amascut",
+    "rate": 3
+   },
+   {
+    "boss": "tzkal_zuk",
+    "rate": 0.7
+   },
+   {
+    "boss": "tztok_jad",
+    "rate": 1.7
+   },
+   {
+    "boss": "vardorvis",
+    "rate": 25
+   },
+   {
+    "boss": "venenatis",
+    "rate": 35
+   },
+   {
+    "boss": "vetion",
+    "rate": 45
+   },
+   {
+    "boss": "yama",
+    "rate": 16
+   },
+   {
+    "boss": "zulrah",
+    "rate": 35
+   }
+  ]
+ }
+}
