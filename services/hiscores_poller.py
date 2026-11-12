@@ -441,15 +441,19 @@ async def run_background(http, redis_conn, slots: int, deadline: float, stats: d
 async def run_cycle(redis_conn=None, now: Optional[datetime] = None) -> dict:
     """One pass: plan, then look up the most urgent few. Never raises."""
     stats = {"due": 0, "polled": 0, "skipped": None}
-    if not enabled():
-        stats["skipped"] = "disabled"
-        return stats
     try:
         if redis_conn is None:
             from utils.redis import redis_client
 
             redis_conn = redis_client.client
+        if not enabled():
+            stats["skipped"] = "disabled"
+            hiscores.record_cycle(redis_conn, "disabled")
+            return stats
         reason = hiscores.may_request(redis_conn)
+        # The heartbeat scripts/health_watch.py reads: the loop is alive, and
+        # whether it is working or holding back (and why).
+        hiscores.record_cycle(redis_conn, reason or "running")
         if reason:
             stats["skipped"] = reason
             return stats

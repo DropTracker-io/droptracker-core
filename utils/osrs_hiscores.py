@@ -60,6 +60,9 @@ BREAKER_KEY = "hiscores:breaker"
 FAILURES_KEY = "hiscores:failures"
 COUNT_KEY = "hiscores:count:{day}"
 
+HEALTH_KEY = "hiscores:health"            # hash: what the health check reads
+HOURLY_KEY = "hiscores:hour:{hour}"       # hash of outcome counts for one UTC hour
+
 OK, NOT_FOUND, RATE_LIMITED, ERROR, BLOCKED = "ok", "not_found", "rate_limited", "error", "blocked"
 
 # Hiscores names that do not normalise to the metric slug Wise Old Man uses.
@@ -235,6 +238,170 @@ def record_outcome(redis_conn, status: str, retry_after: Optional[float] = None)
         pass
 
 
+# --------------------------------------------------------------------------- #
+# Health: what the poller leaves behind for scripts/health_watch.py
+#
+# Jagex publish no rate limit and would not announce a block. The only way to
+# know we have been cut off is to notice that the answers stopped. So every
+# request leaves a trace (when we last got a real answer, what the failures
+# since then looked like, counts per hour) and `health_checks` turns that
+# into pass/fail lines.
+# --------------------------------------------------------------------------- #
+
+# No real answer for this long, while requests are failing, is a page. A
+# refusal (403, 429) is acted on quickly: that is a block. Timeouts and 5xx
+# get much longer, because the hiscores go down for hours on update days and
+# that needs no one's attention.
+REFUSED_STALL_SECONDS = 30 * 60
+OUTAGE_STALL_SECONDS = 3 * 3600
+LOOP_STALL_SECONDS = 15 * 60
+# Share of an hour's requests that failed, and how many requests make the
+# share meaningful.
+ERROR_SHARE_MAX = 0.5
+ERROR_SHARE_MIN_REQUESTS = 40
+_HOURLY_TTL = 3 * 86400
+
+
+def _hour_key(now: Optional[datetime] = None) -> str:
+    return HOURLY_KEY.format(hour=(now or datetime.utcnow()).strftime("%Y%m%d%H"))
+
+
+def _failure_label(status: str, detail: str) -> str:
+    if status == RATE_LIMITED:
+        return "http 429"
+    return (detail or "error")[:40]
+
+
+def is_refusal(label: str) -> bool:
+    """Whether a failure reads as "you are not welcome" rather than "we are
+    down": any 4xx. (A 404 never gets here; it is an answer.)"""
+    return label.startswith("http 4")
+
+
+def record_health(redis_conn, status: str, detail: str = "", now: Optional[datetime] = None) -> None:
+    """Note one request's outcome for the health check. Never raises."""
+    try:
+        stamp = time.time() if now is None else (now - datetime(1970, 1, 1)).total_seconds()
+        hour = _hour_key(now)
+        if status in (OK, NOT_FOUND):
+            redis_conn.hset(HEALTH_KEY, mapping={"last_answer": stamp, "last_attempt": stamp,
+                                                 "fails_since_answer": 0})
+            redis_conn.hincrby(hour, status, 1)
+        elif status in (ERROR, RATE_LIMITED):
+            label = _failure_label(status, detail)
+            redis_conn.hset(HEALTH_KEY, mapping={"last_attempt": stamp, "last_problem": label,
+                                                 "last_problem_at": stamp})
+            redis_conn.hincrby(HEALTH_KEY, "fails_since_answer", 1)
+            redis_conn.hincrby(hour, f"fail:{label}", 1)
+        else:
+            return
+        redis_conn.expire(hour, _HOURLY_TTL)
+    except Exception:
+        pass
+
+
+def record_cycle(redis_conn, state: str, now: Optional[datetime] = None) -> None:
+    """The poller's heartbeat: it ran a cycle, and what state it was in
+    (``running``, ``disabled``, or the reason it may not make requests)."""
+    try:
+        stamp = time.time() if now is None else (now - datetime(1970, 1, 1)).total_seconds()
+        redis_conn.hset(HEALTH_KEY, mapping={"cycle": stamp, "state": str(state)[:40]})
+    except Exception:
+        pass
+
+
+def _text(value) -> str:
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value or "")
+
+
+def _hash(redis_conn, key: str) -> Dict[str, str]:
+    return {_text(k): _text(v) for k, v in (redis_conn.hgetall(key) or {}).items()}
+
+
+def _float(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def recent_counts(redis_conn, now: datetime, hours: int = 2) -> Dict[str, int]:
+    """Outcome counts over the current and previous ``hours - 1`` UTC hours."""
+    from datetime import timedelta
+
+    out: Dict[str, int] = {}
+    for back in range(hours):
+        for name, count in _hash(redis_conn, _hour_key(now - timedelta(hours=back))).items():
+            try:
+                out[name] = out.get(name, 0) + int(count)
+            except ValueError:
+                continue
+    return out
+
+
+def health_checks(redis_conn, now: Optional[datetime] = None) -> list:
+    """``[(key, label, ok, detail)]`` for scripts/health_watch.py.
+
+    Empty when the poller has never run here (nothing to judge). Three checks:
+    the loop is alive; the hiscores are answering; and not too many requests
+    are failing. A poller that is switched off, or resting at its daily cap,
+    passes: silence it chose is not a fault.
+    """
+    now = now or datetime.utcnow()
+    stamp = (now - datetime(1970, 1, 1)).total_seconds()
+    health = _hash(redis_conn, HEALTH_KEY)
+    cycle = _float(health.get("cycle"))
+    if cycle is None:
+        return []
+    state = health.get("state") or "running"
+    results = []
+
+    loop_idle = stamp - cycle
+    results.append((
+        "hiscores:loop", "Hiscores poller running", loop_idle <= LOOP_STALL_SECONDS,
+        f"no poller cycle for {loop_idle / 60:.0f} min. It runs inside "
+        f"droptracker-player-updates: check that unit's journal for 'hiscores'"))
+    if state in ("disabled", "dev instance"):
+        return results
+
+    last_answer = _float(health.get("last_answer"))
+    last_attempt = _float(health.get("last_attempt"))
+    fails = int(_float(health.get("fails_since_answer")) or 0)
+    counts = recent_counts(redis_conn, now)
+    failures = {name[5:]: n for name, n in counts.items() if name.startswith("fail:")}
+    refused = {label: n for label, n in failures.items() if is_refusal(label)}
+    summary = ", ".join(f"{label} x{n}" for label, n in sorted(failures.items(), key=lambda kv: -kv[1])[:4])
+
+    answering, detail = True, ""
+    if fails > 0 and last_attempt is not None:
+        silent = stamp - (last_answer if last_answer is not None else last_attempt)
+        limit = REFUSED_STALL_SECONDS if refused else OUTAGE_STALL_SECONDS
+        if silent > limit:
+            answering = False
+            breaker = " The poller has paused itself and retries by itself." if breaker_open(redis_conn) else ""
+            if refused:
+                detail = (f"no answer from the OSRS hiscores for {silent / 60:.0f} min and the "
+                          f"failures are refusals ({summary}). This looks like a BLOCK or rate limit "
+                          f"on our address.{breaker} To stop asking: HISCORES_POLLER=false in .env, "
+                          f"restart droptracker-player-updates. Plugin data is unaffected")
+            else:
+                detail = (f"no answer from the OSRS hiscores for {silent / 60:.0f} min ({summary}). "
+                          f"Timeouts and 5xx usually mean the hiscores are down (routine on update "
+                          f"days), not a block.{breaker} Plugin data is unaffected")
+    results.append(("hiscores:answers", "OSRS hiscores answering", answering, detail))
+
+    answered = counts.get(OK, 0) + counts.get(NOT_FOUND, 0)
+    failed = sum(failures.values())
+    total = answered + failed
+    too_many = total >= ERROR_SHARE_MIN_REQUESTS and failed / total >= ERROR_SHARE_MAX
+    results.append((
+        "hiscores:errors", "OSRS hiscores error share", not too_many,
+        f"{failed} of {total} hiscores requests failed in the last two hours ({summary}). "
+        f"Answers are still arriving, so this is throttling or an unstable service rather "
+        f"than a full block. Consider raising HISCORES_INTERVAL_MS"))
+    return results
+
+
 @dataclass
 class FetchResult:
     status: str
@@ -271,6 +438,7 @@ async def fetch(http, redis_conn, player_name: str, board: str = MAIN_BOARD, *,
                 result = FetchResult(NOT_FOUND, board=board)
             elif resp.status == 429:
                 record_outcome(redis_conn, RATE_LIMITED, _retry_after(resp.headers))
+                record_health(redis_conn, RATE_LIMITED)
                 return FetchResult(RATE_LIMITED, board=board, detail="429")
             elif resp.status != 200:
                 result = FetchResult(ERROR, board=board, detail=f"http {resp.status}")
@@ -282,4 +450,5 @@ async def fetch(http, redis_conn, player_name: str, board: str = MAIN_BOARD, *,
     except Exception as exc:
         result = FetchResult(ERROR, board=board, detail=type(exc).__name__)
     record_outcome(redis_conn, result.status)
+    record_health(redis_conn, result.status, result.detail)
     return result

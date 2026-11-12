@@ -83,6 +83,11 @@ class FakeRedis:
     def hdel(self, key, field):
         self.hashes.get(key, {}).pop(field, None)
 
+    def hincrby(self, key, field, amount=1):
+        target = self.hashes.setdefault(key, {})
+        target[field] = str(int(target.get(field, 0)) + amount)
+        return int(target[field])
+
     def zadd(self, key, mapping, nx=False, xx=False):
         target = self.hashes.setdefault("z:" + key, {})
         for member, score in mapping.items():
@@ -547,3 +552,126 @@ class TestBackgroundQueue:
         r, polled, _ = self._run(monkeypatch, players, outcome="error")
         assert polled == [1, 2, 3]
         assert 3000 < r.zscore(poller.QUEUE_KEY, "1") - _time.time() < 3700
+
+
+class TestHealth:
+    """What scripts/health_watch.py is told. Silence is the only sign of a block."""
+
+    def _checks(self, r, now=NOW):
+        return {key: (ok, detail) for key, _label, ok, detail in hiscores.health_checks(r, now)}
+
+    def _fail(self, r, detail, when, times=1):
+        for _ in range(times):
+            hiscores.record_health(r, hiscores.ERROR, detail, when)
+
+    def test_nothing_to_report_where_the_poller_never_ran(self):
+        assert hiscores.health_checks(FakeRedis(), NOW) == []
+
+    def test_healthy(self):
+        r = FakeRedis()
+        hiscores.record_cycle(r, "running", NOW)
+        hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(minutes=1))
+        assert all(ok for ok, _ in self._checks(r).values()) and len(self._checks(r)) == 3
+
+    def test_a_dead_loop_is_reported(self):
+        r = FakeRedis()
+        hiscores.record_cycle(r, "running", NOW - timedelta(minutes=20))
+        ok, detail = self._checks(r)["hiscores:loop"]
+        assert not ok and "droptracker-player-updates" in detail
+
+    def test_refusals_page_after_half_an_hour_and_say_block(self):
+        r = FakeRedis()
+        hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(minutes=50))
+        self._fail(r, "http 403", NOW - timedelta(minutes=10), times=6)
+        hiscores.record_cycle(r, "breaker open", NOW)
+        ok, detail = self._checks(r)["hiscores:answers"]
+        assert not ok and "BLOCK" in detail and "http 403 x6" in detail and "HISCORES_POLLER=false" in detail
+
+    def test_refusals_inside_the_first_half_hour_do_not_page_yet(self):
+        r = FakeRedis()
+        hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(minutes=20))
+        self._fail(r, "http 403", NOW - timedelta(minutes=5), times=6)
+        hiscores.record_cycle(r, "running", NOW)
+        assert self._checks(r)["hiscores:answers"][0]
+
+    def test_a_429_counts_as_a_refusal(self):
+        r = FakeRedis()
+        hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(minutes=50))
+        hiscores.record_health(r, hiscores.RATE_LIMITED, "", NOW - timedelta(minutes=10))
+        hiscores.record_cycle(r, "breaker open", NOW)
+        ok, detail = self._checks(r)["hiscores:answers"]
+        assert not ok and "http 429" in detail
+
+    def test_an_outage_gets_three_hours_and_is_not_called_a_block(self):
+        r = FakeRedis()
+        hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(hours=2))
+        self._fail(r, "http 503", NOW - timedelta(minutes=10), times=6)
+        self._fail(r, "TimeoutError", NOW - timedelta(minutes=9), times=3)
+        hiscores.record_cycle(r, "running", NOW)
+        assert self._checks(r)["hiscores:answers"][0]
+        later = NOW + timedelta(hours=2)
+        self._fail(r, "http 503", later - timedelta(minutes=5), times=2)
+        hiscores.record_cycle(r, "running", later)
+        ok, detail = self._checks(r, later)["hiscores:answers"]
+        assert not ok and "BLOCK" not in detail and "update" in detail
+
+    def test_an_answer_clears_it(self):
+        r = FakeRedis()
+        hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(hours=1))
+        self._fail(r, "http 403", NOW - timedelta(minutes=40), times=6)
+        hiscores.record_health(r, hiscores.NOT_FOUND, "", NOW - timedelta(minutes=1))
+        hiscores.record_cycle(r, "running", NOW)
+        assert self._checks(r)["hiscores:answers"][0]
+
+    def test_a_quiet_poller_is_not_a_silent_one(self):
+        # Nothing was due for hours: no failures, so no page.
+        r = FakeRedis()
+        hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(hours=9))
+        hiscores.record_cycle(r, "daily cap reached", NOW)
+        assert all(ok for ok, _ in self._checks(r).values())
+
+    def test_switched_off_reports_only_that_the_loop_is_alive(self):
+        r = FakeRedis()
+        self._fail(r, "http 403", NOW - timedelta(hours=5), times=9)
+        hiscores.record_cycle(r, "disabled", NOW)
+        assert list(self._checks(r)) == ["hiscores:loop"]
+
+    def test_a_high_error_share_is_reported_even_while_answers_arrive(self):
+        r = FakeRedis()
+        hiscores.record_cycle(r, "running", NOW)
+        for _ in range(25):
+            hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(minutes=3))
+        self._fail(r, "http 503", NOW - timedelta(minutes=2), times=30)
+        hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(minutes=1))
+        checks = self._checks(r)
+        assert checks["hiscores:answers"][0]
+        ok, detail = checks["hiscores:errors"]
+        assert not ok and "30 of 56" in detail
+
+    def test_a_few_errors_among_few_requests_are_not_a_share(self):
+        r = FakeRedis()
+        hiscores.record_cycle(r, "running", NOW)
+        hiscores.record_health(r, hiscores.OK, "", NOW)
+        self._fail(r, "TimeoutError", NOW, times=5)
+        hiscores.record_health(r, hiscores.OK, "", NOW)
+        assert self._checks(r)["hiscores:errors"][0]
+
+    def test_counts_span_the_hour_boundary(self):
+        r = FakeRedis()
+        edge = datetime(2026, 11, 12, 13, 2)
+        self._fail(r, "http 403", edge - timedelta(minutes=10), times=3)
+        self._fail(r, "http 403", edge, times=2)
+        assert hiscores.recent_counts(r, edge)["fail:http 403"] == 5
+
+    def test_bytes_from_a_raw_redis_client_are_read(self):
+        r = FakeRedis()
+        hiscores.record_cycle(r, "running", NOW)
+        hiscores.record_health(r, hiscores.OK, "", NOW)
+        r.hashes[hiscores.HEALTH_KEY] = {k.encode(): v.encode() for k, v in r.hashes[hiscores.HEALTH_KEY].items()}
+        assert len(hiscores.health_checks(r, NOW)) == 3
+
+    def test_recording_never_raises(self):
+        r = FakeRedis()
+        r.hset = None
+        hiscores.record_health(r, hiscores.OK)
+        hiscores.record_cycle(r, "running")

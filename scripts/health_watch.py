@@ -299,7 +299,25 @@ def run_checks() -> list:
                         f"{pending} entry(s) spooled to disk — Redis refused the "
                         f"enqueue and the consumer has not drained them back"))
 
+    results.extend(hiscores_checks())
     return results
+
+
+def hiscores_checks() -> list:
+    """The official-hiscores poller (utils/osrs_hiscores.health_checks): is its
+    loop alive, are the hiscores answering us, and are too many requests
+    failing. Jagex would not tell us about a block; silence is the signal.
+    Nothing is reported where the poller has never run."""
+    client = _redis_client()
+    if client is None:
+        return []
+    try:
+        from utils import osrs_hiscores
+
+        return osrs_hiscores.health_checks(client)
+    except Exception as e:
+        print(f"hiscores health check unavailable: {e}", file=sys.stderr)
+        return []
 
 
 async def send_dm(discord_id: str, content: str) -> bool:
@@ -345,7 +363,7 @@ def main() -> int:
             alerted = bool(entry.get("alerted"))
             since = entry.get("since") or now
             if fails >= FAIL_THRESHOLD and not alerted:
-                newly_down.append((label, detail))
+                newly_down.append((label, detail, key))
                 alerted = True
             state[key] = {"fails": fails, "alerted": alerted, "since": since}
 
@@ -355,13 +373,15 @@ def main() -> int:
 
     messages = []
     if newly_down:
-        lines = "\n".join(f"• **{label}** — {detail}" for label, detail in newly_down)
-        messages.append(
-            f"🔴 **DropTracker service alert** ({now})\n{lines}\n\n"
-            f"Failed {FAIL_THRESHOLD} checks in a row. Units auto-restart on exit; "
-            f"still down means it is failing to start or was stopped by hand.\n"
-            f"`systemctl status <unit>` · `journalctl -u <unit> -n 50`"
-        )
+        lines = "\n".join(f"• **{label}** — {detail}" for label, detail, _key in newly_down)
+        footer = f"Failed {FAIL_THRESHOLD} checks in a row."
+        # The unit advice only belongs on a page that is about a unit: on any
+        # other check it sends the reader looking for a stopped service.
+        if any(key.startswith("unit:") for _label, _detail, key in newly_down):
+            footer += (" Units auto-restart on exit; still down means it is failing "
+                       "to start or was stopped by hand.\n"
+                       "`systemctl status <unit>` · `journalctl -u <unit> -n 50`")
+        messages.append(f"🔴 **DropTracker service alert** ({now})\n{lines}\n\n{footer}")
     if recovered:
         lines = "\n".join(
             f"• **{label}**" + (f" (down since {since})" if since else "")
