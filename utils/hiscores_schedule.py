@@ -1,7 +1,7 @@
 """Who the hiscores poller looks up, and when. Pure rules, no I/O.
 
-The poller is never a sweep of everyone. It looks up only players an event
-is waiting on and the plugin is not already telling us about:
+Two tiers. **Event participants** the plugin is not already telling us about
+come first, on a tight schedule:
 
 - **start**: once, around the moment a participant's scoring begins, so there
   is a baseline to measure from;
@@ -10,6 +10,10 @@ is waiting on and the plugin is not already telling us about:
   been, because a hiscores entry only moves when the player logs out.
 
 Start and end readings are *pinned*: retention never thins them away.
+
+**Everyone else we know** (owner decision 2026-11-12: keep history for every
+player, not only event participants) is looked up in whatever request budget
+is left, on a slow cadence that follows the player: `background_interval`.
 """
 from __future__ import annotations
 
@@ -100,3 +104,46 @@ def order(candidates):
     """Most urgent first: end readings, then start readings, then the rotation
     by how overdue each is. ``candidates`` are ``(Due, anything)`` pairs."""
     return sorted(candidates, key=lambda pair: (pair[0].priority, -pair[0].overdue_seconds))
+
+
+# --------------------------------------------------------------------------- #
+# The background tier: every player we know, slowly
+# --------------------------------------------------------------------------- #
+
+# The plugin reports exact XP on every sync, so a player it has seen this
+# recently gains nothing from a hiscores lookup.
+BACKGROUND_PLUGIN_COVERED = timedelta(hours=24)
+BACKGROUND_ACTIVE_FOR = timedelta(days=7)
+BACKGROUND_QUIET_FOR = timedelta(days=30)
+BACKGROUND_ACTIVE_INTERVAL = timedelta(days=1)
+BACKGROUND_QUIET_INTERVAL = timedelta(days=3)
+BACKGROUND_DORMANT_INTERVAL = timedelta(days=7)
+BACKGROUND_NOT_FOUND_BASE = timedelta(days=3)
+BACKGROUND_NOT_FOUND_MAX = timedelta(days=30)
+BACKGROUND_RETRY = timedelta(hours=1)    # after an error, so one bad name cannot hold the queue
+
+
+def background_interval(now: datetime, *, last_changed: Optional[datetime],
+                        first_polled: Optional[datetime], not_found_streak: int = 0) -> timedelta:
+    """How long until a player's next background lookup.
+
+    Daily while their readings keep changing, every three days once they go
+    quiet, weekly when nothing has moved for a month. A name the hiscores do
+    not know backs off from three days to thirty: most are accounts that quit
+    or were renamed, and asking daily would spend the budget on them.
+    """
+    if not_found_streak > 0:
+        wait = BACKGROUND_NOT_FOUND_BASE * (2 ** min(not_found_streak - 1, 5))
+        return min(wait, BACKGROUND_NOT_FOUND_MAX)
+    if last_changed is not None:
+        idle = now - last_changed
+        if idle <= BACKGROUND_ACTIVE_FOR:
+            return BACKGROUND_ACTIVE_INTERVAL
+        if idle <= BACKGROUND_QUIET_FOR:
+            return BACKGROUND_QUIET_INTERVAL
+        return BACKGROUND_DORMANT_INTERVAL
+    # Never seen to change. One reading says nothing about activity, so start
+    # in the middle and let the next reading decide.
+    if first_polled is None or now - first_polled <= BACKGROUND_QUIET_FOR:
+        return BACKGROUND_QUIET_INTERVAL
+    return BACKGROUND_DORMANT_INTERVAL

@@ -1,11 +1,18 @@
-"""The hiscores poller: keeps `player_stat_snapshots` current for event
-participants the plugin is not covering, straight from the official hiscores.
+"""The hiscores poller: keeps `player_stat_snapshots` current for players
+the plugin is not covering, straight from the official hiscores.
 
-Hosted by ``droptracker-player-updates`` (`run_cycle` once a minute). Each
-cycle works out who is due (`utils.hiscores_schedule`), looks them up one at
-a time through the shared gate (`utils.osrs_hiscores`: one request per two
-seconds platform-wide, a breaker, a daily cap) and stores what it learns
-through `utils.stat_snapshots`.
+Hosted by ``droptracker-player-updates`` (`run_cycle` in a loop). Each cycle
+works out who is due (`utils.hiscores_schedule`), looks them up one at a time
+through the shared gate (`utils.osrs_hiscores`: one request per two seconds
+platform-wide, a breaker, a daily cap) and stores what it learns through
+`utils.stat_snapshots`.
+
+Two tiers share each cycle. Event participants go first. Whatever is left of
+the batch goes to the background tier: every player in the database, on a
+slow per-player cadence, drawn from a Redis sorted set of next-due times
+(``hiscores:queue``). The background tier stops for the day at
+HISCORES_BACKGROUND_DAILY requests so events always have headroom under the
+overall cap.
 
 Nothing reads these rows for scoring yet. The WOM reconciler still drives
 events exactly as before; this builds the history the shadow comparison
@@ -13,6 +20,8 @@ needs (dev tracker project 40, t419).
 
 Switches (all env):
   HISCORES_POLLER=false        turn the whole thing off (default on)
+  HISCORES_POLL_ALL=false      event participants only, no background tier (default on)
+  HISCORES_BACKGROUND_DAILY    background tier's share of the daily cap (default 15000)
   HISCORES_POLL_BATCH          most lookups per cycle (default 20)
   HISCORES_INTERVAL_MS, HISCORES_DAILY_CAP, HISCORES_USER_AGENT: see the client
 
@@ -35,14 +44,26 @@ from utils import osrs_hiscores as hiscores
 log = logging.getLogger("hiscores_poller")
 
 BATCH = int(os.getenv("HISCORES_POLL_BATCH", "20"))
+BACKGROUND_DAILY = int(os.getenv("HISCORES_BACKGROUND_DAILY", "15000"))
+QUEUE_KEY = "hiscores:queue"
+SEED_EVERY_SECONDS = 3600
+_last_seed = 0.0
 CYCLE_BUDGET_SECONDS = 50.0
 ON_DEMAND_TTL = timedelta(hours=6)
 _STATE_TTL = 60 * 86400
 
 
-def enabled() -> bool:
-    return (os.getenv("HISCORES_POLLER") or "true").strip().strip('"').strip("'").lower() not in (
+def _on(name: str) -> bool:
+    return (os.getenv(name) or "true").strip().strip('"').strip("'").lower() not in (
         "0", "false", "no", "off")
+
+
+def enabled() -> bool:
+    return _on("HISCORES_POLLER")
+
+
+def background_enabled() -> bool:
+    return _on("HISCORES_POLL_ALL")
 
 
 def _state_key(player_id: int) -> str:
@@ -236,7 +257,8 @@ async def poll_player(http, redis_conn, participant: dict, due: schedule.Due,
     if result.status == hiscores.BLOCKED:
         return "blocked"
     if result.status == hiscores.NOT_FOUND:
-        redis_conn.hset(key, mapping={"polled": stamp, "not_found": stamp})
+        streak = int(_decode_hash(redis_conn.hgetall(key)).get("nf") or 0) + 1
+        redis_conn.hset(key, mapping={"polled": stamp, "not_found": stamp, "nf": streak})
         redis_conn.expire(key, _STATE_TTL)
         return "not_found"
     if result.status != hiscores.OK:
@@ -253,11 +275,135 @@ async def poll_player(http, redis_conn, participant: dict, due: schedule.Due,
         update["changed"] = stamp
     redis_conn.hset(key, mapping=update)
     redis_conn.hdel(key, "not_found")
+    redis_conn.hdel(key, "nf")
     redis_conn.expire(key, _STATE_TTL)
     # A flagged reading also settles the pin: asking again a minute later
     # would get the same answer. The rotation keeps trying at its own pace.
     _mark_pins(redis_conn, player_id, pins, stamp)
     return outcome
+
+
+# --------------------------------------------------------------------------- #
+# The background tier: every player, slowly
+# --------------------------------------------------------------------------- #
+
+def _all_players_db() -> list:
+    """``[(player_id, is_stub)]`` for every player. Stubs are roster entries
+    we have never heard from; they are worth having, after everyone else."""
+    from db.models import Player
+    from db.models.base import Session
+
+    session = Session()
+    try:
+        return [
+            (pid, bool(acc_hash and str(acc_hash).startswith("wom_temp_")))
+            for pid, acc_hash in session.query(Player.player_id, Player.account_hash).all()
+        ]
+    finally:
+        session.close()
+
+
+def seed_queue(redis_conn, players: list) -> dict:
+    """Bring the queue in line with the players table: add who is missing
+    (due at once, real accounts ahead of stubs), drop who is gone. Existing
+    entries keep their place."""
+    known = {int(pid) for pid, _ in players}
+    queued = {int(m) for m in redis_conn.zrange(QUEUE_KEY, 0, -1)}
+    missing = [(str(int(pid)), 1.0 if is_stub else 0.0)
+               for pid, is_stub in players if int(pid) not in queued]
+    for start in range(0, len(missing), 1000):
+        redis_conn.zadd(QUEUE_KEY, dict(missing[start:start + 1000]), nx=True)
+    added = len(missing)
+    gone = [str(m) for m in queued - known]
+    for start in range(0, len(gone), 500):
+        redis_conn.zrem(QUEUE_KEY, *gone[start:start + 500])
+    return {"added": added, "removed": len(gone)}
+
+
+def _players_db(player_ids: list) -> dict:
+    """``{player_id: participant-shaped dict}`` for a batch of ids."""
+    from db.models import Player, PlayerState
+    from db.models.base import Session
+    from db.models.player_last_seen import PlayerLastSeen
+    from utils.account_types import account_type_from_varbit
+
+    if not player_ids:
+        return {}
+    session = Session()
+    try:
+        players = session.query(Player.player_id, Player.player_name, Player.account_type).filter(
+            Player.player_id.in_(player_ids)).all()
+        varbits = dict(session.query(PlayerState.player_id, PlayerState.account_type).filter(
+            PlayerState.player_id.in_(player_ids)).all())
+        seen = dict(session.query(PlayerLastSeen.player_id, PlayerLastSeen.last_seen_at).filter(
+            PlayerLastSeen.player_id.in_(player_ids)).all())
+    finally:
+        session.close()
+    out = {}
+    for p in players:
+        if not p.player_name:
+            continue
+        varbit = varbits.get(p.player_id)
+        out[p.player_id] = {
+            "player_id": p.player_id, "name": p.player_name,
+            "account_type": account_type_from_varbit(varbit) or p.account_type,
+            "account_varbit": varbit if isinstance(varbit, int) else None,
+            "plugin_seen_at": seen.get(p.player_id), "pins": [],
+        }
+    return out
+
+
+def _next_due(redis_conn, player_id: int, now: datetime) -> float:
+    """Unix time of this player's next background lookup, from their state."""
+    state = _decode_hash(redis_conn.hgetall(_state_key(player_id)))
+    wait = schedule.background_interval(
+        now, last_changed=_ts(state.get("changed")), first_polled=_ts(state.get("first")),
+        not_found_streak=int(state.get("nf") or 0))
+    return time.time() + wait.total_seconds()
+
+
+def reschedule(redis_conn, player_id: int, now: datetime, *, only_if_queued: bool = False) -> None:
+    redis_conn.zadd(QUEUE_KEY, {str(int(player_id)): _next_due(redis_conn, player_id, now)},
+                    xx=only_if_queued)
+
+
+async def run_background(http, redis_conn, slots: int, deadline: float, stats: dict) -> None:
+    """Spend up to ``slots`` lookups on the players who have waited longest."""
+    global _last_seed
+    if time.time() - _last_seed >= SEED_EVERY_SECONDS:
+        players = await asyncio.to_thread(_all_players_db)
+        stats["seed"] = seed_queue(redis_conn, players)
+        _last_seed = time.time()
+    if slots <= 0 or hiscores.requests_today(redis_conn) >= BACKGROUND_DAILY:
+        return
+    ids = [int(m) for m in redis_conn.zrangebyscore(QUEUE_KEY, "-inf", time.time(), start=0, num=slots)]
+    info = await asyncio.to_thread(_players_db, ids)
+    rotation = schedule.Due(schedule.ROTATION, False, 2)
+    for player_id in ids:
+        if time.monotonic() >= deadline:
+            break
+        now = datetime.utcnow()
+        player = info.get(player_id)
+        if player is None:
+            redis_conn.zrem(QUEUE_KEY, str(player_id))
+            continue
+        seen = player["plugin_seen_at"]
+        if seen is not None and now - seen <= schedule.BACKGROUND_PLUGIN_COVERED:
+            # The plugin is covering them; look again once that could lapse.
+            redis_conn.zadd(QUEUE_KEY, {str(player_id): time.time()
+                                        + schedule.BACKGROUND_PLUGIN_COVERED.total_seconds()})
+            stats["bg_covered"] = stats.get("bg_covered", 0) + 1
+            continue
+        outcome = await poll_player(http, redis_conn, player, rotation, now)
+        if outcome == "blocked":
+            break
+        stats["bg_" + outcome] = stats.get("bg_" + outcome, 0) + 1
+        stats["polled"] += 1
+        if outcome == "error":
+            redis_conn.zadd(QUEUE_KEY, {str(player_id): time.time()
+                                        + schedule.BACKGROUND_RETRY.total_seconds()})
+        else:
+            reschedule(redis_conn, player_id, now)
 
 
 # --------------------------------------------------------------------------- #
@@ -283,12 +429,11 @@ async def run_cycle(redis_conn=None, now: Optional[datetime] = None) -> dict:
         participants = await asyncio.to_thread(_participants_db, now)
         queue = plan(redis_conn, participants, now)
         stats["due"] = len(queue)
-        if not queue:
-            return stats
 
         import aiohttp
 
         deadline = time.monotonic() + CYCLE_BUDGET_SECONDS
+        blocked = False
         async with aiohttp.ClientSession() as http:
             for due, participant in queue[:BATCH]:
                 if time.monotonic() >= deadline:
@@ -296,9 +441,17 @@ async def run_cycle(redis_conn=None, now: Optional[datetime] = None) -> dict:
                 outcome = await poll_player(http, redis_conn, participant, due)
                 stats[outcome] = stats.get(outcome, 0) + 1
                 if outcome == "blocked":
+                    blocked = True
                     break
                 stats["polled"] += 1
+                # They have just been read: push their background turn back too.
+                reschedule(redis_conn, participant["player_id"], datetime.utcnow(),
+                           only_if_queued=True)
+            if background_enabled() and not blocked:
+                await run_background(http, redis_conn, BATCH - stats["polled"], deadline, stats)
         stats["requests_today"] = hiscores.requests_today(redis_conn)
+        if background_enabled():
+            stats["queue_due"] = int(redis_conn.zcount(QUEUE_KEY, "-inf", time.time()))
     except Exception:
         log.exception("hiscores poller cycle failed")
         stats["skipped"] = "error"

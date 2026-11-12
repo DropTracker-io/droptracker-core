@@ -83,6 +83,31 @@ class FakeRedis:
     def hdel(self, key, field):
         self.hashes.get(key, {}).pop(field, None)
 
+    def zadd(self, key, mapping, nx=False, xx=False):
+        target = self.hashes.setdefault("z:" + key, {})
+        for member, score in mapping.items():
+            if (nx and member in target) or (xx and member not in target):
+                continue
+            target[member] = float(score)
+
+    def zrange(self, key, start, stop):
+        return list(self.hashes.get("z:" + key, {}))
+
+    def zrem(self, key, *members):
+        for member in members:
+            self.hashes.get("z:" + key, {}).pop(member, None)
+
+    def zrangebyscore(self, key, low, high, start=0, num=None):
+        items = sorted(self.hashes.get("z:" + key, {}).items(), key=lambda kv: (kv[1], kv[0]))
+        hits = [m for m, score in items if score <= float(high)]
+        return hits[start:start + num] if num is not None else hits
+
+    def zcount(self, key, low, high):
+        return len(self.zrangebyscore(key, low, high))
+
+    def zscore(self, key, member):
+        return self.hashes.get("z:" + key, {}).get(member)
+
 
 class TestParse:
     def test_unranked_entries_are_left_out_not_zeroed(self):
@@ -429,3 +454,96 @@ class TestPollPlayer:
                                   plugin_seen_at=NOW - timedelta(minutes=5))
         assert got == "plugin_pinned" and calls["boards"] == []
         assert "start" in r.hgetall(poller._pin_key(1, 7))
+
+
+class TestBackgroundCadence:
+    def _wait(self, **over):
+        args = dict(last_changed=None, first_polled=NOW - timedelta(days=1), not_found_streak=0)
+        args.update(over)
+        return schedule.background_interval(NOW, **args)
+
+    def test_follows_how_recently_a_reading_changed(self):
+        assert self._wait(last_changed=NOW - timedelta(days=2)) == timedelta(days=1)
+        assert self._wait(last_changed=NOW - timedelta(days=10)) == timedelta(days=3)
+        assert self._wait(last_changed=NOW - timedelta(days=40)) == timedelta(days=7)
+
+    def test_one_reading_is_not_evidence_of_activity(self):
+        assert self._wait() == timedelta(days=3)
+        assert self._wait(first_polled=NOW - timedelta(days=45)) == timedelta(days=7)
+
+    def test_unknown_names_back_off_to_a_month(self):
+        waits = [self._wait(not_found_streak=n) for n in (1, 2, 3, 4, 9)]
+        assert waits == [timedelta(days=3), timedelta(days=6), timedelta(days=12),
+                         timedelta(days=24), timedelta(days=30)]
+
+
+class TestBackgroundQueue:
+    def test_seeding_adds_the_missing_real_accounts_first_and_drops_the_gone(self):
+        r = FakeRedis()
+        r.zadd(poller.QUEUE_KEY, {"1": 999.0, "50": 5.0})
+        out = poller.seed_queue(r, [(1, False), (2, False), (3, True)])
+        assert out == {"added": 2, "removed": 1}
+        assert r.zscore(poller.QUEUE_KEY, "1") == 999.0      # keeps its place
+        assert r.zrangebyscore(poller.QUEUE_KEY, "-inf", 10) == ["2", "3"]
+
+    def _run(self, monkeypatch, players, outcome="written", slots=5, used_today=0):
+        r = FakeRedis()
+        polled = []
+
+        async def fake_poll(http, redis_conn, participant, due, now=None):
+            polled.append(participant["player_id"])
+            return outcome
+
+        monkeypatch.setattr(poller, "_last_seed", 10 ** 12)   # no seeding in these tests
+        monkeypatch.setattr(poller, "poll_player", fake_poll)
+        monkeypatch.setattr(poller, "_players_db", lambda ids: {i: players[i] for i in ids if i in players})
+        monkeypatch.setattr(poller.hiscores, "requests_today", lambda conn, now=None: used_today)
+        for pid in (1, 2, 3):
+            r.zadd(poller.QUEUE_KEY, {str(pid): float(pid)})
+        stats = {"polled": 0}
+        import time as _time
+
+        asyncio.run(poller.run_background(None, r, slots, _time.monotonic() + 30, stats))
+        return r, polled, stats
+
+    def _player(self, pid, seen=None):
+        return {"player_id": pid, "name": f"p{pid}", "account_type": None, "account_varbit": None,
+                "plugin_seen_at": seen, "pins": []}
+
+    def test_longest_waiting_first_and_each_is_rescheduled(self, monkeypatch):
+        import time as _time
+
+        players = {i: self._player(i) for i in (1, 2, 3)}
+        r, polled, stats = self._run(monkeypatch, players, slots=2)
+        assert polled == [1, 2] and stats["polled"] == 2
+        assert r.zscore(poller.QUEUE_KEY, "1") > _time.time() + 86400
+        assert r.zscore(poller.QUEUE_KEY, "3") == 3.0
+
+    def test_plugin_users_cost_no_request(self, monkeypatch):
+        from datetime import datetime as _dt
+
+        players = {1: self._player(1, seen=_dt.utcnow()), 2: self._player(2), 3: self._player(3)}
+        r, polled, stats = self._run(monkeypatch, players)
+        assert polled == [2, 3] and stats["bg_covered"] == 1
+
+    def test_a_deleted_player_leaves_the_queue(self, monkeypatch):
+        r, polled, _ = self._run(monkeypatch, {2: self._player(2), 3: self._player(3)})
+        assert polled == [2, 3] and r.zscore(poller.QUEUE_KEY, "1") is None
+
+    def test_the_background_budget_is_respected(self, monkeypatch):
+        players = {i: self._player(i) for i in (1, 2, 3)}
+        _, polled, _ = self._run(monkeypatch, players, used_today=poller.BACKGROUND_DAILY)
+        assert polled == []
+
+    def test_a_block_stops_the_pass_and_keeps_everyone_queued(self, monkeypatch):
+        players = {i: self._player(i) for i in (1, 2, 3)}
+        r, polled, stats = self._run(monkeypatch, players, outcome="blocked")
+        assert polled == [1] and stats["polled"] == 0 and r.zscore(poller.QUEUE_KEY, "1") == 1.0
+
+    def test_an_error_is_retried_in_an_hour_not_at_once(self, monkeypatch):
+        import time as _time
+
+        players = {i: self._player(i) for i in (1, 2, 3)}
+        r, polled, _ = self._run(monkeypatch, players, outcome="error")
+        assert polled == [1, 2, 3]
+        assert 3000 < r.zscore(poller.QUEUE_KEY, "1") - _time.time() < 3700

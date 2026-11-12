@@ -541,10 +541,11 @@ async def rank_milestones_loop():
 
 
 async def hiscores_poller_loop():
-    """Official hiscores lookups for event participants the plugin is not
-    covering (services/hiscores_poller.py), once a minute. Each cycle makes
-    at most HISCORES_POLL_BATCH requests, paced by the shared gate; it only
-    stores snapshots and credits nothing."""
+    """Official hiscores lookups for players the plugin is not covering
+    (services/hiscores_poller.py): event participants first, then every
+    other player on a slow cadence. Each cycle makes at most
+    HISCORES_POLL_BATCH requests, paced by the shared gate; it only stores
+    snapshots and credits nothing."""
     from services import hiscores_poller
 
     last_report = 0.0
@@ -553,7 +554,7 @@ async def hiscores_poller_loop():
         try:
             stats = await hiscores_poller.run_cycle()
             for key, value in stats.items():
-                if isinstance(value, int) and key not in ("due", "requests_today"):
+                if isinstance(value, int) and key not in ("due", "requests_today", "queue_due"):
                     totals[key] = totals.get(key, 0) + value
             if stats.get("skipped") == "disabled":
                 await sleep_with_watchdog_heartbeats(600)
@@ -561,13 +562,18 @@ async def hiscores_poller_loop():
             # One line every ten minutes, not one a minute.
             if time.time() - last_report >= 600 and (totals.get("polled") or stats.get("skipped")):
                 print(
-                    f"hiscores_poller: {totals} due_now={stats.get('due')} "
+                    f"hiscores_poller: {totals} events_due={stats.get('due')} "
+                    f"queue_due={stats.get('queue_due')} "
                     f"requests_today={stats.get('requests_today')} skipped={stats.get('skipped')}"
                 )
                 last_report, totals = time.time(), {}
         except Exception as e:
             print(f"Error in hiscores poller loop: {e}")
-        await sleep_with_watchdog_heartbeats(60)
+            stats = {}
+        # A full batch means there is a backlog: come straight back. The gate,
+        # not this sleep, is what paces requests.
+        busy = stats.get("polled", 0) >= hiscores_poller.BATCH
+        await sleep_with_watchdog_heartbeats(5 if busy else 60)
 
 
 async def github_update_loop():
