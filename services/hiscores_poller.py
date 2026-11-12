@@ -96,27 +96,27 @@ def _decode_hash(raw) -> dict:
 # --------------------------------------------------------------------------- #
 
 def _participants_db(now: datetime) -> list:
-    """Participants of events the hiscores can help score:
+    """Participants of running events:
     ``[{player_id, name, account_type, event_id, starts_at, ends_at, joined_at,
     plugin_seen_at}]``. Active events, plus ones that ended inside the window
-    an end reading is still worth taking in."""
+    an end reading is still worth taking in.
+
+    Every active event, not only ones with XP or kill-count tasks: the
+    reconciler also tracks boss kills for effort (bingo EHB) on events whose
+    tasks are all item drops, and which metrics that touches is decided in
+    the event consumer's state, not in the task types."""
     from db.models.base import Session
-    from db.models import Event, EventTask, EventTeamMember, Player, PlayerState
+    from db.models import Event, EventTeamMember, Player, PlayerState
     from db.models.player_last_seen import PlayerLastSeen
     from utils.account_types import account_type_from_varbit
 
     session = Session()
     try:
-        relevant = {
-            row[0] for row in session.query(EventTask.event_id)
-            .filter(EventTask.type.in_(schedule.RELEVANT_TASK_TYPES)).distinct()
-        }
         events = {
             e.id: e for e in session.query(Event.id, Event.status, Event.starts_at, Event.ends_at)
             .filter(Event.status.in_(("active", "past")))
-            if e.id in relevant and (
-                e.status == "active"
-                or (e.ends_at is not None and now - e.ends_at <= schedule.PIN_WINDOW))
+            if e.status == "active"
+            or (e.ends_at is not None and now - e.ends_at <= schedule.PIN_WINDOW)
         }
         if not events:
             return []

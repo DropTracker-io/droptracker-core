@@ -21,10 +21,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-# Event task types whose progress the hiscores can show (the same set the
-# WOM reconciler tracks).
-RELEVANT_TASK_TYPES = ("xp_target", "skill_target", "kc_target", "competition")
-
 # A participant whose plugin talked to us this recently needs no lookup: the
 # plugin reports exact XP and KC, sooner than the hiscores would.
 PLUGIN_COVERED = timedelta(hours=6)
