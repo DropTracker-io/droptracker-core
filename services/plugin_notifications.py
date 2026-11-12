@@ -161,8 +161,12 @@ WEB_PREF_TYPES = (
 # wins over this pref (see data/submissions/common.wants_drop_confirmation),
 # so the website switch is what covers older plugin builds.
 SUBMISSION_PREF_TYPES = ("drop_confirmation",)
+# Clan-side chat a player may switch off on the website. Not event types
+# either: a clan admin's "send in-game message to members" announcement
+# (:func:`push_clan_announcement`) checks it itself.
+CLAN_PREF_TYPES = ("clan_announcement",)
 # Everything the website / Discord settings panels list per account.
-PLAYER_PREF_TYPES = WEB_PREF_TYPES + SUBMISSION_PREF_TYPES
+PLAYER_PREF_TYPES = WEB_PREF_TYPES + SUBMISSION_PREF_TYPES + CLAN_PREF_TYPES
 
 # Broadcast importance (t66): the plugin styles/queues pop-ups by this, so a
 # raid drop that just finished a tile no longer reads like the next 50-KC
@@ -194,6 +198,9 @@ PRIORITY_FOR_TYPE = {
     "event_board_turn": PRIORITY_NORMAL,
     "event_board_roll_prompt": PRIORITY_NORMAL,
     "submission_notice": PRIORITY_NORMAL,
+    # Written by the clan's leadership for the whole clan: it should get
+    # past the plugin's "important pop-ups only" filter.
+    "clan_announcement": PRIORITY_HIGH,
 }
 
 
@@ -296,6 +303,99 @@ def push_submission_notice(player_id, message) -> bool:
         return False
     data = {"message": str(message)[:NOTICE_MAX_CHARS]}
     return push_to_inbox(player_id, build_envelope("submission_notice", data))
+
+
+# --------------------------------------------------------------------------- #
+# Clan announcements (group admin → every member's plugin)
+# --------------------------------------------------------------------------- #
+CLAN_ANNOUNCEMENT_TYPE = "clan_announcement"
+#: In-game text cap. The plugin caps a display's text at 240 characters; the
+#: clan-name prefix ("AstralStar: ") comes out of that budget.
+CLAN_ANNOUNCEMENT_MAX_CHARS = 200
+#: The global group (every player): never a clan announcement audience.
+GLOBAL_GROUP_ID = 2
+
+
+def clan_announcement_envelope(announcement_id, group_id, group_name, title, message,
+                               now: int = None) -> dict:
+    """The ``clan_announcement`` envelope: rendered by plugins that read the
+    server's ``display`` block (6.1.12+); older builds drop the unknown type.
+
+    With no ``event`` on the envelope the plugin writes ``display.text`` as a
+    plain ``[DropTracker]`` chat line and pops ``title`` / ``text`` as a card,
+    so the clan name leads the text. ``data.task_label`` is only there to give
+    each announcement its own pop-up dedupe key (the plugin keys pop-ups on
+    event|task|type, and two announcements inside its 10s window would
+    otherwise swallow the second)."""
+    from services.plugin_display import clean
+
+    group_name = clean(group_name, 40) or "Your clan"
+    message = clean(message, CLAN_ANNOUNCEMENT_MAX_CHARS) or clean(title, CLAN_ANNOUNCEMENT_MAX_CHARS)
+    title = clean(title) or f"{group_name} announcement"
+    data = {
+        "announcement_id": int(announcement_id),
+        "group_id": int(group_id),
+        "group_name": group_name,
+        "message": message,
+        "task_label": f"announcement {int(announcement_id)}",
+    }
+    envelope = build_envelope(CLAN_ANNOUNCEMENT_TYPE, data, now=now)
+    envelope["display"] = {
+        "v": 1,
+        "title": title,
+        "text": f"{group_name}: {message}",
+        "chat": {"tag": "ANNOUNCEMENT", "tone": "info", "emphasis": None},
+        "toast": True,
+        "icon_item_id": None,
+        "card": None,
+    }
+    return envelope
+
+
+def group_member_player_ids(session, group_id) -> set:
+    """Every player in the group (``user_group_association``; a set, since
+    the table can hold duplicate player rows)."""
+    from sqlalchemy import text
+
+    rows = session.execute(
+        text("SELECT player_id FROM user_group_association "
+             "WHERE group_id = :gid AND player_id IS NOT NULL"),
+        {"gid": int(group_id)},
+    ).fetchall()
+    return {int(r[0]) for r in rows}
+
+
+def push_clan_announcement(session, *, announcement_id, group_id, group_name, title,
+                           message) -> int:
+    """Queue an announcement in every member's plugin inbox. Returns how many
+    inboxes it went to.
+
+    Members who switched ``clan_announcement`` off on the website are skipped.
+    An inbox lives 24h, so a member who logs in within a day still sees it;
+    after that it is gone (the post itself stays on the site and Discord).
+    One pipeline for the whole clan: a ~500-member clan is one round trip,
+    not 500. Best-effort like every inbox write."""
+    if not group_id or int(group_id) == GLOBAL_GROUP_ID:
+        return 0
+    members = group_member_player_ids(session, group_id)
+    members -= _players_with_type_disabled(session, CLAN_ANNOUNCEMENT_TYPE, members)
+    if not members:
+        return 0
+    envelope = clan_announcement_envelope(announcement_id, group_id, group_name, title, message)
+    serialized = json.dumps(envelope, default=str)
+    try:
+        pipe = _redis().pipeline(transaction=False)
+        for player_id in members:
+            key = _inbox_key(player_id)
+            pipe.rpush(key, serialized)
+            pipe.ltrim(key, -INBOX_CAP, -1)
+            pipe.expire(key, INBOX_TTL_SECONDS)
+            pipe.publish(WAKE_CHANNEL, str(int(player_id)))
+        pipe.execute()
+    except Exception as e:
+        print(f"[plugin_notifications] clan announcement push failed for group {group_id}: {e}")
+        return 0
+    return len(members)
 
 
 def stamp_player_focus(player_id, event_id, task_id) -> None:

@@ -20,10 +20,19 @@ A global post from anyone but an approver is saved as a draft (status
 Web pages are canonical; Discord is a syndication target via the outbox
 (``services/discord_outbox.py``) — never a direct Discord call from the API.
 Publishing also emits a realtime ``announcement`` event.
+
+Group posts can also go out in game (``send_in_game``): a short message lands
+in every member's plugin inbox (``services/plugin_notifications.
+push_clan_announcement``), at most :data:`IN_GAME_DAILY_LIMIT` per group a day.
+The Discord embed takes the same options the embed builder offers (colour,
+link, thumbnail, image, footer, timestamp) — at creation only; the post's
+Discord message is not edited afterwards.
 """
 from __future__ import annotations
 
 import asyncio
+import re
+import time
 from datetime import datetime
 
 from quart import Blueprint, jsonify, request
@@ -183,12 +192,117 @@ def _ping_content(role_ids: list[str], user_ids: list[str], everyone: bool) -> s
     return " ".join(parts) if parts else None
 
 
+# In-game sends per group per rolling day: a clan-wide pop-up is loud, and a
+# mistake can't be recalled once it is in members' inboxes.
+IN_GAME_DAILY_LIMIT = 3
+_IN_GAME_WINDOW_SECONDS = 24 * 3600
+_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_DEFAULT_EMBED_COLOR = 0xC8AA6E
+
+
+def _in_game_key(group_id) -> str:
+    return f"announcements:in_game:{int(group_id)}"
+
+
+def _in_game_sends_today(group_id) -> list:
+    """Timestamps of this group's in-game sends inside the window. Fail-open:
+    no Redis means no limit, never a blocked announcement."""
+    try:
+        from utils.redis import redis_client
+
+        conn = redis_client.client
+        cutoff = time.time() - _IN_GAME_WINDOW_SECONDS
+        conn.zremrangebyscore(_in_game_key(group_id), 0, cutoff)
+        return [float(score) for _, score in conn.zrange(_in_game_key(group_id), 0, -1, withscores=True)]
+    except Exception:
+        return []
+
+
+def _record_in_game_send(group_id, ann_id) -> None:
+    try:
+        from utils.redis import redis_client
+
+        conn = redis_client.client
+        conn.zadd(_in_game_key(group_id), {str(ann_id): time.time()})
+        conn.expire(_in_game_key(group_id), _IN_GAME_WINDOW_SECONDS)
+    except Exception:
+        pass
+
+
+def _validate_in_game(body: dict, title: str):
+    """``(send, message)``: the one-line in-game text, defaulting to the title."""
+    from services.plugin_notifications import CLAN_ANNOUNCEMENT_MAX_CHARS
+
+    if not bool(body.get("send_in_game", False)):
+        return False, None
+    message = " ".join(str(body.get("in_game_message") or "").split()) or title
+    if len(message) > CLAN_ANNOUNCEMENT_MAX_CHARS:
+        abort_problem(422, "In-game message too long",
+                      f"The in-game message is at most {CLAN_ANNOUNCEMENT_MAX_CHARS} characters.")
+    return True, message
+
+
+def _optional_url(body: dict, key: str, label: str):
+    value = (body.get(key) or "").strip()
+    if not value:
+        return None
+    if len(value) > 512 or not value.lower().startswith(("https://", "http://")):
+        abort_problem(422, f"Invalid {label}", f"The {label} must be an http(s) link.")
+    return value
+
+
+def _validate_embed_style(body: dict) -> dict:
+    """The embed-builder options for the Discord post. All optional."""
+    color = (body.get("embed_color") or "").strip()
+    if color and not _HEX_RE.match(color):
+        abort_problem(422, "Invalid colour", "embed_color must look like #c8aa6e.")
+    footer = (body.get("embed_footer") or "").strip()
+    if len(footer) > 2048:
+        abort_problem(422, "Footer too long", "The footer is at most 2048 characters.")
+    return {
+        "color": int(color[1:], 16) if color else _DEFAULT_EMBED_COLOR,
+        "url": _optional_url(body, "embed_url", "title link"),
+        "thumbnail": _optional_url(body, "embed_thumbnail_url", "thumbnail"),
+        "footer": footer or None,
+        "timestamp": bool(body.get("embed_timestamp", False)),
+    }
+
+
+def _discord_embed(title: str, body_md: str, cover, style: dict, published_at: datetime) -> dict:
+    embed = {"title": title, "description": body_md[:4000], "color": style["color"]}
+    if style.get("url"):
+        embed["url"] = style["url"]
+    if cover:
+        embed["image"] = {"url": cover}
+    if style.get("thumbnail"):
+        embed["thumbnail"] = {"url": style["thumbnail"]}
+    if style.get("footer"):
+        embed["footer"] = {"text": style["footer"]}
+    if style.get("timestamp"):
+        embed["timestamp"] = published_at.astimezone().isoformat()
+    return embed
+
+
 def _create_announcement(user_id, scope_type, group_id, body):
     """Create and publish, or (global post from a non-approver) save as a draft
-    for review. Returns ``(id, status)``."""
+    for review. Returns ``(id, status, in_game_recipients)`` — the last is
+    None unless the post went in game."""
     title, body_md = _validate_input(body)
     pinned = bool(body.get("pinned", False))
-    cover = body.get("cover_image_url")
+    cover = _optional_url(body, "cover_image_url", "image")
+    style = _validate_embed_style(body)
+    send_in_game, in_game_message = (
+        _validate_in_game(body, title) if scope_type == "group" else (False, None))
+    if send_in_game:
+        if int(group_id) == 2:
+            abort_problem(422, "Not for the global group",
+                          "In-game messages go to a clan's members; the global group has every player.")
+        sent = _in_game_sends_today(group_id)
+        if len(sent) >= IN_GAME_DAILY_LIMIT:
+            hours = max(1, int((min(sent) + _IN_GAME_WINDOW_SECONDS - time.time()) // 3600) + 1)
+            abort_problem(429, "In-game limit reached",
+                          f"Your clan can send {IN_GAME_DAILY_LIMIT} in-game announcements a day. "
+                          f"The next one frees up in about {hours}h — or publish without the in-game message.")
     post_to_discord = bool(body.get("post_to_discord", True))
     ping_role_ids = _validate_ping_ids(body.get("ping_role_ids"), "ping_role_ids")
     ping_user_ids = _validate_ping_ids(body.get("ping_user_ids"), "ping_user_ids")
@@ -204,7 +318,7 @@ def _create_announcement(user_id, scope_type, group_id, body):
                     source_label=_author_name(s, user_id), author_user_id=user_id,
                     pinned=pinned, cover_image_url=cover,
                 )
-                return ann.id, "draft"
+                return ann.id, "draft", None
 
     with db_session() as s:
         ann = Announcement(
@@ -240,11 +354,7 @@ def _create_announcement(user_id, scope_type, group_id, body):
                         s,
                         channel_id=str(channel_id),
                         content=_ping_content(ping_role_ids, ping_user_ids, ping_everyone),
-                        embed={
-                            "title": title,
-                            "description": body_md[:4000],
-                            "color": 0xC8AA6E,
-                        },
+                        embed=_discord_embed(title, body_md, cover, style, ann.published_at),
                         kind="announcement",
                         ref_type="announcement",
                         ref_id=ann_id,
@@ -265,6 +375,26 @@ def _create_announcement(user_id, scope_type, group_id, body):
             except Exception as e:
                 print(f"[announcements] global syndication enqueue failed: {e}")
 
+    # In game: every member's plugin inbox. After the commit, so a member
+    # never sees a message for a post that failed to save.
+    in_game_recipients = None
+    if send_in_game:
+        try:
+            from services.plugin_notifications import push_clan_announcement
+
+            with db_session() as s:
+                group = s.query(Group).filter(Group.group_id == group_id).first()
+                in_game_recipients = push_clan_announcement(
+                    s, announcement_id=ann_id, group_id=group_id,
+                    group_name=group.group_name if group else None,
+                    title=title, message=in_game_message,
+                )
+            if in_game_recipients:
+                _record_in_game_send(group_id, ann_id)
+        except Exception as e:
+            print(f"[announcements] in-game send failed for group {group_id}: {e}")
+            in_game_recipients = 0
+
     # Realtime: notify open browsers instantly.
     try:
         from services.realtime import publish_event
@@ -279,7 +409,7 @@ def _create_announcement(user_id, scope_type, group_id, body):
     except Exception:
         pass
 
-    return ann_id, "published"
+    return ann_id, "published", in_game_recipients
 
 
 @announcements_bp.get("/groups/<int:group_id>/discord/roles")
@@ -339,8 +469,12 @@ async def create_group_announcement(group_id: int):
             assert_group_admin(s, user_id, group_id, manageable_guild_ids(user_id), user=user)
 
     await asyncio.to_thread(_authorize)
-    ann_id, status = await asyncio.to_thread(_create_announcement, user_id, "group", group_id, body)
-    return jsonify({"id": ann_id, "status": status})
+    ann_id, status, in_game = await asyncio.to_thread(
+        _create_announcement, user_id, "group", group_id, body)
+    payload = {"id": ann_id, "status": status}
+    if in_game is not None:
+        payload["in_game_recipients"] = in_game
+    return jsonify(payload)
 
 
 @announcements_bp.post("/announcements")
@@ -353,7 +487,7 @@ async def create_global_announcement():
             assert_superadmin(load_user(s, user_id))
 
     await asyncio.to_thread(_authorize)
-    ann_id, status = await asyncio.to_thread(_create_announcement, user_id, "global", None, body)
+    ann_id, status, _ = await asyncio.to_thread(_create_announcement, user_id, "global", None, body)
     return jsonify({"id": ann_id, "status": status})
 
 

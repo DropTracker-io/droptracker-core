@@ -106,6 +106,8 @@ EVENT_PREF_LABELS = {
     # Not an event type: the routine "Drop processed" chat line. Plugin
     # 6.0.10+ has its own toggle, which overrides this one.
     "drop_confirmation": "Drop processed confirmations",
+    # Not an event type: a clan admin's announcement sent in game.
+    "clan_announcement": "Clan announcements",
 }
 
 
