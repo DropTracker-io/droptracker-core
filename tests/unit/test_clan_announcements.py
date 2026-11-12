@@ -78,7 +78,15 @@ class TestEnvelope:
         assert d["title"] == "Bingo starts Friday"
         assert d["text"] == "AstralStar: Sign up on the site!"
         assert d["toast"] is True
-        assert d["card"] is None
+        # The pop-up: caption over the title, the message as the detail line.
+        assert d["card"] == {"kind": "STARTED", "caption": "AstralStar announcement",
+                             "headline": "Bingo starts Friday", "detail": "Sign up on the site!"}
+
+    def test_typographic_punctuation_folded_for_the_game_font(self):
+        env = pn.clan_announcement_envelope(
+            1, 306, "Clan", "\u201cBingo\u201d", "Open \u2014 don\u2019t miss it\u2026")
+        assert env["display"]["text"] == "Clan: Open - don't miss it..."
+        assert env["display"]["title"] == '"Bingo"'
 
     def test_each_announcement_has_its_own_popup_key(self):
         # The plugin keys pop-up dedupe on event|task|type; without a task
@@ -232,3 +240,38 @@ class TestEmbedStyle:
         embed = ann_routes._discord_embed(
             "T", "b" * 5000, None, ann_routes._validate_embed_style({}), datetime.now())
         assert embed == {"title": "T", "description": "b" * 4000, "color": 0xC8AA6E}
+
+
+class TestDiscordNeedsAChannel:
+    """Asking for Discord with no announcements channel is refused before
+    anything is written (it used to publish and silently go nowhere)."""
+
+    def _create(self, monkeypatch, channel, body):
+        import utils.group_config as gc
+
+        monkeypatch.setattr(gc, "get", lambda s, gid, key: channel)
+        written = []
+        monkeypatch.setattr(ann_routes, "Announcement", lambda **kw: written.append(kw))
+        try:
+            ann_routes._create_announcement(1, "group", 306, {"title": "T", "body_md": "b", **body})
+        except _Abort as e:
+            return e.args, written
+        except Exception:
+            # Past validation: the mocked session can't finish the write.
+            return None, written
+        return None, written
+
+    def test_refused_without_a_channel(self, aborts, monkeypatch):
+        refusal, written = self._create(monkeypatch, None, {"post_to_discord": True})
+        assert refusal == (422, "No announcements channel")
+        assert written == []
+
+    def test_site_only_post_needs_no_channel(self, aborts, monkeypatch):
+        refusal, written = self._create(monkeypatch, None, {"post_to_discord": False})
+        assert refusal is None
+        assert len(written) == 1
+
+    def test_allowed_with_a_channel(self, aborts, monkeypatch):
+        refusal, written = self._create(monkeypatch, "1234", {"post_to_discord": True})
+        assert refusal is None
+        assert len(written) == 1

@@ -322,16 +322,23 @@ def clan_announcement_envelope(announcement_id, group_id, group_name, title, mes
     server's ``display`` block (6.1.12+); older builds drop the unknown type.
 
     With no ``event`` on the envelope the plugin writes ``display.text`` as a
-    plain ``[DropTracker]`` chat line and pops ``title`` / ``text`` as a card,
-    so the clan name leads the text. ``data.task_label`` is only there to give
+    plain ``[DropTracker]`` chat line, so the clan name leads the text. The
+    pop-up draws ``display.card``: "<CLAN> ANNOUNCEMENT" over the title, the
+    message as the detail line. Without a card the slim banner used the title
+    as its caption and cut the message off mid-word (seen rendering it with
+    the plugin's own code); ``STARTED`` is the kind with the flag emblem and
+    no "time left" note. The chat line is where the full message reads.
+    Typographic punctuation is folded to ASCII for the game font.
+    ``data.task_label`` is only there to give
     each announcement its own pop-up dedupe key (the plugin keys pop-ups on
     event|task|type, and two announcements inside its 10s window would
     otherwise swallow the second)."""
     from services.plugin_display import clean
 
-    group_name = clean(group_name, 40) or "Your clan"
-    message = clean(message, CLAN_ANNOUNCEMENT_MAX_CHARS) or clean(title, CLAN_ANNOUNCEMENT_MAX_CHARS)
-    title = clean(title) or f"{group_name} announcement"
+    group_name = clean(_game_text(group_name), 40) or "Your clan"
+    message = (clean(_game_text(message), CLAN_ANNOUNCEMENT_MAX_CHARS)
+               or clean(_game_text(title), CLAN_ANNOUNCEMENT_MAX_CHARS))
+    title = clean(_game_text(title)) or f"{group_name} announcement"
     data = {
         "announcement_id": int(announcement_id),
         "group_id": int(group_id),
@@ -347,9 +354,26 @@ def clan_announcement_envelope(announcement_id, group_id, group_name, title, mes
         "chat": {"tag": "ANNOUNCEMENT", "tone": "info", "emphasis": None},
         "toast": True,
         "icon_item_id": None,
-        "card": None,
+        "card": {
+            "kind": "STARTED",
+            "caption": clean(f"{group_name} announcement", 40),
+            "headline": title,
+            "detail": message,
+        },
     }
     return envelope
+
+
+_GAME_PUNCTUATION = str.maketrans({
+    "\u2014": "-", "\u2013": "-", "\u2018": "'", "\u2019": "'",
+    "\u201c": '"', "\u201d": '"', "\u2026": "...", "\u00a0": " ",
+})
+
+
+def _game_text(value):
+    """Typographic punctuation (what phones and word processors type) folded
+    to what the game font has."""
+    return None if value is None else str(value).translate(_GAME_PUNCTUATION)
 
 
 def group_member_player_ids(session, group_id) -> set:

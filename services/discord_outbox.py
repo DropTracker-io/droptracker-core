@@ -237,6 +237,12 @@ async def _delete_message(bot, session, row, own_only: bool = False):
     deleted it by hand should not leave the row retrying forever.
     """
     if not row.discord_message_id:
+        _resolve_announcement_message(session, row)
+    if not row.discord_message_id:
+        if row.ref_type == "announcement":
+            # The post it would remove never went out: nothing to do.
+            row.error = "no Discord message to delete"
+            return
         raise RuntimeError("delete_message row has no discord_message_id")
     channel = await bot.fetch_channel(int(row.channel_id))
     if channel is None:
@@ -254,6 +260,50 @@ async def _delete_message(bot, session, row, own_only: bool = False):
     except Exception as e:  # noqa: BLE001 — already-deleted / unfetchable is fine
         print(f"[discord_outbox] message {row.discord_message_id} not deleted "
               f"(treating as gone): {e}")
+
+
+def _resolve_announcement_message(session, row) -> None:
+    """Fill a follow-up row's target from its announcement. Queued while the
+    post itself was still sending, it had no message id yet; the send's
+    write-back (an earlier row, same drain or a previous one) has it now."""
+    if row.ref_type != "announcement" or not row.ref_id:
+        return
+    ann = session.query(Announcement).filter(Announcement.id == row.ref_id).first()
+    if ann is not None and ann.discord_message_id:
+        row.discord_message_id = str(ann.discord_message_id)
+        if ann.discord_channel_id:
+            row.channel_id = str(ann.discord_channel_id)
+
+
+async def _edit_announcement(bot, session, row):
+    """Send a ``kind='edit_announcement'`` row: apply ``embed_json`` (a patch:
+    title / description / image; ``null`` removes a field) to the posted
+    message's embed. Everything else on the embed stays as posted, so the
+    colour, footer and thumbnail chosen at publish time survive an edit. A
+    message that is gone (deleted by hand) counts as done."""
+    from services.announcement_discord import apply_patch
+
+    if not row.discord_message_id:
+        _resolve_announcement_message(session, row)
+    if not row.discord_message_id:
+        row.error = "no Discord message to edit"
+        return
+    channel = await bot.fetch_channel(int(row.channel_id))
+    if channel is None:
+        raise RuntimeError(f"channel {row.channel_id} not found")
+    try:
+        message = await channel.fetch_message(int(row.discord_message_id))
+    except Exception as e:  # noqa: BLE001
+        row.error = f"message gone: {str(e)[:200]}"
+        return
+    if message is None:
+        row.error = "message gone"
+        return
+    from interactions import Embed
+
+    current = message.embeds[0].to_dict() if getattr(message, "embeds", None) else {}
+    patch = json.loads(row.embed_json or "{}")
+    await message.edit(embeds=[Embed.from_dict(apply_patch(current, patch))])
 
 
 def _message_kwargs(row) -> dict:
@@ -390,6 +440,13 @@ async def drain_once(bot, session_factory, limit: int = 20) -> int:
             try:
                 if row.kind == "forum_post":
                     await _create_forum_post(bot, session, row)
+                    row.status = "sent"
+                    row.processed_at = datetime.now()
+                    sent += 1
+                    continue
+
+                if row.kind == "edit_announcement":
+                    await _edit_announcement(bot, session, row)
                     row.status = "sent"
                     row.processed_at = datetime.now()
                     sent += 1

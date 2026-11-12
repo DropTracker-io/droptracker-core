@@ -25,8 +25,11 @@ Group posts can also go out in game (``send_in_game``): a short message lands
 in every member's plugin inbox (``services/plugin_notifications.
 push_clan_announcement``), at most :data:`IN_GAME_DAILY_LIMIT` per group a day.
 The Discord embed takes the same options the embed builder offers (colour,
-link, thumbnail, image, footer, timestamp) — at creation only; the post's
-Discord message is not edited afterwards.
+link, thumbnail, image, footer, timestamp). A group post needs the group's
+announcements channel to go to Discord: asking for it without one is refused.
+Editing a group post edits its Discord message (title, body, image; the rest
+of the embed as posted) and archiving deletes it
+(``services/announcement_discord``).
 """
 from __future__ import annotations
 
@@ -120,6 +123,18 @@ async def list_announcements():
             has_more = len(rows) > PAGE_SIZE
             rows = rows[:PAGE_SIZE]
             items = [_serialize(a, _author_name(s, a.author_user_id)) for a in rows]
+            if scope_type == "group" and rows:
+                # Where each post stands on Discord, for the admin list. A
+                # classified reason only, never the bot's raw error text.
+                try:
+                    from services.announcement_discord import discord_states
+
+                    states = discord_states(s, rows)
+                    for item in items:
+                        if item["id"] in states:
+                            item["discord"] = states[item["id"]]
+                except Exception as e:
+                    print(f"[announcements] discord state lookup failed: {e}")
             next_cursor = str(offset + PAGE_SIZE) if has_more else None
             return {"items": items, "next_cursor": next_cursor}
 
@@ -304,6 +319,17 @@ def _create_announcement(user_id, scope_type, group_id, body):
                           f"Your clan can send {IN_GAME_DAILY_LIMIT} in-game announcements a day. "
                           f"The next one frees up in about {hours}h — or publish without the in-game message.")
     post_to_discord = bool(body.get("post_to_discord", True))
+    if post_to_discord and scope_type == "group":
+        # Refused, not skipped: a post an admin asked to go to Discord used to
+        # publish anyway and silently go nowhere.
+        with db_session() as s:
+            import utils.group_config as gc
+
+            if not gc.get(s, group_id, "announcements_channel_id"):
+                abort_problem(
+                    422, "No announcements channel",
+                    "Your clan has no announcements channel set. Choose one in Settings → "
+                    "Channels, or untick “Also post to Discord”.")
     ping_role_ids = _validate_ping_ids(body.get("ping_role_ids"), "ping_role_ids")
     ping_user_ids = _validate_ping_ids(body.get("ping_user_ids"), "ping_user_ids")
     ping_everyone = bool(body.get("ping_everyone", False))
@@ -625,7 +651,18 @@ async def update_announcement(announcement_id: int):
             if "pinned" in body:
                 ann.pinned = bool(body["pinned"])
             if "cover_image_url" in body:
-                ann.cover_image_url = body["cover_image_url"]
+                ann.cover_image_url = _optional_url(body, "cover_image_url", "image")
+            if ann.status == "published" and ann.scope_type == "group":
+                # Carry the change to the Discord post (same commit, so the
+                # edit and its outbox row land together or not at all).
+                from services.announcement_discord import embed_patch, sync_edit
+
+                patch = embed_patch(
+                    title=ann.title if "title" in body else None,
+                    body_md=ann.body_md if "body_md" in body else None,
+                    **({"cover_image_url": ann.cover_image_url} if "cover_image_url" in body else {}),
+                )
+                sync_edit(s, ann, patch)
             s.commit()
             return _serialize(ann, _author_name(s, ann.author_user_id))
 
@@ -643,7 +680,13 @@ async def delete_announcement(announcement_id: int):
             if not ann:
                 abort_problem(404, "Announcement not found", f"No announcement {announcement_id}.")
             _assert_can_edit(s, user_id, ann)
+            was_published = ann.status == "published"
             ann.status = "archived"
+            if was_published and ann.scope_type == "group":
+                # Archived on the site = down from Discord too.
+                from services.announcement_discord import sync_archive
+
+                sync_archive(s, ann)
             s.commit()
 
     await asyncio.to_thread(_archive)
