@@ -540,6 +540,36 @@ async def rank_milestones_loop():
         await sleep_with_watchdog_heartbeats(1200)
 
 
+async def hiscores_poller_loop():
+    """Official hiscores lookups for event participants the plugin is not
+    covering (services/hiscores_poller.py), once a minute. Each cycle makes
+    at most HISCORES_POLL_BATCH requests, paced by the shared gate; it only
+    stores snapshots and credits nothing."""
+    from services import hiscores_poller
+
+    last_report = 0.0
+    totals = {}
+    while not shutdown_event.is_set():
+        try:
+            stats = await hiscores_poller.run_cycle()
+            for key, value in stats.items():
+                if isinstance(value, int) and key not in ("due", "requests_today"):
+                    totals[key] = totals.get(key, 0) + value
+            if stats.get("skipped") == "disabled":
+                await sleep_with_watchdog_heartbeats(600)
+                continue
+            # One line every ten minutes, not one a minute.
+            if time.time() - last_report >= 600 and (totals.get("polled") or stats.get("skipped")):
+                print(
+                    f"hiscores_poller: {totals} due_now={stats.get('due')} "
+                    f"requests_today={stats.get('requests_today')} skipped={stats.get('skipped')}"
+                )
+                last_report, totals = time.time(), {}
+        except Exception as e:
+            print(f"Error in hiscores poller loop: {e}")
+        await sleep_with_watchdog_heartbeats(60)
+
+
 async def github_update_loop():
     """Enhanced github_update_loop with watchdog notifications"""
     if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
@@ -608,6 +638,7 @@ async def setup_background_tasks():
     app.npc_totals_task = asyncio.create_task(npc_totals_loop())
     app.item_totals_task = asyncio.create_task(item_totals_loop())
     app.rank_milestones_task = asyncio.create_task(rank_milestones_loop())
+    app.hiscores_poller_task = asyncio.create_task(hiscores_poller_loop())
     app_logger.log(log_type="access", data=f"Started background tasks", app_name="player_updates", description="setup_background_tasks")
 
 async def get_all_groups(session_to_use = None):
@@ -657,6 +688,13 @@ async def cleanup_background_tasks():
         app.rank_milestones_task.cancel()
         try:
             await app.rank_milestones_task
+        except asyncio.CancelledError:
+            pass
+
+    if hasattr(app, 'hiscores_poller_task'):
+        app.hiscores_poller_task.cancel()
+        try:
+            await app.hiscores_poller_task
         except asyncio.CancelledError:
             pass
 

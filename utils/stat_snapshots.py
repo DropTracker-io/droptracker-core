@@ -227,3 +227,142 @@ def xp_baselines(db_session, player_id: int, now: datetime):
     if any(value is None for value in baselines.values()):
         earliest = _baseline(earliest_snapshot(db_session, player_id))
     return baselines, earliest
+
+
+# --------------------------------------------------------------------------- #
+# Hiscores rows
+# --------------------------------------------------------------------------- #
+
+# A hiscores reading is only as fresh as the player's last logout, and the
+# name on it can change hands. Before a reading becomes history it has to be
+# believable next to the player's previous one.
+#
+# XP a player could not have earned: more than this per hour since the last
+# reading, plus a flat allowance for lamps and banked turn-ins. Deliberately
+# loose (the fastest sustained methods are around 1M to 1.5M an hour); it is
+# there to catch a different account answering to the name, not to judge play.
+MAX_XP_PER_HOUR = 2_500_000
+XP_ALLOWANCE = 5_000_000
+
+WRITTEN, UNCHANGED, FLAGGED, STALE = "written", "unchanged", "flagged", "stale"
+
+
+def encode_metrics(values: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """JSON for ``ranks`` / hiscores ``skills``: only real, non-negative ints."""
+    clean = {
+        str(metric): value for metric, value in (values or {}).items()
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0 and metric
+    }
+    return json.dumps(dict(sorted(clean.items())), separators=(",", ":")) if clean else None
+
+
+def plausibility_problem(previous_skills: Mapping[str, int], previous_activities: Mapping[str, int],
+                         previous_at: datetime, skills: Mapping[str, int],
+                         activities: Mapping[str, int], now: datetime) -> Optional[str]:
+    """Why a hiscores reading cannot follow the previous one, or None.
+
+    Compared metric by metric over what both readings know: a skill or boss
+    missing from either side is unknown, not zero.
+    """
+    for skill, xp in skills.items():
+        before = previous_skills.get(skill)
+        if before is not None and xp < before:
+            return f"{skill} xp went down ({before} -> {xp})"
+    for metric, score in activities.items():
+        before = previous_activities.get(metric)
+        if before is not None and score < before:
+            return f"{metric} went down ({before} -> {score})"
+    gained = sum(xp - previous_skills[s] for s, xp in skills.items() if s in previous_skills)
+    hours = max(0.0, (now - previous_at).total_seconds() / 3600.0)
+    if gained > XP_ALLOWANCE + MAX_XP_PER_HOUR * hours:
+        return f"{gained} xp in {hours:.1f}h"
+    return None
+
+
+def record_hiscores_snapshot(db_session, player_id: int, skills: Mapping[str, int],
+                             activities: Mapping[str, int], ranks: Mapping[str, int], *,
+                             total_xp: Optional[int] = None, total_level: Optional[int] = None,
+                             account_type: Optional[int] = None, pinned: bool = False,
+                             now: Optional[datetime] = None) -> str:
+    """Store a hiscores reading. Returns WRITTEN, UNCHANGED, FLAGGED or STALE.
+
+    - UNCHANGED: identical to the player's previous hiscores row. Nothing is
+      written, unless ``pinned`` asks for a row at this moment regardless.
+    - STALE: the plugin has already shown us more XP than this. The hiscores
+      only catch up at logout, so the reading is old news; nothing is written
+      and, if ``pinned``, the plugin's latest row is pinned instead.
+    - FLAGGED: it cannot follow the previous hiscores row (`plausibility_problem`).
+      The row is kept, marked, and never read as a baseline.
+
+    Unlike plugin rows, ``skills`` holds only what the hiscores ranked.
+    The caller commits.
+    """
+    from db.models import PlayerStatSnapshot
+
+    now = (now or datetime.now()).replace(microsecond=0)
+    skills = {s: int(v) for s, v in skills.items() if s in SKILLS and isinstance(v, int) and v >= 0}
+    if not skills:
+        return UNCHANGED
+    known_total = total_xp if isinstance(total_xp, int) and total_xp >= 0 else sum(skills.values())
+    activities_json = encode_activities(activities)
+    skills_json = encode_metrics(skills)
+
+    def latest(*criteria):
+        return (
+            db_session.query(PlayerStatSnapshot)
+            .filter(PlayerStatSnapshot.player_id == player_id, *criteria)
+            .order_by(PlayerStatSnapshot.taken_at.desc())
+            .first()
+        )
+
+    newest = latest(PlayerStatSnapshot.flagged.is_(False))
+    if (newest is not None and newest.source == SOURCE_PLUGIN
+            and int(newest.total_xp or 0) > known_total):
+        if pinned and not newest.pinned:
+            newest.pinned = True
+            db_session.flush()
+        return STALE
+
+    last = latest(PlayerStatSnapshot.source == SOURCE_HISCORES)
+    same = (last is not None and decode_skills(last.skills) == skills
+            and decode_activities(last.activities) == decode_activities(activities_json))
+    if same and last.flagged:
+        return FLAGGED
+    if same and not pinned:
+        return UNCHANGED
+    if last is not None and last.taken_at >= now:
+        return UNCHANGED
+
+    problem = None
+    if not same:
+        trusted = latest(PlayerStatSnapshot.source == SOURCE_HISCORES,
+                         PlayerStatSnapshot.flagged.is_(False))
+        if trusted is not None:
+            problem = plausibility_problem(
+                decode_skills(trusted.skills), decode_activities(trusted.activities),
+                trusted.taken_at, skills, decode_activities(activities_json), now)
+
+    db_session.add(PlayerStatSnapshot(
+        player_id=player_id, taken_at=now, source=SOURCE_HISCORES,
+        account_type=account_type if isinstance(account_type, int) else None,
+        total_xp=known_total,
+        total_level=total_level if isinstance(total_level, int) and total_level > 0 else 0,
+        skills=skills_json, activities=activities_json, ranks=encode_metrics(ranks),
+        flagged=problem is not None, pinned=bool(pinned) and problem is None,
+    ))
+    db_session.flush()
+    return FLAGGED if problem else WRITTEN
+
+
+def pin_latest(db_session, player_id: int) -> bool:
+    """Pin the player's newest usable row, so downsampling keeps it. True if
+    there was one."""
+    from db.models import PlayerStatSnapshot
+
+    row = _usable(db_session, player_id).order_by(PlayerStatSnapshot.taken_at.desc()).first()
+    if row is None:
+        return False
+    if not row.pinned:
+        row.pinned = True
+        db_session.flush()
+    return True
