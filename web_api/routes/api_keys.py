@@ -11,6 +11,17 @@
   PATCH  /api/v1/admin/api-keys/{id}         - promote a tier / set overrides
   GET    /api/v1/admin/api-usage             - who is spending what
   GET    /api/v1/api-key-reveals/{token}     - claim a one-time key link
+  GET    /api/v1/me/api-key-requests                - my requests for a key
+  POST   /api/v1/me/api-key-requests                - ask for a personal key
+  GET    /api/v1/groups/{gid}/api-key-requests      - the group's requests (admin)
+  POST   /api/v1/groups/{gid}/api-key-requests      - ask for a group key (admin)
+  POST   /api/v1/api-key-requests/{id}/cancel       - withdraw a pending request
+  GET    /api/v1/admin/api-key-requests             - every request (developer)
+  POST   /api/v1/admin/api-key-requests/{id}/decision - approve / deny (superadmin)
+
+Asking for a key (web163a) is the public door: a request opens an ``api_token``
+support ticket and staff approve or deny it there with buttons, or from the
+admin page. Rules live in ``db/api_key_requests.py``.
 
 The two self-serve mint routes are gated by ``DATA_API_SELF_SERVE_KEYS``
 (default off) — see :func:`self_serve_enabled`. Staff minting and every other
@@ -709,6 +720,224 @@ async def admin_delete_tier(tier_key: str):
                       "another tier first, or disable this one instead of deleting it.")
     _audit(user_id, "api_key_tier.delete", tier_key, before=json.dumps(detail))
     return jsonify({"ok": True})
+
+
+# ── asking for a key (web163a) ───────────────────────────────────────────────
+
+_REQUEST_LIMIT, _REQUEST_WINDOW = 3, 86400  # per user
+
+
+def _run_request(fn):
+    """Run ``fn(session)`` and commit; RequestError becomes a problem response."""
+    from db.api_key_requests import RequestError
+
+    def _inner():
+        with db_session() as session:
+            try:
+                out = fn(session)
+                session.commit()
+                return out
+            except RequestError as e:
+                session.rollback()
+                abort_problem(e.status, e.title, e.detail)
+
+    return asyncio.to_thread(_inner)
+
+
+def _request_budget_spent(user_id: int) -> bool:
+    from web_api.routes.tickets import _rate_limited
+
+    return _rate_limited("api_key_request", user_id, _REQUEST_LIMIT, _REQUEST_WINDOW)
+
+
+def _discord_member(user):
+    from web_api.routes.tickets import viewer_discord_member
+
+    return viewer_discord_member(user)
+
+
+@api_keys_bp.route("/me/api-key-requests", methods=["GET"])
+async def my_key_requests():
+    user_id = current_user_id()
+
+    def _load(session):
+        from db import api_key_requests as akr
+        from db.models import ApiKeyRequest
+
+        rows = (session.query(ApiKeyRequest)
+                .filter(ApiKeyRequest.scope == akr.SCOPE_USER,
+                        ApiKeyRequest.requested_by_user_id == user_id)
+                .order_by(ApiKeyRequest.id.desc()).limit(20).all())
+        return {
+            "requests": [akr.status_payload(r, s=session, viewer_user_id=user_id)
+                         for r in rows],
+            "discord_member": _discord_member(load_user(session, user_id)),
+        }
+
+    return jsonify(await _run_request(_load))
+
+
+@api_keys_bp.route("/me/api-key-requests", methods=["POST"])
+async def request_my_key():
+    user_id = current_user_id()
+    body = await request.get_json(silent=True) or {}
+    if _request_budget_spent(user_id):
+        abort_problem(429, "Too many requests", "Slow down and try again tomorrow.")
+
+    def _apply(session):
+        from db import api_key_requests as akr
+
+        user = load_user(session, user_id)
+        req = akr.request_user_key(session, user, body.get("label"), body.get("purpose"))
+        return akr.status_payload(req, s=session, viewer_user_id=user_id)
+
+    return jsonify(await _run_request(_apply)), 201
+
+
+@api_keys_bp.route("/groups/<int:group_id>/api-key-requests", methods=["GET"])
+async def group_key_requests(group_id: int):
+    user_id = current_user_id()
+
+    def _load(session):
+        from db import api_key_requests as akr
+        from db.models import ApiKeyRequest
+
+        assert_group_admin(session, user_id, group_id)
+        rows = (session.query(ApiKeyRequest)
+                .filter(ApiKeyRequest.scope == akr.SCOPE_GROUP,
+                        ApiKeyRequest.group_id == group_id)
+                .order_by(ApiKeyRequest.id.desc()).limit(20).all())
+        return {
+            "requests": [akr.status_payload(r, s=session, viewer_user_id=user_id)
+                         for r in rows],
+            "discord_member": _discord_member(load_user(session, user_id)),
+        }
+
+    return jsonify(await _run_request(_load))
+
+
+@api_keys_bp.route("/groups/<int:group_id>/api-key-requests", methods=["POST"])
+async def request_group_key(group_id: int):
+    user_id = current_user_id()
+    body = await request.get_json(silent=True) or {}
+
+    def _apply(session):
+        from db import api_key_requests as akr
+
+        assert_group_admin(session, user_id, group_id)
+        if _request_budget_spent(user_id):
+            raise akr.RequestError(429, "Too many requests",
+                                   "Slow down and try again tomorrow.")
+        user = load_user(session, user_id)
+        req = akr.request_group_key(session, user, group_id,
+                                    body.get("label"), body.get("purpose"))
+        return akr.status_payload(req, s=session, viewer_user_id=user_id)
+
+    return jsonify(await _run_request(_apply)), 201
+
+
+def _note_in_ticket(session, ticket_id, text: str) -> None:
+    """Say it in the ticket: the transcript row, and the Discord channel if
+    the ticket has one. Call after commit (the transcript uses its own session)."""
+    if not ticket_id:
+        return
+    try:
+        from db.models import Ticket
+        from services.discord_outbox import enqueue
+        from services.ticket_transcripts import add_system_message
+
+        add_system_message(int(ticket_id), text)
+        ticket = session.query(Ticket).filter(Ticket.ticket_id == int(ticket_id)).first()
+        channel_id = getattr(ticket, "channel_id", None)
+        if channel_id and getattr(ticket, "status", None) == "open":
+            enqueue(session, channel_id=str(channel_id), content=text[:2000])
+    except Exception:
+        pass
+
+
+@api_keys_bp.route("/api-key-requests/<int:request_id>/cancel", methods=["POST"])
+async def cancel_key_request(request_id: int):
+    user_id = current_user_id()
+
+    def _apply(session):
+        from db import api_key_requests as akr
+        from web_api.deps import is_group_admin_role, resolve_group_role
+
+        user = load_user(session, user_id)
+
+        def may_act(req) -> bool:
+            if req.requested_by_user_id is not None and int(req.requested_by_user_id) == user_id:
+                return True
+            if req.group_id is None:
+                return False
+            return is_group_admin_role(
+                resolve_group_role(session, user_id, int(req.group_id), user=user))
+
+        req = akr.cancel(session, request_id, user_id, may_act=may_act)
+        session.commit()
+        _note_in_ticket(session, req.ticket_id, akr.decision_text({}, "cancel", ""))
+        return akr.status_payload(req, s=session, viewer_user_id=user_id)
+
+    return jsonify(await _run_request(_apply))
+
+
+@api_keys_bp.route("/admin/api-key-requests", methods=["GET"])
+async def admin_key_requests():
+    user_id = current_user_id()
+    status = (request.args.get("status") or "").strip().lower()
+
+    def _load(session):
+        from db import api_key_requests as akr
+        from db.models import ApiKeyRequest
+
+        assert_developer(load_user(session, user_id))
+        q = session.query(ApiKeyRequest)
+        if status:
+            q = q.filter(ApiKeyRequest.status == status)
+        rows = q.order_by(ApiKeyRequest.id.desc()).limit(100).all()
+        pending = (session.query(func.count(ApiKeyRequest.id))
+                   .filter(ApiKeyRequest.status == akr.PENDING).scalar() or 0)
+        return {"requests": [akr.status_payload(r, s=session, staff=True) for r in rows],
+                "pending": int(pending)}
+
+    return jsonify(await _run_request(_load))
+
+
+@api_keys_bp.route("/admin/api-key-requests/<int:request_id>/decision", methods=["POST"])
+async def admin_decide_key_request(request_id: int):
+    """Approve or deny from the admin page: the same decision the ticket
+    buttons make. The claim link goes into the ticket, where the requester
+    is already looking; it is not returned here."""
+    user_id = current_user_id()
+    body = await request.get_json(silent=True) or {}
+    action = str(body.get("action") or "").strip().lower()
+    if action not in ("approve", "deny"):
+        abort_problem(400, "Bad Request", "action must be approve or deny.")
+
+    def _apply(session):
+        from db import api_key_requests as akr
+
+        staff = load_user(session, user_id)
+        assert_superadmin(staff)
+        url = None
+        if action == "approve":
+            req, url = akr.approve(session, request_id, user_id)
+        else:
+            req = akr.deny(session, request_id, user_id)
+        session.commit()
+        payload = akr.status_payload(req, s=session, staff=True)
+        by = getattr(staff, "username", None) or "staff"
+        _note_in_ticket(session, req.ticket_id, akr.decision_text(payload, action, by, url))
+        if action == "approve":
+            try:
+                from services.discord_roles import request_sync
+
+                request_sync()
+            except Exception:
+                pass
+        return payload
+
+    return jsonify(await _run_request(_apply))
 
 
 def _site_base() -> str:

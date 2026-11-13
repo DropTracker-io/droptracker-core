@@ -812,6 +812,14 @@ class Tickets(Extension):
                 await post_removal_card(self.bot, ticket_id, channel)
             except Exception as e:
                 print(f"[tickets] removal card failed for ticket {ticket_id}: {e}")
+            # API key requests are made on the site too; staff decide on
+            # this card.
+            try:
+                from services.api_key_requests_discord import post_request_card
+
+                await post_request_card(self.bot, ticket_id, channel)
+            except Exception as e:
+                print(f"[tickets] key-request card failed for ticket {ticket_id}: {e}")
             loading_message = await channel.send(components=build_ticket_loading())
             if discord_id:
                 asyncio.create_task(
@@ -1317,6 +1325,11 @@ class Tickets(Extension):
             if await _removal_component(event.ctx):
                 return
 
+            from services.api_key_requests_discord import handle_component as _key_request_component
+
+            if await _key_request_component(event.ctx):
+                return
+
             if "create_ticket_" in custom_id:
                 # Split on the prefix, not on "_": custom_id.split("_")[2] read
                 # "create_ticket_api_token" as "api" and silently opened the
@@ -1475,7 +1488,17 @@ class Tickets(Extension):
             # background task so channel setup never blocks on the DB.
             loading_message = await ticket_channel.send(components=build_ticket_loading())
             asyncio.create_task(load_and_update_player_data(ctx.author.id, ticket_channel, loading_message))
-                
+            if ticket_type == "api_token":
+                # Keys are requested on the site, where the request carries
+                # the group and comes back here with staff's buttons.
+                await ticket_channel.send(
+                    "-# Tip: group admins can request a key from their group's **API access** "
+                    "page on the site, and anyone can request a personal one at "
+                    "<https://www.droptracker.io/api-keys>. The reference, with example "
+                    "responses, is at <https://www.droptracker.io/docs/api>.",
+                    allowed_mentions=AllowedMentions.none(),
+                )
+
         except Exception as e:
             print(f"Error setting up ticket details: {e}")
             # Even if this fails, the ticket channel was created successfully

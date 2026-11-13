@@ -35,11 +35,30 @@ probe which keys exist.
 
 ### Getting a key
 
-| Owner | How | Who may |
+Keys are requested on the website and approved by staff (web163a):
+
+| Key for | Where to ask | Who may ask |
 |---|---|---|
-| A user | `POST /api/v1/me/api-keys` on the website | Supporters |
-| A group | `POST /api/v1/groups/{id}/api-keys` | Group owner/admin |
-| Either | Ask staff | Custom limits, any tier |
+| A group | The group's admin pages, **API access** tab (`/groups/{id}/api`) | Group owner/admin |
+| A user's own accounts | `/api-keys` in the dashboard | Any signed-in user |
+| Every group (global) | A support ticket, type API Token Request | Issued by hand only |
+
+A request says what the key is for and opens an `api_token` support ticket.
+Staff press **Approve** or **Deny** on the card in that ticket (or decide from
+`/admin/api-keys`). Approval creates the key on the entry tier and posts a
+one-time claim link in the ticket; the link opens only for the person who
+asked, while signed in, and expires after 7 days. Someone who is not in the
+Discord server follows the ticket on the site instead. Rules:
+`db/api_key_requests.py`; ticket card and buttons:
+`services/api_key_requests_discord.py`.
+
+The older direct-mint routes (`POST /api/v1/me/api-keys`,
+`POST /api/v1/groups/{id}/api-keys`) still exist behind
+`DATA_API_SELF_SERVE_KEYS` and stay off.
+
+The public reference at `/docs/api` shows a real response for every endpoint
+and section. Refresh them after changing a loader's output:
+`./venv/bin/python -m scripts.capture_api_examples --write ../web/apps/web/lib/api-examples.json`.
 
 Maximum 5 active keys per owner. Revoking is immediate.
 

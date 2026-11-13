@@ -130,6 +130,7 @@ from .chat import (
 from .known_issues import KnownIssueCategory, KnownIssue, ISSUE_SEVERITIES, ISSUE_STATUSES
 from .knowledgebase import KBDocument, KBChunk, KBIngestState, KB_SOURCE_TYPES
 from .api_key_reveals import ApiKeyReveal
+from .api_key_requests import ApiKeyRequest
 from .group_verification_code import GroupVerificationCode
 from .plugin_admin_session import PluginAdminSession
 from .api_keys import ApiKey, ApiKeyTier, ApiSubmission
@@ -281,6 +282,7 @@ __all__ = [
     "DiscordRelayIntegration",
     "DiscordRelayGuild",
     "DataRemovalRequest",
+    "ApiKeyRequest",
     "Base",
     "session",
     "Session",

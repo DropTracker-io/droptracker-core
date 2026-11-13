@@ -454,6 +454,7 @@ Production is managed via systemd: `systemctl status 'droptracker-*'`. `STATE=de
 | Website auth/session | `web_api/session.py` (JWT), `web_api/routes/auth.py` (Discord OAuth) |
 | Live drop feed / SSE | `services/realtime.py` (publish), `web_api/routes/realtime.py` (stream) |
 | Subscriptions / billing | `web_api/billing.py` (Stripe), `payments.py`, `routes/subscriptions.py` |
+| Data API keys: asking for one, staff approval, the docs' example responses | `db/api_key_requests.py` (rules; request opens an `api_token` ticket), `services/api_key_requests_discord.py` (ticket card + Approve/Deny, webhook bot), `web_api/routes/api_keys.py`; `scripts/capture_api_examples.py --write` regenerates the web repo's `lib/api-examples.json` for `/docs/api` |
 | Tickets / suggestions | `services/ticket_system.py`, `services/suggestion_sync.py`, `web_api/routes/{tickets,suggestions}.py` |
 | Group creation / RSN claims | `db/group_creation.py`, `db/player_claims.py` (shared by bot + web) |
 | Owner's Android admin widget (device pairing + token-gated summary) | `web_api/routes/admin_widget.py` (`/admin/widget-tokens`, `/admin/widget/summary` — the only endpoint a `dtw_` token opens; owner must still be superadmin), `db/models/admin_widget_token.py` (web128a, SHA-256 only); web BFF `/api/widget/admin` + page `/admin/widget`; the app itself lives outside both repos at `~/droptracker-widget` |
