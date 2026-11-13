@@ -1075,7 +1075,7 @@ class NotificationService:
 
     def _message_text(self, group_id, embed_type, values, formatted_name, *,
                       custom_embeds, fallback=None, own_type=None, line=None,
-                      line_in_embed=False):
+                      line_in_embed=False, prefer_fallback=False):
         """The text sent above a notification embed.
 
         The group's own text (needs ``custom_embeds``) or the template group's,
@@ -1106,6 +1106,13 @@ class NotificationService:
             return notification_text.plain_content(embed_type, values, formatted_name)
         if fallback is None:
             fallback = notification_text.default_content(embed_type, formatted_name)
+        if prefer_fallback and notification_text.own_content_template(
+            group_id, embed_type, bool(custom_embeds), own_type=own_type
+        ) is None:
+            # The sender's own line for THIS notification (a completed
+            # collection log page) beats the template group's generic text;
+            # only a group's own written text still wins (suggestion #238).
+            return fallback
         template = notification_text.content_template(
             group_id, embed_type, bool(custom_embeds), own_type=own_type
         )
@@ -5653,6 +5660,7 @@ class NotificationService:
                                          custom_embeds=upgrade_active,
                                          fallback=(notification_text.completed_clog_content(completed, formatted_name)
                                                    if completed else None),
+                                         prefer_fallback=bool(completed),
                                          line=clog_content_line or None,
                                          line_in_embed=clog_line_in_embed)
             notification_text.apply_footer(embed, group_id, "clog", replacements)

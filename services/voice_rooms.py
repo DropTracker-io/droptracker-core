@@ -142,16 +142,17 @@ class VoiceRooms(Extension):
             return
         self._cooldown[key] = now
 
-        in_guild = sum(1 for raw in r.hvals(core.ROOMS_HASH)
-                       if (core.parse_record(raw) or {}).get("guild_id") == str(guild_id))
-        if in_guild >= core.MAX_ROOMS_PER_GUILD:
+        live = [rec for rec in (core.parse_record(raw) for raw in r.hvals(core.ROOMS_HASH))
+                if rec and rec.get("guild_id") == str(guild_id)]
+        if len(live) >= core.MAX_ROOMS_PER_GUILD:
             return
+        number = core.next_room_number(live, guild_id)
 
         hub = self.bot.cache.get_channel(hub_id)
         member = state.member
         display = (getattr(member, "display_name", None) if member else None) or "Member"
         template = await asyncio.to_thread(_load_name_template, group_id)
-        name = core.render_room_name(template, display)
+        name = core.render_room_name(template, display, number)
         parent_id = getattr(hub, "parent_id", None) if hub else None
         bitrate = int(getattr(hub, "bitrate", 0) or 64000) if hub else 64000
         try:
@@ -166,7 +167,8 @@ class VoiceRooms(Extension):
             return
         room_id = int(data["id"])
         self._rooms.add(room_id)
-        r.hset(core.ROOMS_HASH, str(room_id), core.room_record(guild_id, user_id, hub_id))
+        r.hset(core.ROOMS_HASH, str(room_id),
+               core.room_record(guild_id, user_id, hub_id, number=number))
         r.hset(core.OWNERS_HASH, field, str(room_id))
         if not await self._move(guild_id, user_id, room_id):
             # They left the hub before we could move them, or we lack Move

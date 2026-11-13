@@ -13,7 +13,10 @@ Excluded on purpose: GE-tradeable items (their 0gp rows are transient price
 lookup failures), pets (their ``pet`` submissions carry their own screenshot
 config), and high-rate farming byproducts (>5 drops/player/month — granite
 dust, abyssal pearls, satchels and the like) that would spam screenshot
-uploads. The boss jars are the one deliberate exception to the tradeable
+uploads. Ancient shards, Dark totem pieces and Crystal shards came off the list
+on 2026-11-13 for the same reason (a Catacombs or Prifddinas session hands
+out dozens, and the toggle's blurb promises "notable" drops — see velayn's
+report in #questions, 2026-11-06); the assembled Dark totem stays. The boss jars are the one deliberate exception to the tradeable
 rule — see their block below.
 
 Publishing is automatic: ``GithubPagesUpdater._item_list_contents``
@@ -138,10 +141,6 @@ NOTABLE_UNTRADEABLES = [
     (13380, "Shayzien greaves (5)"),
     (13381, "Shayzien body (5)"),
     (13392, "Xeric's talisman (inert)"),
-    (19677, "Ancient shard"),
-    (19679, "Dark totem base"),
-    (19681, "Dark totem middle"),
-    (19683, "Dark totem top"),
     (19685, "Dark totem"),
     (20704, "Pyromancer garb"),
     (20706, "Pyromancer robe"),
@@ -158,7 +157,6 @@ NOTABLE_UNTRADEABLES = [
     (22971, "Hydra's fang"),
     (22973, "Hydra's eye"),
     (23077, "Alchemical hydra heads"),
-    (23866, "Crystal shards"),
     (24670, "Twisted ancestral colour kit"),
     (25434, "Zealot's robe top"),
     (25436, "Zealot's robe bottom"),

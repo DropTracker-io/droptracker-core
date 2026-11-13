@@ -329,9 +329,9 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Which collection log slots to post",
         "category": "achievements",
         "type": "select",
-        "help": "Every new slot, or only the slot that completes a collection log page. Completed pages are only spotted for members who have opened their collection log with the plugin since joining, or whose every slot on that page we saw them get.",
+        "help": "Every new slot, only the slot that completes a collection log page, or completed pages plus notable slots (boss uniques, pets, jars, ornament kits, champion scrolls and the like). Completed pages are only spotted for members who have opened their collection log with the plugin since joining, or whose every slot on that page we saw them get.",
         "default": "all",
-        "options": ["all", "completed"],
+        "options": ["all", "completed", "completed_notable"],
     },
     # Members' own and the group's collection log messages (db/member_messages.py).
     {
@@ -1070,7 +1070,7 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "label": "Temporary channel name",
         "category": "voice",
         "type": "string",
-        "help": "Name for each temporary voice channel. Placeholder: {name}, the member's server name.",
+        "help": "Name for each temporary voice channel. Placeholders: {name}, the member's server name, and {number}, the room's slot (01, 02, ...) for generic names like \"Channel {number}\".",
         "default": "{name}'s Channel",
     },
 

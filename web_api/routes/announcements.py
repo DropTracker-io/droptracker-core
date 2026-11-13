@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from quart import Blueprint, jsonify, request
 
@@ -164,13 +164,19 @@ async def get_announcement(announcement_id: int):
 # --------------------------------------------------------------------------- #
 # Writes
 # --------------------------------------------------------------------------- #
-def _validate_input(body: dict):
+def _validate_input(body: dict, *, allow_empty_body: bool = False):
+    """``(title, body_md)``. The body may be left empty only for a group post
+    that goes in game (``allow_empty_body``): the one-line in-game message,
+    or the title, then stands in for it on the site and in Discord
+    (suggestion #247 — a chatbox reminder needs no Markdown write-up)."""
     title = (body.get("title") or "").strip()
     body_md = (body.get("body_md") or "").strip()
     if not (1 <= len(title) <= 200):
         abort_problem(422, "Invalid title", "Title must be 1–200 characters.")
     if not body_md:
-        abort_problem(422, "Invalid body", "body_md must not be empty.")
+        if not allow_empty_body:
+            abort_problem(422, "Invalid body", "body_md must not be empty.")
+        body_md = " ".join(str(body.get("in_game_message") or "").split()) or title
     return title, body_md
 
 
@@ -244,6 +250,39 @@ def _record_in_game_send(group_id, ann_id) -> None:
         pass
 
 
+#: How far ahead an in-game end time may sit. A clan reminder is about the next
+#: few days; the inbox itself only lives 24h past the send anyway.
+IN_GAME_UNTIL_MAX_DAYS = 30
+
+
+def _validate_in_game_until(body: dict):
+    """The optional instant after which the in-game message stops showing
+    (``in_game_until``, ISO 8601; a trailing Z or offset is honoured, a bare
+    local time is read as UTC). Naive UTC datetime, or None when unset.
+
+    Carried on the plugin inbox entry only (``expires_at``, dropped by the
+    drain once passed), not stored on the post: the site and Discord copies
+    are not time-limited."""
+    raw = str(body.get("in_game_until") or "").strip()
+    if not raw:
+        return None
+    text = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        abort_problem(422, "Invalid end time", "in_game_until must be an ISO 8601 date-time.")
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    now = datetime.utcnow()
+    if parsed <= now:
+        abort_problem(422, "End time already passed",
+                      "The in-game message's end time must be in the future.")
+    if parsed > now + timedelta(days=IN_GAME_UNTIL_MAX_DAYS):
+        abort_problem(422, "End time too far ahead",
+                      f"The in-game message can show for at most {IN_GAME_UNTIL_MAX_DAYS} days.")
+    return parsed
+
+
 def _validate_in_game(body: dict, title: str):
     """``(send, message)``: the one-line in-game text, defaulting to the title."""
     from services.plugin_notifications import CLAN_ANNOUNCEMENT_MAX_CHARS
@@ -302,12 +341,14 @@ def _create_announcement(user_id, scope_type, group_id, body):
     """Create and publish, or (global post from a non-approver) save as a draft
     for review. Returns ``(id, status, in_game_recipients)`` — the last is
     None unless the post went in game."""
-    title, body_md = _validate_input(body)
+    title, body_md = _validate_input(
+        body, allow_empty_body=(scope_type == "group" and bool(body.get("send_in_game", False))))
     pinned = bool(body.get("pinned", False))
     cover = _optional_url(body, "cover_image_url", "image")
     style = _validate_embed_style(body)
     send_in_game, in_game_message = (
         _validate_in_game(body, title) if scope_type == "group" else (False, None))
+    in_game_until = _validate_in_game_until(body) if send_in_game else None
     if send_in_game:
         if int(group_id) == 2:
             abort_problem(422, "Not for the global group",
@@ -413,7 +454,7 @@ def _create_announcement(user_id, scope_type, group_id, body):
                 in_game_recipients = push_clan_announcement(
                     s, announcement_id=ann_id, group_id=group_id,
                     group_name=group.group_name if group else None,
-                    title=title, message=in_game_message,
+                    title=title, message=in_game_message, until=in_game_until,
                 )
             if in_game_recipients:
                 _record_in_game_send(group_id, ann_id)

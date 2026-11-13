@@ -137,6 +137,10 @@ def _team_size_sort_key(ts: str):
 def team_size_label(ts: str) -> str:
     if ts == "Solo":
         return "Solo"
+    if ts == "2":
+        return "Duo"
+    if ts == "3":
+        return "Trio"
     return f"{ts} players"
 
 

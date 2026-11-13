@@ -282,6 +282,18 @@ RAID_TEAM_SIZE_CAPS = {
     "royal-titans": 1,
 }
 
+#: Bosses whose every time lands on ONE board whatever size was sent, keyed by
+#: match key -> the canonical team size that board is labelled with.
+#:
+#: Yama (suggestion #140, 2026-11-13): fought solo or as a duo, one in-game
+#: personal best for both, and no solo is ever faster than a duo. Separate
+#: Solo and Duo boards only split the same race in two, so it is one board,
+#: labelled Duo. Unlike :data:`RAID_TEAM_SIZE_CAPS` this folds *upwards* too:
+#: a "Solo" Yama time becomes a "2".
+TEAM_SIZE_FOLDS = {
+    "yama": "2",
+}
+
 #: Leading integer of a canonical team-size token — "6" and the low end of the
 #: "6+" / "11-15" brackets. A bracket is over the cap when its *lowest* member
 #: already is.
@@ -304,6 +316,18 @@ def team_size_cap(npc_name: str | None) -> int | None:
     return RAID_TEAM_SIZE_CAPS.get(base) if base else None
 
 
+def team_size_fold(npc_name: str | None) -> str | None:
+    """The single team size every PB at ``npc_name`` is filed under, or None."""
+    key = npc_match_key(npc_name)
+    if not key:
+        return None
+    fold = TEAM_SIZE_FOLDS.get(key)
+    if fold is not None:
+        return fold
+    base = npc_base_slug(key)
+    return TEAM_SIZE_FOLDS.get(base) if base else None
+
+
 def clamp_team_size(npc_name: str | None, raw) -> str:
     """``sanitize_team_size`` plus the boss's real party ceiling.
 
@@ -320,6 +344,9 @@ def clamp_team_size(npc_name: str | None, raw) -> str:
     than inventing a phantom one.
     """
     size = sanitize_team_size(raw)
+    fold = team_size_fold(npc_name)
+    if fold is not None:
+        return fold
     cap = team_size_cap(npc_name)
     if cap is None or size == "Solo":
         return size

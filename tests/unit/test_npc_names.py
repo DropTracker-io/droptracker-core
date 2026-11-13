@@ -270,6 +270,13 @@ def test_clamp_team_size_rejects_impossible_raid_teams():
     assert c("Royal Titans", "2") == "Solo"
     assert c("Royal Titans", "Solo") == "Solo"
 
+    # Yama folds the other way: solo and duo share one in-game PB and nobody
+    # solos faster than a duo, so every time sits on the one Duo board.
+    assert c("Yama", "Solo") == "2"
+    assert c("Yama", "2") == "2"
+    assert c("Yama", "3") == "2"
+    assert c("Zulrah", "Solo") == "Solo"
+
     # Still does sanitize_team_size' job on the way through.
     assert c("Theatre of Blood", "(3 players)") == "3"
     assert c("Theatre of Blood", "0") == "Solo"

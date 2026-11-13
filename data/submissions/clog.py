@@ -401,8 +401,10 @@ async def clog_processor(clog_data, external_session=None, world_type="main"):
                 if gc.is_truthy(gc.get_effective(session, group_id, f"{config_prefix}notify_clogs"))
                 else None
             )
-            if notify_reason == "config" and clog_modes.get(group_id) == "completed" and not completed_collection:
-                notify_reason = None
+            if notify_reason == "config" and clog_modes.get(group_id, "all") != "all":
+                from utils.clog_collections import suppressed_by_mode
+                if suppressed_by_mode(clog_modes[group_id], completed_collection, item_id, item_name):
+                    notify_reason = None
             if notify_reason is None and int(group_points_result.get("total_points_awarded", 0)) > 0:
                 # notify_clogs is off (or the slot completes no page) but points landed: the notify_points_awarded
                 # toggle (opt-in, default OFF) announces the slot so points are never

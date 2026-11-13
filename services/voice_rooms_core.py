@@ -37,16 +37,38 @@ CREATE_COOLDOWN_S = 10
 SWEEP_GRACE_S = 30
 
 
-def render_room_name(template: Optional[str], display_name: str) -> str:
-    """The room's channel name. ``{name}`` is the member's display name.
+def render_room_name(template: Optional[str], display_name: str,
+                     number: Optional[int] = None) -> str:
+    """The room's channel name. ``{name}`` is the member's display name and
+    ``{number}`` the room's slot in the guild ("01", "02", ...: the lowest
+    number no live room holds, see :func:`next_room_number`), for groups
+    that would rather not put a member's name on a channel.
 
-    A template without ``{name}`` is used as written (every room then shares
-    the name, which is allowed). Blank falls back to the default.
+    A template without either placeholder is used as written (every room
+    then shares the name, which is allowed). Blank falls back to the default.
     """
     template = (template or "").strip() or DEFAULT_NAME
     name = (display_name or "").strip() or "Member"
-    rendered = template.replace("{name}", name).strip()
+    slot = f"{int(number):02d}" if number else "01"
+    rendered = template.replace("{name}", name).replace("{number}", slot).strip()
     return (rendered or DEFAULT_NAME.replace("{name}", name))[:NAME_MAX]
+
+
+def next_room_number(records, guild_id) -> int:
+    """The lowest positive number no live room in ``guild_id`` carries, so
+    rooms read "Channel 01, 02, 03" and a freed number is reused next."""
+    used = set()
+    for rec in records or ():
+        if not isinstance(rec, dict) or str(rec.get("guild_id")) != str(guild_id):
+            continue
+        try:
+            used.add(int(rec.get("number") or 0))
+        except (TypeError, ValueError):
+            continue
+    n = 1
+    while n in used:
+        n += 1
+    return n
 
 
 def hub_map(rows) -> Dict[int, int]:
@@ -69,9 +91,13 @@ def owner_field(guild_id, user_id) -> str:
     return f"{int(guild_id)}:{int(user_id)}"
 
 
-def room_record(guild_id, owner_id, hub_id, now: Optional[float] = None) -> str:
-    return json.dumps({"guild_id": str(guild_id), "owner_id": str(owner_id),
-                       "hub_id": str(hub_id), "created_at": int(now or time.time())})
+def room_record(guild_id, owner_id, hub_id, now: Optional[float] = None,
+                number: Optional[int] = None) -> str:
+    rec = {"guild_id": str(guild_id), "owner_id": str(owner_id),
+           "hub_id": str(hub_id), "created_at": int(now or time.time())}
+    if number:
+        rec["number"] = int(number)
+    return json.dumps(rec)
 
 
 def parse_record(raw) -> Optional[dict]:

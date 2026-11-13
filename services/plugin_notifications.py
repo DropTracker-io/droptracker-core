@@ -290,9 +290,14 @@ def drain_inbox(player_id, limit: int = DRAIN_BATCH_LIMIT) -> list:
         try:
             if isinstance(item, bytes):
                 item = item.decode("utf-8")
-            entries.append(json.loads(item))
+            envelope = json.loads(item)
         except Exception:
             continue
+        # An entry with an end time that has passed (a clan announcement about
+        # something already over) is dropped here rather than shown.
+        if expired(envelope):
+            continue
+        entries.append(envelope)
     return entries
 
 
@@ -317,7 +322,7 @@ GLOBAL_GROUP_ID = 2
 
 
 def clan_announcement_envelope(announcement_id, group_id, group_name, title, message,
-                               now: int = None) -> dict:
+                               now: int = None, until=None) -> dict:
     """The ``clan_announcement`` envelope: rendered by plugins that read the
     server's ``display`` block (6.1.12+); older builds drop the unknown type.
 
@@ -347,6 +352,10 @@ def clan_announcement_envelope(announcement_id, group_id, group_name, title, mes
         "task_label": f"announcement {int(announcement_id)}",
     }
     envelope = build_envelope(CLAN_ANNOUNCEMENT_TYPE, data, now=now)
+    if until is not None:
+        # The inbox drain drops it past this instant (suggestion #247): a
+        # "mass at 20:00" line should not greet a member the next morning.
+        envelope["expires_at"] = _as_epoch(until)
     envelope["display"] = {
         "v": 1,
         "title": title,
@@ -389,8 +398,29 @@ def group_member_player_ids(session, group_id) -> set:
     return {int(r[0]) for r in rows}
 
 
+def _as_epoch(value) -> int:
+    """A naive-UTC/aware datetime or a number -> unix seconds."""
+    if hasattr(value, "timestamp"):
+        if getattr(value, "tzinfo", None) is None:
+            import calendar
+            return int(calendar.timegm(value.timetuple()))
+        return int(value.timestamp())
+    return int(value)
+
+
+def expired(envelope: dict, now: float = None) -> bool:
+    """True once an envelope's optional ``expires_at`` has passed."""
+    raw = (envelope or {}).get("expires_at")
+    if raw in (None, ""):
+        return False
+    try:
+        return float(raw) <= float(now if now is not None else time.time())
+    except (TypeError, ValueError):
+        return False
+
+
 def push_clan_announcement(session, *, announcement_id, group_id, group_name, title,
-                           message) -> int:
+                           message, until=None) -> int:
     """Queue an announcement in every member's plugin inbox. Returns how many
     inboxes it went to.
 
@@ -405,7 +435,8 @@ def push_clan_announcement(session, *, announcement_id, group_id, group_name, ti
     members -= _players_with_type_disabled(session, CLAN_ANNOUNCEMENT_TYPE, members)
     if not members:
         return 0
-    envelope = clan_announcement_envelope(announcement_id, group_id, group_name, title, message)
+    envelope = clan_announcement_envelope(announcement_id, group_id, group_name, title, message,
+                                          until=until)
     serialized = json.dumps(envelope, default=str)
     try:
         pipe = _redis().pipeline(transaction=False)

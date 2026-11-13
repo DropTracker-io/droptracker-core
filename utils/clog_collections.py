@@ -83,15 +83,64 @@ def collection_for_item(item_id=None, item_name=None, source=None) -> Optional[s
 
 #: Group config: which collection log slots a group posts (suggestion #238).
 #: ``all`` (default, or unset) = every new slot; ``completed`` = only the slot
-#: that completes a collection log page.
+#: that completes a collection log page; ``completed_notable`` = completed
+#: pages plus the slots worth shouting about on their own (:func:`notable_slot`).
 NOTIFY_MODE_KEY = "clog_notify_mode"
-NOTIFY_MODES = ("all", "completed")
+NOTIFY_MODES = ("all", "completed", "completed_notable")
 
 
 def notify_mode(value) -> str:
     """The stored ``clog_notify_mode`` as a known mode, ``all`` when unset or unknown."""
     mode = str(value or "").strip().lower()
     return mode if mode in NOTIFY_MODES else "all"
+
+
+@lru_cache(maxsize=1)
+def _notable_slots() -> tuple[frozenset, frozenset]:
+    """``(item ids, lower-case item names)`` of slots that are news on their
+    own: every boss unique and pet the task generator's encounter catalog
+    lists (the raid purples, Zulrah's uniques, the DT2 vestiges...) plus the
+    curated notable untradeables (champion scrolls, boss heads, ornament
+    kits, jars). A full page at the Fractured Archive is years away for most
+    players; a "completed pages" group still wants to hear about the purple."""
+    ids: set[int] = set()
+    names: set[str] = set()
+    try:
+        from services.task_generator import ENCOUNTERS
+        for enc in ENCOUNTERS:
+            names.update(str(u).casefold() for u in (enc.get("uniques") or []))
+            if enc.get("pet"):
+                names.add(str(enc["pet"]).casefold())
+    except Exception:
+        pass
+    try:
+        from scripts.export_untradeable_items import NOTABLE_UNTRADEABLES
+        ids.update(int(i) for i, _name in NOTABLE_UNTRADEABLES)
+        names.update(str(n).casefold() for _i, n in NOTABLE_UNTRADEABLES)
+    except Exception:
+        pass
+    return frozenset(ids), frozenset(names)
+
+
+def notable_slot(item_id, item_name) -> bool:
+    """Whether this slot posts under ``completed_notable`` even when it
+    completes no page (suggestion #238)."""
+    ids, names = _notable_slots()
+    try:
+        if item_id is not None and int(item_id) in ids:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(item_name or "").strip().casefold() in names
+
+
+def suppressed_by_mode(mode: str, completed_collection, item_id, item_name) -> bool:
+    """True when a group on ``mode`` should NOT post this slot."""
+    if completed_collection or mode == "all":
+        return False
+    if mode == "completed":
+        return True
+    return not notable_slot(item_id, item_name)
 
 
 @lru_cache(maxsize=1)

@@ -7,6 +7,7 @@ GET /api/v1/groups/{id}/members?page=
 from __future__ import annotations
 
 import asyncio
+from functools import lru_cache
 import json
 import zlib
 from contextlib import contextmanager
@@ -816,6 +817,47 @@ def _month_npc_boxes(s, player_id: int, partition: int, current: int):
     return npc_list
 
 
+@lru_cache(maxsize=1)
+def _npc_category_index() -> dict:
+    """match key -> content category, from the task generator's encounter list
+    (``raids``, ``gwd``, ``dt2``, ``bosses``, ``slayer``, ``wilderness``,
+    ``group``, ``skilling``): the one curated place that already files every
+    tracked boss under a heading the site uses."""
+    from services.task_generator import ENCOUNTERS
+    from utils.npc_names import npc_match_key
+
+    # Tracked content the encounter list leaves out (no KC task to size).
+    index: dict = {"fractured-archive": "raids", "tempoross": "skilling",
+                   "wintertodt": "skilling", "zalcano": "skilling"}
+    for enc in ENCOUNTERS:
+        category = enc.get("category")
+        if not category or category == "general":
+            continue
+        for name in list(enc.get("kc_npcs") or []) + [enc.get("label"), enc.get("short")]:
+            key = npc_match_key(name) if name else None
+            if key:
+                index.setdefault(key, category)
+    return index
+
+
+def _npc_category(npc_name) -> str:
+    """The loot tracker's filter heading for an NPC; ``other`` when it is not a
+    catalogued boss (a slayer task monster, a chest, skilling loot)."""
+    try:
+        from utils.npc_names import npc_base_slug, npc_match_key
+
+        key = npc_match_key(npc_name)
+        if not key:
+            return "other"
+        index = _npc_category_index()
+        if key in index:
+            return index[key]
+        base = npc_base_slug(key)
+        return index.get(base, "other") if base else "other"
+    except Exception:
+        return "other"
+
+
 def _fold_npc_boxes(months):
     """Merge per-month NPC boxes (oldest first) into one all-time list.
 
@@ -930,6 +972,10 @@ async def player_loot(player_id: int):
                 else:
                     npc_list = _month_npc_boxes(s, player_id, partition, current)
 
+            # Tagged at assembly, not inside the month cache, so months cached
+            # before the tag existed pick it up too (suggestion #248).
+            for npc in npc_list:
+                npc["category"] = _npc_category(npc.get("name"))
             payload = {
                 "player_id": player_id,
                 "partition": partition,

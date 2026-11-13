@@ -31,6 +31,41 @@ class TestRoomName:
     def test_missing_display_name(self):
         assert core.render_room_name(None, "") == "Member's Channel"
 
+    def test_numbered_template(self):
+        # Generic names for groups that don't want members' names on channels.
+        assert core.render_room_name("Channel {number}", "Zed", 1) == "Channel 01"
+        assert core.render_room_name("Channel {number}", "Zed", 12) == "Channel 12"
+        assert core.render_room_name("Room {number} · {name}", "Zed", 3) == "Room 03 · Zed"
+
+    def test_number_defaults_to_the_first_slot(self):
+        assert core.render_room_name("Channel {number}", "Zed") == "Channel 01"
+
+
+class TestRoomNumbers:
+    def _rec(self, guild, number=None):
+        rec = {"guild_id": str(guild), "owner_id": "1", "hub_id": "2", "created_at": 0}
+        if number:
+            rec["number"] = number
+        return rec
+
+    def test_first_room_is_one(self):
+        assert core.next_room_number([], 10) == 1
+
+    def test_lowest_free_number_is_reused(self):
+        live = [self._rec(10, 1), self._rec(10, 3)]
+        assert core.next_room_number(live, 10) == 2
+
+    def test_other_guilds_do_not_count(self):
+        assert core.next_room_number([self._rec(11, 1)], 10) == 1
+
+    def test_rooms_without_a_number_are_ignored(self):
+        assert core.next_room_number([self._rec(10)], 10) == 1
+
+    def test_record_carries_its_number(self):
+        rec = core.parse_record(core.room_record(10, 1, 2, now=5, number=4))
+        assert rec["number"] == 4
+        assert "number" not in core.parse_record(core.room_record(10, 1, 2, now=5))
+
 
 class TestHubMap:
     def test_only_real_snowflakes_count(self):
