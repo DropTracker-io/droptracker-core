@@ -478,12 +478,14 @@ async def test_notification():
         db_session = get_db_session()
         try:
             player_id = _resolve_player_id(db_session, player_name, acc_hash)
+            # Informational replies are 200s: the plugin prints `message` as a
+            # chat line and treats non-2xx as "couldn't reach the API".
             if player_id is None:
-                return {"message": "Your account isn't registered with DropTracker yet; submit a drop first."}, 404
+                return {"message": "Your account isn't registered with DropTracker yet; submit a drop first."}, 200
             key = f"test_notification:{int(player_id)}"
             try:
                 if not redis_client.client.set(key, "1", nx=True, ex=TEST_NOTIFICATION_COOLDOWN_SECONDS):
-                    return {"message": "You sent a test recently; try again in a few minutes."}, 429
+                    return {"message": "You sent a test recently; try again in a few minutes."}, 200
             except Exception:
                 pass
             player = db_session.query(Player).filter(Player.player_id == player_id).first()
@@ -494,7 +496,7 @@ async def test_notification():
             db_session.close()
 
     result, status = await asyncio.to_thread(_run)
-    if status != 200:
+    if "groups" not in result:
         return jsonify(result), status
 
     from data.submissions.common import create_notification, group_has_notification_channel
