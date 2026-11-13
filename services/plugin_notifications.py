@@ -321,8 +321,13 @@ CLAN_ANNOUNCEMENT_MAX_CHARS = 200
 GLOBAL_GROUP_ID = 2
 
 
+#: Where the in-game line is drawn: a game message, or a clan broadcast line
+#: (plugins 6.1.27+; older builds ignore the field and draw a game line).
+CLAN_ANNOUNCEMENT_CHANNELS = ("game", "clan")
+
+
 def clan_announcement_envelope(announcement_id, group_id, group_name, title, message,
-                               now: int = None, until=None) -> dict:
+                               now: int = None, until=None, channel: str = "game") -> dict:
     """The ``clan_announcement`` envelope: rendered by plugins that read the
     server's ``display`` block (6.1.12+); older builds drop the unknown type.
 
@@ -360,7 +365,8 @@ def clan_announcement_envelope(announcement_id, group_id, group_name, title, mes
         "v": 1,
         "title": title,
         "text": f"{group_name}: {message}",
-        "chat": {"tag": "ANNOUNCEMENT", "tone": "info", "emphasis": None},
+        "chat": {"tag": "ANNOUNCEMENT", "tone": "info", "emphasis": None,
+                 "channel": "clan" if channel == "clan" else "game"},
         "toast": True,
         "icon_item_id": None,
         "card": {
@@ -420,7 +426,7 @@ def expired(envelope: dict, now: float = None) -> bool:
 
 
 def push_clan_announcement(session, *, announcement_id, group_id, group_name, title,
-                           message, until=None) -> int:
+                           message, until=None, channel: str = "game") -> int:
     """Queue an announcement in every member's plugin inbox. Returns how many
     inboxes it went to.
 
@@ -436,7 +442,7 @@ def push_clan_announcement(session, *, announcement_id, group_id, group_name, ti
     if not members:
         return 0
     envelope = clan_announcement_envelope(announcement_id, group_id, group_name, title, message,
-                                          until=until)
+                                          until=until, channel=channel)
     serialized = json.dumps(envelope, default=str)
     try:
         pipe = _redis().pipeline(transaction=False)

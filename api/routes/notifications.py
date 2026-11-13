@@ -450,3 +450,95 @@ async def get_event_board_png(event_id: int):
         "Cache-Control": "private, max-age=60",
         "Content-Disposition": f'inline; filename="board-{event_id}.png"',
     })
+
+
+# --------------------------------------------------------------------------- #
+# ::dttest — a sample drop into the player's clans' loot channels (suggestion
+# #221). Lets a leader check the channel, permissions and embed design without
+# waiting for a real drop. Nothing is stored: the sender skips the
+# NotifiedSubmission row and the content says it is a test.
+# --------------------------------------------------------------------------- #
+TEST_NOTIFICATION_COOLDOWN_SECONDS = 300
+TEST_NOTIFICATION_ITEM = ("Twisted bow", 20997, "Chambers of Xeric", 1_500_000_000)
+
+
+@notifications_bp.get("/test_notification")
+async def test_notification():
+    player_name = request.args.get("player_name", None)
+    acc_hash = request.args.get("acc_hash", None)
+    if not player_name or not acc_hash:
+        return jsonify({"error": "player_name and acc_hash are required"}), 400
+
+    def _run():
+        import uuid
+
+        from db.models import Group
+        from utils.redis import redis_client
+
+        db_session = get_db_session()
+        try:
+            player_id = _resolve_player_id(db_session, player_name, acc_hash)
+            if player_id is None:
+                return {"message": "Your account isn't registered with DropTracker yet; submit a drop first."}, 404
+            key = f"test_notification:{int(player_id)}"
+            try:
+                if not redis_client.client.set(key, "1", nx=True, ex=TEST_NOTIFICATION_COOLDOWN_SECONDS):
+                    return {"message": "You sent a test recently; try again in a few minutes."}, 429
+            except Exception:
+                pass
+            player = db_session.query(Player).filter(Player.player_id == player_id).first()
+            groups = [g for g in (player.groups if player else []) if g.group_id != 2]
+            return {"player_id": player_id,
+                    "groups": [(g.group_id, g.group_name) for g in groups]}, 200
+        finally:
+            db_session.close()
+
+    result, status = await asyncio.to_thread(_run)
+    if status != 200:
+        return jsonify(result), status
+
+    from data.submissions.common import create_notification, group_has_notification_channel
+    from db.models import Session
+
+    item_name, item_id, npc_name, value = TEST_NOTIFICATION_ITEM
+    sent, no_channel = [], []
+    for group_id, group_name in result["groups"]:
+        s = Session()
+        try:
+            has_channel = group_has_notification_channel(s, group_id, "drop")
+        finally:
+            s.close()
+        if not has_channel:
+            no_channel.append(group_name or str(group_id))
+            continue
+        await create_notification(
+            "drop",
+            result["player_id"],
+            {
+                "test": True,
+                "guid": f"test-{uuid.uuid4().hex}",
+                "item_name": item_name,
+                "item_id": item_id,
+                "npc_name": npc_name,
+                "value": value,
+                "quantity": 1,
+                "total_value": value,
+                "kill_count": 1337,
+                "player_name": player_name,
+                "player_id": result["player_id"],
+                "image_url": "",
+                "notify_reason": "test",
+            },
+            group_id=group_id,
+        )
+        sent.append(group_name or str(group_id))
+    if not sent and not no_channel:
+        message = "You're not in any DropTracker group yet, so there is nowhere to send a test."
+    else:
+        parts = []
+        if sent:
+            parts.append("Sent a test drop notification to: " + ", ".join(sent) + ".")
+        if no_channel:
+            parts.append("No loot channel is set for: " + ", ".join(no_channel) + ".")
+        message = " ".join(parts)
+    return jsonify({"message": message, "sent": sent, "no_channel": no_channel})

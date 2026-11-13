@@ -113,6 +113,20 @@ class TestEnvelope:
         env = pn.clan_announcement_envelope(1, 306, None, "T", "m")
         assert env["display"]["text"] == "Your clan: m"
 
+    def test_channel_defaults_to_a_game_line(self):
+        env = pn.clan_announcement_envelope(1, 306, "Clan", "T", "m")
+        assert env["display"]["chat"]["channel"] == "game"
+        assert "expires_at" not in env
+
+    def test_clan_channel_and_end_time_ride_the_envelope(self):
+        import datetime as dt
+        until = dt.datetime(2026, 11, 13, 20, 0)
+        env = pn.clan_announcement_envelope(1, 306, "Clan", "T", "m", until=until, channel="clan")
+        assert env["display"]["chat"]["channel"] == "clan"
+        assert env["expires_at"] == 1794600000
+        assert pn.expired(env, now=1794600000) is True
+        assert pn.expired(env, now=1794599999) is False
+
 
 class TestPush:
     @pytest.fixture
@@ -200,6 +214,37 @@ class TestInGameValidation:
         with pytest.raises(_Abort):
             ann_routes._validate_in_game(
                 {"send_in_game": True, "in_game_message": "x" * 201}, "T")
+
+
+class TestInGameChannel:
+    def test_defaults_to_game(self, aborts):
+        assert ann_routes._validate_in_game_channel({}) == "game"
+
+    def test_clan_is_allowed(self, aborts):
+        assert ann_routes._validate_in_game_channel({"in_game_channel": "Clan"}) == "clan"
+
+    def test_anything_else_is_refused(self, aborts):
+        with pytest.raises(_Abort):
+            ann_routes._validate_in_game_channel({"in_game_channel": "yell"})
+
+
+class TestInGameUntil:
+    def test_unset_is_none(self, aborts):
+        assert ann_routes._validate_in_game_until({}) is None
+
+    def test_past_is_refused(self, aborts):
+        with pytest.raises(_Abort):
+            ann_routes._validate_in_game_until({"in_game_until": "2020-01-01T00:00:00Z"})
+
+    def test_future_zulu_parses_to_naive_utc(self, aborts):
+        import datetime as dt
+        soon = (dt.datetime.utcnow() + dt.timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
+        got = ann_routes._validate_in_game_until({"in_game_until": soon.strftime("%Y-%m-%dT%H:%M:%SZ")})
+        assert got.tzinfo is None and got == soon
+
+    def test_too_far_ahead_is_refused(self, aborts):
+        with pytest.raises(_Abort):
+            ann_routes._validate_in_game_until({"in_game_until": "2099-01-01T20:00:00Z"})
 
 
 class TestEmbedStyle:

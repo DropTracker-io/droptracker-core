@@ -125,3 +125,25 @@ def test_unknown_roster_source_is_not_solo():
 def test_roster_source_matching_is_case_and_space_insensitive(source):
     players, _, _, stripped = _apply_raid_party_evidence(["a"], None, None, source)
     assert players is None and stripped is True
+
+
+class TestRaidLootPointsEligible:
+    """Points for raid loot claimed outside the raid (rule agreed 2026-11-13)."""
+
+    def _ok(self, **fields):
+        from data.submissions.drop import raid_loot_points_eligible
+        return raid_loot_points_eligible(fields)
+
+    def test_inside_the_raid_always_counts(self):
+        assert self._ok(in_raid="true", in_party="false") is True
+
+    def test_outside_but_in_a_party_counts(self):
+        assert self._ok(in_raid="false", in_party="true") is True
+
+    def test_outside_and_alone_does_not(self):
+        assert self._ok(in_raid="false", in_party="false") is False
+        assert self._ok(in_raid="False") is False
+
+    def test_older_plugins_send_nothing_and_stay_eligible(self):
+        assert self._ok() is True
+        assert self._ok(raid_party_size="3") is True

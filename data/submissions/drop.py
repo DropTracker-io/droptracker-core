@@ -344,6 +344,30 @@ def _normalize_split_size(raw, players_included):
     return size if size >= named + 1 else None
 
 
+def raid_loot_points_eligible(drop_data) -> bool:
+    """Whether a raid drop may earn clan points, from where it was claimed.
+
+    Plugin 6.1.27+ sends ``in_raid`` (the game's raid varbits still place the
+    player inside) and ``in_party`` (a RuneLite party is open) with every
+    raid-sourced drop. A chest claimed OUTSIDE the raid by someone in no party
+    is the leaver's trick: drop out of the team, open the chest from the bank
+    collection box, and the "solo" drop earns full points with no split
+    (robbe_b, #points-system-chat 2026-11-01). Rule agreed 2026-11-13: points
+    inside the loot room, or outside the raid while still in a party; never
+    outside and alone. Older plugins send neither field and stay eligible.
+    """
+    def _flag(key):
+        raw = drop_data.get(key)
+        if raw is None:
+            return None
+        return str(raw).strip().lower() in ("true", "1", "yes")
+
+    in_raid, in_party = _flag("in_raid"), _flag("in_party")
+    if in_raid is None:
+        return True
+    return in_raid or bool(in_party)
+
+
 def _normalize_raid_party_size(raw):
     """Plugin-reported raid party size (receiver included), or None.
 
@@ -860,6 +884,10 @@ async def drop_processor(drop_data, external_session=None, world_type="main"):
                     nonlocal has_awarded_points, group_points_result
                     from .common import check_group_point_system_active
                     point_system_active = check_group_point_system_active(group_id, session)
+                    if point_system_active and not raid_loot_points_eligible(drop_data):
+                        print(f"[RaidPartyGuard] {player_name} / {npc_name} (guid={guid}): "
+                              "raid loot claimed outside the raid with no party open; no points")
+                        point_system_active = False
                     debug_print(
                         f"Group {group_id} point check start: active={point_system_active}, "
                         f"players_included={players_included}, item_id={item_id}, npc_id={npc_id}, "

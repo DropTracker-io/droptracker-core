@@ -1194,6 +1194,8 @@ class NotificationService:
         return getattr(exc, "status", None) == 400
 
     def _record_drop_notification(self, db_session, data, message, player_id, group_id):
+        if data.get("test"):
+            return  # a ::dttest sample: nothing to mark as announced
         """Remember that this drop was announced to this group.
 
         ``_is_not_sent_with_session`` reads these rows, so a send path that
@@ -4622,6 +4624,10 @@ class NotificationService:
                                          custom_embeds=upgrade_active,
                                          line=drop_content_line or None,
                                          line_in_embed=drop_line_in_embed)
+            if data.get("test"):
+                # ::dttest (suggestion #221): the real embed, clearly labelled.
+                content = (f"🧪 **Test notification** requested by {formatted_name} with `::dttest` "
+                           f"— nothing was recorded.\n{content or ''}").rstrip()
             notification_text.apply_footer(embed, group_id, "drop", values)
             # (The old second attach pass lived here; _resolve_image_attachment
             # above already covers both hosted and remote URLs.)

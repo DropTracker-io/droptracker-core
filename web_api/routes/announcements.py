@@ -283,6 +283,18 @@ def _validate_in_game_until(body: dict):
     return parsed
 
 
+def _validate_in_game_channel(body: dict) -> str:
+    """``game`` (default) or ``clan``: how the plugin draws the line. Pet icons
+    (``:vorki:``) work in both; the plugin resolves them (suggestion #247)."""
+    from services.plugin_notifications import CLAN_ANNOUNCEMENT_CHANNELS
+
+    channel = str(body.get("in_game_channel") or "game").strip().lower()
+    if channel not in CLAN_ANNOUNCEMENT_CHANNELS:
+        abort_problem(422, "Invalid in-game channel",
+                      f"in_game_channel must be one of {list(CLAN_ANNOUNCEMENT_CHANNELS)}.")
+    return channel
+
+
 def _validate_in_game(body: dict, title: str):
     """``(send, message)``: the one-line in-game text, defaulting to the title."""
     from services.plugin_notifications import CLAN_ANNOUNCEMENT_MAX_CHARS
@@ -349,6 +361,7 @@ def _create_announcement(user_id, scope_type, group_id, body):
     send_in_game, in_game_message = (
         _validate_in_game(body, title) if scope_type == "group" else (False, None))
     in_game_until = _validate_in_game_until(body) if send_in_game else None
+    in_game_channel = _validate_in_game_channel(body) if send_in_game else "game"
     if send_in_game:
         if int(group_id) == 2:
             abort_problem(422, "Not for the global group",
@@ -455,6 +468,7 @@ def _create_announcement(user_id, scope_type, group_id, body):
                     s, announcement_id=ann_id, group_id=group_id,
                     group_name=group.group_name if group else None,
                     title=title, message=in_game_message, until=in_game_until,
+                    channel=in_game_channel,
                 )
             if in_game_recipients:
                 _record_in_game_send(group_id, ann_id)
