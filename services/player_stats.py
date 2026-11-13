@@ -30,36 +30,40 @@ def _flat(values: Optional[dict]) -> Dict[str, int]:
     return out
 
 
+# A baseline taken this long after the window opened is worth knowing about
+# when two sources are compared: gains before it were not counted.
+LATE_BASELINE_SECONDS = 3600
+
+
 def gained(db_session, player_id: int, start: datetime, end: datetime) -> Dict[str, dict]:
-    """``{metric: {"start", "end", "gained", "partial", "source", "age_seconds"}}``
-    for one player over a window.
+    """``{metric: {"start", "end", "gained", "baseline_at", "late", "source",
+    "age_seconds", "taken_at"}}`` for one player over a window.
 
-    The baseline is the player's stats at ``start``. When their history only
-    begins inside the window the first reading in it stands in and the metric
-    is marked ``partial`` (WOM does the same: its "start" is the first
-    snapshot of the period). A metric with no baseline at all is left out.
+    Measured the way Wise Old Man measures it: from the first reading inside
+    the window to the last (`utils.stat_snapshots.first_values_in_window`).
+    A player with no reading inside the window has no row. A metric with no
+    baseline is left out. ``late`` marks a baseline taken more than an hour
+    after the window opened.
     """
-    from utils.stat_snapshots import first_values_between, values_at
+    from utils.stat_snapshots import first_values_in_window, values_at
 
+    opening = first_values_in_window(db_session, player_id, start, end)
+    if opening is None:
+        return {}
     closing = values_at(db_session, player_id, end)
     if closing is None:
         return {}
-    opening = values_at(db_session, player_id, start)
-    partial = False
-    if opening is None:
-        opening = first_values_between(db_session, player_id, start, end)
-        partial = True
-    if opening is None:
-        return {}
     first, last = _flat(opening), _flat(closing)
     age = max(0, int((end - closing["taken_at"]).total_seconds()))
+    late = (opening["taken_at"] - start).total_seconds() > LATE_BASELINE_SECONDS
     out = {}
     for metric, value in last.items():
         base = first.get(metric)
         if base is None:
             continue
         out[metric] = {"start": base, "end": value, "gained": max(0, value - base),
-                       "partial": partial, "source": closing["source"], "age_seconds": age,
+                       "baseline_at": opening["taken_at"], "late": late, "partial": late,
+                       "source": closing["source"], "age_seconds": age,
                        "taken_at": closing["taken_at"]}
     return out
 

@@ -289,8 +289,9 @@ def record_hiscores_snapshot(db_session, player_id: int, skills: Mapping[str, in
     - UNCHANGED: identical to the player's previous hiscores row. Nothing is
       written, unless ``pinned`` asks for a row at this moment regardless.
     - STALE: the plugin has already shown us more XP than this. The hiscores
-      only catch up at logout, so the reading is old news; nothing is written
-      and, if ``pinned``, the plugin's latest row is pinned instead.
+      only catch up at logout, so the reading is old news; it is not written
+      and, if ``pinned``, the plugin's latest numbers are repeated in a pinned
+      row at this moment instead (`carry_forward`).
     - FLAGGED: it cannot follow the previous hiscores row (`plausibility_problem`).
       The row is kept, marked, and never read as a baseline.
 
@@ -318,9 +319,8 @@ def record_hiscores_snapshot(db_session, player_id: int, skills: Mapping[str, in
     newest = latest(PlayerStatSnapshot.flagged.is_(False))
     if (newest is not None and newest.source == SOURCE_PLUGIN
             and int(newest.total_xp or 0) > known_total):
-        if pinned and not newest.pinned:
-            newest.pinned = True
-            db_session.flush()
+        if pinned:
+            carry_forward(db_session, player_id, now)
         return STALE
 
     last = latest(PlayerStatSnapshot.source == SOURCE_HISCORES)
@@ -417,22 +417,81 @@ def values_at(db_session, player_id: int, when: datetime) -> Optional[dict]:
             "taken_at": newest.taken_at, "source": newest.source}
 
 
-def first_values_between(db_session, player_id: int, start: datetime, end: datetime) -> Optional[dict]:
-    """The earliest usable row strictly inside ``(start, end]``, shaped like
-    `values_at`. The fallback baseline for a player whose history begins
-    after a window opened."""
+def first_values_in_window(db_session, player_id: int, start: datetime, end: datetime) -> Optional[dict]:
+    """A player's stats at the start of a window, the way Wise Old Man reads
+    it: from the first reading taken INSIDE ``[start, end]``, shaped like
+    `values_at` (``taken_at`` is that first reading's time).
+
+    Nothing from before the window is used. A reading from before it cannot
+    say what happened between then and the window opening, and counting that
+    would let XP earned before an event be credited to it. The cost is the
+    other way round and small: what a player gains between the window opening
+    and their first reading in it is not counted. The poller keeps that gap
+    short by taking a reading for every participant as an event starts.
+
+    Each source's first reading in the window is used, and for each metric
+    the earlier of them that knows it: a plugin row has exact XP but only
+    some bosses, a hiscores row has every boss.
+    """
     from db.models import PlayerStatSnapshot
 
-    row = (
+    firsts = []
+    for name in (SOURCE_PLUGIN, SOURCE_HISCORES, SOURCE_WOM):
+        row = (
+            _usable(db_session, player_id)
+            .filter(PlayerStatSnapshot.source == name, PlayerStatSnapshot.taken_at >= start,
+                    PlayerStatSnapshot.taken_at <= end)
+            .order_by(PlayerStatSnapshot.taken_at.asc())
+            .first()
+        )
+        if row is not None:
+            firsts.append(row)
+    if not firsts:
+        return None
+    firsts.sort(key=lambda r: r.taken_at)
+    skills: Dict[str, int] = {}
+    activities: Dict[str, int] = {}
+    for row in firsts:
+        for skill, xp in decode_skills(row.skills).items():
+            # A plugin row lists every skill and writes 0 for one it could
+            # not read; let a later reading that does know it fill that in.
+            if skill not in skills or (skills[skill] == 0 and xp > 0):
+                skills[skill] = xp
+        for metric, score in decode_activities(row.activities).items():
+            activities.setdefault(metric, score)
+    return {"skills": skills, "activities": activities,
+            "taken_at": firsts[0].taken_at, "source": firsts[0].source}
+
+
+def carry_forward(db_session, player_id: int, now: datetime, *, pinned: bool = True) -> bool:
+    """Write a row at ``now`` repeating the player's newest plugin reading.
+
+    For the moment an event starts or ends: the plugin already has this
+    player's exact numbers, so no hiscores request is needed, but the window
+    still needs a reading of its own inside it (`first_values_in_window`).
+    True if a row was written. The caller commits.
+    """
+    from db.models import PlayerStatSnapshot
+
+    now = now.replace(microsecond=0)
+    latest = (
         _usable(db_session, player_id)
-        .filter(PlayerStatSnapshot.taken_at > start, PlayerStatSnapshot.taken_at <= end)
-        .order_by(PlayerStatSnapshot.taken_at.asc())
+        .filter(PlayerStatSnapshot.source == SOURCE_PLUGIN)
+        .order_by(PlayerStatSnapshot.taken_at.desc())
         .first()
     )
-    if row is None:
-        return None
-    return {"skills": decode_skills(row.skills), "activities": decode_activities(row.activities),
-            "taken_at": row.taken_at, "source": row.source}
+    if latest is None or latest.taken_at >= now:
+        if latest is not None and pinned and not latest.pinned:
+            latest.pinned = True
+            db_session.flush()
+        return latest is not None
+    db_session.add(PlayerStatSnapshot(
+        player_id=player_id, taken_at=now, source=SOURCE_PLUGIN,
+        account_type=latest.account_type, total_xp=latest.total_xp, total_level=latest.total_level,
+        skills=latest.skills, activities=latest.activities, ranks=latest.ranks,
+        ehp=latest.ehp, ehb=latest.ehb, flagged=False, pinned=bool(pinned)))
+    db_session.flush()
+    return True
 
 
 def efficiency_for(skills: Mapping[str, int], activities: Mapping[str, int],

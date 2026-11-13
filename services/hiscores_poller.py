@@ -50,6 +50,9 @@ SEED_EVERY_SECONDS = 3600
 _last_seed = 0.0
 CYCLE_BUDGET_SECONDS = 50.0
 ON_DEMAND_TTL = timedelta(hours=6)
+# A detected account type is trusted this long. Types change rarely (an
+# account de-irons, a hardcore dies), so a monthly look is plenty.
+TYPE_RECHECK = timedelta(days=30)
 _STATE_TTL = 60 * 86400
 
 
@@ -264,6 +267,32 @@ async def _fetch_player(http, redis_conn, name: str, account_type) -> hiscores.F
     return result
 
 
+def _varbit_for(account_type: Optional[str]) -> Optional[int]:
+    """Our account type string as the varbit number snapshots store."""
+    from utils.account_types import ACCOUNT_TYPES_BY_VARBIT
+
+    try:
+        return ACCOUNT_TYPES_BY_VARBIT.index(account_type)
+    except ValueError:
+        return None
+
+
+def _carry_forward_db(player_id: int, now: datetime) -> bool:
+    from db.models.base import Session
+    from utils.stat_snapshots import carry_forward
+
+    session = Session()
+    try:
+        written = carry_forward(session, player_id, now)
+        session.commit()
+        return written
+    except Exception:
+        session.rollback()
+        return False
+    finally:
+        session.close()
+
+
 async def poll_player(http, redis_conn, participant: dict, due: schedule.Due,
                       now: Optional[datetime] = None) -> str:
     """Look one participant up and record it. Returns what happened:
@@ -275,28 +304,54 @@ async def poll_player(http, redis_conn, participant: dict, due: schedule.Due,
 
     seen = participant.get("plugin_seen_at")
     if due.pinned and seen is not None and now - seen <= schedule.PLUGIN_COVERED:
-        # The plugin is ahead of the hiscores for this player: keep its latest
-        # row as the start/end reading and spend no request.
-        if await asyncio.to_thread(_pin_latest_db, player_id):
+        # The plugin is ahead of the hiscores for this player, so no request
+        # is spent. A start reading repeats the plugin's numbers in a row of
+        # its own at this moment, because gains are counted from the first
+        # reading INSIDE the window; an end reading only has to be kept.
+        if due.reason == schedule.START:
+            done = await asyncio.to_thread(_carry_forward_db, player_id, now)
+        else:
+            done = await asyncio.to_thread(_pin_latest_db, player_id)
+        if done:
             _mark_pins(redis_conn, player_id, pins, stamp)
             return "plugin_pinned"
 
-    result = await _fetch_player(http, redis_conn, participant["name"], participant.get("account_type"))
+    state = _decode_hash(redis_conn.hgetall(key))
+    # The plugin (or a submission) telling us the type beats anything worked
+    # out from the boards.
+    known = participant.get("account_type")
+    detected_at = _ts(state.get("type_at"))
+    detected = state.get("type") if detected_at and now - detected_at < TYPE_RECHECK else None
+    account_type = known or detected
+
+    result = await _fetch_player(http, redis_conn, participant["name"], account_type)
     if result.status == hiscores.BLOCKED:
         return "blocked"
     if result.status == hiscores.NOT_FOUND:
-        streak = int(_decode_hash(redis_conn.hgetall(key)).get("nf") or 0) + 1
+        streak = int(state.get("nf") or 0) + 1
         redis_conn.hset(key, mapping={"polled": stamp, "not_found": stamp, "nf": streak})
         redis_conn.expire(key, _STATE_TTL)
         return "not_found"
     if result.status != hiscores.OK:
         return "error"
 
-    outcome = await asyncio.to_thread(
-        _store_db, player_id, participant.get("account_varbit"), result.hiscores, due.pinned, now)
     update = {"polled": stamp}
-    previous = _decode_hash(redis_conn.hgetall(key))
-    if "first" not in previous:
+    if not known and not detected and result.board == hiscores.MAIN_BOARD:
+        # Nobody has told us what kind of account this is: ask the boards.
+        # Without it an ironman would be scored on a main's EHP and EHB rates.
+        found = await hiscores.detect_account_type(
+            lambda board: hiscores.fetch(http, redis_conn, participant["name"], board),
+            result.hiscores)
+        if found:
+            account_type = found
+            update["type"], update["type_at"] = found, stamp
+
+    varbit = participant.get("account_varbit")
+    if varbit is None:
+        varbit = _varbit_for(account_type)
+    outcome = await asyncio.to_thread(
+        _store_db, player_id, varbit, result.hiscores, due.pinned, now)
+    if "first" not in state:
         update["first"] = stamp
     elif outcome == "written":
         # The very first reading is not a change; later ones that differ are.

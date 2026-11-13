@@ -151,6 +151,49 @@ def parse(payload: Any) -> Optional[Hiscores]:
     return out
 
 
+def total_xp(reading: Hiscores) -> int:
+    """Overall XP, or the sum of the ranked skills when Overall is unranked."""
+    return reading.total_xp if reading.total_xp is not None else sum(reading.skills.values())
+
+
+async def detect_account_type(fetch_board, main: Hiscores) -> Optional[str]:
+    """Work out an account's type from which boards it is on, for a player
+    the plugin has never told us about. Returns a `utils.account_types` wire
+    string, or None when a board could not be read (try again later).
+
+    ``fetch_board(board)`` is an awaitable returning a `FetchResult`; ``main``
+    is the reading already taken from the main board. The rules are Wise Old
+    Man's (AssertPlayerTypeService): every account is on the main board; an
+    ironman is also on the ironman board with the same XP. More XP on the
+    main board than the ironman one means the account de-ironed. A hardcore
+    or ultimate is on that board too, with as much XP as its ironman entry;
+    a hardcore who died stops gaining there and is a plain ironman.
+
+    Costs one extra request for a regular account and up to three for an
+    ironman. Group ironmen have no board of their own and read as normal,
+    which is also how they are scored.
+    """
+    iron = await fetch_board(BOARDS["ironman"])
+    if iron.status == NOT_FOUND:
+        return "normal"
+    if iron.status != OK:
+        return None
+    iron_xp = total_xp(iron.hiscores)
+    if iron_xp < total_xp(main):
+        return "normal"
+    hardcore = await fetch_board(BOARDS["hardcore_ironman"])
+    if hardcore.status == OK and total_xp(hardcore.hiscores) >= iron_xp:
+        return "hardcore_ironman"
+    if hardcore.status not in (OK, NOT_FOUND):
+        return None
+    ultimate = await fetch_board(BOARDS["ultimate_ironman"])
+    if ultimate.status == OK and total_xp(ultimate.hiscores) >= iron_xp:
+        return "ultimate_ironman"
+    if ultimate.status not in (OK, NOT_FOUND):
+        return None
+    return "ironman"
+
+
 def url_for(player_name: str, board: str = MAIN_BOARD) -> str:
     return f"{BASE_URL}/m={board}/index_lite.json?player={quote(str(player_name).strip())}"
 

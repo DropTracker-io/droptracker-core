@@ -238,11 +238,12 @@ class TestSchedule:
     def test_a_new_participant_is_treated_as_active_at_first(self):
         assert _due(last_polled=NOW - timedelta(hours=2), first_polled=NOW - timedelta(hours=2)) is not None
 
-    def test_start_reading_is_pinned_and_taken_from_half_an_hour_before(self):
-        start = NOW + timedelta(minutes=20)
-        verdict = _due(starts_at=start, has_start=False)
+    def test_start_reading_is_pinned_and_taken_once_scoring_has_begun(self):
+        # Gains count from the first reading INSIDE the window, so a reading
+        # before the start would be no use as the baseline.
+        assert _due(starts_at=NOW + timedelta(minutes=5), has_start=False) is None
+        verdict = _due(starts_at=NOW - timedelta(minutes=2), has_start=False)
         assert (verdict.reason, verdict.pinned) == (schedule.START, True)
-        assert _due(starts_at=NOW + timedelta(minutes=45), has_start=False) is None
 
     def test_start_reading_is_wanted_even_from_plugin_users(self):
         verdict = _due(starts_at=NOW - timedelta(minutes=5), has_start=False,
@@ -349,11 +350,27 @@ class TestStoringReadings:
         assert _rec(s, {"attack": 8000}, when=NOW + timedelta(hours=1), total=8000) == store.STALE
         assert [r.source for r in _rows(s)] == ["plugin"]
 
-    def test_a_stale_pinned_reading_pins_the_plugin_row_instead(self, s):
+    def test_a_stale_pinned_reading_repeats_the_plugin_numbers_at_that_moment(self, s):
         xp = {**{skill: 0 for skill in SKILLS}, "attack": 9000}
         store.record_plugin_snapshot(s, 7, xp, now=NOW)
-        _rec(s, {"attack": 8000}, when=NOW + timedelta(hours=1), total=8000, pinned=True)
-        assert _rows(s)[0].pinned is True
+        when = NOW + timedelta(hours=1)
+        assert _rec(s, {"attack": 8000}, when=when, total=8000, pinned=True) == store.STALE
+        first, carried = _rows(s)
+        assert (carried.source, carried.taken_at, carried.pinned) == ("plugin", when, True)
+        assert carried.skills == first.skills and first.pinned is False
+
+    def test_carry_forward_needs_a_plugin_reading(self, s):
+        assert store.carry_forward(s, 7, NOW) is False
+        _rec(s, {"attack": 1000}, when=NOW - timedelta(hours=1))
+        assert store.carry_forward(s, 7, NOW) is False and len(_rows(s)) == 1
+
+    def test_a_carried_row_is_not_overwritten_by_the_next_sync(self, s):
+        xp = {**{skill: 0 for skill in SKILLS}, "attack": 9000}
+        store.record_plugin_snapshot(s, 7, xp, now=NOW - timedelta(minutes=30))
+        assert store.carry_forward(s, 7, NOW)
+        store.record_plugin_snapshot(s, 7, {**xp, "attack": 9500}, now=NOW + timedelta(minutes=2))
+        assert [(r.pinned, store.decode_skills(r.skills)["attack"]) for r in _rows(s)] == [
+            (False, 9000), (True, 9000), (False, 9500)]
 
     def test_hiscores_ahead_of_the_plugin_are_stored(self, s):
         xp = {**{skill: 0 for skill in SKILLS}, "attack": 9000}
@@ -454,11 +471,120 @@ class TestPollPlayer:
         assert got == "written"
         assert calls["boards"] == [hiscores.BOARDS["ironman"], hiscores.MAIN_BOARD]
 
-    def test_a_plugin_user_gets_their_own_row_pinned_and_no_request(self, monkeypatch):
+    def test_a_plugin_user_gets_a_start_row_of_their_own_and_no_request(self, monkeypatch):
+        carried = []
+        monkeypatch.setattr(poller, "_carry_forward_db", lambda pid, now: carried.append(pid) or True)
         got, r, calls = self._run(monkeypatch, hiscores.FetchResult(hiscores.ERROR),
                                   plugin_seen_at=NOW - timedelta(minutes=5))
-        assert got == "plugin_pinned" and calls["boards"] == []
+        assert got == "plugin_pinned" and calls["boards"] == [] and carried == [7]
         assert "start" in r.hgetall(poller._pin_key(1, 7))
+
+    def test_a_plugin_user_at_the_end_keeps_their_latest_row(self, monkeypatch):
+        r = FakeRedis()
+        pinned = []
+        monkeypatch.setattr(poller, "_pin_latest_db", lambda pid: pinned.append(pid) or True)
+        monkeypatch.setattr(poller, "_carry_forward_db", lambda pid, now: pytest.fail("not at an end reading"))
+        p = _participant(pins=[(1, "end")], plugin_seen_at=NOW - timedelta(minutes=5))
+        got = asyncio.run(poller.poll_player(None, r, p, schedule.Due(schedule.END, True, 0), NOW))
+        assert got == "plugin_pinned" and pinned == [7]
+
+
+class TestAccountType:
+    """A player the plugin never told us about: which boards are they on?"""
+
+    def _reading(self, xp):
+        return hiscores.Hiscores(skills={"attack": xp}, total_xp=xp)
+
+    def _detect(self, main_xp, boards):
+        asked = []
+
+        async def fetch_board(board):
+            asked.append(board)
+            xp = boards.get(board)
+            if xp == "down":
+                return hiscores.FetchResult(hiscores.ERROR, board=board)
+            if xp is None:
+                return hiscores.FetchResult(hiscores.NOT_FOUND, board=board)
+            return hiscores.FetchResult(hiscores.OK, self._reading(xp), board)
+
+        return asyncio.run(hiscores.detect_account_type(fetch_board, self._reading(main_xp))), asked
+
+    IRON, HC, UIM = (hiscores.BOARDS["ironman"], hiscores.BOARDS["hardcore_ironman"],
+                     hiscores.BOARDS["ultimate_ironman"])
+
+    def test_not_on_the_ironman_board_is_a_normal_account_in_one_request(self):
+        assert self._detect(5000, {}) == ("normal", [self.IRON])
+
+    def test_ironman(self):
+        assert self._detect(5000, {self.IRON: 5000}) == ("ironman", [self.IRON, self.HC, self.UIM])
+
+    def test_hardcore_and_ultimate(self):
+        assert self._detect(5000, {self.IRON: 5000, self.HC: 5000})[0] == "hardcore_ironman"
+        assert self._detect(5000, {self.IRON: 5000, self.UIM: 5000})[0] == "ultimate_ironman"
+
+    def test_a_dead_hardcore_is_a_plain_ironman(self):
+        # The hardcore entry stopped at death; the ironman one kept going.
+        assert self._detect(9000, {self.IRON: 9000, self.HC: 4000})[0] == "ironman"
+
+    def test_a_de_ironed_account_is_normal(self):
+        assert self._detect(9000, {self.IRON: 6000}) == ("normal", [self.IRON])
+
+    def test_a_board_that_cannot_be_read_gives_no_answer(self):
+        assert self._detect(5000, {self.IRON: "down"})[0] is None
+        assert self._detect(5000, {self.IRON: 5000, self.HC: "down"})[0] is None
+        assert self._detect(5000, {self.IRON: 5000, self.UIM: "down"})[0] is None
+
+    def _poll(self, monkeypatch, participant=None, state=None, boards=None):
+        r = FakeRedis()
+        if state:
+            r.hset(poller._state_key(7), mapping=state)
+        asked, stored = [], {}
+        boards = boards or {}
+
+        async def fake_fetch(http, redis_conn, name, board, **kwargs):
+            asked.append(board)
+            if board == hiscores.MAIN_BOARD or board in boards:
+                return hiscores.FetchResult(hiscores.OK, self._reading(5000), board)
+            return hiscores.FetchResult(hiscores.NOT_FOUND, board=board)
+
+        def fake_store(player_id, varbit, reading, pinned, now):
+            stored["varbit"] = varbit
+            return "written"
+
+        monkeypatch.setattr(poller.hiscores, "fetch", fake_fetch)
+        monkeypatch.setattr(poller, "_store_db", fake_store)
+        asyncio.run(poller.poll_player(None, r, _participant(pins=[], **(participant or {})),
+                                       schedule.Due(schedule.ROTATION, False, 2), NOW))
+        return r.hgetall(poller._state_key(7)), asked, stored
+
+    def test_an_unknown_player_is_typed_once_and_the_answer_kept(self, monkeypatch):
+        state, asked, stored = self._poll(monkeypatch, boards={self.IRON})
+        assert state["type"] == "ironman" and "type_at" in state
+        assert asked == [hiscores.MAIN_BOARD, self.IRON, self.HC, self.UIM]
+        assert stored["varbit"] == 1          # ironman, as the plugin's varbit would say
+
+    def test_a_kept_answer_is_used_and_costs_nothing_more(self, monkeypatch):
+        stamp = (NOW - timedelta(days=3) - datetime(1970, 1, 1)).total_seconds()
+        state, asked, stored = self._poll(monkeypatch, state={"type": "ironman", "type_at": stamp, "first": 1},
+                                          boards={self.IRON})
+        assert asked == [self.IRON] and stored["varbit"] == 1
+
+    def test_an_old_answer_is_checked_again(self, monkeypatch):
+        stamp = (NOW - timedelta(days=40) - datetime(1970, 1, 1)).total_seconds()
+        state, asked, stored = self._poll(monkeypatch, state={"type": "ironman", "type_at": stamp, "first": 1})
+        assert asked == [hiscores.MAIN_BOARD, self.IRON] and state["type"] == "normal"
+        assert stored["varbit"] == 0
+
+    def test_a_type_the_plugin_told_us_is_never_second_guessed(self, monkeypatch):
+        state, asked, stored = self._poll(
+            monkeypatch, participant={"account_type": "ultimate_ironman", "account_varbit": 2},
+            boards={self.UIM})
+        assert asked == [self.UIM] and "type" not in state and stored["varbit"] == 2
+
+    def test_group_ironman_from_the_plugin_stays_group_ironman(self, monkeypatch):
+        state, asked, stored = self._poll(
+            monkeypatch, participant={"account_type": "group_ironman", "account_varbit": 4})
+        assert asked == [hiscores.MAIN_BOARD] and stored["varbit"] == 4
 
 
 class TestBackgroundCadence:

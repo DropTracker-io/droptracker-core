@@ -35,7 +35,7 @@ def summarise(rows, tolerance_for) -> dict:
         if row.our_value is None:
             bucket["no_data_ours"] += 1
         elif is_partial(row):
-            # Our history began after the window opened: not a fair pair.
+            # Our first reading came well after the window opened: not a fair pair.
             bucket["partial"] += 1
         elif row.wom_value is None:
             bucket["no_data_wom"] += 1
@@ -78,8 +78,8 @@ def main() -> int:
             print(f"{consumer:<12}{context:<18}{b['rows']:>7}{b['compared']:>9}{b['matched']:>8}{rate:>8}"
                   f"{b['no_data_ours']:>9}{b['partial']:>11}{b['no_data_wom']:>10}{len(b['players']):>9}"
                   f"  {b['last_seen']}")
-        print("(late start = our history for that player began after the window opened; "
-              "left out of the match rate)")
+        print("(late start = our first reading in the window came more than an hour after it "
+              "opened; left out of the match rate)")
 
         differing = [r for r in rows if r.our_value is not None and r.wom_value is not None
                      and not is_partial(r) and abs(r.our_value - r.wom_value) > stats_shadow.TOLERANCE.get(r.consumer, 0.0)]

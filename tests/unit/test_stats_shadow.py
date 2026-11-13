@@ -159,34 +159,67 @@ class TestValuesAt:
 
 
 class TestGained:
-    def test_gain_over_a_window(self, s):
+    """Gains run from the first reading INSIDE the window, as WOM's do."""
+
+    END = T0 + timedelta(days=5)
+
+    def test_gain_runs_from_the_first_reading_in_the_window(self, s):
         _hiscores(s, 7, T0 - timedelta(days=1), {"attack": 1000, "runecraft": 50}, {"zulrah": 10})
+        _hiscores(s, 7, T0 + timedelta(minutes=5), {"attack": 1500, "runecraft": 60}, {"zulrah": 12})
         _hiscores(s, 7, T0 + timedelta(days=3), {"attack": 4000, "runecraft": 80}, {"zulrah": 25, "vorkath": 3})
-        got = player_stats.gained(s, 7, T0, T0 + timedelta(days=5))
-        assert got["attack"]["gained"] == 3000 and got["zulrah"]["gained"] == 15
-        assert (got["attack"]["start"], got["attack"]["end"]) == (1000, 4000)
+        got = player_stats.gained(s, 7, T0, self.END)
+        # What was gained before the window (1000 -> 1500) is not the event's.
+        assert (got["attack"]["start"], got["attack"]["end"], got["attack"]["gained"]) == (1500, 4000, 2500)
+        assert got["zulrah"]["gained"] == 13
         # Our "runecraft" is WOM's "runecrafting".
-        assert got["runecrafting"]["gained"] == 30 and "runecraft" not in got
-        # No baseline for a boss first seen mid-window: unknown, so left out.
+        assert got["runecrafting"]["gained"] == 20 and "runecraft" not in got
+        # No baseline for a boss first seen later in the window: left out.
         assert "vorkath" not in got
-        assert got["attack"]["partial"] is False and got["attack"]["source"] == "hiscores"
-        assert got["attack"]["age_seconds"] == 2 * 86400
+        assert got["attack"]["late"] is False and got["attack"]["baseline_at"] == T0 + timedelta(minutes=5)
+        assert got["attack"]["source"] == "hiscores" and got["attack"]["age_seconds"] == 2 * 86400
 
-    def test_history_starting_inside_the_window_is_partial(self, s):
-        _hiscores(s, 7, T0 + timedelta(days=1), {"attack": 1000})
+    def test_a_reading_before_the_window_is_never_the_baseline(self, s):
+        _hiscores(s, 7, T0 - timedelta(hours=1), {"attack": 1000})
         _hiscores(s, 7, T0 + timedelta(days=3), {"attack": 4000})
-        got = player_stats.gained(s, 7, T0, T0 + timedelta(days=5))
-        assert got["attack"]["gained"] == 3000 and got["attack"]["partial"] is True
+        got = player_stats.gained(s, 7, T0, self.END)
+        # One reading in the window: it is both ends, so nothing is claimed.
+        assert got["attack"]["gained"] == 0 and got["attack"]["late"] is True
 
-    def test_no_history_is_nothing_not_zeros(self, s):
-        assert player_stats.gained(s, 7, T0, T0 + timedelta(days=5)) == {}
+    def test_no_reading_inside_the_window_is_nothing(self, s):
+        _hiscores(s, 7, T0 - timedelta(hours=1), {"attack": 1000})
+        assert player_stats.gained(s, 7, T0, self.END) == {}
+        assert player_stats.gained(s, 8, T0, self.END) == {}
+
+    def test_a_reading_exactly_at_the_start_counts_as_inside(self, s):
+        _hiscores(s, 7, T0, {"attack": 1000})
+        _hiscores(s, 7, T0 + timedelta(days=1), {"attack": 1800})
+        assert player_stats.gained(s, 7, T0, self.END)["attack"]["gained"] == 800
+
+    def test_each_metric_starts_from_the_first_reading_that_knows_it(self, s):
+        # The plugin's first row in the window has XP and one boss; the
+        # hiscores reading an hour later knows every boss.
+        _plugin(s, 7, T0 + timedelta(minutes=10), kc={"zulrah": 40}, attack=5000)
+        _hiscores(s, 7, T0 + timedelta(hours=1), {"attack": 5200, "hitpoints": 1154}, {"zulrah": 41, "vorkath": 9})
+        _plugin(s, 7, T0 + timedelta(days=2), kc={"zulrah": 50}, attack=9000)
+        _hiscores(s, 7, T0 + timedelta(days=3), {"attack": 9000, "hitpoints": 1154}, {"zulrah": 50, "vorkath": 15})
+        got = player_stats.gained(s, 7, T0, self.END)
+        assert got["attack"]["gained"] == 4000        # from the plugin's first row
+        assert got["zulrah"]["gained"] == 10          # plugin knew it first
+        assert got["vorkath"]["gained"] == 6          # only the hiscores knew it
+
+    def test_a_carried_forward_start_row_is_the_baseline(self, s):
+        _plugin(s, 7, T0 - timedelta(hours=2), attack=5000)
+        assert store.carry_forward(s, 7, T0 + timedelta(minutes=1))
+        _plugin(s, 7, T0 + timedelta(hours=3), attack=5600)
+        got = player_stats.gained(s, 7, T0, self.END)
+        assert got["attack"]["gained"] == 600 and got["attack"]["late"] is False
 
     def test_rows_take_the_shape_wom_answers_in(self, s):
-        _hiscores(s, 7, T0 - timedelta(days=1), {"attack": 1000}, {"zulrah": 10})
+        _hiscores(s, 7, T0 + timedelta(minutes=1), {"attack": 1000}, {"zulrah": 10})
         _hiscores(s, 7, T0 + timedelta(days=3), {"attack": 4000}, {"zulrah": 25})
         rows = player_stats.bulk_gained_rows(
             s, [{"player_id": 7, "name": "Some One", "wom_id": 99}, {"player_id": 8, "name": "No Data", "wom_id": 5}],
-            T0, T0 + timedelta(days=5))
+            T0, self.END)
         (row,) = rows
         assert row["player"]["id"] == 99 and row["player"]["username"] == "Some One"
         assert row["player"]["updatedAt"] == "2026-11-04T00:00:00.000Z" == row["endDate"]

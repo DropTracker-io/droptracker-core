@@ -177,11 +177,12 @@ def compare_gained_rows(wom_rows_by_player: dict, our_rows_by_player: dict,
             if mine:
                 detail += f"; ours {mine.get('start')}->{mine.get('end')}"
                 if mine.get("partial"):
-                    detail += " (our history starts inside the window)"
+                    detail += f" (our first reading in the window was at {mine.get('baseline_at')})"
             origin = (mine or {}).get("source")
             if origin and mine.get("partial"):
-                # Not a fair comparison: we were not watching when the window
-                # opened. The report counts these apart from real differences.
+                # Our first reading came well after the window opened, so
+                # earlier gains are not in our figure. The report counts these
+                # apart from real differences.
                 origin = f"{origin}/partial"
             out.append(entry(metric, wom_gain, our_gain, player_id=player_id,
                              our_source=origin,

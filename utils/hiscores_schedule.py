@@ -3,8 +3,9 @@
 Two tiers. **Event participants** the plugin is not already telling us about
 come first, on a tight schedule:
 
-- **start**: once, around the moment a participant's scoring begins, so there
-  is a baseline to measure from;
+- **start**: once, as soon as a participant's scoring begins, so there is a
+  reading inside the window to measure from (gains are counted from the
+  first reading in the window, as Wise Old Man counts them);
 - **end**: once, after the event closes, so there is a final value;
 - **rotation**: in between, on a cadence set by how active the player has
   been, because a hiscores entry only moves when the player logs out.
@@ -25,7 +26,6 @@ from typing import Optional
 # plugin reports exact XP and KC, sooner than the hiscores would.
 PLUGIN_COVERED = timedelta(hours=6)
 
-START_LEAD = timedelta(minutes=30)     # begin taking baselines this long before the start
 PIN_WINDOW = timedelta(hours=12)       # how long a missed start/end reading is still worth taking
 ACTIVE_FOR = timedelta(hours=24)       # "active" = a reading changed this recently
 QUIET_FOR = timedelta(hours=72)
@@ -66,12 +66,13 @@ def due(now: datetime, *, starts_at: Optional[datetime], ends_at: Optional[datet
     """Whether to look this participant up now, and why. None = leave alone.
 
     A participant covered by the plugin is still returned for a start or end
-    reading (the caller pins the plugin's own latest row instead of asking
-    the hiscores); they are simply never part of the rotation.
+    reading (the caller repeats the plugin's own latest numbers in a row at
+    that moment instead of asking the hiscores); they are simply never part
+    of the rotation.
     """
     # Scoring starts at the event's start, or when a late joiner joined.
     begins = max([t for t in (starts_at, joined_at) if t is not None], default=None)
-    if begins is not None and now < begins - START_LEAD:
+    if begins is not None and now < begins:
         return None
     blocked = not_found_at is not None and now - not_found_at < NOT_FOUND_BACKOFF
 
@@ -83,7 +84,7 @@ def due(now: datetime, *, starts_at: Optional[datetime], ends_at: Optional[datet
     if blocked:
         return None
     if not has_start and begins is not None and now - begins <= PIN_WINDOW:
-        return Due(START, True, _PRIORITY[START], (now - (begins - START_LEAD)).total_seconds())
+        return Due(START, True, _PRIORITY[START], (now - begins).total_seconds())
 
     if plugin_seen_at is not None and now - plugin_seen_at <= PLUGIN_COVERED:
         return None
