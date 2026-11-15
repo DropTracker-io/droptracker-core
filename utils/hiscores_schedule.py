@@ -110,11 +110,16 @@ def order(candidates):
 # The plugin reports exact XP on every sync, so a player it has seen this
 # recently gains nothing from a hiscores lookup.
 BACKGROUND_PLUGIN_COVERED = timedelta(hours=24)
-BACKGROUND_ACTIVE_FOR = timedelta(days=7)
+# How often a player is read, by how recently a reading of theirs changed.
+# (Raised 2026-11-15, owner: readings were a day and a half old at the median
+# against Wise Old Man's half a day.)
+BACKGROUND_ACTIVE_FOR = timedelta(days=3)
+BACKGROUND_RECENT_FOR = timedelta(days=14)
 BACKGROUND_QUIET_FOR = timedelta(days=30)
-BACKGROUND_ACTIVE_INTERVAL = timedelta(days=1)
-BACKGROUND_QUIET_INTERVAL = timedelta(days=3)
-BACKGROUND_DORMANT_INTERVAL = timedelta(days=7)
+BACKGROUND_ACTIVE_INTERVAL = timedelta(hours=6)
+BACKGROUND_RECENT_INTERVAL = timedelta(hours=12)
+BACKGROUND_QUIET_INTERVAL = timedelta(days=1)
+BACKGROUND_DORMANT_INTERVAL = timedelta(days=3)
 BACKGROUND_NOT_FOUND_BASE = timedelta(days=3)
 BACKGROUND_NOT_FOUND_MAX = timedelta(days=30)
 BACKGROUND_RETRY = timedelta(hours=1)    # after an error, so one bad name cannot hold the queue
@@ -124,10 +129,11 @@ def background_interval(now: datetime, *, last_changed: Optional[datetime],
                         first_polled: Optional[datetime], not_found_streak: int = 0) -> timedelta:
     """How long until a player's next background lookup.
 
-    Daily while their readings keep changing, every three days once they go
-    quiet, weekly when nothing has moved for a month. A name the hiscores do
-    not know backs off from three days to thirty: most are accounts that quit
-    or were renamed, and asking daily would spend the budget on them.
+    Every six hours while their readings keep changing, twice a day for a
+    fortnight after, daily for a month, then every three days. A name the
+    hiscores do not know backs off from three days to thirty: most are
+    accounts that quit or were renamed, and asking often would spend the
+    budget on them.
     """
     if not_found_streak > 0:
         wait = BACKGROUND_NOT_FOUND_BASE * (2 ** min(not_found_streak - 1, 5))
@@ -136,11 +142,13 @@ def background_interval(now: datetime, *, last_changed: Optional[datetime],
         idle = now - last_changed
         if idle <= BACKGROUND_ACTIVE_FOR:
             return BACKGROUND_ACTIVE_INTERVAL
+        if idle <= BACKGROUND_RECENT_FOR:
+            return BACKGROUND_RECENT_INTERVAL
         if idle <= BACKGROUND_QUIET_FOR:
             return BACKGROUND_QUIET_INTERVAL
         return BACKGROUND_DORMANT_INTERVAL
-    # Never seen to change. One reading says nothing about activity, so start
-    # in the middle and let the next reading decide.
+    # Never seen to change. One reading says nothing about activity, so read
+    # again within a day and let that decide; after a month of nothing, relax.
     if first_polled is None or now - first_polled <= BACKGROUND_QUIET_FOR:
         return BACKGROUND_QUIET_INTERVAL
     return BACKGROUND_DORMANT_INTERVAL

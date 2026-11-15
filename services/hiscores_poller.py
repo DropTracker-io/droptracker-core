@@ -21,8 +21,8 @@ needs (dev tracker project 40, t419).
 Switches (all env):
   HISCORES_POLLER=false        turn the whole thing off (default on)
   HISCORES_POLL_ALL=false      event participants only, no background tier (default on)
-  HISCORES_BACKGROUND_DAILY    background tier's share of the daily cap (default 15000)
-  HISCORES_POLL_BATCH          most lookups per cycle (default 20)
+  HISCORES_BACKGROUND_DAILY    background tier's share of the daily cap (default 50000)
+  HISCORES_POLL_BATCH          most lookups per cycle (default 40)
   HISCORES_INTERVAL_MS, HISCORES_DAILY_CAP, HISCORES_USER_AGENT: see the client
 
 Per-player state lives in Redis hash ``hiscores:p:{player_id}`` (when last
@@ -43,8 +43,8 @@ from utils import osrs_hiscores as hiscores
 
 log = logging.getLogger("hiscores_poller")
 
-BATCH = int(os.getenv("HISCORES_POLL_BATCH", "20"))
-BACKGROUND_DAILY = int(os.getenv("HISCORES_BACKGROUND_DAILY", "15000"))
+BATCH = int(os.getenv("HISCORES_POLL_BATCH", "40"))
+BACKGROUND_DAILY = int(os.getenv("HISCORES_BACKGROUND_DAILY", "50000"))
 QUEUE_KEY = "hiscores:queue"
 SEED_EVERY_SECONDS = 3600
 _last_seed = 0.0
@@ -450,6 +450,32 @@ def reschedule(redis_conn, player_id: int, now: datetime, *, only_if_queued: boo
                     xx=only_if_queued)
 
 
+def rebase_queue(redis_conn, now: Optional[datetime] = None) -> dict:
+    """Re-plan every queued player from when they were last read, pulling
+    forward anyone the current cadence would have read sooner. For after the
+    cadence is made faster: a turn already booked under the old cadence would
+    otherwise stand. Never pushes anyone later. Returns counts."""
+    now = now or datetime.utcnow()
+    moved = kept = 0
+    for member, score in redis_conn.zrange(QUEUE_KEY, 0, -1, withscores=True):
+        player_id = int(member)
+        state = _decode_hash(redis_conn.hgetall(_state_key(player_id)))
+        polled = _ts(state.get("polled"))
+        if polled is None:
+            kept += 1
+            continue
+        wait = schedule.background_interval(
+            now, last_changed=_ts(state.get("changed")), first_polled=_ts(state.get("first")),
+            not_found_streak=int(state.get("nf") or 0))
+        due = (polled - datetime(1970, 1, 1)).total_seconds() + wait.total_seconds()
+        if due < float(score):
+            redis_conn.zadd(QUEUE_KEY, {str(player_id): due})
+            moved += 1
+        else:
+            kept += 1
+    return {"moved_earlier": moved, "unchanged": kept}
+
+
 async def run_background(http, redis_conn, slots: int, deadline: float, stats: dict) -> None:
     """Spend up to ``slots`` lookups on the players who have waited longest."""
     global _last_seed
@@ -509,6 +535,9 @@ async def run_cycle(redis_conn=None, now: Optional[datetime] = None) -> dict:
         # The heartbeat scripts/health_watch.py reads: the loop is alive, and
         # whether it is working or holding back (and why).
         hiscores.record_cycle(redis_conn, reason or "running")
+        change = hiscores.tune_pace(redis_conn)
+        if change:
+            stats["pace"] = change
         if reason:
             stats["skipped"] = reason
             return stats
@@ -537,6 +566,7 @@ async def run_cycle(redis_conn=None, now: Optional[datetime] = None) -> dict:
             if background_enabled() and not blocked:
                 await run_background(http, redis_conn, BATCH - stats["polled"], deadline, stats)
         stats["requests_today"] = hiscores.requests_today(redis_conn)
+        stats["interval_ms"] = hiscores.current_interval(redis_conn)
         if background_enabled():
             stats["queue_due"] = int(redis_conn.zcount(QUEUE_KEY, "-inf", time.time()))
     except Exception:

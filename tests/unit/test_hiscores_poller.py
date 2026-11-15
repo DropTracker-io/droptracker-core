@@ -69,6 +69,14 @@ class FakeRedis:
 
     def delete(self, key):
         self.data.pop(key, None)
+        self.hashes.pop(key, None)
+
+    def lpush(self, key, value):
+        self.data.setdefault(key, [])
+        self.data[key].insert(0, value)
+
+    def ltrim(self, key, start, stop):
+        self.data[key] = self.data.get(key, [])[start:stop + 1]
 
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
@@ -95,8 +103,9 @@ class FakeRedis:
                 continue
             target[member] = float(score)
 
-    def zrange(self, key, start, stop):
-        return list(self.hashes.get("z:" + key, {}))
+    def zrange(self, key, start, stop, withscores=False):
+        items = self.hashes.get("z:" + key, {})
+        return list(items.items()) if withscores else list(items)
 
     def zrem(self, key, *members):
         for member in members:
@@ -594,18 +603,110 @@ class TestBackgroundCadence:
         return schedule.background_interval(NOW, **args)
 
     def test_follows_how_recently_a_reading_changed(self):
-        assert self._wait(last_changed=NOW - timedelta(days=2)) == timedelta(days=1)
-        assert self._wait(last_changed=NOW - timedelta(days=10)) == timedelta(days=3)
-        assert self._wait(last_changed=NOW - timedelta(days=40)) == timedelta(days=7)
+        assert self._wait(last_changed=NOW - timedelta(days=2)) == timedelta(hours=6)
+        assert self._wait(last_changed=NOW - timedelta(days=10)) == timedelta(hours=12)
+        assert self._wait(last_changed=NOW - timedelta(days=20)) == timedelta(days=1)
+        assert self._wait(last_changed=NOW - timedelta(days=40)) == timedelta(days=3)
 
     def test_one_reading_is_not_evidence_of_activity(self):
-        assert self._wait() == timedelta(days=3)
-        assert self._wait(first_polled=NOW - timedelta(days=45)) == timedelta(days=7)
+        assert self._wait() == timedelta(days=1)
+        assert self._wait(first_polled=NOW - timedelta(days=45)) == timedelta(days=3)
 
     def test_unknown_names_back_off_to_a_month(self):
         waits = [self._wait(not_found_streak=n) for n in (1, 2, 3, 4, 9)]
         assert waits == [timedelta(days=3), timedelta(days=6), timedelta(days=12),
                          timedelta(days=24), timedelta(days=30)]
+
+
+class TestPace:
+    """The request interval tunes itself: faster when clean, slower when not."""
+
+    def _hour(self, r, answered, failed, when):
+        r.hashes[hiscores.WINDOW_KEY] = {"answered": str(answered), "failed": str(failed)}
+        return hiscores.tune_pace(r, when)
+
+    def _started(self):
+        r = FakeRedis()
+        assert hiscores.tune_pace(r, NOW) is None          # first call only starts the clock
+        return r
+
+    def test_starts_at_the_configured_interval(self):
+        assert hiscores.current_interval(FakeRedis()) == hiscores.INTERVAL_MS
+
+    def test_a_clean_hour_goes_a_little_faster(self):
+        r = self._started()
+        line = self._hour(r, 900, 1, NOW + timedelta(hours=1))
+        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS - hiscores.SPEED_UP_STEP_MS
+        assert "clean" not in line and str(hiscores.INTERVAL_MS) in line
+        assert "clean hour" in r.data[hiscores.PACE_LOG_KEY][0]
+
+    def test_it_never_goes_below_the_floor(self):
+        r = self._started()
+        r.set(hiscores.INTERVAL_KEY, hiscores.MIN_INTERVAL_MS)
+        assert self._hour(r, 900, 0, NOW + timedelta(hours=1)) is None
+        assert hiscores.current_interval(r) == hiscores.MIN_INTERVAL_MS
+
+    def test_at_most_one_change_an_hour(self):
+        r = self._started()
+        self._hour(r, 900, 0, NOW + timedelta(hours=1))
+        assert self._hour(r, 900, 0, NOW + timedelta(hours=1, minutes=30)) is None
+        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS - hiscores.SPEED_UP_STEP_MS
+
+    def test_too_few_requests_say_nothing(self):
+        r = self._started()
+        assert self._hour(r, 50, 0, NOW + timedelta(hours=1)) is None
+        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS
+
+    def test_a_rising_failure_share_slows_down(self):
+        r = self._started()
+        self._hour(r, 950, 50, NOW + timedelta(hours=1))
+        assert hiscores.current_interval(r) == int(hiscores.INTERVAL_MS * hiscores.SLOW_DOWN_FACTOR)
+
+    def test_a_middling_hour_holds(self):
+        r = self._started()
+        assert self._hour(r, 985, 15, NOW + timedelta(hours=1)) is None
+        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS
+
+    def test_a_refusal_doubles_the_interval_at_once(self):
+        r = FakeRedis()
+        hiscores.record_health(r, hiscores.ERROR, "http 403", NOW)
+        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS * 2
+        hiscores.record_health(r, hiscores.RATE_LIMITED, "", NOW)
+        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS * 4
+        assert "refused (http 429)" in r.data[hiscores.PACE_LOG_KEY][0]
+
+    def test_a_502_does_not_count_as_a_refusal(self):
+        r = FakeRedis()
+        hiscores.record_health(r, hiscores.ERROR, "http 502", NOW)
+        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS
+
+    def test_no_speeding_up_for_twelve_hours_after_a_refusal(self):
+        r = self._started()
+        hiscores.record_health(r, hiscores.ERROR, "http 403", NOW)
+        slowed = hiscores.current_interval(r)
+        assert self._hour(r, 900, 0, NOW + timedelta(hours=2)) is None
+        assert hiscores.current_interval(r) == slowed
+        self._hour(r, 900, 0, NOW + timedelta(hours=13))
+        assert hiscores.current_interval(r) == slowed - hiscores.SPEED_UP_STEP_MS
+
+    def test_the_interval_is_capped_both_ways(self):
+        r = FakeRedis()
+        r.set(hiscores.INTERVAL_KEY, 5)
+        assert hiscores.current_interval(r) == hiscores.MIN_INTERVAL_MS
+        r.set(hiscores.INTERVAL_KEY, 10 ** 9)
+        assert hiscores.current_interval(r) == hiscores.MAX_INTERVAL_MS
+        r.set(hiscores.INTERVAL_KEY, "junk")
+        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS
+
+    def test_outcomes_feed_the_window(self):
+        r = FakeRedis()
+        hiscores.record_health(r, hiscores.OK, "", NOW)
+        hiscores.record_health(r, hiscores.NOT_FOUND, "", NOW)
+        hiscores.record_health(r, hiscores.ERROR, "TimeoutError", NOW)
+        assert r.hashes[hiscores.WINDOW_KEY] == {"answered": "2", "failed": "1"}
+
+    def test_the_user_agent_says_who_and_where(self):
+        assert "DropTracker" in hiscores.USER_AGENT and "droptracker.io" in hiscores.USER_AGENT
 
 
 class TestBackgroundQueue:
@@ -616,6 +717,21 @@ class TestBackgroundQueue:
         assert out == {"added": 2, "removed": 1}
         assert r.zscore(poller.QUEUE_KEY, "1") == 999.0      # keeps its place
         assert r.zrangebyscore(poller.QUEUE_KEY, "-inf", 10) == ["2", "3"]
+
+    def test_rebase_pulls_forward_and_never_pushes_back(self):
+        r = FakeRedis()
+        epoch = lambda t: (t - datetime(1970, 1, 1)).total_seconds()
+        # Read 30h ago, never seen to change: now due daily, was booked 2 days out.
+        r.hset(poller._state_key(1), mapping={"polled": epoch(NOW - timedelta(hours=30)),
+                                              "first": epoch(NOW - timedelta(hours=30))})
+        r.zadd(poller.QUEUE_KEY, {"1": epoch(NOW + timedelta(days=2))})
+        # Already due sooner than the cadence would say: left alone.
+        r.hset(poller._state_key(2), mapping={"polled": epoch(NOW - timedelta(hours=1)),
+                                              "first": epoch(NOW - timedelta(hours=1))})
+        r.zadd(poller.QUEUE_KEY, {"2": epoch(NOW + timedelta(hours=2)), "3": 0.0})
+        assert poller.rebase_queue(r, NOW) == {"moved_earlier": 1, "unchanged": 2}
+        assert r.zscore(poller.QUEUE_KEY, "1") == epoch(NOW - timedelta(hours=6))
+        assert r.zscore(poller.QUEUE_KEY, "2") == epoch(NOW + timedelta(hours=2))
 
     def _run(self, monkeypatch, players, outcome="written", slots=5, used_today=0):
         r = FakeRedis()
@@ -647,7 +763,7 @@ class TestBackgroundQueue:
         players = {i: self._player(i) for i in (1, 2, 3)}
         r, polled, stats = self._run(monkeypatch, players, slots=2)
         assert polled == [1, 2] and stats["polled"] == 2
-        assert r.zscore(poller.QUEUE_KEY, "1") > _time.time() + 86400
+        assert r.zscore(poller.QUEUE_KEY, "1") > _time.time() + 3600
         assert r.zscore(poller.QUEUE_KEY, "3") == 3.0
 
     def test_plugin_users_cost_no_request(self, monkeypatch):

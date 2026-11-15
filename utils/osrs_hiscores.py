@@ -13,8 +13,13 @@ board at all: renamed, banned, or never ranked.
 
 Rules this module enforces, because Jagex owes us nothing:
 
-- **One global pace.** Every process shares one Redis gate, so the whole
-  platform makes at most one request per ``HISCORES_INTERVAL_MS``.
+- **One global pace, which adjusts itself.** Every process shares one Redis
+  gate, so the whole platform makes at most one request per interval, one at
+  a time. The interval starts at ``HISCORES_INTERVAL_MS`` and is tuned from
+  what the hiscores do (`tune_pace`): a little faster each hour that almost
+  nothing fails, down to ``HISCORES_MIN_INTERVAL_MS``; much slower at once
+  when we are refused, and slower when errors climb. Jagex publish no limit,
+  so the limit is found by listening rather than assumed.
 - **Back off when told.** A 429, or a run of errors, opens a breaker and
   nothing is sent until it closes. Hiscores outages are routine on update
   Wednesdays; the plugin's data is unaffected by them.
@@ -46,9 +51,18 @@ BOARDS = {
 }
 MAIN_BOARD = BOARDS["normal"]
 
-USER_AGENT = os.getenv("HISCORES_USER_AGENT", "DropTracker (https://www.droptracker.io)")
+# Says who we are, what this is and where to reach us, so that anyone at
+# Jagex looking at their logs can ask us to slow down instead of blocking us.
+# Set HISCORES_USER_AGENT to add a contact address.
+USER_AGENT = os.getenv(
+    "HISCORES_USER_AGENT",
+    "DropTracker-HiscoresPoller/1.0 (+https://www.droptracker.io; OSRS clan stats tracker; "
+    "one request at a time, backs off on errors)")
+# Where the pace starts, and the fastest and slowest it may tune itself to.
 INTERVAL_MS = int(os.getenv("HISCORES_INTERVAL_MS", "2000"))
-DAILY_CAP = int(os.getenv("HISCORES_DAILY_CAP", "20000"))
+MIN_INTERVAL_MS = int(os.getenv("HISCORES_MIN_INTERVAL_MS", "1000"))
+MAX_INTERVAL_MS = 15000
+DAILY_CAP = int(os.getenv("HISCORES_DAILY_CAP", "60000"))
 REQUEST_TIMEOUT = float(os.getenv("HISCORES_TIMEOUT", "15"))
 # Consecutive failures before the breaker opens, and how long it stays open.
 BREAKER_FAILURES = 5
@@ -56,6 +70,9 @@ BREAKER_SECONDS = 600
 RATE_LIMIT_SECONDS = 900
 
 GATE_KEY = "hiscores:gate"
+INTERVAL_KEY = "hiscores:interval_ms"      # the tuned interval, shared by every process
+WINDOW_KEY = "hiscores:window"             # outcome counts since the pace was last tuned
+PACE_LOG_KEY = "hiscores:pace_log"         # recent pace changes, newest first
 BREAKER_KEY = "hiscores:breaker"
 FAILURES_KEY = "hiscores:failures"
 COUNT_KEY = "hiscores:count:{day}"
@@ -237,10 +254,21 @@ def may_request(redis_conn, now: Optional[datetime] = None) -> Optional[str]:
     return None
 
 
+def current_interval(redis_conn) -> int:
+    """Milliseconds between requests right now: the tuned value if there is
+    one, else the starting one. Always inside the allowed range."""
+    try:
+        raw = redis_conn.get(INTERVAL_KEY)
+        value = int(float(raw)) if raw else INTERVAL_MS
+    except Exception:
+        value = INTERVAL_MS
+    return max(MIN_INTERVAL_MS, min(MAX_INTERVAL_MS, value))
+
+
 def take_slot(redis_conn) -> bool:
     """Claim the one request slot of this interval. False if it is taken."""
     try:
-        return bool(redis_conn.set(GATE_KEY, "1", nx=True, px=INTERVAL_MS))
+        return bool(redis_conn.set(GATE_KEY, "1", nx=True, px=current_interval(redis_conn)))
     except Exception:
         return False
 
@@ -250,7 +278,7 @@ async def wait_for_slot(redis_conn, deadline: float) -> bool:
     while time.monotonic() < deadline:
         if take_slot(redis_conn):
             return True
-        await asyncio.sleep(min(0.25, INTERVAL_MS / 1000.0))
+        await asyncio.sleep(0.2)
     return False
 
 
@@ -330,12 +358,16 @@ def record_health(redis_conn, status: str, detail: str = "", now: Optional[datet
             redis_conn.hset(HEALTH_KEY, mapping={"last_answer": stamp, "last_attempt": stamp,
                                                  "fails_since_answer": 0})
             redis_conn.hincrby(hour, status, 1)
+            redis_conn.hincrby(WINDOW_KEY, "answered", 1)
         elif status in (ERROR, RATE_LIMITED):
             label = _failure_label(status, detail)
             redis_conn.hset(HEALTH_KEY, mapping={"last_attempt": stamp, "last_problem": label,
                                                  "last_problem_at": stamp})
             redis_conn.hincrby(HEALTH_KEY, "fails_since_answer", 1)
             redis_conn.hincrby(hour, f"fail:{label}", 1)
+            redis_conn.hincrby(WINDOW_KEY, "failed", 1)
+            if is_refusal(label):
+                slow_down_for_refusal(redis_conn, label, now)
         else:
             return
         redis_conn.expire(hour, _HOURLY_TTL)
@@ -441,8 +473,91 @@ def health_checks(redis_conn, now: Optional[datetime] = None) -> list:
         "hiscores:errors", "OSRS hiscores error share", not too_many,
         f"{failed} of {total} hiscores requests failed in the last two hours ({summary}). "
         f"Answers are still arriving, so this is throttling or an unstable service rather "
-        f"than a full block. Consider raising HISCORES_INTERVAL_MS"))
+        f"than a full block. The poller slows itself down when errors climb "
+        f"(now one request per {current_interval(redis_conn)} ms)"))
     return results
+
+
+# --------------------------------------------------------------------------- #
+# Pace: faster while the hiscores are happy, slower the moment they are not
+# --------------------------------------------------------------------------- #
+
+TUNE_EVERY_SECONDS = 3600
+TUNE_MIN_REQUESTS = 200          # fewer than this says nothing about a failure share
+SPEED_UP_STEP_MS = 100           # how much faster after a clean hour
+SPEED_UP_MAX_FAIL_SHARE = 0.005  # "clean": at most 0.5% of requests failed
+SLOW_DOWN_FAIL_SHARE = 0.03      # 3% failing is the hiscores struggling, or us being throttled
+SLOW_DOWN_FACTOR = 1.5
+REFUSAL_FACTOR = 2.0             # a 403/429 doubles the interval on the spot
+REFUSAL_QUIET_SECONDS = 12 * 3600  # no speeding up this long after a refusal
+
+
+def _set_interval(redis_conn, value: float, reason: str, now: Optional[datetime] = None) -> int:
+    new = int(max(MIN_INTERVAL_MS, min(MAX_INTERVAL_MS, round(value))))
+    old = current_interval(redis_conn)
+    if new != old:
+        redis_conn.set(INTERVAL_KEY, new)
+        stamp = (now or datetime.utcnow()).strftime("%Y-%m-%d %H:%M")
+        redis_conn.lpush(PACE_LOG_KEY, f"{stamp} {old}ms -> {new}ms: {reason}")
+        redis_conn.ltrim(PACE_LOG_KEY, 0, 99)
+    return new
+
+
+def slow_down_for_refusal(redis_conn, label: str, now: Optional[datetime] = None) -> None:
+    """We were told no. Halve the pace at once and remember when. Never raises."""
+    try:
+        stamp = time.time() if now is None else (now - datetime(1970, 1, 1)).total_seconds()
+        redis_conn.hset(HEALTH_KEY, mapping={"last_refusal": stamp})
+        _set_interval(redis_conn, current_interval(redis_conn) * REFUSAL_FACTOR,
+                      f"refused ({label})", now)
+    except Exception:
+        pass
+
+
+def tune_pace(redis_conn, now: Optional[datetime] = None) -> Optional[str]:
+    """Adjust the request interval from the last hour's outcomes. Called every
+    poller cycle; does something at most once an hour, and only with enough
+    requests to judge by. Returns a line describing a change, else None.
+
+    - 3% or more failed: slow down by half again.
+    - at most 0.5% failed, and no refusal in the last 12 hours: 100 ms faster,
+      down to the floor.
+    - anything between: hold.
+    """
+    try:
+        now = now or datetime.utcnow()
+        stamp = (now - datetime(1970, 1, 1)).total_seconds()
+        health = _hash(redis_conn, HEALTH_KEY)
+        last = _float(health.get("last_tune"))
+        if last is not None and stamp - last < TUNE_EVERY_SECONDS:
+            return None
+        window = _hash(redis_conn, WINDOW_KEY)
+        answered, failed = int(window.get("answered") or 0), int(window.get("failed") or 0)
+        total = answered + failed
+        if last is None:
+            # First run: start the clock, judge at the next one.
+            redis_conn.hset(HEALTH_KEY, mapping={"last_tune": stamp})
+            redis_conn.delete(WINDOW_KEY)
+            return None
+        if total < TUNE_MIN_REQUESTS:
+            return None
+        redis_conn.hset(HEALTH_KEY, mapping={"last_tune": stamp})
+        redis_conn.delete(WINDOW_KEY)
+        share = failed / total
+        before = current_interval(redis_conn)
+        refused_at = _float(health.get("last_refusal"))
+        if share >= SLOW_DOWN_FAIL_SHARE:
+            after = _set_interval(redis_conn, before * SLOW_DOWN_FACTOR,
+                                  f"{failed} of {total} requests failed", now)
+        elif share <= SPEED_UP_MAX_FAIL_SHARE and (
+                refused_at is None or stamp - refused_at >= REFUSAL_QUIET_SECONDS):
+            after = _set_interval(redis_conn, before - SPEED_UP_STEP_MS,
+                                  f"clean hour ({failed} of {total} failed)", now)
+        else:
+            after = before
+        return f"pace {before}ms -> {after}ms ({failed} of {total} failed)" if after != before else None
+    except Exception:
+        return None
 
 
 @dataclass
