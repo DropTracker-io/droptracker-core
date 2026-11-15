@@ -59,6 +59,20 @@ DEFAULT_TIME_BUDGET = float(os.getenv("RECAP_EHB_TIME_BUDGET", "600"))
 # The lazy web path generates a card inside an HTTP request, so it gets a much
 # tighter one — a slow clan fetch must not become a slow page.
 LAZY_TIME_BUDGET = float(os.getenv("RECAP_EHB_LAZY_BUDGET", "10"))
+# What a page view may spend at WOM. A card is generated the first time anyone
+# opens it, and "anyone" is mostly crawlers: on 2026-11-14 three bots walked
+# ~17,000 recap pages and each new player cost two per-player calls (4,339 that
+# day against ~975 normally), days after WOM asked us to cut volume.
+#
+# * Per-player calls are off for page views (0). A view still reaches the
+#   player through their clan, where one call answers for the whole roster and
+#   is remembered for 30 days. The monthly delivery run keeps its own capped
+#   per-player pass, which no visitor can trigger.
+# * Clan calls made for page views share one daily ceiling across all workers.
+#   Past it the card is built without EHB, exactly as when WOM is down.
+LAZY_PLAYER_CALLS = int(os.getenv("RECAP_EHB_LAZY_PLAYER_CALLS", "0"))
+LAZY_DAILY_BUDGET = int(os.getenv("RECAP_EHB_LAZY_DAILY_BUDGET", "150"))
+_LAZY_SPENT_PREFIX = "recap:ehblazy:spent:"
 
 # "We already asked WOM about this subject for this period." Kept in Redis
 # rather than the table because it records an *attempt*, and the useful lifetime
@@ -647,6 +661,8 @@ async def _harvest_stragglers(
     if len(missing) > player_cap:
         stats["players_dropped"] += len(missing) - player_cap
         missing = missing[:player_cap]
+    if not missing:
+        return  # player_cap 0: page views make no per-player calls
 
     rows = session.execute(
         text(
@@ -677,6 +693,39 @@ async def _harvest_stragglers(
         _mark_attempted(conn, "p", int(player_id), period)
 
 
+def _lazy_spent_key(now: Optional[datetime] = None) -> str:
+    return _LAZY_SPENT_PREFIX + (now or datetime.utcnow()).strftime("%Y%m%d")
+
+
+def lazy_budget_left(conn, now: Optional[datetime] = None) -> bool:
+    """Whether page views may still send WOM calls today (UTC).
+
+    Fails CLOSED when Redis is unreachable: the ceiling exists to protect
+    someone else's API, and a card without EHB is a normal card.
+    """
+    if LAZY_DAILY_BUDGET <= 0 or conn is None:
+        return False
+    try:
+        return int(conn.get(_lazy_spent_key(now)) or 0) < LAZY_DAILY_BUDGET
+    except Exception:
+        return False
+
+
+def _spend_lazy_budget(conn, calls: int, now: Optional[datetime] = None) -> None:
+    if conn is None or calls <= 0:
+        return
+    try:
+        key = _lazy_spent_key(now)
+        spent = conn.incrby(key, int(calls))
+        conn.expire(key, 2 * 24 * 3600)
+        if spent >= LAZY_DAILY_BUDGET > spent - int(calls):
+            logger.warning(
+                "recap EHB: page views used today's %d WOM calls; cards opened "
+                "for the first time omit EHB until 00:00 UTC", LAZY_DAILY_BUDGET)
+    except Exception:
+        pass
+
+
 async def ensure_player_ehb(player_id: int, period: str) -> dict:
     """Harvest one player's month on demand, for the lazily-generated card.
 
@@ -687,17 +736,25 @@ async def ensure_player_ehb(player_id: int, period: str) -> dict:
     """
     from db import Session
 
+    conn = _redis()
+    if not lazy_budget_left(conn):
+        stats = _new_stats()
+        stats["out_of_budget"] = True
+        return stats
+
     session = Session()
     try:
-        return await harvest_month_ehb(
+        stats = await harvest_month_ehb(
             session,
             period,
             player_ids=[int(player_id)],
             group_cap=2,
-            player_cap=1,
+            player_cap=LAZY_PLAYER_CALLS,
             time_budget=LAZY_TIME_BUDGET,
             log=lambda message: logger.debug("%s", message),
         )
+        _spend_lazy_budget(conn, stats["bulk_calls"] + stats["player_calls"])
+        return stats
     finally:
         try:
             session.close()

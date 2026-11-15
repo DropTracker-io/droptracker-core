@@ -451,3 +451,89 @@ class TestCandidateGroups:
     def test_nothing_wanted_means_no_queries_at_all(self):
         session = _Session()
         assert ehb._candidate_groups(session, set(), set()) == []
+
+
+# --------------------------------------------------------------------------- #
+# Page views and WOM (2026-11-15). Crawlers walked ~17,000 recap pages in a day
+# and every first view of a player cost per-player WOM calls: 4,339 that day.
+# --------------------------------------------------------------------------- #
+class _CountingRedis(_FakeRedis):
+    def incrby(self, key, amount):
+        self.store[key] = int(self.store.get(key) or 0) + amount
+        return self.store[key]
+
+    def expire(self, key, ttl):
+        pass
+
+
+class TestLazyPageViewBudget:
+    def _run(self, monkeypatch, conn, harvested_stats=None):
+        seen = {}
+
+        async def fake_harvest(session, period, **kwargs):
+            seen.update(kwargs, ran=True)
+            stats = ehb._new_stats()
+            stats.update(harvested_stats or {})
+            return stats
+
+        class _Session:
+            def close(self):
+                pass
+
+        import db
+
+        monkeypatch.setattr(db, "Session", lambda: _Session(), raising=False)
+        monkeypatch.setattr(ehb, "harvest_month_ehb", fake_harvest)
+        monkeypatch.setattr(ehb, "_redis", lambda: conn)
+        stats = asyncio.run(ehb.ensure_player_ehb(7, "2026-10"))
+        return stats, seen
+
+    def test_a_page_view_makes_no_per_player_calls_by_default(self, monkeypatch):
+        _, seen = self._run(monkeypatch, _CountingRedis())
+        assert ehb.LAZY_PLAYER_CALLS == 0 and seen["player_cap"] == 0
+
+    def test_calls_made_for_page_views_are_counted_against_the_day(self, monkeypatch):
+        conn = _CountingRedis()
+        self._run(monkeypatch, conn, {"bulk_calls": 2})
+        self._run(monkeypatch, conn, {"bulk_calls": 1})
+        assert list(conn.store.values()) == [3]
+
+    def test_past_the_daily_ceiling_nothing_is_fetched(self, monkeypatch):
+        conn = _CountingRedis()
+        conn.store[ehb._lazy_spent_key()] = ehb.LAZY_DAILY_BUDGET
+        stats, seen = self._run(monkeypatch, conn)
+        assert "ran" not in seen and stats["out_of_budget"] is True
+
+    def test_redis_down_fetches_nothing_rather_than_everything(self, monkeypatch):
+        _, seen = self._run(monkeypatch, _CountingRedis(blow_up=True))
+        assert "ran" not in seen
+        _, seen = self._run(monkeypatch, None)
+        assert "ran" not in seen
+
+    def test_the_ceiling_is_per_utc_day(self):
+        from datetime import datetime
+
+        conn = _CountingRedis()
+        conn.store[ehb._lazy_spent_key(datetime(2026, 11, 14, 23, 59))] = ehb.LAZY_DAILY_BUDGET
+        assert not ehb.lazy_budget_left(conn, datetime(2026, 11, 14, 23, 59))
+        assert ehb.lazy_budget_left(conn, datetime(2026, 11, 15, 0, 0))
+
+    def test_zero_player_cap_never_asks_wom_or_the_database(self, monkeypatch):
+        class _NoQueries:
+            def execute(self, *a, **k):
+                raise AssertionError("no query expected")
+
+        calls = []
+
+        async def fake_player(name, start, end):
+            calls.append(name)
+
+        import utils.wiseoldman as wom
+
+        monkeypatch.setattr(wom, "get_player_gained_ehb", fake_player, raising=False)
+        monkeypatch.setattr(ehb, "stored_gains", lambda *a, **k: {})
+        stats = ehb._new_stats()
+        asyncio.run(ehb._harvest_stragglers(
+            _NoQueries(), "2026-10", {7}, _CountingRedis(), stats,
+            start_dt=None, end_dt=None, deadline=1e18, player_cap=0))
+        assert calls == [] and stats["player_calls"] == 0
