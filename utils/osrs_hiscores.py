@@ -58,12 +58,17 @@ MAIN_BOARD = BOARDS["normal"]
 USER_AGENT = os.getenv(
     "HISCORES_USER_AGENT",
     "DropTracker-HiscoresPoller/1.0 (+https://www.droptracker.io; OSRS clan stats tracker; "
-    "at most one request a second, backs off on errors)")
+    "at most two requests a second, backs off on errors)")
 # Where the pace starts, and the fastest and slowest it may tune itself to.
 INTERVAL_MS = int(os.getenv("HISCORES_INTERVAL_MS", "2000"))
-MIN_INTERVAL_MS = int(os.getenv("HISCORES_MIN_INTERVAL_MS", "1000"))
+# The floor is half the pace Wise Old Man's own code allows itself: its
+# update-player job is limited to one start per 250 ms with 8 running at once
+# (server/src/jobs/handlers/update-player.job.ts, read 2026-11-16), straight
+# to the same endpoint with no proxy in the repository. We are not WOM, and
+# Jagex may know them, so we stop at two a second and still listen.
+MIN_INTERVAL_MS = int(os.getenv("HISCORES_MIN_INTERVAL_MS", "500"))
 MAX_INTERVAL_MS = 15000
-DAILY_CAP = int(os.getenv("HISCORES_DAILY_CAP", "60000"))
+DAILY_CAP = int(os.getenv("HISCORES_DAILY_CAP", "150000"))
 REQUEST_TIMEOUT = float(os.getenv("HISCORES_TIMEOUT", "15"))
 # Consecutive failures before the breaker opens, and how long it stays open.
 BREAKER_FAILURES = 5

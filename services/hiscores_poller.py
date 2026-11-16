@@ -21,9 +21,9 @@ needs (dev tracker project 40, t419).
 Switches (all env):
   HISCORES_POLLER=false        turn the whole thing off (default on)
   HISCORES_POLL_ALL=false      event participants only, no background tier (default on)
-  HISCORES_BACKGROUND_DAILY    background tier's share of the daily cap (default 50000)
-  HISCORES_POLL_BATCH          most lookups per cycle (default 80)
-  HISCORES_CONCURRENCY         lookups in flight at once (default 2)
+  HISCORES_BACKGROUND_DAILY    background tier's share of the daily cap (default 130000)
+  HISCORES_POLL_BATCH          most lookups per cycle (default 120)
+  HISCORES_CONCURRENCY         lookups in flight at once (default 4)
   HISCORES_INTERVAL_MS, HISCORES_DAILY_CAP, HISCORES_USER_AGENT: see the client
 
 Per-player state lives in Redis hash ``hiscores:p:{player_id}`` (when last
@@ -44,14 +44,14 @@ from utils import osrs_hiscores as hiscores
 
 log = logging.getLogger("hiscores_poller")
 
-BATCH = int(os.getenv("HISCORES_POLL_BATCH", "80"))
+BATCH = int(os.getenv("HISCORES_POLL_BATCH", "120"))
 # Lookups in flight at once. The gate still spaces request STARTS by the
 # tuned interval; this only stops a slow answer (about a second each) from
 # being what limits the pace instead of the gate.
-CONCURRENCY = max(1, int(os.getenv("HISCORES_CONCURRENCY", "2")))
+CONCURRENCY = max(1, int(os.getenv("HISCORES_CONCURRENCY", "4")))
 PARTICIPANTS_CACHE_SECONDS = 60
 _participants_cache = {"at": 0.0, "rows": []}
-BACKGROUND_DAILY = int(os.getenv("HISCORES_BACKGROUND_DAILY", "50000"))
+BACKGROUND_DAILY = int(os.getenv("HISCORES_BACKGROUND_DAILY", "130000"))
 QUEUE_KEY = "hiscores:queue"
 SEED_EVERY_SECONDS = 3600
 _last_seed = 0.0
