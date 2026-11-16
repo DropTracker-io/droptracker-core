@@ -171,10 +171,14 @@ async def _browser_ws_url(port: int) -> str:
         return resp.json()["webSocketDebuggerUrl"]
 
 
+# How many layout widths a page may claim through ``size_js``.
+_MAX_SIZE_JS_GROWTH = 4
+
+
 async def _capture(ws_url: str, url: str, *, width: int, scale: float,
                    timeout: float, max_height: int,
                    viewport_height: int, ready_js: str | None = None,
-                   transparent: bool = False) -> bytes:
+                   transparent: bool = False, size_js: str | None = None) -> bytes:
     # max_size=None: a full-page base64 PNG easily exceeds the 1 MiB ws default.
     async with websockets.connect(ws_url, max_size=None,
                                   open_timeout=10) as ws:
@@ -250,13 +254,31 @@ async def _capture(ws_url: str, url: str, *, width: int, scale: float,
             content_h = int(math.ceil(size.get("height") or 0)) or viewport_height
             content_h = min(content_h, max_height)
             content_w = int(math.ceil(size.get("width") or width)) or width
+            clip_w, clip_h = min(content_w, width), content_h
+
+            # A page that draws an artifact of its own size says how big it is,
+            # from its top-left corner. Bounded, and ignored unless it is a pair
+            # of positive numbers: the page is ours, the limit is for its bugs.
+            if size_js:
+                try:
+                    res = await cdp.send("Runtime.evaluate", {
+                        "expression": size_js, "returnByValue": True,
+                    }, session_id=sid, timeout=5)
+                    said = (res.get("result") or {}).get("value")
+                    if (isinstance(said, list) and len(said) == 2
+                            and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                                    and v >= 1 for v in said)):
+                        clip_w = min(int(math.ceil(said[0])), width * _MAX_SIZE_JS_GROWTH)
+                        clip_h = min(int(math.ceil(said[1])), max_height)
+                except Exception:
+                    pass
 
             shot = await cdp.send("Page.captureScreenshot", {
                 "omitBackground": transparent,
                 "format": "png",
                 "captureBeyondViewport": True,
-                "clip": {"x": 0, "y": 0, "width": min(content_w, width),
-                         "height": content_h, "scale": 1},
+                "clip": {"x": 0, "y": 0, "width": clip_w,
+                         "height": clip_h, "scale": 1},
             }, session_id=sid, timeout=timeout)
             return base64.b64decode(shot["data"])
         finally:
@@ -520,7 +542,8 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
                          viewport_height: int = 1080,
                          ready_js: str | None = None,
                          transparent: bool = False,
-                         queue_timeout: float | None = None) -> bytes:
+                         queue_timeout: float | None = None,
+                         size_js: str | None = None) -> bytes:
     """Render ``url`` in headless chromium and return a full-page PNG.
 
     ``width`` is the CSS layout width; ``scale`` is the device pixel ratio (2 =
@@ -540,6 +563,12 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
     only knows about the DOM and ``<img>`` elements, so anything drawn
     asynchronously into a canvas (the WebGL character render) must signal its
     own readiness or it will be photographed blank.
+
+    ``size_js`` is an optional JavaScript expression giving ``[width, height]``
+    in CSS pixels: the capture is then exactly that, from the page's top-left
+    corner, instead of the layout width by the content height. For a page whose
+    artifact decides its own size (the character render grows its canvas for a
+    model that needs the room), which may be wider than ``width``.
 
     ``viewport_height`` is the emulated window height, and the floor on the
     captured height: chromium reports ``cssContentSize`` as at least the
@@ -569,7 +598,8 @@ async def screenshot_url(url: str, *, width: int = 1100, scale: float = 2.0,
                     png = await _capture(browser.ws_url, url, width=width, scale=scale,
                                          timeout=timeout, max_height=max_height,
                                          viewport_height=viewport_height,
-                                         ready_js=ready_js, transparent=transparent)
+                                         ready_js=ready_js, transparent=transparent,
+                                         size_js=size_js)
                     outcome = "ok"
                     return png
                 finally:

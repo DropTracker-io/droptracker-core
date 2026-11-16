@@ -33,6 +33,11 @@ PUBLIC_BASE = "https://www.droptracker.io/img/models"
 # presented; the built-in readiness probe only knows about images.
 _READY_JS = "window.__modelReady === true"
 
+# The page draws every character at one scale and grows its canvas for a model
+# that needs more room (a scythe, a pet), so the image is MODEL_IMAGE_WIDTH x
+# MODEL_IMAGE_HEIGHT for a lone character and bigger, never smaller, otherwise.
+_SIZE_JS = "window.__modelSize"
+
 # SwiftShader is CPU rasterisation, so a render is seconds rather than
 # milliseconds. Well beyond that means something is wrong, not slow.
 _RENDER_TIMEOUT_SECONDS = 45.0
@@ -103,6 +108,7 @@ async def render_gear_image(player_id: int, fingerprint: str,
             scale=2.0,
             timeout=_RENDER_TIMEOUT_SECONDS,
             ready_js=_READY_JS,
+            size_js=_SIZE_JS,
             # A Discord client can be light or dark; a baked-in background
             # rectangle looks broken on whichever one we did not assume.
             transparent=True,

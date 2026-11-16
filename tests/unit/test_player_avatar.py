@@ -174,3 +174,36 @@ class TestBuildAvatar:
         blank = Image.new("L", (WIDTH, HEIGHT), 0)
         Image.merge("RGBA", (blank,) * 4).save(source)
         assert build_avatar(str(source)) is None
+
+
+class TestGrownFrames:
+    """Since 2026-11-16 the render page draws every character at one scale and
+    grows the frame for a model that needs the room, so the image may be wider
+    or taller than 800x1200 while the body in it is the same size."""
+
+    @staticmethod
+    def _in_frame(width, height, dx=0, dy=0, extras=()):
+        img = Image.new("L", (width, height), 0)
+        img.paste(Image.new("L", (120, BODY), 255), (400 - 60 + dx, HEAD + dy))
+        for left, top, right, bottom in extras:
+            img.paste(Image.new("L", (right - left, bottom - top), 255), (left, top))
+        return img
+
+    def test_a_wider_frame_crops_the_same_torso(self):
+        base = _crop_box(figure())
+        # 240 px wider, grown evenly about the middle: the figure moves right.
+        scythe = (1020, HEAD - 150, 1028, FEET - 100)
+        wide = _crop_box(self._in_frame(WIDTH + 240, HEIGHT, dx=120, extras=(scythe,)))
+        assert wide is not None
+        assert wide[2] - wide[0] == base[2] - base[0]
+        assert abs(centre_of(wide) - (centre_of(base) + 120)) < 15
+        assert abs(wide[1] - base[1]) <= 2
+
+    def test_a_taller_frame_crops_the_same_torso(self):
+        base = _crop_box(figure())
+        # 200 px taller, grown evenly: the figure moves down by half of it.
+        banner = (396, HEAD - 60, 404, HEAD + 100)
+        tall = _crop_box(self._in_frame(WIDTH, HEIGHT + 200, dy=100, extras=(banner,)))
+        assert tall is not None
+        assert tall[2] - tall[0] == base[2] - base[0]
+        assert abs(tall[1] - (base[1] + 100)) <= 2

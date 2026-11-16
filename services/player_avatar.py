@@ -75,11 +75,19 @@ from services.player_model import ensure_public_dir
 # the 56 px profile tile, doubled for retina) without a per-surface variant.
 AVATAR_SIZE = 128
 
-# The character's height as a fraction of the render's height. From the fixed
-# camera in the /model-image page: measured mean 629 px of 1200 across 55
+# The character's height as a fraction of the render's BASE height. From the
+# fixed camera in the /model-image page: measured mean 629 px of 1200 across 55
 # renders. Expressed as a ratio so a future re-render at another size still
 # works without touching this.
 _BODY_FRACTION = 0.525
+
+# The base frame's height over its width (400x600). Since 2026-11-16 the page
+# draws every character at one scale and grows the frame for a model that needs
+# the room, so a render can be wider or taller than the base; the body is still
+# _BODY_FRACTION of the base height, not of the image's. Growth is nearly
+# always in one direction (wider for a pet or a long weapon), so the base is
+# the smaller of the two heights the image's sides imply.
+_BASE_ASPECT = 1.5
 
 # Where a bare head's crown sits above the feet, in body heights. Only a
 # fallback: the crown is detected per image, and this stands in when detection
@@ -274,7 +282,7 @@ def _crop_box(alpha) -> Optional[Tuple[int, int, int, int]]:
     if (bottom - top) < height * 0.20 or feet < height * 0.5:
         return None
 
-    body = height * _BODY_FRACTION
+    body = min(height, width * _BASE_ASPECT) * _BODY_FRACTION
 
     # Everything below is measured in body heights of the fixed camera. A figure
     # well short of one body is not drawn at that scale (see _MIN_FIGURE), and a
