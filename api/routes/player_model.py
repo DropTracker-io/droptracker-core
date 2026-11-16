@@ -65,7 +65,8 @@ async def upload_player_model():
     pin = (form.get("pin") or "").strip() in ("1", "true")
 
     # 6.1.15+ sends the mesh ("mesh"/"pet_mesh") and the glTF is written here;
-    # older plugins send the finished glTF ("model"/"pet_model").
+    # 6.1.28+ sends the game model itself in the same fields, and the mesh is
+    # built here too. Older plugins send the finished glTF ("model"/"pet_model").
     mesh_file, model_file = files.get("mesh"), files.get("model")
     if mesh_file is None and model_file is None:
         return jsonify({"error": "model file is required"}), 422
@@ -74,11 +75,11 @@ async def upload_player_model():
         from services.player_model_mesh import MeshError, convert
 
         try:
-            model_bytes = await asyncio.to_thread(convert, mesh_file.read())
+            model_bytes = await asyncio.to_thread(convert, mesh_file.read(), "player")
         except MeshError:
             return jsonify({"accepted": False, "reason": "invalid_model"}), 422
         try:
-            pet_bytes = await asyncio.to_thread(convert, pet_mesh.read()) if pet_mesh is not None else None
+            pet_bytes = await asyncio.to_thread(convert, pet_mesh.read(), "pet") if pet_mesh is not None else None
         except MeshError:
             pet_bytes = None  # the pet is optional; never lose the player's model over it
     else:
