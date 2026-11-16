@@ -14,8 +14,9 @@ board at all: renamed, banned, or never ranked.
 Rules this module enforces, because Jagex owes us nothing:
 
 - **One global pace, which adjusts itself.** Every process shares one Redis
-  gate, so the whole platform makes at most one request per interval, one at
-  a time. The interval starts at ``HISCORES_INTERVAL_MS`` and is tuned from
+  gate, so the whole platform starts at most one request per interval (a
+  slow answer may overlap the next request; no more than
+  ``HISCORES_CONCURRENCY`` are ever in flight). The interval starts at ``HISCORES_INTERVAL_MS`` and is tuned from
   what the hiscores do (`tune_pace`): a little faster each hour that almost
   nothing fails, down to ``HISCORES_MIN_INTERVAL_MS``; much slower at once
   when we are refused, and slower when errors climb. Jagex publish no limit,
@@ -57,7 +58,7 @@ MAIN_BOARD = BOARDS["normal"]
 USER_AGENT = os.getenv(
     "HISCORES_USER_AGENT",
     "DropTracker-HiscoresPoller/1.0 (+https://www.droptracker.io; OSRS clan stats tracker; "
-    "one request at a time, backs off on errors)")
+    "at most one request a second, backs off on errors)")
 # Where the pace starts, and the fastest and slowest it may tune itself to.
 INTERVAL_MS = int(os.getenv("HISCORES_INTERVAL_MS", "2000"))
 MIN_INTERVAL_MS = int(os.getenv("HISCORES_MIN_INTERVAL_MS", "1000"))

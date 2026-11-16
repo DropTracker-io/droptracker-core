@@ -256,13 +256,34 @@ def encode_metrics(values: Optional[Mapping[str, Any]]) -> Optional[str]:
     return json.dumps(dict(sorted(clean.items())), separators=(",", ":")) if clean else None
 
 
+def counts_only_up(metric: str) -> bool:
+    """Whether a hiscores activity is a running total that can never fall.
+
+    Boss kill counts, clue scrolls and collection log slots are. Minigame
+    RANK scores are not: Last Man Standing and PvP Arena scores drop when a
+    player loses, and league, Deadman and grid points reset with their
+    seasons. Only the first kind may be used to call a reading impossible.
+    An activity we do not recognise is treated as able to fall, so a new
+    hiscores entry can never get every reading of a player flagged.
+    """
+    if metric.startswith("clue_scrolls") or metric == "collections_logged":
+        return True
+    try:
+        from utils import efficiency
+
+        return metric in efficiency.tables()["bosses"]
+    except Exception:
+        return False
+
+
 def plausibility_problem(previous_skills: Mapping[str, int], previous_activities: Mapping[str, int],
                          previous_at: datetime, skills: Mapping[str, int],
                          activities: Mapping[str, int], now: datetime) -> Optional[str]:
     """Why a hiscores reading cannot follow the previous one, or None.
 
     Compared metric by metric over what both readings know: a skill or boss
-    missing from either side is unknown, not zero.
+    missing from either side is unknown, not zero. Activities are only held
+    to "never goes down" where that is true of them (`counts_only_up`).
     """
     for skill, xp in skills.items():
         before = previous_skills.get(skill)
@@ -270,13 +291,37 @@ def plausibility_problem(previous_skills: Mapping[str, int], previous_activities
             return f"{skill} xp went down ({before} -> {xp})"
     for metric, score in activities.items():
         before = previous_activities.get(metric)
-        if before is not None and score < before:
+        if before is not None and score < before and counts_only_up(metric):
             return f"{metric} went down ({before} -> {score})"
     gained = sum(xp - previous_skills[s] for s, xp in skills.items() if s in previous_skills)
     hours = max(0.0, (now - previous_at).total_seconds() / 3600.0)
     if gained > XP_ALLOWANCE + MAX_XP_PER_HOUR * hours:
         return f"{gained} xp in {hours:.1f}h"
     return None
+
+
+# A player whose readings keep being refused is not stuck forever. If the
+# hiscores have told the same new story this many times in a row, over at
+# least this long, the story is true (a rollback, or the name now belongs to
+# another account) and becomes the baseline.
+FLAG_HEAL_READINGS = 3
+FLAG_HEAL_SECONDS = 24 * 3600
+
+
+def flagged_run_is_consistent(flagged_rows, skills: Mapping[str, int],
+                              activities: Mapping[str, int], now: datetime) -> bool:
+    """Whether a new reading, plus the unbroken run of flagged readings before
+    it (oldest first), is long and self-consistent enough to be believed."""
+    if len(flagged_rows) < FLAG_HEAL_READINGS - 1:
+        return False
+    if (now - flagged_rows[0].taken_at).total_seconds() < FLAG_HEAL_SECONDS:
+        return False
+    chain = [(decode_skills(r.skills), decode_activities(r.activities), r.taken_at) for r in flagged_rows]
+    chain.append((dict(skills), dict(activities), now))
+    for (a_skills, a_acts, a_at), (b_skills, b_acts, b_at) in zip(chain, chain[1:]):
+        if plausibility_problem(a_skills, a_acts, a_at, b_skills, b_acts, b_at):
+            return False
+    return True
 
 
 def record_hiscores_snapshot(db_session, player_id: int, skills: Mapping[str, int],
@@ -341,6 +386,20 @@ def record_hiscores_snapshot(db_session, player_id: int, skills: Mapping[str, in
             problem = plausibility_problem(
                 decode_skills(trusted.skills), decode_activities(trusted.activities),
                 trusted.taken_at, skills, decode_activities(activities_json), now)
+        if problem is not None:
+            # Refused before as well? An unbroken, self-consistent run of
+            # refusals means the hiscores are right and our baseline is not.
+            run = (
+                db_session.query(PlayerStatSnapshot)
+                .filter(PlayerStatSnapshot.player_id == player_id,
+                        PlayerStatSnapshot.source == SOURCE_HISCORES,
+                        PlayerStatSnapshot.taken_at > (trusted.taken_at if trusted is not None else now))
+                .order_by(PlayerStatSnapshot.taken_at.asc())
+                .all()
+            )
+            if run and all(r.flagged for r in run) and flagged_run_is_consistent(
+                    run, skills, decode_activities(activities_json), now):
+                problem = None
 
     # A hiscores reading is complete (every skill and boss the player is
     # ranked in), so it can carry the player's EHP and EHB with it.

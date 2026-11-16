@@ -750,7 +750,15 @@ class TestBackgroundQueue:
         stats = {"polled": 0}
         import time as _time
 
-        asyncio.run(poller.run_background(None, r, slots, _time.monotonic() + 30, stats))
+        monkeypatch.setattr(poller, "CONCURRENCY", 1)      # keep the order checkable
+        rotation = schedule.Due(schedule.ROTATION, False, 2)
+
+        async def go():
+            found = await poller.background_items(r, slots, set(), stats)
+            await poller.work(None, r, [("bg", rotation, p) for p in found],
+                              _time.monotonic() + 30, stats)
+
+        asyncio.run(go())
         return r, polled, stats
 
     def _player(self, pid, seen=None):
@@ -917,3 +925,103 @@ class TestHealth:
         r.hset = None
         hiscores.record_health(r, hiscores.OK)
         hiscores.record_cycle(r, "running")
+
+
+class TestWork:
+    def test_no_more_than_the_allowed_number_in_flight(self, monkeypatch):
+        r = FakeRedis()
+        flight = {"now": 0, "peak": 0, "done": []}
+
+        async def fake_poll(http, redis_conn, participant, due, now=None):
+            flight["now"] += 1
+            flight["peak"] = max(flight["peak"], flight["now"])
+            await asyncio.sleep(0.01)
+            flight["now"] -= 1
+            flight["done"].append(participant["player_id"])
+            return "written"
+
+        monkeypatch.setattr(poller, "poll_player", fake_poll)
+        monkeypatch.setattr(poller, "CONCURRENCY", 2)
+        rotation = schedule.Due(schedule.ROTATION, False, 2)
+        items = [("bg", rotation, {"player_id": i}) for i in range(9)]
+        stats = {"polled": 0}
+        import time as _time
+
+        asyncio.run(poller.work(None, r, items, _time.monotonic() + 30, stats))
+        assert flight["peak"] == 2 and sorted(flight["done"]) == list(range(9)) and stats["polled"] == 9
+
+    def test_event_participants_go_before_the_background_tier(self, monkeypatch):
+        order = []
+
+        async def fake_poll(http, redis_conn, participant, due, now=None):
+            order.append(participant["player_id"])
+            return "unchanged"
+
+        monkeypatch.setattr(poller, "poll_player", fake_poll)
+        monkeypatch.setattr(poller, "CONCURRENCY", 1)
+        rotation = schedule.Due(schedule.ROTATION, False, 2)
+        start = schedule.Due(schedule.START, True, 1)
+        import time as _time
+
+        asyncio.run(poller.work(None, FakeRedis(), [("event", start, {"player_id": 1}),
+                                                    ("bg", rotation, {"player_id": 2})],
+                                _time.monotonic() + 30, {"polled": 0}))
+        assert order == [1, 2]
+
+    def test_a_refusal_stops_every_worker(self, monkeypatch):
+        calls = []
+
+        async def fake_poll(http, redis_conn, participant, due, now=None):
+            calls.append(participant["player_id"])
+            await asyncio.sleep(0)
+            return "blocked"
+
+        monkeypatch.setattr(poller, "poll_player", fake_poll)
+        monkeypatch.setattr(poller, "CONCURRENCY", 2)
+        rotation = schedule.Due(schedule.ROTATION, False, 2)
+        import time as _time
+
+        stats = {"polled": 0}
+        asyncio.run(poller.work(None, FakeRedis(), [("bg", rotation, {"player_id": i}) for i in range(8)],
+                                _time.monotonic() + 30, stats))
+        assert len(calls) <= 2 and stats["polled"] == 0
+
+
+class TestWhatMayNeverFall:
+    def test_rank_scores_may_fall_and_boss_counts_may_not(self, s):
+        _rec(s, {"attack": 5000}, {"last_man_standing": 999, "pvp_arena": 3013, "league_points": 800,
+                                   "zulrah": 50, "clue_scrolls_all": 20}, when=NOW)
+        assert _rec(s, {"attack": 5100}, {"last_man_standing": 988, "pvp_arena": 2970, "league_points": 0,
+                                          "zulrah": 51, "clue_scrolls_all": 20},
+                    when=NOW + timedelta(hours=2)) == store.WRITTEN
+        assert _rec(s, {"attack": 5200}, {"zulrah": 51, "clue_scrolls_all": 19},
+                    when=NOW + timedelta(hours=4)) == store.FLAGGED
+
+    def test_an_activity_we_do_not_know_cannot_flag_anyone(self):
+        assert store.counts_only_up("zulrah") and store.counts_only_up("clue_scrolls_hard")
+        assert store.counts_only_up("collections_logged")
+        assert not store.counts_only_up("pvp_arena") and not store.counts_only_up("brand_new_minigame")
+
+
+class TestStuckPlayersHeal:
+    def test_three_consistent_refusals_over_a_day_become_the_baseline(self, s):
+        _rec(s, {"attack": 9000}, {"zulrah": 80}, when=NOW)
+        # The name now belongs to a smaller account.
+        assert _rec(s, {"attack": 500}, {"zulrah": 3}, when=NOW + timedelta(hours=2)) == store.FLAGGED
+        assert _rec(s, {"attack": 650}, {"zulrah": 4}, when=NOW + timedelta(hours=14)) == store.FLAGGED
+        assert _rec(s, {"attack": 800}, {"zulrah": 5}, when=NOW + timedelta(hours=27)) == store.WRITTEN
+        assert [r.flagged for r in _rows(s)] == [False, True, True, False]
+        assert store.values_at(s, 7, NOW + timedelta(days=2))["taken_at"] == NOW + timedelta(hours=27)
+        # And from there on, readings are judged against the new baseline.
+        assert _rec(s, {"attack": 900}, {"zulrah": 5}, when=NOW + timedelta(hours=30)) == store.WRITTEN
+
+    def test_not_before_a_day_has_passed(self, s):
+        _rec(s, {"attack": 9000}, when=NOW)
+        for hours, xp in ((1, 500), (2, 600), (3, 700), (4, 800)):
+            assert _rec(s, {"attack": xp}, when=NOW + timedelta(hours=hours)) == store.FLAGGED
+
+    def test_readings_that_contradict_each_other_never_heal(self, s):
+        _rec(s, {"attack": 9000}, when=NOW)
+        _rec(s, {"attack": 500}, when=NOW + timedelta(hours=2))
+        _rec(s, {"attack": 300}, when=NOW + timedelta(hours=14))    # went down again
+        assert _rec(s, {"attack": 400}, when=NOW + timedelta(hours=27)) == store.FLAGGED
