@@ -546,6 +546,9 @@ async def work(http, redis_conn, items: list, deadline: float, stats: dict) -> N
                     reschedule(redis_conn, player["player_id"], datetime.utcnow())
 
     await asyncio.gather(*(worker() for _ in range(CONCURRENCY)))
+    # Work was left over (the cycle ran out of time, not of players): the
+    # host loop should come straight back instead of resting a minute.
+    stats["more"] = bool(pending) and not stopped
 
 
 # --------------------------------------------------------------------------- #

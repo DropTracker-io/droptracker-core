@@ -554,7 +554,8 @@ async def hiscores_poller_loop():
         try:
             stats = await hiscores_poller.run_cycle()
             for key, value in stats.items():
-                if isinstance(value, int) and key not in ("due", "requests_today", "queue_due", "interval_ms"):
+                if isinstance(value, int) and not isinstance(value, bool) and key not in (
+                        "due", "requests_today", "queue_due", "interval_ms"):
                     totals[key] = totals.get(key, 0) + value
             if stats.get("pace"):
                 print(f"hiscores_poller: {stats['pace']}")
@@ -572,9 +573,12 @@ async def hiscores_poller_loop():
         except Exception as e:
             print(f"Error in hiscores poller loop: {e}")
             stats = {}
-        # A full batch means there is a backlog: come straight back. The gate,
-        # not this sleep, is what paces requests.
-        busy = stats.get("polled", 0) >= hiscores_poller.BATCH
+        # Work left over means there is a backlog: come straight back. The
+        # gate, not this sleep, is what paces requests. (Until 2026-11-16 this
+        # asked whether a whole batch had been read, which a 50-second cycle
+        # never managed, so every cycle was followed by a minute's rest and
+        # the pace sat at half the gate's whatever the gate said.)
+        busy = bool(stats.get("more"))
         await sleep_with_watchdog_heartbeats(1 if busy else 60)
 
 

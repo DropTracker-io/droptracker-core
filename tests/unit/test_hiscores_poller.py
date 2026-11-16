@@ -949,6 +949,22 @@ class TestWork:
 
         asyncio.run(poller.work(None, r, items, _time.monotonic() + 30, stats))
         assert flight["peak"] == 2 and sorted(flight["done"]) == list(range(9)) and stats["polled"] == 9
+        assert stats["more"] is False
+
+    def test_running_out_of_time_says_there_is_more(self, monkeypatch):
+        async def fake_poll(http, redis_conn, participant, due, now=None):
+            await asyncio.sleep(0.02)
+            return "written"
+
+        monkeypatch.setattr(poller, "poll_player", fake_poll)
+        monkeypatch.setattr(poller, "CONCURRENCY", 1)
+        rotation = schedule.Due(schedule.ROTATION, False, 2)
+        stats = {"polled": 0}
+        import time as _time
+
+        asyncio.run(poller.work(None, FakeRedis(), [("bg", rotation, {"player_id": i}) for i in range(50)],
+                                _time.monotonic() + 0.05, stats))
+        assert stats["more"] is True and 0 < stats["polled"] < 50
 
     def test_event_participants_go_before_the_background_tier(self, monkeypatch):
         order = []
