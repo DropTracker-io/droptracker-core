@@ -142,6 +142,13 @@ class TestSync:
         assert pp.resync_after_correction(s, ev, task.id, a.id) == {}
         assert a.score == 20
 
+    def test_bingo_kind_pays(self, db):
+        """A bingo board is its own event kind and scores on task points."""
+        s, m, ev, task, a, b = db
+        ev.kind = "bingo"
+        assert pp.sync_partial_points(s, ev) == {a.id: 6}
+        assert a.score == 26
+
     def test_other_event_kinds_pay_nothing(self, db):
         s, m, ev, task, a, b = db
         ev.kind = "board_game"

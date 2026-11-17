@@ -33,9 +33,10 @@ from utils import task_repeat as _tr
 
 PARTIAL_GUID = "partial-points"
 PARTIAL_NOTE = "Partial points: unfinished when the event ended"
-# Bingo boards are standard events with has_bingo set. Board-game, Conquest,
-# Loot Sweep and SOTW/BOTW rank on their own rules, not task points.
-PARTIAL_EVENT_KINDS = ("standard",)
+# Task lists ("standard") and bingo boards ("bingo") both score on task
+# points. Board-game, Conquest, Loot Sweep and SOTW/BOTW rank on their own
+# rules. The web toggle (event-general-setup.tsx) shows for the same kinds.
+PARTIAL_EVENT_KINDS = ("standard", "bingo")
 _APPLIED = ("auto", "confirmed", "manual")
 
 
