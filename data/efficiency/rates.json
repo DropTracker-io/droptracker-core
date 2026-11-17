@@ -1,9 +1,9 @@
 {
  "source": {
   "repo": "https://github.com/wise-old-man/wise-old-man",
-  "commit": "f930946d4152e7c449df1dd367405f1351f2eeaf",
+  "commit": "0c48ccf0f29b487642df2200c196d396f57fa0b1",
   "license": "MIT, Copyright (c) 2020 Ruben Amendoeira",
-  "synced_at": "2026-11-12T10:58:00Z"
+  "synced_at": "2026-11-17T21:30:22Z"
  },
  "skills": [
   "overall",
@@ -6481,6 +6481,10 @@
     "rate": 3.2
    },
    {
+    "boss": "the_fractured_archive",
+    "rate": 3.5
+   },
+   {
     "boss": "thermonuclear_smoke_devil",
     "rate": 150
    },
@@ -6755,6 +6759,10 @@
     "rate": 3.2
    },
    {
+    "boss": "the_fractured_archive",
+    "rate": 3.5
+   },
+   {
     "boss": "thermonuclear_smoke_devil",
     "rate": 100
    },
@@ -7025,6 +7033,10 @@
     "rate": 2.9
    },
    {
+    "boss": "the_fractured_archive",
+    "rate": 3
+   },
+   {
     "boss": "thermonuclear_smoke_devil",
     "rate": 88
    },
@@ -7265,6 +7277,10 @@
    {
     "boss": "theatre_of_blood",
     "rate": 2.9
+   },
+   {
+    "boss": "the_fractured_archive",
+    "rate": 2
    },
    {
     "boss": "thermonuclear_smoke_devil",
