@@ -147,3 +147,22 @@ class TestRaidLootPointsEligible:
     def test_older_plugins_send_nothing_and_stay_eligible(self):
         assert self._ok() is True
         assert self._ok(raid_party_size="3") is True
+
+    @pytest.mark.parametrize("source", [
+        "Tombs of Amascut", "Tombs of Amascut: Expert Mode", "Tombs of Amascut: Entry Mode",
+        "Fractured Archive", "The Fractured Archive",
+    ])
+    def test_raids_whose_loot_room_reads_as_outside_stay_eligible(self, source):
+        """ToA and the Fractured Archive drop their in-raid state before the
+        chest opens, so plugin 6.1.27 says in_raid=false inside the loot room.
+        The rule withheld points from 57 real chests before this (2026-11-17)."""
+        assert self._ok(source=source, in_raid="false", in_party="false") is True
+        assert self._ok(npc_name=source, in_raid="false", in_party="false") is True
+
+    @pytest.mark.parametrize("source", [
+        "Theatre of Blood", "Theatre of Blood: Hard Mode",
+        "Chambers of Xeric", "Chambers of Xeric Challenge Mode",
+    ])
+    def test_the_rule_still_holds_where_the_flag_is_reliable(self, source):
+        assert self._ok(source=source, in_raid="false", in_party="false") is False
+        assert self._ok(source=source, in_raid="true", in_party="false") is True

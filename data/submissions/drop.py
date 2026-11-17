@@ -344,6 +344,16 @@ def _normalize_split_size(raw, players_included):
     return size if size >= named + 1 else None
 
 
+# Raids whose loot room the plugin's ``in_raid`` cannot see. Tombs of Amascut
+# and the Fractured Archive (which copies ToA's party varbits) drop their
+# "inside the raid" state before the chest is opened, so plugin 6.1.27 reports
+# ``in_raid=false`` for loot claimed in the loot room itself. Applying the rule
+# there withheld points from 57 legitimate chests in its first two days, solos
+# and unpartied teams alike (reported by Sokira2, 2026-11-17). Until a plugin
+# reports those loot rooms correctly, the flag proves nothing for these raids.
+_IN_RAID_UNRELIABLE_SOURCES = ("tombs of amascut", "fractured archive")
+
+
 def raid_loot_points_eligible(drop_data) -> bool:
     """Whether a raid drop may earn clan points, from where it was claimed.
 
@@ -354,7 +364,9 @@ def raid_loot_points_eligible(drop_data) -> bool:
     collection box, and the "solo" drop earns full points with no split
     (robbe_b, #points-system-chat 2026-11-01). Rule agreed 2026-11-13: points
     inside the loot room, or outside the raid while still in a party; never
-    outside and alone. Older plugins send neither field and stay eligible.
+    outside and alone. Older plugins send neither field and stay eligible, and
+    so do the raids in ``_IN_RAID_UNRELIABLE_SOURCES``, where ``in_raid=false``
+    is what a claim inside the loot room looks like.
     """
     def _flag(key):
         raw = drop_data.get(key)
@@ -365,7 +377,10 @@ def raid_loot_points_eligible(drop_data) -> bool:
     in_raid, in_party = _flag("in_raid"), _flag("in_party")
     if in_raid is None:
         return True
-    return in_raid or bool(in_party)
+    if in_raid or bool(in_party):
+        return True
+    source = str(drop_data.get("source") or drop_data.get("npc_name") or "").lower()
+    return any(name in source for name in _IN_RAID_UNRELIABLE_SOURCES)
 
 
 def _normalize_raid_party_size(raw):
