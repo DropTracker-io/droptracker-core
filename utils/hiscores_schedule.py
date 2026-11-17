@@ -22,9 +22,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-# A participant whose plugin talked to us this recently needs no lookup: the
-# plugin reports exact XP and KC, sooner than the hiscores would.
-PLUGIN_COVERED = timedelta(hours=6)
+# A participant whose plugin sent us their stats this recently needs no
+# lookup: it reports exact XP, sooner than the hiscores would. "Sent us their
+# stats" is a state sync (player_state.last_synced_at), NOT merely being seen:
+# about a third of plugin users never sync stats, and counting them as covered
+# left them with no readings from either source (found 2026-11-17). The window
+# is short on purpose. Once the syncs stop the player has probably logged
+# out, and one hiscores reading then picks up the last minutes of the session
+# that the plugin's final sync missed.
+PLUGIN_COVERED = timedelta(hours=1)
 
 PIN_WINDOW = timedelta(hours=12)       # how long a missed start/end reading is still worth taking
 ACTIVE_FOR = timedelta(hours=24)       # "active" = a reading changed this recently
@@ -59,7 +65,7 @@ def rotation_interval(now: datetime, last_changed: Optional[datetime],
 
 
 def due(now: datetime, *, starts_at: Optional[datetime], ends_at: Optional[datetime],
-        joined_at: Optional[datetime], plugin_seen_at: Optional[datetime],
+        joined_at: Optional[datetime], plugin_synced_at: Optional[datetime],
         last_polled: Optional[datetime], last_changed: Optional[datetime],
         first_polled: Optional[datetime], not_found_at: Optional[datetime],
         has_start: bool, has_end: bool) -> Optional[Due]:
@@ -86,7 +92,7 @@ def due(now: datetime, *, starts_at: Optional[datetime], ends_at: Optional[datet
     if not has_start and begins is not None and now - begins <= PIN_WINDOW:
         return Due(START, True, _PRIORITY[START], (now - begins).total_seconds())
 
-    if plugin_seen_at is not None and now - plugin_seen_at <= PLUGIN_COVERED:
+    if plugin_synced_at is not None and now - plugin_synced_at <= PLUGIN_COVERED:
         return None
     if last_polled is None:
         return Due(ROTATION, False, _PRIORITY[ROTATION], float("inf"))
@@ -107,9 +113,10 @@ def order(candidates):
 # The background tier: every player we know, slowly
 # --------------------------------------------------------------------------- #
 
-# The plugin reports exact XP on every sync, so a player it has seen this
-# recently gains nothing from a hiscores lookup.
-BACKGROUND_PLUGIN_COVERED = timedelta(hours=24)
+# Same rule for the background tier: skip only while stats are arriving.
+BACKGROUND_PLUGIN_COVERED = PLUGIN_COVERED
+# How soon after the last sync to come back and take that closing reading.
+AFTER_LAST_SYNC = timedelta(minutes=5)
 # How often a player is read, by how recently a reading of theirs changed.
 # (Raised 2026-11-15, owner: readings were a day and a half old at the median
 # against Wise Old Man's half a day.)

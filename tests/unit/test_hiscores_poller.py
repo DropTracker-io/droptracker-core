@@ -219,7 +219,7 @@ class TestGate:
 
 def _due(**over):
     args = dict(starts_at=NOW - timedelta(days=3), ends_at=NOW + timedelta(days=3), joined_at=None,
-                plugin_seen_at=None, last_polled=None, last_changed=None, first_polled=None,
+                plugin_synced_at=None, last_polled=None, last_changed=None, first_polled=None,
                 not_found_at=None, has_start=True, has_end=False)
     args.update(over)
     return schedule.due(NOW, **args)
@@ -229,9 +229,10 @@ class TestSchedule:
     def test_never_polled_is_due(self):
         assert _due().reason == schedule.ROTATION
 
-    def test_plugin_covered_players_are_left_out_of_the_rotation(self):
-        assert _due(plugin_seen_at=NOW - timedelta(hours=5)) is None
-        assert _due(plugin_seen_at=NOW - timedelta(hours=7)) is not None
+    def test_players_whose_stats_are_arriving_are_left_out_of_the_rotation(self):
+        assert _due(plugin_synced_at=NOW - timedelta(minutes=50)) is None
+        # An hour after the last sync they have probably logged out: read them.
+        assert _due(plugin_synced_at=NOW - timedelta(minutes=70)) is not None
 
     def test_cadence_follows_activity(self):
         active = dict(first_polled=NOW - timedelta(days=5), last_changed=NOW - timedelta(hours=3))
@@ -256,7 +257,7 @@ class TestSchedule:
 
     def test_start_reading_is_wanted_even_from_plugin_users(self):
         verdict = _due(starts_at=NOW - timedelta(minutes=5), has_start=False,
-                       plugin_seen_at=NOW - timedelta(minutes=1))
+                       plugin_synced_at=NOW - timedelta(minutes=1))
         assert verdict.reason == schedule.START
 
     def test_a_late_joiner_starts_when_they_joined(self):
@@ -395,7 +396,7 @@ class TestStoringReadings:
 def _participant(**over):
     base = {"player_id": 7, "name": "Some Player", "account_type": None, "account_varbit": None,
             "event_id": 1, "starts_at": NOW - timedelta(days=3), "ends_at": NOW + timedelta(days=3),
-            "joined_at": None, "plugin_seen_at": None}
+            "joined_at": None, "plugin_synced_at": None}
     base.update(over)
     return base
 
@@ -406,7 +407,7 @@ class TestPlan:
         r.hset(poller._pin_key(1, 7), "start", 1)
         people = [_participant(),
                   _participant(event_id=2, ends_at=NOW - timedelta(hours=1)),
-                  _participant(player_id=8, plugin_seen_at=NOW - timedelta(hours=1))]
+                  _participant(player_id=8, plugin_synced_at=NOW - timedelta(minutes=30))]
         r.hset(poller._pin_key(1, 8), "start", 1)
         queue = poller.plan(r, people, NOW)
         assert [(d.reason, p["player_id"], p["pins"]) for d, p in queue] == [("end", 7, [(2, "end")])]
@@ -484,7 +485,7 @@ class TestPollPlayer:
         carried = []
         monkeypatch.setattr(poller, "_carry_forward_db", lambda pid, now: carried.append(pid) or True)
         got, r, calls = self._run(monkeypatch, hiscores.FetchResult(hiscores.ERROR),
-                                  plugin_seen_at=NOW - timedelta(minutes=5))
+                                  plugin_synced_at=NOW - timedelta(minutes=5))
         assert got == "plugin_pinned" and calls["boards"] == [] and carried == [7]
         assert "start" in r.hgetall(poller._pin_key(1, 7))
 
@@ -493,7 +494,7 @@ class TestPollPlayer:
         pinned = []
         monkeypatch.setattr(poller, "_pin_latest_db", lambda pid: pinned.append(pid) or True)
         monkeypatch.setattr(poller, "_carry_forward_db", lambda pid, now: pytest.fail("not at an end reading"))
-        p = _participant(pins=[(1, "end")], plugin_seen_at=NOW - timedelta(minutes=5))
+        p = _participant(pins=[(1, "end")], plugin_synced_at=NOW - timedelta(minutes=5))
         got = asyncio.run(poller.poll_player(None, r, p, schedule.Due(schedule.END, True, 0), NOW))
         assert got == "plugin_pinned" and pinned == [7]
 
@@ -763,7 +764,7 @@ class TestBackgroundQueue:
 
     def _player(self, pid, seen=None):
         return {"player_id": pid, "name": f"p{pid}", "account_type": None, "account_varbit": None,
-                "plugin_seen_at": seen, "pins": []}
+                "plugin_synced_at": seen, "pins": []}
 
     def test_longest_waiting_first_and_each_is_rescheduled(self, monkeypatch):
         import time as _time
@@ -774,12 +775,25 @@ class TestBackgroundQueue:
         assert r.zscore(poller.QUEUE_KEY, "1") > _time.time() + 3600
         assert r.zscore(poller.QUEUE_KEY, "3") == 3.0
 
-    def test_plugin_users_cost_no_request(self, monkeypatch):
+    def test_a_player_whose_stats_are_arriving_costs_no_request_and_is_revisited_soon(self, monkeypatch):
+        import time as _time
         from datetime import datetime as _dt
 
-        players = {1: self._player(1, seen=_dt.utcnow()), 2: self._player(2), 3: self._player(3)}
+        players = {1: self._player(1, seen=_dt.utcnow() - timedelta(minutes=20)),
+                   2: self._player(2), 3: self._player(3)}
         r, polled, stats = self._run(monkeypatch, players)
         assert polled == [2, 3] and stats["bg_covered"] == 1
+        # Back 5 minutes after the hour from that sync: about 45 minutes from now.
+        wait = r.zscore(poller.QUEUE_KEY, "1") - _time.time()
+        assert 40 * 60 < wait < 50 * 60
+
+    def test_a_player_who_stopped_syncing_is_read(self, monkeypatch):
+        from datetime import datetime as _dt
+
+        players = {1: self._player(1, seen=_dt.utcnow() - timedelta(hours=3)),
+                   2: self._player(2), 3: self._player(3)}
+        _, polled, stats = self._run(monkeypatch, players)
+        assert polled == [1, 2, 3] and "bg_covered" not in stats
 
     def test_a_deleted_player_leaves_the_queue(self, monkeypatch):
         r, polled, _ = self._run(monkeypatch, {2: self._player(2), 3: self._player(3)})

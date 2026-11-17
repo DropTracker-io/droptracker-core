@@ -29,6 +29,9 @@ Switches (all env):
 Per-player state lives in Redis hash ``hiscores:p:{player_id}`` (when last
 looked up, when a reading last changed, when the name was last not found) and
 ``hiscores:pin:{event_id}:{player_id}`` (which start/end readings exist).
+
+"Covered by the plugin" means the plugin sent the player's STATS within the
+last hour (player_state.last_synced_at), not that the plugin was seen.
 """
 from __future__ import annotations
 
@@ -108,7 +111,7 @@ def _decode_hash(raw) -> dict:
 def _participants_db(now: datetime) -> list:
     """Participants of running events:
     ``[{player_id, name, account_type, event_id, starts_at, ends_at, joined_at,
-    plugin_seen_at}]``. Active events, plus ones that ended inside the window
+    plugin_synced_at}]``. Active events, plus ones that ended inside the window
     an end reading is still worth taking in.
 
     Every active event, not only ones with XP or kill-count tasks: the
@@ -117,7 +120,6 @@ def _participants_db(now: datetime) -> list:
     the event consumer's state, not in the task types."""
     from db.models.base import Session
     from db.models import Event, EventTeamMember, Player, PlayerState
-    from db.models.player_last_seen import PlayerLastSeen
     from utils.account_types import account_type_from_varbit
 
     session = Session()
@@ -142,9 +144,11 @@ def _participants_db(now: datetime) -> list:
         varbits = dict(
             session.query(PlayerState.player_id, PlayerState.account_type)
             .filter(PlayerState.player_id.in_(list(player_ids))).all())
+        # When the plugin last sent this player's stats (a state sync), which
+        # is not the same as when the plugin was last seen.
         seen = dict(
-            session.query(PlayerLastSeen.player_id, PlayerLastSeen.last_seen_at)
-            .filter(PlayerLastSeen.player_id.in_(list(player_ids))).all())
+            session.query(PlayerState.player_id, PlayerState.last_synced_at)
+            .filter(PlayerState.player_id.in_(list(player_ids))).all())
     finally:
         session.close()
 
@@ -159,7 +163,7 @@ def _participants_db(now: datetime) -> list:
             "account_type": account_type_from_varbit(varbit) or player.account_type,
             "account_varbit": varbit if isinstance(varbit, int) else None,
             "event_id": m.event_id, "starts_at": event.starts_at, "ends_at": event.ends_at,
-            "joined_at": m.joined_at, "plugin_seen_at": seen.get(m.player_id),
+            "joined_at": m.joined_at, "plugin_synced_at": seen.get(m.player_id),
         })
     return out
 
@@ -174,7 +178,7 @@ def plan(redis_conn, participants: list, now: datetime) -> list:
         pins = _decode_hash(redis_conn.hgetall(_pin_key(p["event_id"], p["player_id"])))
         verdict = schedule.due(
             now, starts_at=p["starts_at"], ends_at=p["ends_at"], joined_at=p["joined_at"],
-            plugin_seen_at=p["plugin_seen_at"], last_polled=_ts(state.get("polled")),
+            plugin_synced_at=p["plugin_synced_at"], last_polled=_ts(state.get("polled")),
             last_changed=_ts(state.get("changed")), first_polled=_ts(state.get("first")),
             not_found_at=_ts(state.get("not_found")),
             has_start="start" in pins, has_end="end" in pins)
@@ -309,7 +313,7 @@ async def poll_player(http, redis_conn, participant: dict, due: schedule.Due,
     player_id, pins = participant["player_id"], participant.get("pins") or []
     key, stamp = _state_key(player_id), time.time()
 
-    seen = participant.get("plugin_seen_at")
+    seen = participant.get("plugin_synced_at")
     if due.pinned and seen is not None and now - seen <= schedule.PLUGIN_COVERED:
         # The plugin is ahead of the hiscores for this player, so no request
         # is spent. A start reading repeats the plugin's numbers in a row of
@@ -414,7 +418,6 @@ def _players_db(player_ids: list) -> dict:
     """``{player_id: participant-shaped dict}`` for a batch of ids."""
     from db.models import Player, PlayerState
     from db.models.base import Session
-    from db.models.player_last_seen import PlayerLastSeen
     from utils.account_types import account_type_from_varbit
 
     if not player_ids:
@@ -425,8 +428,8 @@ def _players_db(player_ids: list) -> dict:
             Player.player_id.in_(player_ids)).all()
         varbits = dict(session.query(PlayerState.player_id, PlayerState.account_type).filter(
             PlayerState.player_id.in_(player_ids)).all())
-        seen = dict(session.query(PlayerLastSeen.player_id, PlayerLastSeen.last_seen_at).filter(
-            PlayerLastSeen.player_id.in_(player_ids)).all())
+        seen = dict(session.query(PlayerState.player_id, PlayerState.last_synced_at).filter(
+            PlayerState.player_id.in_(player_ids)).all())
     finally:
         session.close()
     out = {}
@@ -438,7 +441,7 @@ def _players_db(player_ids: list) -> dict:
             "player_id": p.player_id, "name": p.player_name,
             "account_type": account_type_from_varbit(varbit) or p.account_type,
             "account_varbit": varbit if isinstance(varbit, int) else None,
-            "plugin_seen_at": seen.get(p.player_id), "pins": [],
+            "plugin_synced_at": seen.get(p.player_id), "pins": [],
         }
     return out
 
@@ -505,11 +508,13 @@ async def background_items(redis_conn, slots: int, skip: set, stats: dict) -> li
         if player is None:
             redis_conn.zrem(QUEUE_KEY, str(player_id))
             continue
-        seen = player["plugin_seen_at"]
+        seen = player["plugin_synced_at"]
         if seen is not None and now - seen <= schedule.BACKGROUND_PLUGIN_COVERED:
-            # The plugin is covering them; look again once that could lapse.
-            redis_conn.zadd(QUEUE_KEY, {str(player_id): time.time()
-                                        + schedule.BACKGROUND_PLUGIN_COVERED.total_seconds()})
+            # The plugin is sending their stats right now. Come back just
+            # after the window from that sync: if the syncs have stopped by
+            # then, that reading is the end of their session.
+            back = (seen + schedule.BACKGROUND_PLUGIN_COVERED + schedule.AFTER_LAST_SYNC - now)
+            redis_conn.zadd(QUEUE_KEY, {str(player_id): time.time() + max(60.0, back.total_seconds())})
             stats["bg_covered"] = stats.get("bg_covered", 0) + 1
             continue
         out.append(player)
