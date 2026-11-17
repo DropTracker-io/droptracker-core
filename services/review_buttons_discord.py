@@ -14,7 +14,8 @@ and is audited the same way (with ``via: discord`` and the clicker's Discord
 id). Who may press is :func:`review_buttons_core.may_review`. Clicks are read
 from the raw interaction so the card's components can be rewritten as plain
 JSON (Components V2 cards included): the buttons go, a "who decided" line
-appears, and a held drop gets an Undo button.
+appears, and a held drop gets an Undo button. That line also carries how
+much of the queue is left, because the channel itself never says (#249).
 """
 from __future__ import annotations
 
@@ -85,6 +86,40 @@ def _is_event_manager(s, user_id, group_ids) -> bool:
                     GroupEventManager.group_id.in_(list(group_ids))).first() is not None)
 
 
+def _pending_event_count(s, event_id: int):
+    """Completions still awaiting review on this event, or None.
+
+    Best-effort by contract: this runs after the decision is committed,
+    and a count that fails must never cost someone their review.
+    """
+    from sqlalchemy import func
+
+    from db.models import EventCompletion
+    try:
+        return int(s.query(func.count(EventCompletion.id))
+                   .filter(EventCompletion.event_id == event_id,
+                           EventCompletion.status == "pending").scalar() or 0)
+    except Exception:
+        log.warning("[ReviewButtons] pending count failed for event %s",
+                    event_id, exc_info=True)
+        return None
+
+
+def _pending_drop_count(s, group_id: int):
+    """Held manual drops still awaiting this group's review, or None."""
+    from sqlalchemy import func
+
+    from db.models import DropGroupModeration
+    try:
+        return int(s.query(func.count(DropGroupModeration.id))
+                   .filter(DropGroupModeration.group_id == group_id,
+                           DropGroupModeration.status == "pending").scalar() or 0)
+    except Exception:
+        log.warning("[ReviewButtons] pending count failed for group %s",
+                    group_id, exc_info=True)
+        return None
+
+
 def _decide_drop(s, parsed: dict, facts: dict):
     """``(ok, status_line_or_error, undo_custom_id)`` for a held manual drop."""
     from db.models import AuditLog, Group
@@ -124,10 +159,14 @@ def _decide_drop(s, parsed: dict, facts: dict):
     ))
     s.commit()
     who = f"<@{facts['discord_id']}>"
+    # Counted after the commit above, so it reflects this decision.
+    left = _pending_drop_count(s, group_id) if action != "undo" else None
     if action == "approve":
-        return True, f"✅ Approved by {who}", core.drop_custom_id("undo", group_id, drop_id)
+        return (True, core.with_backlog(f"✅ Approved by {who}", left),
+                core.drop_custom_id("undo", group_id, drop_id))
     if action == "reject":
-        return True, f"❌ Rejected by {who}", core.drop_custom_id("undo", group_id, drop_id)
+        return (True, core.with_backlog(f"❌ Rejected by {who}", left),
+                core.drop_custom_id("undo", group_id, drop_id))
     return True, f"↩️ {who} took that back. It's waiting for review again.", None
 
 
@@ -175,9 +214,12 @@ def _decide_event(s, parsed: dict, facts: dict):
         s.rollback()
         return False, e.detail, None
     who = f"<@{facts['discord_id']}>"
+    # event_review.confirm/reject have committed by here, so this count
+    # already excludes the row just decided.
+    left = _pending_event_count(s, ev.id)
     if parsed["action"] == "approve":
-        return True, f"✅ Approved by {who}", None
-    return True, f"❌ Rejected by {who}", None
+        return True, core.with_backlog(f"✅ Approved by {who}", left), None
+    return True, core.with_backlog(f"❌ Rejected by {who}", left), None
 
 
 def decide(parsed: dict, facts: dict):

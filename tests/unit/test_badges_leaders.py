@@ -57,6 +57,9 @@ class FakeSession:
     def commit(self):
         self.commits += 1
 
+    def close(self):
+        self.closed = True
+
 
 class FakeRedis:
     """Records the key each zrevrange asked for and replays canned boards."""
@@ -287,3 +290,82 @@ class TestPeriods:
         assert badges._leader_periods({"period": "monthly"}, months) == months
         assert badges._leader_periods({"period": "202605"}, months) == ["202605"]
         assert badges._leader_periods({"period": "banana"}, months) == []
+
+
+# --------------------------------------------------------------------------- #
+# Which families run on a given cycle
+# --------------------------------------------------------------------------- #
+class TestCycleFamilies:
+    """Day-scoped families ride the Redis day marker; held families must not.
+
+    ``daily_champion`` and ``loot_streak`` score a *finished* day, so once the
+    marker has moved past yesterday they correctly no-op for the rest of the
+    day. ``boss_record`` and ``global_champion`` track live state — the
+    ``personal_best`` table and a Redis board — so they have to converge on
+    every cycle.
+
+    Boss records used to be gated behind the same marker, which quietly turned
+    the hourly task into a once-a-night job: a record set at 03:00 showed
+    nothing on the player's profile until the following midnight, and an
+    improved record left the badge displaying the old time for just as long
+    (bug #250).
+    """
+
+    @pytest.fixture
+    def cycle(self, monkeypatch):
+        calls = {"daily": [], "streaks": [], "records": [], "leaders": []}
+        badge_defs = [
+            (make_badge(key="daily_loot_champion", badge_id=1), {"type": "daily_champion"}),
+            (make_badge(key="loot_streak_7", badge_id=2), {"type": "loot_streak", "days": 7}),
+            (make_badge(key="boss_record_holder", badge_id=4), {"type": "boss_record"}),
+            (make_badge(key="global_loot_leader_alltime", badge_id=6),
+             {"type": "global_champion", "period": "all"}),
+        ]
+        monkeypatch.setattr(badges, "Session", lambda: FakeSession([]))
+        monkeypatch.setattr(badges, "_load_automatic_badges", lambda s: badge_defs)
+        monkeypatch.setattr(badges, "evaluate_daily_champion",
+                            lambda s, b, day, dry=False: calls["daily"].append(day) or 0)
+        monkeypatch.setattr(badges, "evaluate_streaks",
+                            lambda s, b, day, n, dry=False: calls["streaks"].append(day) or 0)
+        monkeypatch.setattr(badges, "evaluate_boss_records",
+                            lambda s, b, dry=False: calls["records"].append(b.key) or {})
+        monkeypatch.setattr(badges, "evaluate_global_champion",
+                            lambda s, b, dry=False, period=None:
+                            calls["leaders"].append(period) or 0)
+        monkeypatch.setattr(badges, "redis_client",
+                            SimpleNamespace(client=SimpleNamespace(
+                                get=lambda k: None, set=lambda k, v: None)))
+        return calls
+
+    def test_held_families_converge_when_the_day_marker_is_already_set(
+            self, cycle, monkeypatch):
+        """The regression: an empty day list must not skip boss records."""
+        monkeypatch.setattr(badges, "_days_to_process", lambda yesterday: [])
+
+        stats = badges.run_badge_cycle()
+
+        assert stats["days"] == []
+        assert cycle["daily"] == [], "a finished day is not re-scored"
+        assert cycle["streaks"] == []
+        assert cycle["records"] == ["boss_record_holder"], (
+            "boss records track live state and must converge every cycle")
+        assert cycle["leaders"] == ["all"]
+
+    def test_every_family_runs_on_the_first_cycle_after_rollover(
+            self, cycle, monkeypatch):
+        monkeypatch.setattr(badges, "_days_to_process", lambda yesterday: ["20261112"])
+
+        badges.run_badge_cycle()
+
+        assert cycle["daily"] == ["20261112"]
+        assert cycle["streaks"] == ["20261112"]
+        assert cycle["records"] == ["boss_record_holder"]
+        assert cycle["leaders"] == ["all"]
+
+    def test_only_records_still_restricts_to_that_family(self, cycle, monkeypatch):
+        monkeypatch.setattr(badges, "_days_to_process", lambda yesterday: [])
+
+        badges.run_badge_cycle(only="records")
+
+        assert cycle["records"] == ["boss_record_holder"]
+        assert cycle["daily"] == [] and cycle["streaks"] == [] and cycle["leaders"] == []

@@ -170,6 +170,28 @@ def decided_message(message: dict, status_line: str, undo_custom_id: Optional[st
     return {"content": content[:2000], "components": components}
 
 
+def with_backlog(status_line: str, remaining) -> str:
+    """``status_line`` with "N still awaiting review" appended.
+
+    Discord gives a reviewer no sense of the queue. They work through loose
+    cards in channel history, so the only thing that ever tells them how much
+    is left is the card they just clicked. In bug #249 a staff member stopped
+    at 111 of 288 believing the queue was empty, and his clan read the 177 the
+    site still listed as approvals that had failed to register.
+
+    ``remaining`` of None means the count could not be taken — say nothing
+    rather than guess, since a wrong number here is worse than no number.
+    """
+    if remaining is None:
+        return status_line
+    remaining = int(remaining)
+    if remaining <= 0:
+        return f"{status_line} · nothing else is waiting"
+    if remaining == 1:
+        return f"{status_line} · 1 more is waiting for review"
+    return f"{status_line} · {remaining:,} more are waiting for review"
+
+
 def drop_review_buttons(group_id: int, drop_id: int) -> list:
     """Approve / Reject row restored on a manual-review ping after an Undo."""
     return [{"type": 1, "components": [

@@ -233,6 +233,43 @@ def _ping(content="🔍 **Manual submission awaiting review** — x"):
     }
 
 
+class TestWithBacklog:
+    """The queue depth appended to a decision's status line (bug #249).
+
+    Discord never tells a reviewer how much is left: they work through loose
+    cards in channel history. A staff member stopped at 111 of 288 believing
+    the queue was empty, and his clan read the 177 the site still listed as
+    approvals that had failed to register. The card they just clicked is the
+    only place that number can reach them.
+    """
+
+    def test_remaining_is_appended(self):
+        assert rb.with_backlog("\u2705 Approved by <@1>", 176) == (
+            "\u2705 Approved by <@1> \u00b7 176 more are waiting for review")
+
+    def test_large_counts_are_grouped(self):
+        assert rb.with_backlog("x", 1234).endswith("1,234 more are waiting for review")
+
+    def test_one_is_singular(self):
+        assert rb.with_backlog("x", 1) == "x \u00b7 1 more is waiting for review"
+
+    def test_empty_queue_says_so(self):
+        assert rb.with_backlog("x", 0) == "x \u00b7 nothing else is waiting"
+
+    def test_unknown_count_says_nothing(self):
+        """A count that could not be taken must never become a wrong number."""
+        assert rb.with_backlog("\u2705 Approved by <@1>", None) == "\u2705 Approved by <@1>"
+
+    def test_the_line_still_survives_a_redecision(self):
+        """decided_message strips the previous status line by its leading mark,
+        so the backlog suffix must not break that."""
+        once = rb.decided_message(_ping(), rb.with_backlog("\u2705 Approved by <@1>", 5))
+        twice = rb.decided_message({**_ping(), "content": once["content"]},
+                                   rb.with_backlog("\u274c Rejected by <@2>", 4))
+        assert "Approved" not in twice["content"]
+        assert twice["content"].endswith("\u274c Rejected by <@2> \u00b7 4 more are waiting for review")
+
+
 class TestDecidedMessage:
     def test_plain_ping_keeps_link_row_without_review_buttons(self):
         # A row holding a review button goes as a whole (link included), and

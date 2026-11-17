@@ -64,9 +64,10 @@ class FakeSession:
 
     ROW_DATE = datetime(2026, 1, 1, 12, 0, 0)
 
-    def __init__(self, candidates, recap_payloads=()):
+    def __init__(self, candidates, recap_payloads=(), event_proofs=()):
         self._candidates = [(cid, url, self.ROW_DATE) for cid, url in candidates]
         self._recap_payloads = list(recap_payloads)
+        self._event_proofs = list(event_proofs)
         self._served = False
         self.cleared: list[int] = []
         self.commits = 0
@@ -77,6 +78,12 @@ class FakeSession:
             return _Result([(datetime.now() - timedelta(days=32),)])
         if "recap_snapshots" in sql:
             return _Result([(p,) for p in self._recap_payloads])
+        if "JOIN web_events e" in sql:
+            # Each event-owned image table is asked separately and the
+            # answers unioned; the proofs ride in on the completions one.
+            if "web_event_completions" in sql:
+                return _Result([(u,) for u in self._event_proofs])
+            return _Result([])
         if sql.strip().upper().startswith("UPDATE"):
             self.cleared.extend(params["ids"])
             return _Result([])
@@ -241,6 +248,79 @@ def test_recap_referenced_screenshot_survives_pruning(prune):
     assert not drop.exists(), "unreferenced screenshots still prune normally"
     # The protected row keeps its reference; only the pruned one is cleared.
     assert session.cleared == [102]
+
+
+def test_event_proof_screenshot_survives_pruning(prune):
+    """A screenshot attached to an event outlives the drop cadence.
+
+    An event proof is what an admin confirms a pending completion against,
+    on the site's review queue and as the thumbnail on the Discord review
+    card. The drop rule deletes any screenshot of a sub-threshold drop after
+    five days, which was blanking proofs while they were still in the queue:
+    on one 13-day event 42 of 309 proofs had already gone, every one of them
+    a drop worth under the threshold (bug #251).
+    """
+    module, root = prune
+    keep = _make_image(root, "1/drop/Vorkath/Vorkath_Dragonbone_necklace_a.png")
+    drop = _make_image(root, "2/drop/Vorkath/Vorkath_Dragonbone_necklace_b.png")
+    session = FakeSession(
+        [(101, URL + "1/drop/Vorkath/Vorkath_Dragonbone_necklace_a.png"),
+         (102, URL + "2/drop/Vorkath/Vorkath_Dragonbone_necklace_b.png")],
+        event_proofs=[URL + "1/drop/Vorkath/Vorkath_Dragonbone_necklace_a.png"],
+    )
+
+    _run(module, session, ["--apply"])
+
+    assert keep.exists(), "an event proof must never be pruned on value/age"
+    assert session.cleared == [102], (
+        "the protected row keeps its drops.image_url too")
+    assert not drop.exists(), "unreferenced screenshots still prune normally"
+
+
+def test_event_protection_covers_every_image_table_and_the_conclusion_rule(prune):
+    """Pin the rule, not just the plumbing.
+
+    The window is anchored to when the event *concluded*, which is a bound of
+    its own rather than a variant of the drop/non-drop cadences. ``ended_at``
+    is the authority and ``ends_at`` the fallback, and an event carrying
+    neither must read as still running — a missing timestamp is never
+    permission to delete.
+    """
+    module, _root = prune
+    session = _RecordingSession([])
+
+    _run(module, session, [])
+
+    asked = [s for s in session.sql if "JOIN web_events e" in s]
+    assert len(asked) == len(module.EVENT_IMAGE_TABLES) == 4
+    for table, column in module.EVENT_IMAGE_TABLES:
+        assert any(f"FROM {table} r" in s and f"r.{column}" in s for s in asked), (
+            f"{table}.{column} is an event image and must be protected")
+    for sql in asked:
+        assert "e.status = 'past'" in sql
+        assert "COALESCE(e.ended_at, e.ends_at)" in sql
+        assert ":cutoff" in sql
+
+
+def test_event_retention_window_is_separate_from_the_drop_window(prune):
+    """``--event-retention-days`` is its own knob and defaults to 30."""
+    module, _root = prune
+    assert module.DEFAULT_EVENT_RETENTION_DAYS == 30
+    assert module.DEFAULT_RETENTION_DAYS == 5
+
+    seen = {}
+
+    def spy(retention_days):
+        seen["days"] = retention_days
+        return set(), set()
+
+    original = module.event_protected_paths
+    module.event_protected_paths = spy
+    try:
+        _run(module, FakeSession([]), ["--event-retention-days", "90"])
+    finally:
+        module.event_protected_paths = original
+    assert seen["days"] == 90
 
 
 def test_recap_protection_survives_a_malformed_payload(prune):

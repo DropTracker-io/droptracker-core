@@ -18,9 +18,19 @@ notification). The disk hit 99% while this script ran green every night,
 reporting a healthy 1.9 GiB reclaimed. A DB-driven scan structurally cannot
 see a file nothing in the DB points at — hence the filesystem sweep.
 
-Note both mechanisms honour the same recap protection, and deleting any image
+Note both mechanisms honour the same protection sets, and deleting any image
 blanks it in Discord messages older than the retention window: the URL lives
 in the message, and there is no backup of this tree anywhere.
+
+Two things are protected from both mechanisms regardless of age or value:
+
+  * screenshots a **recap** card renders (``recap_protected_paths``), and
+  * screenshots attached to an **event** (``event_protected_paths``), which
+    are kept until the event has been over for ``--event-retention-days``
+    (default 30). That is a bound of its own, deliberately independent of
+    the drop and non-drop cadences above: an event proof is evidence an
+    admin confirms against, and the 5-day drop window was deleting it while
+    the submission was still in the review queue (bug #251).
 
 Every drop submission may carry a screenshot, and we kept all of them forever:
 as of 2026-07-21 that is 837k files / 152 GiB under
@@ -121,6 +131,9 @@ URL_PREFIXES = (
 DEFAULT_MIN_VALUE = 1_000_000
 DEFAULT_RETENTION_DAYS = 5
 DEFAULT_NONDROP_RETENTION_DAYS = 30
+# How long an event's screenshots outlive the event itself. Its own bound,
+# not a variant of the two above — see event_protected_paths().
+DEFAULT_EVENT_RETENTION_DAYS = 30
 # B2 keys are deleted in batches of this many (the S3 DeleteObjects cap).
 B2_DELETE_CHUNK = 1_000
 
@@ -261,6 +274,71 @@ def recap_protected_paths() -> tuple[set[str], set[str]]:
     return paths, b2_keys
 
 
+# Every event-owned table that can point at an uploaded image, and the
+# column that does it. All four hang off ``web_events`` by ``event_id``,
+# which is what makes one query shape serve them all.
+#
+# The two ledgers carry submission proof (EventBuyin.proof_url is a
+# deliberate twin of EventCompletion's); the other two are board-game
+# dressing — a team's custom game piece and the board background. Those
+# two are not reachable by any sweep today, since nothing walks their
+# directories, but they are event images and the rule is the rule: a
+# later sweep that does reach them must not be able to blank a live
+# board.
+EVENT_IMAGE_TABLES = (
+    ("web_event_completions", "proof_url"),
+    ("web_event_buyins", "proof_url"),
+    ("web_event_teams", "piece_icon_url"),
+    ("web_event_board_config", "background_url"),
+)
+
+
+def event_protected_paths(retention_days: int) -> tuple[set[str], set[str]]:
+    """Screenshots attached to an event, which survive every other prune
+    rule until the event has been over for ``retention_days`` days —
+    returned as ``(local paths, B2 keys)`` like the recap set.
+
+    Covers every event-owned image (``EVENT_IMAGE_TABLES``), proof first.
+    An event proof is evidence, not decoration. An admin confirms a pending
+    completion against it (the site's review queue, and the thumbnail on the
+    Discord review card), and the submission log and audit surfaces render it
+    long afterwards. None of that is bounded by the *drop* cadence: an event
+    running ``submission_policy='confirm_non_api'`` legitimately leaves rows
+    pending for weeks, while the drop rule deletes any screenshot of a drop
+    worth under ``--min-value`` after five days.
+
+    That is bug #251: on one 13-day event, 42 of the 309 completions carrying
+    a proof already pointed at a deleted file, and every one of them was a
+    drop worth under the threshold. Clue and casket uniques are the usual
+    casualties — cosmetically prized, nearly worthless in GP — which is
+    exactly the kind of submission a scavenger hunt is made of.
+
+    A row is protected unless its event is ``past`` *and* concluded more than
+    ``retention_days`` ago. ``ended_at`` is when it actually ended and is the
+    authority; ``ends_at`` (the scheduled end) is a fallback for any row that
+    never got one stamped. An event with neither is treated as still running,
+    because a missing timestamp must never be read as permission to delete.
+    """
+    cutoff = datetime.now() - timedelta(days=retention_days)
+    urls: set[str] = set()
+    for table, column in EVENT_IMAGE_TABLES:
+        rows = session.execute(text(
+            f"SELECT r.{column} FROM {table} r "
+            "JOIN web_events e ON e.id = r.event_id "
+            f"WHERE r.{column} IS NOT NULL AND r.{column} <> '' "
+            "  AND NOT (e.status = 'past' "
+            "           AND COALESCE(e.ended_at, e.ends_at) IS NOT NULL "
+            "           AND COALESCE(e.ended_at, e.ends_at) < :cutoff)"
+        ), {"cutoff": cutoff}).all()
+        urls.update(url for (url,) in rows if url)
+
+    paths = {p for p in (local_path_for(u) for u in urls) if p}
+    b2_keys = {k for k in (b2_key_for(u) for u in urls) if k}
+    print(f"protected by events (ended < {retention_days}d ago or still "
+          f"running): {len(paths):,} local + {len(b2_keys):,} B2 screenshot(s)")
+    return paths, b2_keys
+
+
 def windows_to_scan(cutoff: datetime) -> list[tuple[datetime, datetime]]:
     """Day-sized ``[start, end)`` windows covering every drop older than the
     cutoff, oldest first.
@@ -334,7 +412,7 @@ def prune_non_drop_images(cutoff, protected, snap, apply, retention_days):
             if datetime.fromtimestamp(st.st_mtime) >= cutoff:
                 continue
             if path in protected:
-                # A recap card renders this one forever.
+                # A recap card or a live event still renders this one.
                 skipped += 1
                 continue
             # Recorded BEFORE the unlink, same as the drop path, so the log is
@@ -350,7 +428,7 @@ def prune_non_drop_images(cutoff, protected, snap, apply, retention_days):
             freed += st.st_size
         snap.flush()
         if removed or skipped:
-            note = f" ({skipped:,} recap-protected)" if skipped else ""
+            note = f" ({skipped:,} protected)" if skipped else ""
             print(f"  {submission_type:<22}: {removed:,} images "
                   f"({_fmt_bytes(freed)}){note}")
         totals[submission_type] = (removed, freed)
@@ -416,7 +494,7 @@ def prune_b2_refless_images(retention_days, protected_b2, snap, apply):
     for submission_type in sorted(refless):
         removed, freed, skipped = totals[submission_type]
         if removed or skipped:
-            note = f" ({skipped:,} recap-protected)" if skipped else ""
+            note = f" ({skipped:,} protected)" if skipped else ""
             print(f"  {submission_type:<22}: {removed:,} B2 objects "
                   f"({_fmt_bytes(freed)}){note}")
     return totals
@@ -509,6 +587,11 @@ def main() -> int:
                              f"(default {DEFAULT_NONDROP_RETENTION_DAYS}); "
                              "these have no value to weigh, so age is the "
                              "whole policy")
+    parser.add_argument("--event-retention-days", type=int,
+                        default=DEFAULT_EVENT_RETENTION_DAYS,
+                        help="keep screenshots attached to an event until it has "
+                             "been over this long, whatever their value or age "
+                             f"(default {DEFAULT_EVENT_RETENTION_DAYS})")
     parser.add_argument("--skip-non-drop", action="store_true",
                         help="only prune drop screenshots (legacy behaviour)")
     args = parser.parse_args()
@@ -522,9 +605,17 @@ def main() -> int:
     print(f"=== prune_drop_images — {mode} ===")
     print(f"keep if value*quantity >= {args.min_value:,} or newer than "
           f"{cutoff:%Y-%m-%d %H:%M} ({args.retention_days}d)")
+    print(f"always keep event screenshots until {args.event_retention_days}d after "
+          "the event ends")
     print(f"snapshot: {snapshot_path}\n")
 
+    # Two independent protection sets, unioned once and threaded through
+    # every branch below (the drop scan, both non-drop sweeps and the
+    # reference healer all consult them).
     protected, protected_b2 = recap_protected_paths()
+    ev_paths, ev_b2 = event_protected_paths(args.event_retention_days)
+    protected |= ev_paths
+    protected_b2 |= ev_b2
 
     scanned = pruned = pruned_b2 = missing = unresolved = protected_hits = 0
     freed = 0
@@ -627,8 +718,8 @@ def main() -> int:
                             part_pruned += done
                         continue
                     if path in protected:
-                        # A recap card renders this one forever; leave both the
-                        # file and the drops.image_url reference alone.
+                        # A recap card or an event still renders this one;
+                        # leave the file AND the drops.image_url reference.
                         protected_hits += 1
                         continue
                     try:
@@ -699,7 +790,7 @@ def main() -> int:
         print(f"already missing    : {missing:,} (image_url "
               f"{'cleared' if args.apply else 'would be cleared'})")
     if protected_hits:
-        print(f"recap-protected    : {protected_hits:,} (kept for recap cards)")
+        print(f"protected          : {protected_hits:,} (kept for recap cards / events)")
     if unresolved:
         # Overwhelmingly rows with image_url = '' — a drop that simply carried
         # no screenshot. Nothing to reclaim; they are not a backlog.

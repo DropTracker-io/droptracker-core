@@ -10,6 +10,10 @@ Automatic badge behavior is code-owned: a badge row's ``criteria`` JSON has a
 
 All evaluators are idempotent — re-running any day converges to the same
 awards — so the hourly ``run_badge_cycle`` can safely catch up after downtime.
+The day-scoped families (``daily_champion``, ``loot_streak``) score a finished
+day and so run once per day off a Redis marker; the held ones
+(``boss_record``, ``global_champion``) track live state and converge on every
+cycle.
 Data sources are Redis leaderboards (daily boards, plus the persistent
 monthly/all-time boards) and the small ``personal_best`` table only; the
 160M-row ``drops`` table is never touched.
@@ -563,7 +567,9 @@ def run_badge_cycle(dry_run: bool = False, days: Optional[List[str]] = None,
                     months: Optional[List[str]] = None) -> dict:
     """Evaluate all automatic badges. Called hourly from the bot; the day
     marker makes the day-scoped families a single Redis GET after the first
-    run of the day.
+    run of the day. The held families (boss records, leaders) ignore the
+    marker and converge on every call — they track live state, not a
+    finished day.
 
     ``days`` overrides the marker-derived day list (used by scripts);
     ``months`` does the same for the monthly leader badge; ``only`` restricts
@@ -575,13 +581,19 @@ def run_badge_cycle(dry_run: bool = False, days: Optional[List[str]] = None,
     stats = {"days": day_list, "months": month_list,
              "daily": 0, "streaks": 0, "records": {}, "leaders": {}}
 
-    # The day-scoped families (and record convergence, which rides the daily
-    # run) no-op once the day's marker is set. The held leader badges are the
-    # exception: they track a live board, so they converge every cycle — two
-    # Redis reads and a couple of indexed queries — and the site's #1 chip is
-    # never more than an hour stale.
-    explicit = days is not None or only is not None
-    run_daily_families = bool(day_list) or explicit
+    # The day-scoped families (daily champion, loot streaks) no-op once the
+    # day's marker is set: they score a *finished* day, so re-running them
+    # within the same day can only produce the same answer.
+    #
+    # The held badges are different and must NOT ride that marker. They track
+    # live state — a board for the leader badges, `personal_best` for the
+    # record badges — so they converge every cycle. Boss records used to be
+    # gated behind the day marker, which quietly made them a once-a-night job:
+    # a record set at 03:00 showed nothing on the player's profile until the
+    # following midnight, ~21 hours later, and an *improved* record left the
+    # badge displaying the old time for just as long (bug #250). Convergence
+    # is idempotent and cheap — one DISTINCT over `personal_best`, then one
+    # indexed query per (npc, team_size) slot.
 
     session = Session()
     try:
@@ -598,8 +610,6 @@ def run_badge_cycle(dry_run: bool = False, days: Optional[List[str]] = None,
                 for day in day_list:
                     stats["streaks"] += evaluate_streaks(session, badge, day, n, dry_run)
             elif ctype == "boss_record" and only in (None, "records"):
-                if not run_daily_families:
-                    continue
                 stats["records"][badge.key] = evaluate_boss_records(session, badge, dry_run)
             elif ctype == "global_champion" and only in (None, "leaders"):
                 periods = _leader_periods(crit, month_list)
