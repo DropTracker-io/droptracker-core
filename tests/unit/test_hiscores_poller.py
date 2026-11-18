@@ -230,9 +230,9 @@ class TestSchedule:
         assert _due().reason == schedule.ROTATION
 
     def test_players_whose_stats_are_arriving_are_left_out_of_the_rotation(self):
-        assert _due(plugin_synced_at=NOW - timedelta(minutes=50)) is None
-        # An hour after the last sync they have probably logged out: read them.
-        assert _due(plugin_synced_at=NOW - timedelta(minutes=70)) is not None
+        assert _due(plugin_synced_at=NOW - timedelta(minutes=15)) is None
+        # Some while after the last sync they have probably logged out: read them.
+        assert _due(plugin_synced_at=NOW - timedelta(minutes=25)) is not None
 
     def test_cadence_follows_activity(self):
         active = dict(first_polled=NOW - timedelta(days=5), last_changed=NOW - timedelta(hours=3))
@@ -407,7 +407,7 @@ class TestPlan:
         r.hset(poller._pin_key(1, 7), "start", 1)
         people = [_participant(),
                   _participant(event_id=2, ends_at=NOW - timedelta(hours=1)),
-                  _participant(player_id=8, plugin_synced_at=NOW - timedelta(minutes=30))]
+                  _participant(player_id=8, plugin_synced_at=NOW - timedelta(minutes=10))]
         r.hset(poller._pin_key(1, 8), "start", 1)
         queue = poller.plan(r, people, NOW)
         assert [(d.reason, p["player_id"], p["pins"]) for d, p in queue] == [("end", 7, [(2, "end")])]
@@ -604,7 +604,7 @@ class TestBackgroundCadence:
         return schedule.background_interval(NOW, **args)
 
     def test_follows_how_recently_a_reading_changed(self):
-        assert self._wait(last_changed=NOW - timedelta(days=2)) == timedelta(hours=6)
+        assert self._wait(last_changed=NOW - timedelta(days=2)) == timedelta(hours=3)
         assert self._wait(last_changed=NOW - timedelta(days=10)) == timedelta(hours=12)
         assert self._wait(last_changed=NOW - timedelta(days=20)) == timedelta(days=1)
         assert self._wait(last_changed=NOW - timedelta(days=40)) == timedelta(days=3)
@@ -743,6 +743,7 @@ class TestBackgroundQueue:
             return outcome
 
         monkeypatch.setattr(poller, "_last_seed", 10 ** 12)   # no seeding in these tests
+        monkeypatch.setattr(poller, "_last_session_scan", 10 ** 12)
         monkeypatch.setattr(poller, "poll_player", fake_poll)
         monkeypatch.setattr(poller, "_players_db", lambda ids: {i: players[i] for i in ids if i in players})
         monkeypatch.setattr(poller.hiscores, "requests_today", lambda conn, now=None: used_today)
@@ -779,13 +780,13 @@ class TestBackgroundQueue:
         import time as _time
         from datetime import datetime as _dt
 
-        players = {1: self._player(1, seen=_dt.utcnow() - timedelta(minutes=20)),
+        players = {1: self._player(1, seen=_dt.utcnow() - timedelta(minutes=10)),
                    2: self._player(2), 3: self._player(3)}
         r, polled, stats = self._run(monkeypatch, players)
         assert polled == [2, 3] and stats["bg_covered"] == 1
-        # Back 5 minutes after the hour from that sync: about 45 minutes from now.
+        # Back 5 minutes after the window from that sync: about 15 minutes from now.
         wait = r.zscore(poller.QUEUE_KEY, "1") - _time.time()
-        assert 40 * 60 < wait < 50 * 60
+        assert 12 * 60 < wait < 18 * 60
 
     def test_a_player_who_stopped_syncing_is_read(self, monkeypatch):
         from datetime import datetime as _dt
@@ -1055,3 +1056,33 @@ class TestStuckPlayersHeal:
         _rec(s, {"attack": 500}, when=NOW + timedelta(hours=2))
         _rec(s, {"attack": 300}, when=NOW + timedelta(hours=14))    # went down again
         assert _rec(s, {"attack": 400}, when=NOW + timedelta(hours=27)) == store.FLAGGED
+
+
+class TestSessionEnds:
+    """Read a player when they stop playing, the moment WOM would hear of it."""
+
+    def test_only_a_fresh_silence_with_no_read_since(self):
+        ended = schedule.session_ended
+        contact = NOW - timedelta(minutes=25)
+        assert ended(NOW, contact, None)
+        assert ended(NOW, contact, contact - timedelta(hours=2))
+        assert not ended(NOW, contact, contact + timedelta(minutes=3))     # already read since
+        assert not ended(NOW, NOW - timedelta(minutes=10), None)           # still playing
+        assert not ended(NOW, NOW - timedelta(hours=2), None)              # an old silence
+        assert not ended(NOW, None, None)
+
+    def test_players_who_just_stopped_are_brought_forward(self):
+        r = FakeRedis()
+        epoch = lambda t: (t - datetime(1970, 1, 1)).total_seconds()
+        for pid in (1, 2, 3, 4):
+            r.zadd(poller.QUEUE_KEY, {str(pid): epoch(NOW + timedelta(hours=5))})
+        r.hset(poller._state_key(2), mapping={"polled": epoch(NOW - timedelta(minutes=5))})   # read since
+        r.hset(poller._state_key(3), mapping={"polled": 1, "not_found": 1})
+        contacts = {1: NOW - timedelta(minutes=25), 2: NOW - timedelta(minutes=25),
+                    3: NOW - timedelta(minutes=25), 4: NOW - timedelta(minutes=5),
+                    99: NOW - timedelta(minutes=25)}                                          # not queued
+        assert poller.enqueue_session_ends(r, contacts, NOW) == 1
+        assert r.zscore(poller.QUEUE_KEY, "1") == 2.0
+        assert r.zscore(poller.QUEUE_KEY, "2") == epoch(NOW + timedelta(hours=5))
+        assert r.zscore(poller.QUEUE_KEY, "4") == epoch(NOW + timedelta(hours=5))
+        assert r.zscore(poller.QUEUE_KEY, "99") is None

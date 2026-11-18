@@ -29,8 +29,8 @@ from typing import Optional
 # left them with no readings from either source (found 2026-11-17). The window
 # is short on purpose. Once the syncs stop the player has probably logged
 # out, and one hiscores reading then picks up the last minutes of the session
-# that the plugin's final sync missed.
-PLUGIN_COVERED = timedelta(hours=1)
+# that the plugin's final sync missed (see SESSION_END below).
+PLUGIN_COVERED = timedelta(minutes=20)
 
 PIN_WINDOW = timedelta(hours=12)       # how long a missed start/end reading is still worth taking
 ACTIVE_FOR = timedelta(hours=24)       # "active" = a reading changed this recently
@@ -123,7 +123,7 @@ AFTER_LAST_SYNC = timedelta(minutes=5)
 BACKGROUND_ACTIVE_FOR = timedelta(days=3)
 BACKGROUND_RECENT_FOR = timedelta(days=14)
 BACKGROUND_QUIET_FOR = timedelta(days=30)
-BACKGROUND_ACTIVE_INTERVAL = timedelta(hours=6)
+BACKGROUND_ACTIVE_INTERVAL = timedelta(hours=3)
 BACKGROUND_RECENT_INTERVAL = timedelta(hours=12)
 BACKGROUND_QUIET_INTERVAL = timedelta(days=1)
 BACKGROUND_DORMANT_INTERVAL = timedelta(days=3)
@@ -136,7 +136,7 @@ def background_interval(now: datetime, *, last_changed: Optional[datetime],
                         first_polled: Optional[datetime], not_found_streak: int = 0) -> timedelta:
     """How long until a player's next background lookup.
 
-    Every six hours while their readings keep changing, twice a day for a
+    Every three hours while their readings keep changing, twice a day for a
     fortnight after, daily for a month, then every three days. A name the
     hiscores do not know backs off from three days to thirty: most are
     accounts that quit or were renamed, and asking often would spend the
@@ -159,3 +159,29 @@ def background_interval(now: datetime, *, last_changed: Optional[datetime],
     if first_polled is None or now - first_polled <= BACKGROUND_QUIET_FOR:
         return BACKGROUND_QUIET_INTERVAL
     return BACKGROUND_DORMANT_INTERVAL
+
+
+# --------------------------------------------------------------------------- #
+# Session ends: read a player when they stop playing, not hours later
+# --------------------------------------------------------------------------- #
+
+# The hiscores change when a player logs out. Wise Old Man hears about that
+# moment (RuneLite tells it at logout, and so do we when a player is active),
+# which is why a fixed cadence alone always left it ahead for a few players.
+# We cannot see a logout, but we can see our plugin fall silent: this long
+# after a player's last contact (a submission or a stats sync), take one
+# reading. If they were only idle the reading is unchanged and costs one
+# request; their next contact arms it again.
+SESSION_END_AFTER = timedelta(minutes=20)
+SESSION_END_WINDOW = timedelta(minutes=45)   # older silences were handled by an earlier cycle
+
+
+def session_ended(now: datetime, last_contact: Optional[datetime],
+                  last_polled: Optional[datetime]) -> bool:
+    """Whether a player has just fallen silent and has not been read since."""
+    if last_contact is None:
+        return False
+    silent = now - last_contact
+    if silent < SESSION_END_AFTER or silent > SESSION_END_WINDOW:
+        return False
+    return last_polled is None or last_polled < last_contact

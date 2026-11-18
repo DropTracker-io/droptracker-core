@@ -58,6 +58,7 @@ BACKGROUND_DAILY = int(os.getenv("HISCORES_BACKGROUND_DAILY", "130000"))
 QUEUE_KEY = "hiscores:queue"
 SEED_EVERY_SECONDS = 3600
 _last_seed = 0.0
+_last_session_scan = 0.0
 CYCLE_BUDGET_SECONDS = 50.0
 ON_DEMAND_TTL = timedelta(hours=6)
 # A detected account type is trusted this long. Types change rarely (an
@@ -486,6 +487,46 @@ def rebase_queue(redis_conn, now: Optional[datetime] = None) -> dict:
     return {"moved_earlier": moved, "unchanged": kept}
 
 
+def _recent_contacts_db(now: datetime) -> dict:
+    """``{player_id: last contact}`` for players whose plugin fell silent in
+    the session-end window: last contact is the later of their last
+    submission and their last stats sync."""
+    from db.models import PlayerState
+    from db.models.base import Session
+    from db.models.player_last_seen import PlayerLastSeen
+
+    since = now - schedule.SESSION_END_WINDOW
+    session = Session()
+    try:
+        contacts = dict(session.query(PlayerLastSeen.player_id, PlayerLastSeen.last_seen_at)
+                        .filter(PlayerLastSeen.last_seen_at >= since).all())
+        for player_id, synced in session.query(PlayerState.player_id, PlayerState.last_synced_at) \
+                .filter(PlayerState.last_synced_at >= since).all():
+            if synced and (player_id not in contacts or synced > contacts[player_id]):
+                contacts[player_id] = synced
+    finally:
+        session.close()
+    return contacts
+
+
+def enqueue_session_ends(redis_conn, contacts: dict, now: datetime) -> int:
+    """Bring forward every player who has just stopped playing and has not
+    been read since. Returns how many were brought forward."""
+    moved = 0
+    for player_id, contact in contacts.items():
+        state = _decode_hash(redis_conn.hgetall(_state_key(player_id)))
+        if "not_found" in state:
+            continue
+        if not schedule.session_ended(now, contact, _ts(state.get("polled"))):
+            continue
+        # Only players already in the queue (a deleted player is not).
+        if redis_conn.zscore(QUEUE_KEY, str(int(player_id))) is None:
+            continue
+        redis_conn.zadd(QUEUE_KEY, {str(int(player_id)): 2.0})
+        moved += 1
+    return moved
+
+
 async def background_items(redis_conn, slots: int, skip: set, stats: dict) -> list:
     """The players who have waited longest for a background read, as
     ``[player dict]``. Players the plugin is covering are pushed back here
@@ -497,6 +538,16 @@ async def background_items(redis_conn, slots: int, skip: set, stats: dict) -> li
         _last_seed = time.time()
     if slots <= 0 or hiscores.requests_today(redis_conn) >= BACKGROUND_DAILY:
         return []
+    global _last_session_scan
+    if time.time() - _last_session_scan >= 60:
+        _last_session_scan = time.time()
+        try:
+            now_ = datetime.utcnow()
+            ended = enqueue_session_ends(redis_conn, await asyncio.to_thread(_recent_contacts_db, now_), now_)
+            if ended:
+                stats["session_ends"] = ended
+        except Exception:
+            log.exception("session-end scan failed")
     ids = [int(m) for m in redis_conn.zrangebyscore(QUEUE_KEY, "-inf", time.time(), start=0, num=slots)]
     info = await asyncio.to_thread(_players_db, ids)
     now = datetime.utcnow()
