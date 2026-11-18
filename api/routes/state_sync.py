@@ -112,6 +112,49 @@ async def state_sync():
     return jsonify({"accepted": True, **result}), 200
 
 
+@state_sync_bp.post("/state/logout")
+async def state_logout():
+    """The plugin reports that its player just logged out.
+
+    The official hiscores update when a player logs out, so this books one
+    hiscores reading for them a minute and a half from now
+    (services/hiscores_poller.note_logout). It carries no progress data: the
+    name and account hash only. Always answers quickly and quietly; there is
+    nothing here for a client to retry.
+    """
+    if not request.is_json:
+        return jsonify({"error": "Content-Type must be application/json"}), 415
+    raw = await request.get_data()
+    if len(raw) > 4096:
+        return jsonify({"error": "Body too large"}), 413
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return jsonify({"error": "Malformed JSON"}), 400
+    if not isinstance(body, dict) or not body.get("acc_hash"):
+        return jsonify({"error": "acc_hash is required"}), 422
+
+    def resolve():
+        db_session = get_db_session()
+        try:
+            return _resolve_player_id(db_session, body.get("player_name"), str(body["acc_hash"]))
+        finally:
+            db_session.close()
+
+    try:
+        player_id = await asyncio.to_thread(resolve)
+    except Exception as exc:
+        print(f"/state/logout failed: {exc}")
+        return jsonify({"accepted": False}), 202
+    if player_id is None:
+        return jsonify({"accepted": False, "reason": "unknown_player"}), 202
+
+    from services.hiscores_poller import note_logout
+    from utils.redis import redis_client
+
+    return jsonify({"accepted": bool(note_logout(redis_client.client, player_id))}), 200
+
+
 # Reference data, so it is read once per process rather than per snapshot.
 # Cached for a few minutes rather than forever: re-running the structure sync
 # used to leave every long-lived API worker on the old slot set until it was

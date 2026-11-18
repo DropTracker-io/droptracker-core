@@ -31,7 +31,11 @@ looked up, when a reading last changed, when the name was last not found) and
 ``hiscores:pin:{event_id}:{player_id}`` (which start/end readings exist).
 
 "Covered by the plugin" means the plugin sent the player's STATS within the
-last hour (player_state.last_synced_at), not that the plugin was seen.
+last 20 minutes (player_state.last_synced_at), not that the plugin was seen.
+
+The plugin (6.1.29+) reports logouts to POST /state/logout; `note_logout`
+books a read 90 seconds later, at the very front of the queue. Older plugins
+are caught by the session-end scan instead (20 minutes after they go quiet).
 """
 from __future__ import annotations
 
@@ -527,6 +531,69 @@ def enqueue_session_ends(redis_conn, contacts: dict, now: datetime) -> int:
     return moved
 
 
+# --------------------------------------------------------------------------- #
+# Logouts: the plugin tells us the moment a player stops playing
+# --------------------------------------------------------------------------- #
+
+LOGOUT_KEY = "hiscores:logouts"          # zset: player id -> when to read them
+LOGOUT_READ_DELAY = 90                   # seconds for the hiscores to catch up with a logout
+LOGOUT_RETRY_DELAY = 300                 # one more look if the first read showed nothing new
+LOGOUT_MIN_GAP = 60                      # at most one logout per player per minute
+
+
+def note_logout(redis_conn, player_id: int, now_ts: Optional[float] = None) -> bool:
+    """The plugin says this player just logged out (POST /state/logout).
+
+    The hiscores change at logout, so this is the one moment a reading is
+    guaranteed to be worth taking. The read is booked a little later, to give
+    the hiscores time to update. True if booked; False if this player already
+    reported a logout in the last minute (a relog loop must not buy a request
+    each time). Never raises.
+    """
+    try:
+        now_ts = time.time() if now_ts is None else now_ts
+        if not redis_conn.set(f"hiscores:logout:gap:{int(player_id)}", "1", nx=True, ex=LOGOUT_MIN_GAP):
+            return False
+        redis_conn.zadd(LOGOUT_KEY, {str(int(player_id)): now_ts + LOGOUT_READ_DELAY})
+        return True
+    except Exception:
+        return False
+
+
+def promote_logouts(redis_conn, now_ts: Optional[float] = None) -> int:
+    """Move players whose post-logout read has come due to the very front of
+    the queue, marked so the plugin-coverage skip leaves them alone."""
+    now_ts = time.time() if now_ts is None else now_ts
+    moved = 0
+    for member in redis_conn.zrangebyscore(LOGOUT_KEY, "-inf", now_ts):
+        player_id = int(member)
+        redis_conn.zrem(LOGOUT_KEY, str(player_id))
+        key = _state_key(player_id)
+        state = _decode_hash(redis_conn.hgetall(key))
+        if "not_found" in state:
+            continue
+        if "logout" not in state:
+            redis_conn.hset(key, mapping={"logout": 1})
+            redis_conn.expire(key, _STATE_TTL)
+        redis_conn.zadd(QUEUE_KEY, {str(player_id): 1.9})
+        moved += 1
+    return moved
+
+
+def after_logout_read(redis_conn, player_id: int, outcome: str) -> None:
+    """Close out a post-logout read. If it showed nothing new the hiscores may
+    simply not have caught up yet: look once more in a few minutes."""
+    key = _state_key(player_id)
+    attempt = _decode_hash(redis_conn.hgetall(key)).get("logout")
+    if attempt is None:
+        return
+    if outcome == "unchanged" and str(attempt) == "1":
+        redis_conn.hset(key, mapping={"logout": 2})
+        redis_conn.zadd(LOGOUT_KEY, {str(int(player_id)): time.time() + LOGOUT_RETRY_DELAY})
+    elif outcome not in ("error", "blocked"):
+        redis_conn.hdel(key, "logout")
+
+
 async def background_items(redis_conn, slots: int, skip: set, stats: dict) -> list:
     """The players who have waited longest for a background read, as
     ``[player dict]``. Players the plugin is covering are pushed back here
@@ -538,6 +605,9 @@ async def background_items(redis_conn, slots: int, skip: set, stats: dict) -> li
         _last_seed = time.time()
     if slots <= 0 or hiscores.requests_today(redis_conn) >= BACKGROUND_DAILY:
         return []
+    logouts = promote_logouts(redis_conn)
+    if logouts:
+        stats["logouts"] = logouts
     global _last_session_scan
     if time.time() - _last_session_scan >= 60:
         _last_session_scan = time.time()
@@ -560,7 +630,10 @@ async def background_items(redis_conn, slots: int, skip: set, stats: dict) -> li
             redis_conn.zrem(QUEUE_KEY, str(player_id))
             continue
         seen = player["plugin_synced_at"]
-        if seen is not None and now - seen <= schedule.BACKGROUND_PLUGIN_COVERED:
+        # A player who has just logged out synced a moment ago by definition;
+        # the logout is exactly why they are being read.
+        logged_out = redis_conn.hget(_state_key(player_id), "logout") is not None
+        if not logged_out and seen is not None and now - seen <= schedule.BACKGROUND_PLUGIN_COVERED:
             # The plugin is sending their stats right now. Come back just
             # after the window from that sync: if the syncs have stopped by
             # then, that reading is the end of their session.
@@ -595,6 +668,7 @@ async def work(http, redis_conn, items: list, deadline: float, stats: dict) -> N
                 reschedule(redis_conn, player["player_id"], datetime.utcnow(), only_if_queued=True)
             else:
                 stats["bg_" + outcome] = stats.get("bg_" + outcome, 0) + 1
+                after_logout_read(redis_conn, player["player_id"], outcome)
                 if outcome == "error":
                     redis_conn.zadd(QUEUE_KEY, {str(player["player_id"]): time.time()
                                                 + schedule.BACKGROUND_RETRY.total_seconds()})

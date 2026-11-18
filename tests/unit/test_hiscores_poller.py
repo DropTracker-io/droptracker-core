@@ -91,6 +91,9 @@ class FakeRedis:
     def hdel(self, key, field):
         self.hashes.get(key, {}).pop(field, None)
 
+    def hget(self, key, field):
+        return self.hashes.get(key, {}).get(field)
+
     def hincrby(self, key, field, amount=1):
         target = self.hashes.setdefault(key, {})
         target[field] = str(int(target.get(field, 0)) + amount)
@@ -1086,3 +1089,61 @@ class TestSessionEnds:
         assert r.zscore(poller.QUEUE_KEY, "2") == epoch(NOW + timedelta(hours=5))
         assert r.zscore(poller.QUEUE_KEY, "4") == epoch(NOW + timedelta(hours=5))
         assert r.zscore(poller.QUEUE_KEY, "99") is None
+
+
+class TestLogouts:
+    """The plugin reports a logout; we read the hiscores shortly after."""
+
+    def test_a_logout_books_a_read_ninety_seconds_out(self):
+        r = FakeRedis()
+        assert poller.note_logout(r, 7, now_ts=1000.0)
+        assert r.zscore(poller.LOGOUT_KEY, "7") == 1000.0 + poller.LOGOUT_READ_DELAY
+
+    def test_a_relog_loop_buys_one_read_a_minute(self):
+        r = FakeRedis()
+        assert poller.note_logout(r, 7, now_ts=1000.0)
+        assert not poller.note_logout(r, 7, now_ts=1010.0)
+        assert r.zscore(poller.LOGOUT_KEY, "7") == 1000.0 + poller.LOGOUT_READ_DELAY
+
+    def test_redis_trouble_never_reaches_the_plugin(self):
+        r = FakeRedis()
+        r.broken = True
+        assert poller.note_logout(r, 7) is False
+
+    def test_due_logouts_go_to_the_very_front_and_not_before(self):
+        r = FakeRedis()
+        r.zadd(poller.QUEUE_KEY, {"7": 9e9, "8": 9e9})
+        poller.note_logout(r, 7, now_ts=1000.0)
+        poller.note_logout(r, 8, now_ts=1060.0)
+        assert poller.promote_logouts(r, now_ts=1050.0) == 0
+        assert poller.promote_logouts(r, now_ts=1095.0) == 1
+        assert r.zscore(poller.QUEUE_KEY, "7") == 1.9 and r.zscore(poller.QUEUE_KEY, "8") == 9e9
+        assert r.hgetall(poller._state_key(7))["logout"] == "1"
+        assert r.zscore(poller.LOGOUT_KEY, "7") is None
+
+    def test_a_read_that_shows_nothing_new_is_tried_once_more(self):
+        r = FakeRedis()
+        r.hset(poller._state_key(7), mapping={"logout": 1})
+        poller.after_logout_read(r, 7, "unchanged")
+        assert r.hgetall(poller._state_key(7))["logout"] == "2"
+        assert r.zscore(poller.LOGOUT_KEY, "7") is not None
+        # The second look settles it either way.
+        poller.after_logout_read(r, 7, "unchanged")
+        assert "logout" not in r.hgetall(poller._state_key(7))
+
+    def test_a_read_with_new_numbers_settles_it(self):
+        r = FakeRedis()
+        r.hset(poller._state_key(7), mapping={"logout": 1})
+        poller.after_logout_read(r, 7, "written")
+        assert "logout" not in r.hgetall(poller._state_key(7)) and r.zscore(poller.LOGOUT_KEY, "7") is None
+
+    def test_a_failed_read_keeps_the_logout_pending(self):
+        r = FakeRedis()
+        r.hset(poller._state_key(7), mapping={"logout": 1})
+        poller.after_logout_read(r, 7, "error")
+        assert r.hgetall(poller._state_key(7))["logout"] == "1"
+
+    def test_an_ordinary_read_is_untouched(self):
+        r = FakeRedis()
+        poller.after_logout_read(r, 7, "unchanged")
+        assert r.hashes.get(poller._state_key(7), {}) == {} and r.zscore(poller.LOGOUT_KEY, "7") is None
