@@ -403,10 +403,13 @@ def run_player(s, req: DataRemovalRequest, *, apply: bool, bot_token: str | None
                                      bot_token, apply=True)
     done = pe.apply_erasure(s, plan)
     s.commit()
-    redis = pe.purge_redis(redis_client.client, plan.player_id, None, apply=True)
+    redis = pe.purge_redis(redis_client.client, plan.player_id, None, apply=True,
+                           player_name=plan.player_name)
     files = pe.purge_files(plan, apply=True)
+    archives = pe.purge_stat_archives(plan.player_id, apply=True)
     return {"exported_rows": rows, "discord": discord,
-            "db": {k: v for k, v in done.items() if v}, "redis": redis, "files": files}
+            "db": {k: v for k, v in done.items() if v}, "redis": redis, "files": files,
+            "stat_archives": archives}
 
 
 def run_group(s, req: DataRemovalRequest, *, apply: bool) -> dict:

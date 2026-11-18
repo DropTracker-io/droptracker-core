@@ -61,3 +61,42 @@ class TestRefusals:
             assert "billing rows" in str(e)
         else:
             raise AssertionError("expected refusal")
+
+
+class TestHiscoresKeys:
+    def test_hiscores_state_is_purged(self):
+        keys = pe.redis_keys_for(5, None)
+        assert "hiscores:p:5" in keys and "hiscores:pin:*:5" in keys
+
+
+class TestNearbySamples:
+    def test_submitter_sample_is_dropped(self):
+        raw = '{"p":"Some_Name","n":["Other"],"k":"drop","t":1}'
+        assert pe.scrub_sample(raw, "some name") is None
+
+    def test_nearby_name_is_cut_out_and_others_kept(self):
+        import json
+        raw = '{"p":"Other","n":["Some-Name","Third"],"k":"drop","t":1}'
+        out = json.loads(pe.scrub_sample(raw, "Some Name"))
+        assert out["p"] == "Other" and out["n"] == ["Third"]
+
+    def test_unrelated_sample_is_untouched(self):
+        raw = '{"p":"Other","n":["Someone Else"],"k":"drop","t":1}'
+        assert pe.scrub_sample(raw, "Some Name") == raw
+
+    def test_unparseable_sample_is_untouched(self):
+        assert pe.scrub_sample("not json", "x") == "not json"
+
+
+class TestKbPatterns:
+    def test_matches_only_the_author_column(self):
+        import re
+        (pat,) = pe.kb_chat_patterns(["bob_1"])
+        # LIKE -> regex: '%' any, escaped '\_' literal.
+        rx = "^" + re.escape(pat).replace("%", ".*").replace(r"\\_", "_") + "$"
+        assert re.match(rx, "[2026-01-01 10:00] bob_1: hello", re.S)
+        assert not re.match(rx, "[2026-01-01 10:00] bob_12: hello", re.S)
+
+    def test_like_wildcards_are_escaped(self):
+        (pat,) = pe.kb_chat_patterns(["a%b_c"])
+        assert pat == r"%] a\%b\_c: %"

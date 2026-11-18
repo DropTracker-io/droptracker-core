@@ -27,6 +27,13 @@ What happens to each kind of row:
   (which must have an author) are moved to a shared "Removed user" account
   with the Discord id blanked. The transcript text is kept as the record of
   the request.
+* **Copies outside the player tables go too** (the privacy policy promises
+  it): ticket author names become "Removed user", the admin bot's knowledge
+  base drops its copies of the user's tickets and chat lines (``purge_kb``),
+  and after the commit the player's 3D models / gear renders / avatars
+  (``dt_img/models/{id}/``), archived stat snapshot days
+  (``purge_stat_archives``), hiscores state and nearby-player name samples
+  (``purge_name_samples``) are removed.
 * **Billing refuses.** A user with subscription or payment rows is not erased
   by this; those records have their own retention rules.
 
@@ -84,6 +91,10 @@ class Plan:
     refusals: list = field(default_factory=list)
     discord_messages: list = field(default_factory=list)  # (channel_id, message_id)
     image_urls: list = field(default_factory=list)
+    # Names the user wrote under in tickets and Discord chat, and the tickets
+    # they wrote in: what the admin bot's knowledge-base copies are found by.
+    author_names: list = field(default_factory=list)
+    ticket_ids: list = field(default_factory=list)
 
     @property
     def needs_placeholder(self) -> bool:
@@ -184,7 +195,7 @@ def plan_erasure(s, player_id: int | None, user_id: int | None,
         _plan_images(s, plan)
 
     if user_id is not None:
-        u = s.execute(text("SELECT discord_id FROM users WHERE user_id = :u"),
+        u = s.execute(text("SELECT discord_id, username FROM users WHERE user_id = :u"),
                       {"u": user_id}).first()
         if u is None:
             plan.refusals.append(f"user {user_id} does not exist")
@@ -220,7 +231,37 @@ def plan_erasure(s, player_id: int | None, user_id: int | None,
                 plan.null_user[(table, col)] = n
             else:
                 plan.refusals.append(f"{table}.{col} is NOT NULL and names this user as actor")
+        _plan_author_trail(s, plan, u.username)
     return plan
+
+
+def _table_exists(s, table: str) -> bool:
+    return bool(s.execute(text(
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE table_schema = DATABASE() AND table_name = :t"
+    ), {"t": table}).scalar())
+
+
+def _plan_author_trail(s, plan: Plan, username: str | None) -> None:
+    """The names a user's ticket messages carry, and the tickets they're in."""
+    names = {username} if username else set()
+    if plan.discord_id:
+        rows = s.execute(text(
+            "SELECT DISTINCT ticket_id, author_name FROM ticket_messages "
+            "WHERE author_discord_id = :d OR author_user_id = :u"
+        ), {"d": plan.discord_id, "u": plan.user_id}).all()
+    else:
+        rows = s.execute(text(
+            "SELECT DISTINCT ticket_id, author_name FROM ticket_messages WHERE author_user_id = :u"
+        ), {"u": plan.user_id}).all()
+    tickets = {r.ticket_id for r in rows}
+    names |= {r.author_name for r in rows if r.author_name}
+    for (table, col) in plan.ticket_user:
+        tickets |= set(s.execute(text(
+            f"SELECT ticket_id FROM `{table}` WHERE `{col}` = :u"
+        ), {"u": plan.user_id}).scalars().all())
+    plan.author_names = sorted(n for n in names if n and n != REMOVED_USER_NAME)
+    plan.ticket_ids = sorted(tickets)
 
 
 def _player_row_ids(s, plan: Plan, table: str, pk: str) -> list:
@@ -450,10 +491,17 @@ def apply_erasure(s, plan: Plan) -> dict:
             done[f"null {table}.{col}"] = s.execute(text(
                 f"UPDATE `{table}` SET `{col}` = NULL WHERE `{col}` = :u"
             ), {"u": uid}).rowcount
+        # The transcript stays as the record of what was asked, but not under
+        # the person's name.
+        done["ticket_messages.author_name anonymized"] = s.execute(text(
+            "UPDATE ticket_messages SET author_name = :r WHERE author_user_id = :u"
+            + (" OR author_discord_id = :d" if plan.discord_id else "")
+        ), {"r": REMOVED_USER_NAME, "u": uid, "d": plan.discord_id}).rowcount
         if plan.discord_id:
             done["ticket_messages.author_discord_id blanked"] = s.execute(text(
                 "UPDATE ticket_messages SET author_discord_id = '' WHERE author_discord_id = :d"
             ), {"d": plan.discord_id}).rowcount
+        done.update(purge_kb(s, plan))
 
     # Own rows. Retry passes order RESTRICT FKs between the player's own
     # tables (e.g. notified before drops) without hard-coding them.
@@ -487,6 +535,50 @@ def apply_erasure(s, plan: Plan) -> dict:
     return done
 
 
+def kb_chat_patterns(names) -> list[str]:
+    """LIKE patterns for a chat chunk line written by one of ``names``.
+
+    The admin bot's miner renders each message as ``[YYYY-MM-DD HH:MM] author:
+    content``, so ``"] name: "`` finds that author's lines (and nobody whose
+    name merely contains theirs).
+    """
+    out = []
+    for n in names:
+        esc = n.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        out.append(f"%] {esc}: %")
+    return out
+
+
+def purge_kb(s, plan: Plan) -> dict:
+    """The admin bot's knowledge-base copies (``kb_documents``/``kb_chunks``).
+
+    Ticket documents for the user's tickets are dropped whole; the miner
+    re-reads them from the now-anonymized transcript. A general-chat chunk
+    with any line the user wrote is dropped whole (it is a window of
+    neighbouring messages, so the line cannot be cut out cleanly).
+    """
+    done = {"kb ticket documents": 0, "kb chat chunks": 0}
+    if not _table_exists(s, "kb_documents"):
+        return done
+    if plan.ticket_ids:
+        ids = [str(t) for t in plan.ticket_ids]
+        doc_ids = s.execute(text(
+            "SELECT id FROM kb_documents WHERE source_type = 'ticket' AND source_ref IN :r"
+        ).bindparams(bindparam("r", expanding=True)), {"r": ids}).scalars().all()
+        if doc_ids:
+            s.execute(text("DELETE FROM kb_chunks WHERE document_id IN :d")
+                      .bindparams(bindparam("d", expanding=True)), {"d": doc_ids})
+            done["kb ticket documents"] = s.execute(text(
+                "DELETE FROM kb_documents WHERE id IN :d"
+            ).bindparams(bindparam("d", expanding=True)), {"d": doc_ids}).rowcount
+    for pat in kb_chat_patterns(plan.author_names):
+        done["kb chat chunks"] += s.execute(text(
+            "DELETE c FROM kb_chunks c JOIN kb_documents d ON d.id = c.document_id "
+            "WHERE d.source_type IN ('chat', 'forum') AND c.content LIKE :p"
+        ), {"p": pat}).rowcount
+    return done
+
+
 # --------------------------------------------------------------------------- #
 # Side stores (after the DB commit)
 # --------------------------------------------------------------------------- #
@@ -497,7 +589,7 @@ def redis_keys_for(player_id: int | None, user_id: int | None) -> list[str]:
         p = player_id
         pats += [f"player:{p}", f"player:{p}:*", f"p:{p}", f"pstats:*:{p}:*",
                  f"plugin:notify:{p}", f"rank_watch:*:{p}", f"wom:eventupd:{p}",
-                 f"events:*:kcdedupe:*:{p}"]
+                 f"events:*:kcdedupe:*:{p}", f"hiscores:p:{p}", f"hiscores:pin:*:{p}"]
     if user_id is not None:
         u = user_id
         pats += [f"web:profile:{u}", f"web:guilds:{u}", f"web:guildmeta:{u}",
@@ -505,8 +597,67 @@ def redis_keys_for(player_id: int | None, user_id: int | None) -> list[str]:
     return pats
 
 
-def purge_redis(r, player_id: int | None, user_id: int | None, apply: bool) -> dict:
+def _fold(name) -> str:
+    import re
+
+    return re.sub(r"[ _\-]+", " ", str(name or "").strip()).casefold()
+
+
+def scrub_sample(raw, name: str):
+    """One ``splitscan:samples`` entry with ``name`` taken out.
+
+    Returns the entry unchanged, a rewritten entry (the name was one of the
+    nearby players), or None (the name submitted it, so the sample goes).
+    """
+    import json
+
+    try:
+        sample = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
+    want = _fold(name)
+    if _fold(sample.get("p")) == want:
+        return None
+    nearby = sample.get("n") or []
+    kept = [n for n in nearby if _fold(n) != want]
+    if len(kept) == len(nearby):
+        return raw
+    sample["n"] = kept
+    return json.dumps(sample, separators=(",", ":"))
+
+
+def purge_name_samples(r, name: str | None, apply: bool) -> int:
+    """Take a name out of the nearby-player samples (``splitscan:samples:*``,
+    30-day TTL). They hold other people's names, so they are rewritten, not
+    deleted. Returns how many samples named the player."""
+    if not name:
+        return 0
+    hits = 0
+    for key in r.scan_iter(match="splitscan:samples:*", count=5000):
+        entries = r.lrange(key, 0, -1)
+        out = [scrub_sample(e.decode() if isinstance(e, bytes) else e, name) for e in entries]
+        changed = sum(1 for a, b in zip(entries, out)
+                      if b is None or b != (a.decode() if isinstance(a, bytes) else a))
+        if not changed:
+            continue
+        hits += changed
+        if apply:
+            ttl = r.ttl(key)
+            pipe = r.pipeline()
+            pipe.delete(key)
+            kept = [e for e in out if e is not None]
+            if kept:
+                pipe.rpush(key, *kept)
+                if ttl and ttl > 0:
+                    pipe.expire(key, ttl)
+            pipe.execute()
+    return hits
+
+
+def purge_redis(r, player_id: int | None, user_id: int | None, apply: bool,
+                player_name: str | None = None) -> dict:
     out = {"keys": 0, "leaderboard_members": 0}
+    out["nearby_samples"] = purge_name_samples(r, player_name, apply)
     keys: list = []
     for pat in redis_keys_for(player_id, user_id):
         if any(ch in pat for ch in "*?["):
@@ -535,13 +686,19 @@ def purge_files(plan: Plan, apply: bool) -> dict:
     a run as another user can fail there, and that must not leave the bucket
     copies behind. Local failures are reported (``local_error``), not raised.
     """
-    out = {"local_dir": None, "local_files": 0, "b2_keys": 0}
+    out = {"local_dir": None, "local_files": 0, "b2_keys": 0, "model_dir": None}
     keys: set = set()
     try:
         from scripts.prune_drop_images import b2_key_for, local_path_for, _b2_storage
         b2 = _b2_storage()
         if b2 is not None and plan.wom_id:
             for obj in b2.list_keys(f"{b2.USER_UPLOAD_PREFIX}/{plan.wom_id}/"):
+                keys.add(obj["key"] if isinstance(obj, dict) else obj)
+        # 3D models, gear renders and avatar crops: all under the player id.
+        # Pinned / PB-protected ones too: the prune protections are about
+        # retention, and this is the owner asking for removal.
+        if b2 is not None and plan.player_id is not None:
+            for obj in b2.list_keys(f"{b2.MODELS_PREFIX}/{int(plan.player_id)}/"):
                 keys.add(obj["key"] if isinstance(obj, dict) else obj)
         stray = []
         for url in plan.image_urls:
@@ -563,13 +720,55 @@ def purge_files(plan: Plan, apply: bool) -> dict:
         if os.path.isdir(d):
             out["local_dir"] = d
             out["local_files"] = sum(len(f) for _r, _d, f in os.walk(d))
+    if plan.player_id is not None:
+        try:
+            from services.player_model import model_dir
+            md = model_dir(int(plan.player_id))
+            if os.path.isdir(md):
+                out["model_dir"] = md
+        except Exception as e:
+            out["model_dir_error"] = f"{type(e).__name__}: {e}"
     if apply:
         try:
             for path in stray:
                 os.unlink(path)
             if out["local_dir"]:
                 shutil.rmtree(out["local_dir"])
+            if out["model_dir"]:
+                shutil.rmtree(out["model_dir"])
         except OSError as e:
             out["local_error"] = (f"{type(e).__name__}: {e} (the tree is owned by the "
                                   "intake service account; remove it as that user)")
+    return out
+
+
+def purge_stat_archives(player_id: int | None, apply: bool) -> dict:
+    """Take the player's rows out of the archived stat snapshot days
+    (``dt_stats/snapshots/``, written by ``utils/stat_snapshot_retention``).
+    Each day holds every player, so a day is rewritten without them."""
+    out = {"archives": 0, "rows": 0}
+    if player_id is None:
+        return out
+    try:
+        from utils import image_storage
+        from utils import stat_snapshot_retention as ret
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+    try:
+        for obj in image_storage.list_keys(ret.ARCHIVE_PREFIX + "/"):
+            key = obj["key"]
+            data = image_storage.get_bytes(key)
+            if not data:
+                continue
+            rows = ret.parse_archive(data)
+            kept = [row for row in rows if int(row.get("player_id", -1)) != int(player_id)]
+            if len(kept) == len(rows):
+                continue
+            out["archives"] += 1
+            out["rows"] += len(rows) - len(kept)
+            if apply:
+                image_storage.put_bytes(key, ret.serialize_rows(kept), "application/gzip")
+    except Exception as e:  # report, don't hide
+        out["error"] = f"{type(e).__name__}: {e}"
     return out

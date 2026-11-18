@@ -118,8 +118,10 @@ def main() -> int:
         _print_plan(plan)
 
         from utils.redis import redis_client
-        print("\nredis:", pe.purge_redis(redis_client.client, args.player, args.user, apply=False))
+        print("\nredis:", pe.purge_redis(redis_client.client, args.player, args.user,
+                                            apply=False, player_name=plan.player_name))
         print("files:", pe.purge_files(plan, apply=False))
+        print("stat archives:", pe.purge_stat_archives(args.player, apply=False))
 
         if args.rehearse and not plan.refusals:
             done = pe.apply_erasure(s, plan)
@@ -142,8 +144,10 @@ def main() -> int:
         print("\ndb:")
         for k, v in done.items():
             print(f"  {k}: {v}")
-        print("redis:", pe.purge_redis(redis_client.client, args.player, args.user, apply=True))
+        print("redis:", pe.purge_redis(redis_client.client, args.player, args.user,
+                                            apply=True, player_name=plan.player_name))
         print("files:", pe.purge_files(plan, apply=True))
+        print("stat archives:", pe.purge_stat_archives(args.player, apply=True))
         return 0
     except Exception:
         s.rollback()

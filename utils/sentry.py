@@ -77,6 +77,10 @@ def init_sentry(service_name: str) -> bool:
             dsn=dsn,
             environment=environment,
             traces_sample_rate=0,  # errors only — no performance tracing
+            # Privacy policy: error reports carry the stack and its variables,
+            # never request bodies (chat lines, RSNs) or IPs/cookies.
+            send_default_pii=False,
+            max_request_body_size="never",
         )
         sentry_sdk.set_tag("service", service_name)
     except Exception as exc:  # never let telemetry break a service
