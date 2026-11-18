@@ -249,10 +249,15 @@ def test_build_snapshot_shapes_database_rows(monkeypatch):
 
         def execute(self, statement, params=None):
             self.statements.append((str(statement), params))
-            if "COUNT(" in str(statement):
+            # The boss query counts players too, so tell the two apart by table.
+            if "user_group_association" in str(statement):
                 return Result(scalar=27856)
-            # MariaDB hands SUM() back as Decimal.
-            return Result(rows=[(14150, "Yama", Decimal("31734859972"), Decimal("10138"))])
+            # MariaDB hands SUM() back as Decimal. Seven NPCs, richest first, as
+            # the query orders them.
+            return Result(rows=[
+                (14150 + i, f"Boss {i}", Decimal(str(7_000 - i * 1_000)), Decimal(str(70 - i)), 9 - i)
+                for i in range(7)
+            ])
 
     session = Session()
 
@@ -267,9 +272,12 @@ def test_build_snapshot_shapes_database_rows(monkeypatch):
     snapshot = ps.build_snapshot(PART)
 
     assert snapshot["member_count"] == 27856
-    assert snapshot["top_bosses"] == [
-        {"npc_id": 14150, "name": "Yama", "loot": 31_734_859_972, "drops": 10138},
-    ]
+    # The summary keeps its five, in the shape it has always had (no players).
+    assert len(snapshot["top_bosses"]) == ps.TOP_BOSSES
+    assert snapshot["top_bosses"][0] == {"npc_id": 14150, "name": "Boss 0", "loot": 7_000, "drops": 70}
+    # The full list keeps every NPC, with its player count.
+    assert len(snapshot["bosses"]) == 7
+    assert snapshot["bosses"][6] == {"npc_id": 14156, "name": "Boss 6", "loot": 1_000, "drops": 64, "players": 3}
     json.dumps(snapshot)  # must survive the trip into Redis (no Decimal left)
 
     # "Accounts" means players. The association table also carries user-only
@@ -281,8 +289,108 @@ def test_build_snapshot_shapes_database_rows(monkeypatch):
     assert "JOIN players" in member_sql
 
     boss_sql, boss_params = session.statements[1]
-    assert boss_params == {"partition": PART, "lim": ps.TOP_BOSSES}
+    # One pass for every NPC: the top five are cut from it, not queried apart.
+    assert boss_params == {"partition": PART}
+    assert len(session.statements) == 2
+    assert "COUNT(DISTINCT t.player_id)" in boss_sql
     # The whole point: "members of the global group" is everybody, so the
     # 27k-row membership join that made this a 20-second query is gone.
     assert "user_group_association" not in boss_sql
     assert "max_statement_time" in boss_sql
+
+
+# --------------------------------------------------------------------------- #
+# GET /platform/bosses                                                        #
+# --------------------------------------------------------------------------- #
+BOSSES = [
+    {"npc_id": 900006, "name": "Fractured Archive", "loot": 684_037_605_119, "drops": 197082, "players": 1490},
+    {"npc_id": 13696, "name": "Chambers of Xeric", "loot": 33_040_000_000, "drops": 14942, "players": 937},
+    {"npc_id": 2042, "name": "Zulrah", "loot": 4_330_000_000, "drops": 107474, "players": 811},
+]
+SNAPSHOT_WITH_BOSSES = dict(SNAPSHOT, bosses=BOSSES)
+
+
+def _store(r, snapshot):
+    r.set(ps.SNAPSHOT_KEY.format(partition=PART), json.dumps(snapshot))
+
+
+def test_bosses_lists_every_npc_richest_first_without_touching_the_database(r):
+    _store(r, SNAPSHOT_WITH_BOSSES)
+    calls = []
+
+    payload, stale = ps.load_bosses(conn=r, now=NOW, partition=PART, build=_builder(calls=calls))
+
+    assert stale is False and calls == []
+    assert payload["partition"] == PART and payload["snapshot_at"] == NOW - 30
+    assert [b["npc_id"] for b in payload["bosses"]] == [900006, 13696, 2042]
+    assert payload["bosses"][0] == {
+        "npc_id": 900006,
+        "name": "Fractured Archive",
+        "loot": {"value": 684_037_605_119, "value_formatted": "684.04B"},
+        "drops": 197082,
+        "players": 1490,
+    }
+
+
+def test_bosses_serves_a_stale_snapshot_and_only_flags_it(r):
+    _store(r, dict(SNAPSHOT_WITH_BOSSES, at=NOW - ps.FRESH_FOR - 1))
+    calls = []
+
+    payload, stale = ps.load_bosses(conn=r, now=NOW, partition=PART, build=_builder(calls=calls))
+
+    assert stale is True and calls == []
+    assert len(payload["bosses"]) == 3
+
+
+def test_bosses_from_a_snapshot_written_before_the_list_existed(r):
+    """An older worker mid-deploy (or last week's key) wrote no ``bosses``: answer
+    with an empty list and ask for a rebuild behind the response, never in front."""
+    _store(r, SNAPSHOT)  # fresh, but the old shape
+    calls = []
+
+    payload, stale = ps.load_bosses(conn=r, now=NOW, partition=PART, build=_builder(calls=calls))
+
+    assert payload["bosses"] == [] and payload["snapshot_at"] == NOW - 30
+    assert stale is True and calls == []
+
+
+def test_bosses_with_nothing_cached_builds_once_in_front(r):
+    calls = []
+
+    payload, stale = ps.load_bosses(
+        conn=r, now=NOW, partition=PART, build=_builder(result=SNAPSHOT_WITH_BOSSES, calls=calls)
+    )
+
+    assert calls == [PART] and stale is False
+    assert len(payload["bosses"]) == 3
+    # And the summary now reads the same snapshot without building again.
+    ps.load(conn=r, now=NOW, partition=PART, build=_builder(calls=calls))
+    assert calls == [PART]
+
+
+def test_bosses_with_redis_down_answers_empty_instead_of_querying_per_request():
+    calls = []
+
+    payload, stale = ps.load_bosses(conn=None, now=NOW, partition=PART, build=_builder(calls=calls))
+
+    assert payload["bosses"] == [] and payload["snapshot_at"] is None
+    assert calls == [] and stale is False
+
+
+def test_bosses_skips_a_row_it_cannot_read(r):
+    _store(r, dict(SNAPSHOT, bosses=[BOSSES[0], "junk", {"name": "no id"}, BOSSES[2]]))
+
+    payload, _stale = ps.load_bosses(conn=r, now=NOW, partition=PART)
+
+    assert [b["npc_id"] for b in payload["bosses"]] == [900006, 2042]
+
+
+def test_the_summary_is_unchanged_by_the_wider_snapshot(r):
+    _store(r, SNAPSHOT_WITH_BOSSES)
+
+    payload, stale = ps.load(conn=r, now=NOW, partition=PART)
+
+    assert stale is False
+    assert [b["npc_id"] for b in payload["top_bosses"]] == [14150, 13699]
+    assert "bosses" not in payload
+    assert all("players" not in b for b in payload["top_bosses"])

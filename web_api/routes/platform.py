@@ -11,6 +11,18 @@
       "snapshot_at": 1789737600 | null
     }
 
+  GET /api/v1/platform/bosses    (public, cached 30s)
+
+    {
+      "partition": 202609,
+      "generated_at": 1789737906,
+      "snapshot_at": 1789737600 | null,
+      "bosses": [ { "npc_id", "name", "loot": {money}, "drops", "players" } ]
+    }
+
+  Every NPC with loot this month, richest first: what the homepage ranks its
+  boss line-up from, in one request instead of one per boss.
+
 ``monthly_loot`` is read live from Redis on every request. ``member_count`` and
 ``top_bosses`` come from a Redis-held snapshot that is rebuilt behind the
 response once it is ten minutes old; they are null / empty only while the very
@@ -46,6 +58,18 @@ async def platform_summary():
     from web_api.platform_summary import load
 
     payload, stale = await asyncio.to_thread(load)
+    if stale:
+        task = asyncio.get_running_loop().create_task(_refresh_behind(payload["partition"]))
+        _refreshing.add(task)
+        task.add_done_callback(_refreshing.discard)
+    return with_cache_headers(jsonify(payload), max_age=30)
+
+
+@platform_bp.get("/platform/bosses")
+async def platform_bosses():
+    from web_api.platform_summary import load_bosses
+
+    payload, stale = await asyncio.to_thread(load_bosses)
     if stale:
         task = asyncio.get_running_loop().create_task(_refresh_behind(payload["partition"]))
         _refreshing.add(task)

@@ -59,19 +59,29 @@ KEEP_FOR = 7 * 86400
 # retried every two minutes rather than on every request.
 LOCK_TTL = 120
 
+# Every NPC with loot this month, richest first, in one pass over the month's
+# rollup. The homepage used to take only the top five from here and then ask
+# `GET /npcs/{id}` once per boss it stages (~44 requests per render, each a
+# 0.3-0.9s aggregate when its cache was cold) to rank the rest. This is the
+# same GROUP BY the top five already paid for; returning all ~1,000 groups and
+# counting each one's players costs ~1.6s against ~1.4s, once per ten minutes,
+# behind a response.
+#
 # Aggregate first, name afterwards: joining npc_list inside the GROUP BY would
 # drag a lookup through every one of the month's ~400k-1M rollup rows to label
-# the five that survive.
-_TOP_BOSSES_SQL = text(
+# the groups that survive.
+_BOSSES_SQL = text(
     "SET STATEMENT max_statement_time=20 FOR "
-    "SELECT a.npc_id, n.npc_name, a.loot, a.drops "
+    "SELECT a.npc_id, n.npc_name, a.loot, a.drops, a.players "
     "FROM ( "
-    "  SELECT t.npc_id, SUM(t.total_value) AS loot, SUM(t.drop_count) AS drops "
+    "  SELECT t.npc_id, SUM(t.total_value) AS loot, SUM(t.drop_count) AS drops, "
+    "         COUNT(DISTINCT t.player_id) AS players "
     "  FROM player_npc_hourly_totals t "
     "  WHERE t.`partition` = :partition "
-    "  GROUP BY t.npc_id ORDER BY loot DESC LIMIT :lim "
+    "  GROUP BY t.npc_id "
     ") a JOIN npc_list n ON n.npc_id = a.npc_id "
-    "ORDER BY a.loot DESC"
+    "WHERE a.loot > 0 "
+    "ORDER BY a.loot DESC, a.npc_id ASC"
 )
 
 # DISTINCT players, joined to `players` — not COUNT(*). The association table
@@ -150,21 +160,26 @@ def build_snapshot(partition) -> dict:
 
     with db_session() as s:
         members = s.execute(_MEMBER_COUNT_SQL, {"gid": GLOBAL_GROUP_ID}).scalar()
-        rows = s.execute(
-            _TOP_BOSSES_SQL, {"partition": int(partition), "lim": TOP_BOSSES}
-        ).fetchall()
+        rows = s.execute(_BOSSES_SQL, {"partition": int(partition)}).fetchall()
+    bosses = [
+        {
+            "npc_id": int(npc_id),
+            "name": name,
+            "loot": int(loot or 0),
+            "drops": int(drops or 0),
+            "players": int(players or 0),
+        }
+        for (npc_id, name, loot, drops, players) in rows
+    ]
     return {
         "at": int(time.time()),
         "member_count": int(members or 0),
+        # The summary's five, in the shape it has always had.
         "top_bosses": [
-            {
-                "npc_id": int(npc_id),
-                "name": name,
-                "loot": int(loot or 0),
-                "drops": int(drops or 0),
-            }
-            for (npc_id, name, loot, drops) in rows
+            {k: b[k] for k in ("npc_id", "name", "loot", "drops")} for b in bosses[:TOP_BOSSES]
         ],
+        # Everything, for GET /platform/bosses.
+        "bosses": bosses,
     }
 
 
@@ -263,6 +278,48 @@ def load(*, conn=_DEFAULT, now: Optional[float] = None, partition: Optional[int]
                 "drops": int(b.get("drops") or 0),
             }
             for b in snapshot["top_bosses"]
+            if isinstance(b, dict) and _as_int(b.get("npc_id")) is not None
+        ]
+    return payload, stale
+
+
+def load_bosses(*, conn=_DEFAULT, now: Optional[float] = None, partition: Optional[int] = None,
+                build: Callable[[int], dict] = build_snapshot) -> tuple[dict, bool]:
+    """``(payload, stale)`` for ``GET /platform/bosses``: every NPC with loot
+    this month, richest first, from the same snapshot as :func:`load`.
+
+    Same contract as :func:`load`: a request never waits on a rebuild when
+    there is something to serve. A snapshot written before this list existed
+    (an older worker during a deploy, or last week's key) has no ``bosses``;
+    it is served as an empty list and flagged stale, so the next rebuild
+    fills it in, rather than building in front of the response.
+    """
+    from web_api.common import get_current_partition, money
+
+    ts = int(now if now is not None else time.time())
+    partition = int(partition if partition is not None else get_current_partition())
+    conn = _rc() if conn is _DEFAULT else conn
+
+    snapshot = _read(conn, partition)
+    stale = False
+    if snapshot is None:
+        snapshot = refresh(partition, conn=conn, build=build)
+    elif ts - int(snapshot["at"]) > FRESH_FOR or not isinstance(snapshot.get("bosses"), list):
+        stale = True
+
+    payload = {"partition": partition, "generated_at": ts, "snapshot_at": None, "bosses": []}
+    if snapshot is not None:
+        payload["snapshot_at"] = int(snapshot["at"])
+        rows = snapshot.get("bosses")
+        payload["bosses"] = [
+            {
+                "npc_id": int(b["npc_id"]),
+                "name": b.get("name") or "",
+                "loot": money(b.get("loot")),
+                "drops": int(b.get("drops") or 0),
+                "players": int(b.get("players") or 0),
+            }
+            for b in (rows if isinstance(rows, list) else [])
             if isinstance(b, dict) and _as_int(b.get("npc_id")) is not None
         ]
     return payload, stale
