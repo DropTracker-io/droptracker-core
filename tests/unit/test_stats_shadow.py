@@ -140,6 +140,15 @@ class TestValuesAt:
         assert got["skills"]["attack"] == 1200 and got["activities"] == {"zulrah": 44, "vorkath": 9}
         assert got["source"] == "plugin" and got["taken_at"] == T0 + timedelta(hours=2)
 
+    def test_plugin_counters_that_do_not_match_the_hiscores_are_never_used(self, s):
+        # The plugin's Colosseum chest count is not Sol Heredit's kill count.
+        _hiscores(s, 7, T0, {"attack": 900}, {"sol_heredit": 3, "zulrah": 40})
+        _plugin(s, 7, T0 + timedelta(hours=2), kc={"sol_heredit": 24, "zulrah": 44}, attack=1200)
+        got = store.values_at(s, 7, T0 + timedelta(hours=3))
+        assert got["activities"] == {"sol_heredit": 3, "zulrah": 44}
+        first = store.first_values_in_window(s, 7, T0 + timedelta(hours=1), T0 + timedelta(hours=5))
+        assert "sol_heredit" not in first["activities"] and first["activities"]["zulrah"] == 44
+
     def test_only_rows_at_or_before_the_moment_count(self, s):
         _hiscores(s, 7, T0, {"attack": 900})
         _hiscores(s, 7, T0 + timedelta(days=2), {"attack": 5000})

@@ -242,6 +242,14 @@ class TestBossScores:
         assert plugin_boss_scores(s, 7, self._metric) == {"zulrah": 40, "vorkath": 7}
         assert plugin_boss_scores(s, 8, self._metric) == {}
 
+    def test_counters_the_plugin_keeps_differently_are_not_stored(self, s):
+        for npc_id, name, kc in ((1, "Fortis Colosseum", 24), (2, "Zulrah", 40)):
+            s.add(NpcList(npc_id=npc_id, npc_name=name))
+            s.add(PlayerNpcKc(player_id=7, npc_id=npc_id, kill_count=kc))
+        s.commit()
+        metric = {"Fortis Colosseum": "sol_heredit", "Zulrah": "zulrah"}.get
+        assert plugin_boss_scores(s, 7, metric) == {"zulrah": 40}
+
     def test_scores_ride_on_the_snapshot(self, s):
         self._seed(s)
         xp = {**{skill: 0 for skill in SKILLS}, "hitpoints": 1154}

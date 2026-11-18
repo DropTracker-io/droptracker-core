@@ -77,6 +77,26 @@ def decode_activities(raw: Any) -> Dict[str, int]:
     }
 
 
+# Bosses where the plugin's own kill counter is not the number the hiscores
+# publish, so it must never be merged with (or stand in for) a hiscores value.
+# Measured 2026-11-18 on 4,364 players with both sources: the share of players
+# whose plugin count was above a NEWER hiscores reading was 0.3-3% for normal
+# bosses (lag) and 17-42% for these. The plugin counts reward chests, keys or
+# attempts there (the Colosseum chest ran 8x Sol Heredit's kill count).
+PLUGIN_COUNT_DIFFERS = frozenset({
+    "sol_heredit", "bryophyta", "obor", "wintertodt", "the_hueycoatl", "doom_of_mokhaiotl",
+})
+
+
+def _activities_of(row) -> Dict[str, int]:
+    """A row's activities as a reader may use them: a plugin row's counters
+    that do not match the hiscores' are left out."""
+    scores = decode_activities(row.activities)
+    if row.source == SOURCE_PLUGIN:
+        return {m: v for m, v in scores.items() if m not in PLUGIN_COUNT_DIFFERS}
+    return scores
+
+
 def plugin_boss_scores(db_session, player_id: int,
                        metric_for: Callable[[str], Optional[str]]) -> Dict[str, int]:
     """Boss kill counts the plugin has reported, keyed by hiscores metric.
@@ -98,6 +118,8 @@ def plugin_boss_scores(db_session, player_id: int,
     out: Dict[str, int] = {}
     for name, kill_count in rows:
         metric = metric_for(name)
+        if metric in PLUGIN_COUNT_DIFFERS:
+            continue
         if metric and kill_count and kill_count > out.get(metric, 0):
             out[metric] = int(kill_count)
     return out
@@ -468,7 +490,7 @@ def values_at(db_session, player_id: int, when: datetime) -> Optional[dict]:
             # read: 0 is "unknown" unless nothing better exists.
             if xp > skills.get(skill, -1):
                 skills[skill] = xp
-        for metric, score in decode_activities(row.activities).items():
+        for metric, score in _activities_of(row).items():
             if score > activities.get(metric, 0):
                 activities[metric] = score
     newest = max(rows, key=lambda r: r.taken_at)
@@ -516,7 +538,7 @@ def first_values_in_window(db_session, player_id: int, start: datetime, end: dat
             # not read; let a later reading that does know it fill that in.
             if skill not in skills or (skills[skill] == 0 and xp > 0):
                 skills[skill] = xp
-        for metric, score in decode_activities(row.activities).items():
+        for metric, score in _activities_of(row).items():
             activities.setdefault(metric, score)
     return {"skills": skills, "activities": activities,
             "taken_at": firsts[0].taken_at, "source": firsts[0].source}
