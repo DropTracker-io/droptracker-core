@@ -52,6 +52,7 @@ from services.state_sync import (
     newly_completed_quests,
     parse_diary_tiers,
     parse_int_map,
+    parse_kill_counts,
     parse_skills,
     repair_name_derived_items,
     serialize_varps,
@@ -280,6 +281,7 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
                     completed_tasks.append(value)
         diary_tiers = parse_diary_tiers(snapshot.get("diary_tiers"))
         skills = parse_skills(snapshot.get("skills"))
+        kill_counts = parse_kill_counts(snapshot.get("kill_counts"))
 
         previous_items = {
             row.item_id: row.quantity
@@ -307,7 +309,7 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
         improved_diaries = improved_diary_tiers(previous_diaries, diary_tiers)
 
         # ── Persist ──────────────────────────────────────────────────────────
-        _upsert_state(db_session, player_id, snapshot, skills)
+        _upsert_state(db_session, player_id, snapshot, skills, kill_counts)
         _upsert_items(db_session, player_id, previous_items, items)
         _upsert_quests(db_session, player_id, previous_quests, quests)
         _upsert_diaries(db_session, player_id, previous_diaries, diary_tiers)
@@ -341,7 +343,7 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
         db_session.close()
 
 
-def _upsert_state(db_session, player_id, snapshot, skills):
+def _upsert_state(db_session, player_id, snapshot, skills, kill_counts=None):
     row = db_session.query(PlayerState).filter(PlayerState.player_id == player_id).first()
     if row is None:
         row = PlayerState(player_id=player_id)
@@ -374,10 +376,10 @@ def _upsert_state(db_session, player_id, snapshot, skills):
     row.last_synced_at = datetime.now()
 
     if skills:
-        _update_player_experience(db_session, player_id, skills, row.account_type)
+        _update_player_experience(db_session, player_id, skills, row.account_type, kill_counts)
 
 
-def _update_player_experience(db_session, player_id, skills, account_type=None):
+def _update_player_experience(db_session, player_id, skills, account_type=None, kill_counts=None):
     """Refresh the existing latest-only per-skill XP row.
 
     Reuses ``player_exp`` rather than adding a second XP store. Per-skill
@@ -411,10 +413,17 @@ def _update_player_experience(db_session, player_id, skills, account_type=None):
     from utils.xp_history import skills_from_row
 
     def boss_scores():
-        from utils.stat_snapshots import plugin_boss_scores
+        from utils.stat_snapshots import client_boss_scores, plugin_boss_scores
         from utils.wiseoldman import wom_boss_metric
 
-        return plugin_boss_scores(db_session, player_id, wom_boss_metric)
+        # What our own submissions have counted, topped up with what the
+        # player's client holds (6.1.30+): the game's numbers, for every boss
+        # they have killed, not only the ones a submission happened to carry.
+        scores = plugin_boss_scores(db_session, player_id, wom_boss_metric)
+        for metric, count in client_boss_scores(kill_counts).items():
+            if count > scores.get(metric, 0):
+                scores[metric] = count
+        return scores
 
     db_session.flush()
     record_plugin_snapshot(db_session, player_id, skills_from_row(row),

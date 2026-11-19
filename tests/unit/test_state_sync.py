@@ -19,6 +19,7 @@ from services.state_sync import (
     newly_completed_quests,
     parse_diary_tiers,
     parse_int_map,
+    parse_kill_counts,
     parse_skills,
     repair_name_derived_items,
     serialize_varps,
@@ -297,3 +298,18 @@ def test_snapshot_summary_survives_hostile_shapes():
 def test_limits_are_enforced_exactly(limit):
     raw = {str(i): 1 for i in range(1, limit + 50)}
     assert len(parse_int_map(raw, limit=limit)) == limit
+
+
+class TestKillCounts:
+    def test_names_are_lowered_and_counts_kept(self):
+        assert parse_kill_counts({"Zulrah": 40, " Vorkath ": "7"}) == {"zulrah": 40, "vorkath": 7}
+
+    def test_junk_is_dropped(self):
+        raw = {"zulrah": 0, "vorkath": -3, "nex": 10 ** 9, "": 5, 7: 5, "kraken": None, "ok": 3}
+        assert parse_kill_counts(raw) == {"ok": 3}
+        assert parse_kill_counts(None) == {} and parse_kill_counts([1, 2]) == {}
+
+    def test_a_flood_is_bounded(self):
+        from services.state_sync import MAX_KILL_COUNTS
+
+        assert len(parse_kill_counts({f"boss {i}": 1 for i in range(5000)})) == MAX_KILL_COUNTS

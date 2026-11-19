@@ -91,7 +91,12 @@ DEFAULT_SECTIONS: Dict[str, Dict[str, Any]] = {
         "payload": {
             # Server-tunable so sync load can be dialled back without a Plugin
             # Hub release.
-            "interval_minutes": 60,
+            # 10 since 2026-11-19 (was 60). Until plugin 6.1.30 every
+            # loading screen also triggered a sync, about every 3.5 minutes per
+            # player, so in practice this only ever applied to players
+            # standing still; from 6.1.30 it is the real cadence. A sync costs
+            # about 40 ms and 6 KB (Redis state_sync:cost:*).
+            "interval_minutes": 10,
             "rapid_seconds": 3,
             # Kill switch. False makes conforming clients stop syncing state
             # entirely, which is the only lever we have that does not require a

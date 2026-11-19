@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from db.models import NpcList, PlayerNpcKc, PlayerStatSnapshot
 from utils import stat_snapshot_retention as retention
 from utils.stat_snapshots import (
+    client_boss_scores,
     decode_activities,
     encode_activities,
     plugin_boss_scores,
@@ -271,3 +272,28 @@ class TestBossScores:
         assert encode_activities({"zulrah": 0, "vorkath": 3, "x": True, "y": "9"}) == '{"vorkath":3}'
         assert encode_activities({}) is None
         assert decode_activities("not json") == {}
+
+
+class TestClientKillCounts:
+    """Kill counts the player's client holds, turned into hiscores metrics."""
+
+    def test_game_names_resolve_to_hiscores_metrics(self):
+        got = client_boss_scores({
+            "zulrah": 40, "chambers of xeric challenge mode": 12, "theatre of blood hard mode": 3,
+            "tombs of amascut expert mode": 9, "corrupted gauntlet": 77, "gauntlet": 5,
+            "tztok-jad": 2, "k'ril tsutsaroth": 31, "the nightmare": 6, "phosani's nightmare": 1,
+            "leviathan": 8, "lunar chest": 14,
+        })
+        assert got == {
+            "zulrah": 40, "chambers_of_xeric_challenge_mode": 12, "theatre_of_blood_hard_mode": 3,
+            "tombs_of_amascut_expert": 9, "the_corrupted_gauntlet": 77, "the_gauntlet": 5,
+            "tztok_jad": 2, "kril_tsutsaroth": 31, "nightmare": 6, "phosanis_nightmare": 1,
+            "the_leviathan": 8, "lunar_chests": 14,
+        }
+
+    def test_things_that_are_not_hiscores_bosses_are_dropped(self):
+        assert client_boss_scores({"ardougne rooftop": 900, "brimstone chest": 30, "agility arena": 4}) == {}
+
+    def test_junk_counts_and_nothing_at_all(self):
+        assert client_boss_scores({"zulrah": 0, "vorkath": True, "nex": "7"}) == {}
+        assert client_boss_scores(None) == {}

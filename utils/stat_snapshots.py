@@ -97,6 +97,49 @@ def _activities_of(row) -> Dict[str, int]:
     return scores
 
 
+# Names the game uses in its "kill count is" chat line (which is what the
+# client stores) that are not the hiscores' name for the same counter.
+_CLIENT_BOSS_ALIASES = {
+    "corrupted_gauntlet": "the_corrupted_gauntlet",
+    "corrupted_hunllef": "the_corrupted_gauntlet",
+    "gauntlet": "the_gauntlet",
+    "crystalline_hunllef": "the_gauntlet",
+    "the_nightmare": "nightmare",
+    "lunar_chest": "lunar_chests",
+    "barrows": "barrows_chests",
+}
+
+
+def client_boss_scores(kill_counts: Optional[Mapping[str, Any]]) -> Dict[str, int]:
+    """Kill counts sent from the player's client (``kill_counts`` on a state
+    sync: RuneLite's stored "kill count is" values), keyed by hiscores metric.
+
+    These are the game's own numbers and are current mid-session, which the
+    hiscores are not. Only names that resolve to a boss the hiscores track are
+    kept; agility laps, chests and the rest that Chat Commands also stores
+    under the same group are dropped. A name is tried as it is, through the
+    alias table, and with a leading "the" added or removed.
+    """
+    try:
+        from utils import efficiency
+        from utils.osrs_hiscores import metric_slug
+
+        bosses = set(efficiency.tables()["bosses"])
+    except Exception:
+        return {}
+    out: Dict[str, int] = {}
+    for name, count in (kill_counts or {}).items():
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            continue
+        slug = metric_slug(name)
+        slug = _CLIENT_BOSS_ALIASES.get(slug, slug)
+        if slug not in bosses:
+            slug = slug[4:] if slug.startswith("the_") else f"the_{slug}"
+        if slug in bosses and count > out.get(slug, 0):
+            out[slug] = count
+    return out
+
+
 def plugin_boss_scores(db_session, player_id: int,
                        metric_for: Callable[[str], Optional[str]]) -> Dict[str, int]:
     """Boss kill counts the plugin has reported, keyed by hiscores metric.

@@ -125,6 +125,30 @@ def parse_skills(raw: Any) -> Dict[str, int]:
     return out
 
 
+MAX_KILL_COUNTS = 300
+MAX_KILL_COUNT = 10_000_000
+
+
+def parse_kill_counts(raw: Any) -> Dict[str, int]:
+    """Boss name -> kill count, as RuneLite's Chat Commands plugin stored them
+    on the player's client (plugin 6.1.30+). Names are kept as sent, lowered;
+    turning them into metrics is ``utils.stat_snapshots.client_boss_scores``.
+    Bounded like every other part of a snapshot: it is client input."""
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, int] = {}
+    for name, count in raw.items():
+        if len(out) >= MAX_KILL_COUNTS:
+            break
+        if not isinstance(name, str) or not name.strip():
+            continue
+        value = _coerce_int(count)
+        if value is None or value <= 0 or value > MAX_KILL_COUNT:
+            continue
+        out[name.strip().lower()[:64]] = value
+    return out
+
+
 def count_completed_combat_achievements(varps: Dict[int, int]) -> int:
     """Number of completed combat achievement tasks.
 
