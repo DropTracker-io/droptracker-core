@@ -535,6 +535,10 @@ async def load_config():
 # on the only published build to go fetch a release that did not exist.)
 # 2026-08-24: hub pin 87d66f3 -> version 6.0, and 6.0 clients are in the wild
 # (61 accounts wrote player_state, which only v6's StateSyncService can write).
+# The served value is normally the group-2 row `plugin_latest_version`, which
+# utils/plugin_release.py now moves forward by itself when the Plugin Hub has
+# actually released a newer version. This constant is only the fallback for a
+# database with no such row.
 PLUGIN_LATEST_VERSION_FALLBACK = "6.0"
 PLUGIN_MINIMUM_VERSION_FALLBACK = "5.0.0"
 

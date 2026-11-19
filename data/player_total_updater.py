@@ -582,6 +582,72 @@ async def hiscores_poller_loop():
         await sleep_with_watchdog_heartbeats(1 if busy else 60)
 
 
+def _plugin_release_check() -> dict:
+    """One blocking pass of utils.plugin_release.sync, committed if it changed."""
+    from db.models.base import Session
+    from utils import plugin_release
+
+    session = Session()
+    try:
+        result = plugin_release.sync(session, apply=True)
+        if result["changed"]:
+            session.commit()
+        return result
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+async def _dm_owner(content: str) -> None:
+    """Best-effort DM to the owner(s). Never raises."""
+    try:
+        from utils.discord_rest import DiscordRest
+
+        token = os.getenv("BOT_TOKEN", "")
+        owners = [p.strip() for p in (os.getenv("WEB_SUPERADMIN_DISCORD_IDS", "") or "").split(",") if p.strip()]
+        if not token or not owners:
+            return
+        async with DiscordRest(token) as rest:
+            for owner in owners:
+                await rest.send_dm(owner, {"content": content[:1900]})
+    except Exception as e:
+        print(f"plugin release DM failed: {e}")
+
+
+async def plugin_release_loop():
+    """Advertise the plugin version the Plugin Hub has actually released
+    (utils/plugin_release.py), checked every 15 minutes. Moves the advertised
+    version forward only when the hub pins a newer one AND players are
+    already running it, so nobody is told to fetch a build that is not out."""
+    from utils.external_calls import external_apis_allowed
+
+    if not external_apis_allowed():
+        print("Skipping plugin release loop on dev instance")
+        return
+    last_reason = None
+    while not shutdown_event.is_set():
+        try:
+            result = await asyncio.to_thread(_plugin_release_check)
+            if result["changed"]:
+                line = (f"plugin_release: now advertising {result['pinned']} "
+                        f"(was {result['advertised']}; hub commit {str(result['commit'])[:7]}, "
+                        f"{result['players']} players already on it)")
+                print(line)
+                await _dm_owner(
+                    f"🟢 **Plugin {result['pinned']} is released.** The server now tells older "
+                    f"clients to update (was advertising {result['advertised']}). "
+                    f"{result['players']} players are already on it.")
+            elif result["reason"] != last_reason:
+                # Say why nothing changed once per reason, not every 15 minutes.
+                print(f"plugin_release: {result['reason']}")
+            last_reason = result["reason"]
+        except Exception as e:
+            print(f"Error in plugin release loop: {e}")
+        await sleep_with_watchdog_heartbeats(900)
+
+
 async def github_update_loop():
     """Enhanced github_update_loop with watchdog notifications"""
     if os.getenv("STATUS") == "dev" or os.getenv("STATE") == "dev":
@@ -651,6 +717,7 @@ async def setup_background_tasks():
     app.item_totals_task = asyncio.create_task(item_totals_loop())
     app.rank_milestones_task = asyncio.create_task(rank_milestones_loop())
     app.hiscores_poller_task = asyncio.create_task(hiscores_poller_loop())
+    app.plugin_release_task = asyncio.create_task(plugin_release_loop())
     app_logger.log(log_type="access", data=f"Started background tasks", app_name="player_updates", description="setup_background_tasks")
 
 async def get_all_groups(session_to_use = None):
@@ -700,6 +767,13 @@ async def cleanup_background_tasks():
         app.rank_milestones_task.cancel()
         try:
             await app.rank_milestones_task
+        except asyncio.CancelledError:
+            pass
+
+    if hasattr(app, 'plugin_release_task'):
+        app.plugin_release_task.cancel()
+        try:
+            await app.plugin_release_task
         except asyncio.CancelledError:
             pass
 
