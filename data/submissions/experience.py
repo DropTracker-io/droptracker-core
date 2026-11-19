@@ -362,6 +362,36 @@ def _parse_snapshot_skills(experience_data) -> list[dict]:
     return out
 
 
+def _record_stat_snapshot(session, player_id, exp_entry) -> bool:
+    """Keep the stat history (player_stat_snapshots) current from an XP
+    snapshot. True if a row was written.
+
+    The plugin sends one of these at login, at logout and on a world hop, on
+    either transport, to every player who tracks experience: exact XP straight
+    from the game client, which the hiscores will not show until the player
+    logs out. Until 2026-11-19 only the separate account-progress sync fed the
+    history, so about a third of plugin users (1,260 a day) sent us their XP
+    and it never reached their history.
+
+    Runs inside the caller's transaction in a SAVEPOINT and never raises: the
+    snapshot's own job (stored XP, event progress) must not depend on it.
+    """
+    try:
+        from utils.stat_snapshots import plugin_boss_scores, record_plugin_snapshot
+        from utils.xp_history import skills_from_row
+
+        def boss_scores():
+            from utils.wiseoldman import wom_boss_metric
+
+            return plugin_boss_scores(session, player_id, wom_boss_metric)
+
+        session.flush()
+        return record_plugin_snapshot(session, player_id, skills_from_row(exp_entry),
+                                      activities=boss_scores)
+    except Exception:
+        return False
+
+
 def _is_snapshot_submission(experience_data) -> bool:
     """True for full-snapshot ``experience_update`` submissions."""
     sub_type = str(experience_data.get("type") or "").strip().lower()
@@ -581,6 +611,9 @@ async def experience_processor(experience_data, external_session=None):
 
             if total_level > 0 and (not player.total_level or total_level > player.total_level):
                 player.total_level = total_level
+
+            stage = "snapshot_history"
+            _record_stat_snapshot(session, player_id, exp_entry)
 
             stage = "snapshot_commit"
             session.commit()

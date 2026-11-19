@@ -147,3 +147,35 @@ class TestReaders:
         now = datetime(2026, 11, 10, 12)
         baselines, earliest = xp_baselines(s, PID, now)
         assert gains_since(_xp(), baselines, earliest, now) == {"day": None, "week": None, "month": None}
+
+
+class TestXpSnapshotSubmissionsFeedTheHistory:
+    """The plugin's login/logout XP snapshots reach player_stat_snapshots."""
+
+    def _exp_row(self, **xp):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(**{**{skill: 0 for skill in SKILLS}, "hitpoints": 1154, **xp})
+
+    def _hook(self):
+        import importlib
+
+        return importlib.import_module("data.submissions.experience")._record_stat_snapshot
+
+    def test_a_snapshot_writes_a_plugin_row(self, s):
+        assert self._hook()(s, PID, self._exp_row(attack=5000)) is True
+        (row,) = _rows(s)
+        assert row.source == SOURCE_PLUGIN and decode_skills(row.skills)["attack"] == 5000
+
+    def test_an_unchanged_snapshot_writes_nothing(self, s):
+        hook = self._hook()
+        hook(s, PID, self._exp_row(attack=5000))
+        assert hook(s, PID, self._exp_row(attack=5000)) is False
+        assert len(_rows(s)) == 1
+
+    def test_it_never_raises_into_the_submission(self):
+        class Broken:
+            def flush(self):
+                raise RuntimeError("database went away")
+
+        assert self._hook()(Broken(), PID, self._exp_row(attack=5000)) is False
