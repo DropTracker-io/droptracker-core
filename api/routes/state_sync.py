@@ -97,11 +97,13 @@ async def state_sync():
     if not acc_hash:
         return jsonify({"error": "acc_hash is required"}), 422
 
+    started = time.monotonic()
     try:
         result = await asyncio.to_thread(_apply_snapshot, player_name, str(acc_hash), snapshot)
     except Exception as exc:
         print(f"/state/sync failed: {exc}")
         return jsonify({"error": "Could not apply snapshot"}), 500
+    _record_sync_cost(snapshot.get("source"), len(raw), time.monotonic() - started)
 
     if result is None:
         # Unknown account: identity is established by the normal submission
@@ -110,6 +112,31 @@ async def state_sync():
         return jsonify({"accepted": False, "reason": "unknown_player"}), 202
 
     return jsonify({"accepted": True, **result}), 200
+
+
+def _record_sync_cost(source, body_bytes: int, seconds: float) -> None:
+    """Count what progress syncs cost, per hour and per trigger, in Redis hash
+    ``state_sync:cost:{YYYYMMDDHH}`` (kept three days): how many, how long
+    they took in total, how many were slow, how many bytes. Read it before
+    changing how often the plugin syncs. Never raises."""
+    try:
+        from utils.redis import redis_client
+
+        conn = redis_client.client
+        key = f"state_sync:cost:{datetime.utcnow().strftime('%Y%m%d%H')}"
+        trigger = str(source or "unknown")[:20]
+        ms = int(seconds * 1000)
+        pipe = conn.pipeline()
+        pipe.hincrby(key, f"n:{trigger}", 1)
+        pipe.hincrby(key, f"ms:{trigger}", ms)
+        pipe.hincrby(key, "bytes", int(body_bytes))
+        pipe.hincrby(key, "slow_250ms" if ms >= 250 else "fast", 1)
+        if ms >= 1000:
+            pipe.hincrby(key, "slow_1s", 1)
+        pipe.expire(key, 3 * 86400)
+        pipe.execute()
+    except Exception:
+        pass
 
 
 # Reference data, so it is read once per process rather than per snapshot.
