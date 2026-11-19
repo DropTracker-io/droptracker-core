@@ -79,6 +79,9 @@ _PROCESSORS = {
     "clan_chat": "clan_chat_processor",
     # Plugin settings snapshot for debugging (JSON in the embed description).
     "config_snapshot": "config_snapshot_processor",
+    # The player logged out; the hiscores are read shortly after. Stores
+    # nothing. Main world only (the plugin sends it for nothing else).
+    "logout": "logout_processor",
     # A player kill. The plugin sends it as a "drop" bundle tagged
     # source_type=pvp; data.submissions.pvp.collapse_pvp_bundle folds that into
     # one pvp_kill before routing, so it never reaches the NPC drop pipeline.
@@ -106,12 +109,14 @@ SEASONAL_TYPES = frozenset({
 
 
 # Types stored from hardcore worlds: everything with a processor except the
-# clan relays (main-world chat, bridged into Discord) and the plugin settings
-# snapshot (a debugging aid that says nothing about the world).
+# clan relays (main-world chat, bridged into Discord), the plugin settings
+# snapshot (a debugging aid that says nothing about the world) and the logout
+# notice (about the main game's hiscores).
 HARDCORE_TYPES = SUPPORTED_TYPES - frozenset({
     "clan_broadcast",
     "clan_chat",
     "config_snapshot",
+    "logout",
 })
 
 

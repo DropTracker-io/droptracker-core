@@ -33,8 +33,9 @@ looked up, when a reading last changed, when the name was last not found) and
 "Covered by the plugin" means the plugin sent the player's STATS within the
 last 20 minutes (player_state.last_synced_at), not that the plugin was seen.
 
-The plugin (6.1.29+) reports logouts to POST /state/logout; `note_logout`
-books a read 90 seconds later, at the very front of the queue. Older plugins
+The plugin (6.1.29+) reports logouts as a "logout" submission, on the API or
+through the Discord webhooks like everything else (data/submissions/logout.py);
+`note_logout` books a read 90 seconds later, at the very front of the queue. Older plugins
 are caught by the session-end scan instead (20 minutes after they go quiet).
 """
 from __future__ import annotations
@@ -542,7 +543,7 @@ LOGOUT_MIN_GAP = 60                      # at most one logout per player per min
 
 
 def note_logout(redis_conn, player_id: int, now_ts: Optional[float] = None) -> bool:
-    """The plugin says this player just logged out (POST /state/logout).
+    """The plugin says this player just logged out (a "logout" submission).
 
     The hiscores change at logout, so this is the one moment a reading is
     guaranteed to be worth taking. The read is booked a little later, to give
