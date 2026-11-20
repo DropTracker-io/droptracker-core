@@ -121,6 +121,15 @@ class TestEntryEmbed:
             "url": "https://cdn.example/p.png"}
         assert "image" not in self._embed(proof_url="http://cdn.example/p.png")
 
+    def test_bond_wording(self):
+        assert gbd.bonds(1) == "1 bond" and gbd.bonds(-3) == "3 bonds"
+        assert gbd.bonds_signed(-3) == "-3 bonds"
+        assert gbd.activity_line("payout", "staff", -2, "Winner", asset="bond") == (
+            "**Winner** was paid **2 bonds**")
+        e = self._embed(kind="donation", source="staff", amount=1, balance=4, asset="bond")
+        assert e["description"] == "**Zezima** donated **1 bond**."
+        assert e["fields"][0] == {"name": "Bond balance", "value": "4 bonds", "inline": True}
+
     def test_no_em_dashes_in_copy(self):
         e = self._embed()
         assert "—" not in str(e)
@@ -187,6 +196,28 @@ class TestBoardEmbed:
         e = gbd.board_embed(group_id=1, group_name="V", summary=_summary(),
                             recent=recent, show_names=True)
         assert all(len(f["value"]) <= 1024 for f in e["fields"])
+
+    def test_bonds_line_only_once_the_clan_has_bonds(self):
+        e = gbd.board_embed(group_id=1, group_name="V", summary=_summary(), recent=[],
+                            show_names=True)
+        assert "Bond" not in str(e)
+        e = gbd.board_embed(group_id=1, group_name="V",
+                            summary=_summary(bonds={"balance": 0, "in": 0, "out": 0, "count": 0}),
+                            recent=[], show_names=True)
+        assert "Bond" not in str(e)
+        e = gbd.board_embed(group_id=1, group_name="V",
+                            summary=_summary(bonds={"balance": 12, "in": 15, "out": 3, "count": 4}),
+                            recent=[], show_names=True)
+        assert e["description"] == "Balance: **9,000,000 gp**\nBonds: **12**"
+
+    def test_bonds_only_bank_is_not_empty(self):
+        e = gbd.board_embed(group_id=1, group_name="V",
+                            summary=_summary(totals={"by_kind": {}}, top_donors=[], donor_count=0,
+                                             bonds={"balance": 2, "in": 2, "out": 0, "count": 1}),
+                            recent=[dict(_RECENT[0], asset="bond", amount=2, source="staff")],
+                            show_names=True)
+        assert e["description"] == "Balance: **0 gp**\nBonds: **2**"
+        assert e["fields"][-1]["value"] == "<t:1790000000:R> **Zezima** donated **2 bonds**"
 
     def test_hash_follows_content_and_channel(self):
         e = gbd.board_embed(group_id=1, group_name="V", summary=_summary(),
@@ -270,7 +301,8 @@ def queue(monkeypatch):
     )
     outbox = SimpleNamespace(enqueue=lambda _s, **kw: state["sent"].append(kw))
     monkeypatch.setitem(sys.modules, "services.discord_outbox", outbox)
-    monkeypatch.setattr(gbd, "_balance", lambda _s, gid, neutral: 9_000_000)
+    monkeypatch.setattr(gbd, "_balance",
+                        lambda _s, gid, neutral, asset="gp": 12 if asset == "bond" else 9_000_000)
     return state
 
 
@@ -319,6 +351,13 @@ class TestQueueEntryPosts:
         pot = _row(id=6, kind="event_transfer", source="staff", amount=-5, rsn=None, event_id=12)
         gbd.queue_entry_posts(_Session(players=[(12, "BOTW")]), 363, [pot])
         assert "the **BOTW** prize pot" in queue["sent"][1]["embed"]["description"]
+
+    def test_bond_entry_posts_bonds_and_the_bond_balance(self, queue):
+        gbd.queue_entry_posts(_Session(), 363, [_row(asset="bond", source="staff", amount=3)])
+        embed = queue["sent"][0]["embed"]
+        assert embed["description"] == "**Zezima** donated **3 bonds**."
+        assert embed["fields"] == [{"name": "Bond balance", "value": "12 bonds", "inline": True}]
+        assert "gp" not in str(embed)
 
     def test_never_raises(self, queue, monkeypatch):
         def _boom(*a, **k):

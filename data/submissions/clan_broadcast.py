@@ -451,6 +451,7 @@ def _process_coffer(session, use_external_session, broadcast_data, relayer, clan
                     row = GroupBankEntry(
                         group_id=gid,
                         kind=kind,
+                        asset="gp",  # the coffer only ever holds GP
                         amount=amount,
                         status=status,
                         source="coffer",

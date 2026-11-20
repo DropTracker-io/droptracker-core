@@ -55,6 +55,53 @@ class TestSignedAmount:
             gbs.signed_amount("heist", 10)
 
 
+class TestBonds:
+    """Suggestion #253: bonds are their own balance, a count, never GP."""
+
+    def test_signs_follow_the_kind(self):
+        assert gbs.signed_amount("donation", 3, "bond") == 3
+        assert gbs.signed_amount("payout", 2, "bond") == -2
+        assert gbs.signed_amount("withdrawal", 1, "bond") == -1
+        assert gbs.signed_amount("adjustment", -4, "bond") == -4
+
+    def test_cap_and_whole_numbers(self):
+        assert gbs.signed_amount("donation", gbs.MAX_BOND_AMOUNT, "bond") == gbs.MAX_BOND_AMOUNT
+        for value in (0, -1, gbs.MAX_BOND_AMOUNT + 1, 1.5, "3", True):
+            with pytest.raises(gbs.BankRuleError):
+                gbs.signed_amount("donation", value, "bond")
+        with pytest.raises(gbs.BankRuleError, match="bonds"):
+            gbs.signed_amount("adjustment", 0, "bond")
+        # A GP-sized figure typed into the bonds field is refused.
+        with pytest.raises(gbs.BankRuleError):
+            gbs.signed_amount("donation", 5_000_000, "bond")
+
+    @pytest.mark.parametrize("kind", ["holder_transfer", "event_transfer"])
+    def test_gp_only_kinds_refused(self, kind):
+        with pytest.raises(gbs.BankRuleError) as e:
+            gbs.signed_amount(kind, 1, "bond")
+        assert e.value.title == "Not for bonds"
+
+    def test_asset_defaults_to_gp(self):
+        assert gbs.check_asset(None) == "gp"
+        assert gbs.check_asset("bond") == "bond"
+        with pytest.raises(gbs.BankRuleError):
+            gbs.check_asset("platinum")
+        # GP keeps its own (much larger) limit.
+        assert gbs.signed_amount("donation", 5_000_000) == 5_000_000
+
+    def test_bond_totals(self):
+        out = gbs.bond_totals([("donation", 12, 3), ("payout", -5, 2),
+                               ("withdrawal", -1, 1), ("adjustment", 2, 1)])
+        assert out == {"balance": 8, "in": 12, "out": 6, "count": 7}
+        assert gbs.bond_totals([]) == {"balance": 0, "in": 0, "out": 0, "count": 0}
+
+    def test_constants_match_the_model(self):
+        from db.models import group_bank as model
+
+        assert gbs.BANK_ASSETS == model.BANK_ASSETS
+        assert set(gbs.BOND_KINDS) <= set(gbs.RECORDABLE_KINDS)
+
+
 class TestCheckTransition:
     @pytest.mark.parametrize("old,new", [
         ("pending", "confirmed"),
@@ -410,7 +457,7 @@ class _Rec:
     id = group_id = kind = status = player_id = rsn = amount = None
     created_at = event_buyin_id = event_id = source = user_id = None
     note = review_note = proof_url = confirmed_at = event_label = None
-    holder_player_id = holder_rsn = None
+    holder_player_id = holder_rsn = asset = None
 
     def __init__(self, **kw):
         self.id = None
@@ -435,7 +482,7 @@ def _entry(**kw):
         source="member", player_id=None, rsn="Zez", user_id=None, note=None,
         review_note=None, proof_url=None, event_id=None, event_buyin_id=None,
         event_label=None, created_at=None, confirmed_at=None, acted_by_user_id=None,
-        holder_player_id=None, holder_rsn=None,
+        holder_player_id=None, holder_rsn=None, asset="gp",
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -600,6 +647,82 @@ class TestRecordEntry:
             json={"kind": "payout", "amount": 10, "rsn": "x", "event_id": 1},
         )
         assert r.status_code == 404
+
+
+class TestRecordBonds:
+    async def test_bond_donation_stored_as_a_count(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "donation", "asset": "bond", "amount": 3, "rsn": "Sponsor"},
+        )
+        assert r.status_code == 200, await r.get_data()
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert (row.asset, row.amount, row.status) == ("bond", 3, "confirmed")
+        audit = next(a for a in s.added if isinstance(a, _RecAudit))
+        assert '"asset": "bond"' in audit.after
+        assert s.queued_posts == [row]
+
+    async def test_bond_payout_negative(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        r = await client.post(
+            "/api/v1/groups/42/bank/entries",
+            json={"kind": "payout", "asset": "bond", "amount": 2, "rsn": "Winner"},
+        )
+        assert r.status_code == 200
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert (row.asset, row.amount) == ("bond", -2)
+
+    async def test_gp_is_the_default_asset(self, client, monkeypatch):
+        s = _S([_GROUP])
+        _wire(monkeypatch, s)
+        await client.post("/api/v1/groups/42/bank/entries",
+                          json={"kind": "donation", "amount": 10, "rsn": "x"})
+        row = next(a for a in s.added if isinstance(a, _RecEntry))
+        assert row.asset == "gp"
+
+    @pytest.mark.parametrize("body", [
+        {"kind": "holder_transfer", "asset": "bond", "amount": 1, "rsn": "a", "holder_rsn": "b"},
+        {"kind": "withdrawal", "asset": "bond", "amount": 1, "holder_rsn": "Mahj"},
+        {"kind": "donation", "asset": "bond", "amount": 200_000, "rsn": "x"},
+        {"kind": "donation", "asset": "platinum", "amount": 1, "rsn": "x"},
+    ])
+    async def test_refused_before_touching_the_db(self, client, monkeypatch, body):
+        s = _S()
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/groups/42/bank/entries", json=body)
+        assert r.status_code == 422, await r.get_data()
+
+    async def test_bonds_cannot_fund_an_event(self, client, monkeypatch):
+        s = _S()
+        _wire(monkeypatch, s)
+        r = await client.post("/api/v1/groups/42/bank/transfer",
+                              json={"event_name": "Weekly", "amount": 1, "asset": "bond"})
+        assert r.status_code == 422
+
+    async def test_edit_keeps_the_bond_unit_and_asset(self, client, monkeypatch):
+        row = _entry(asset="bond", amount=3, status="confirmed", confirmed_at=datetime(2026, 1, 1))
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"amount": 5})
+        assert r.status_code == 200, await r.get_data()
+        assert row.amount == 5
+        for body in ({"amount": 200_000}, {"asset": "gp"}, {"holder_rsn": "Mahj"}):
+            s = _S([_entry(asset="bond", amount=3, status="confirmed")])
+            _wire(monkeypatch, s)
+            r = await client.patch("/api/v1/groups/42/bank/entries/9", json=body)
+            assert r.status_code == 422, body
+            assert not s.committed
+
+    async def test_bond_rows_review_like_gp(self, client, monkeypatch):
+        row = _entry(asset="bond", amount=2, status="pending")
+        s = _S([row])
+        _wire(monkeypatch, s)
+        r = await client.patch("/api/v1/groups/42/bank/entries/9", json={"status": "confirmed"})
+        assert r.status_code == 200
+        assert row.status == "confirmed" and s.queued_posts == [row]
 
 
 # --------------------------------------------------------------------------- #
@@ -1069,7 +1192,8 @@ class TestTransfer:
 # public read
 # --------------------------------------------------------------------------- #
 class TestGetBank:
-    def _wire_read(self, monkeypatch, s, *, viewer=None, role=None, show=(True, True), neutral=False):
+    def _wire_read(self, monkeypatch, s, *, viewer=None, role=None, show=(True, True), neutral=False,
+                   bonds=()):
         _wire(monkeypatch, s)
         # Reads order by real columns (created_at.desc()): keep a mock class.
         monkeypatch.setattr(gb, "GroupBankEntry", MagicMock())
@@ -1085,6 +1209,7 @@ class TestGetBank:
             "coffer_withdrawals_neutral": neutral,
             "held_outside_coffer": 5_000 if neutral else 0,
             "holders": [{"player_id": None, "rsn": "Mahj", "held": 5_000}] if neutral else [],
+            "bonds": gbs.bond_totals(bonds),
         })
 
     async def test_public_headline(self, client, monkeypatch):
@@ -1121,6 +1246,22 @@ class TestGetBank:
             {"player_id": None, "rsn": "Mahj", "held": {"value": 5_000, "value_formatted": body["holders"][0]["held"]["value_formatted"]}}
         ]
         assert clauses == [True]
+
+    async def test_bonds_reported_on_their_own(self, client, monkeypatch):
+        recent = [_entry(status="confirmed", asset="bond", amount=3)]
+        s = _S([_GROUP], recent)
+        self._wire_read(monkeypatch, s, bonds=[("donation", 5, 2), ("payout", -1, 1)])
+        body = await (await client.get("/api/v1/groups/42/bank")).get_json()
+        assert body["bonds"] == {"balance": 4, "in": 5, "out": 1, "count": 3}
+        # The GP headline is untouched by bonds.
+        assert body["balance"]["value"] == 8_000
+        assert body["recent"][0]["asset"] == "bond"
+
+    async def test_no_bonds_reads_as_zero(self, client, monkeypatch):
+        s = _S([_GROUP], [])
+        self._wire_read(monkeypatch, s)
+        body = await (await client.get("/api/v1/groups/42/bank")).get_json()
+        assert body["bonds"] == {"balance": 0, "in": 0, "out": 0, "count": 0}
 
     async def test_hidden_from_public_when_turned_off(self, client, monkeypatch):
         s = _S([_GROUP])
@@ -1176,8 +1317,9 @@ class TestSummarySQL:
             _g("withdrawal", "coffer", -4_000, 1, rsn="Mahj"),
             _g("payout", "staff", -1_000, 1, rsn="W", hrsn="Mahj"),
         ]
-        # The grouped rows, then current names for the tracked accounts.
-        s = _S(grouped, [(5, "New")])
+        # The grouped GP rows, the bond sums, then current names for the
+        # tracked accounts.
+        s = _S(grouped, [("donation", 12, 3), ("payout", -2, 1)], [(5, "New")])
         monkeypatch.setattr(gb, "GroupBankEntry", MagicMock())
         monkeypatch.setattr(gb, "_coffer_withdrawals_neutral", lambda s, gid: True)
         out = gb._summary(s, 42)
@@ -1187,6 +1329,50 @@ class TestSummarySQL:
         assert out["totals"]["balance"] == 9_000
         assert out["totals"]["paid_out"] == 1_000
         assert out["top_donors"][0]["rsn"] == "New" and out["donor_count"] == 1
+        assert out["bonds"] == {"balance": 10, "in": 12, "out": 2, "count": 4}
+
+    def test_gp_and_bond_queries_filter_on_asset(self, monkeypatch):
+        """A bond row leaking into a GP sum is the main risk (suggestion #253):
+        the GP roll-up must filter asset = 'gp', the bond sums asset = 'bond'."""
+        from db.models.group_bank import GroupBankEntry
+
+        seen = []
+
+        class _Spy(_Q):
+            def filter(self, *clauses, **k):
+                seen.append([str(c.compile(compile_kwargs={"literal_binds": True}))
+                             for c in clauses])
+                return self
+
+        class _SpyS(_S):
+            def query(self, *a, **k):
+                return _Spy(self._batches.pop(0))
+
+        monkeypatch.setattr(gb, "GroupBankEntry", GroupBankEntry)
+        monkeypatch.setattr(gb, "_coffer_withdrawals_neutral", lambda s, gid: False)
+        gb._summary(_SpyS([], []), 42)
+        gp_filters, bond_filters = seen
+        assert any("asset = 'gp'" in c for c in gp_filters)
+        assert any("asset = 'bond'" in c for c in bond_filters)
+
+    def test_outside_events_are_gp_only(self, monkeypatch):
+        from db.models.group_bank import GroupBankEntry
+
+        seen = []
+
+        class _Spy(_Q):
+            def filter(self, *clauses, **k):
+                seen.extend(str(c.compile(compile_kwargs={"literal_binds": True}))
+                            for c in clauses)
+                return self
+
+        class _SpyS(_S):
+            def query(self, *a, **k):
+                return _Spy(self._batches.pop(0))
+
+        monkeypatch.setattr(gb, "GroupBankEntry", GroupBankEntry)
+        gb._outside_events(_SpyS([]), 42)
+        assert "group_bank_entries.asset = 'gp'" in seen
 
 
 class TestListEntries:

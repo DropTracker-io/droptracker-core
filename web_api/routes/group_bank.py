@@ -3,7 +3,7 @@
   GET    /api/v1/groups/{id}/bank                      -> headline + donors (public)
   GET    /api/v1/groups/{id}/bank/entries              -> full ledger page (admin)
          ?status=pending|confirmed|rejected|void|all&before_id=&limit=
-  POST   /api/v1/groups/{id}/bank/entries  { kind, amount, player_id?|rsn?,
+  POST   /api/v1/groups/{id}/bank/entries  { kind, amount, asset?, player_id?|rsn?,
                                              holder_player_id?|holder_rsn?,
                                              note?, proof_key?, event_id?,
                                              status?, created_at? } -> { id }
@@ -36,6 +36,13 @@ by whoever withdrew it. Staff see who holds what (``holders`` on the
 headline); ``held_outside_coffer_total`` is its sum. The rules are
 ``services/group_bank.roll_up`` and ``is_held_move``.
 
+**Bonds** (suggestion #253, web164a): ``asset: "bond"`` books a row in Old
+School bonds instead of GP. ``amount`` is then a count of bonds, signed like
+GP, and the bond balance is its own number (``bonds`` on the headline); it is
+never converted into GP. Every GP sum here filters ``asset == "gp"`` (see
+``_gp``). Bonds are only donated, withdrawn, paid out or adjusted: no holders,
+no holder transfers, no event funding. A row's asset never changes.
+
 ``created_at`` (unix seconds) backdates an entry to when the GP actually
 moved, so a clan can enter its history; the ledger is ordered by it.
 
@@ -66,6 +73,9 @@ from services.group_bank import (
     NAMED_KINDS,
     RECORDABLE_KINDS,
     BankRuleError,
+    bond_totals,
+    check_asset,
+    check_asset_kind,
     check_holder,
     check_transition,
     clean_text,
@@ -126,6 +136,7 @@ def _is_id(value) -> bool:
 def _snapshot(e: GroupBankEntry) -> str:
     return json.dumps({
         "kind": e.kind,
+        "asset": _asset(e),
         "amount": int(e.amount or 0),
         "status": e.status,
         "source": e.source,
@@ -191,6 +202,23 @@ def _coffer_withdrawals_neutral(s, group_id: int) -> bool:
     from utils import group_config as gc
 
     return gc.is_truthy(gc.get(s, group_id, "bank_coffer_withdrawals_neutral", default=None))
+
+
+def _asset(e) -> str:
+    """A row's asset; rows read before web164a carry none and are GP."""
+    return getattr(e, "asset", None) or "gp"
+
+
+def _gp():
+    """Filter clause keeping GP rows only. Every GP total, donor ranking,
+    holder roll-up and balance must apply it, or a bond row counts as GP."""
+    return GroupBankEntry.asset == "gp"
+
+
+def _has_holder_fields(body: dict) -> bool:
+    return body.get("holder_player_id") is not None or bool(
+        str(body.get("holder_rsn") or "").strip()
+    )
 
 
 def _on_balance(neutral: bool):
@@ -263,6 +291,8 @@ def _entry_row(e: GroupBankEntry, names: dict, events: dict, users: dict, can_ma
     return {
         "id": e.id,
         "kind": e.kind,
+        # "bond" rows count bonds, not GP (suggestion #253).
+        "asset": _asset(e),
         "amount": money(int(e.amount or 0)),
         "status": e.status,
         "source": e.source,
@@ -318,12 +348,21 @@ def _summary(s, group_id: int) -> dict:
             GroupBankEntry.holder_player_id, GroupBankEntry.holder_rsn,
             func.sum(GroupBankEntry.amount), func.count(GroupBankEntry.id),
         )
-        .filter(GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed")
+        .filter(GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed",
+                _gp())
         .group_by(
             GroupBankEntry.kind, GroupBankEntry.source,
             GroupBankEntry.player_id, GroupBankEntry.rsn,
             GroupBankEntry.holder_player_id, GroupBankEntry.holder_rsn,
         )
+        .all()
+    )
+    # Bonds are their own balance (suggestion #253): a separate count.
+    bond_sums = (
+        s.query(GroupBankEntry.kind, func.sum(GroupBankEntry.amount), func.count(GroupBankEntry.id))
+        .filter(GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed",
+                GroupBankEntry.asset == "bond")
+        .group_by(GroupBankEntry.kind)
         .all()
     )
     pids = {r[2] for r in grouped if r[2] is not None} | {r[4] for r in grouped if r[4] is not None}
@@ -340,6 +379,7 @@ def _summary(s, group_id: int) -> dict:
         "coffer_withdrawals_neutral": neutral,
         "held_outside_coffer": rolled["held"],
         "holders": rolled["holders"],
+        "bonds": bond_totals(bond_sums),
     }
 
 
@@ -356,6 +396,7 @@ def _outside_events(s, group_id: int) -> list:
             GroupBankEntry.kind == "event_transfer",
             GroupBankEntry.status == "confirmed",
             GroupBankEntry.event_label.isnot(None),
+            _gp(),
         )
         .group_by(GroupBankEntry.event_label)
         .order_by(last.desc())
@@ -415,8 +456,10 @@ async def get_bank(group_id: int):
             summary = _summary(s, group_id)
             totals = summary["totals"]
             neutral = summary["coffer_withdrawals_neutral"]
+            bonds = summary["bonds"]
             # GP moving between the coffer and its holders isn't clan
-            # activity worth listing.
+            # activity worth listing. Bond rows are activity too (each
+            # carries its asset).
             recent_q = s.query(GroupBankEntry).filter(
                 GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed",
                 _on_balance(neutral),
@@ -446,6 +489,12 @@ async def get_bank(group_id: int):
                     {**h, "held": money(h["held"])} for h in summary["holders"]
                 ] if can_manage else None,
                 "adjustment_total": money(totals["adjustments"]),
+                # Bonds, counted on their own (suggestion #253). Plain counts,
+                # not GP envelopes; count = confirmed bond rows.
+                "bonds": {
+                    "balance": bonds["balance"], "in": bonds["in"],
+                    "out": bonds["out"], "count": bonds["count"],
+                },
                 "donation_count": totals["donation_count"],
                 "donor_count": summary["donor_count"],
                 "top_donors": [
@@ -453,7 +502,8 @@ async def get_bank(group_id: int):
                 ] if donors_visible else None,
                 "recent": _decorate(s, recent_rows, can_manage) if donors_visible else None,
                 "pending_count": _pending_count(s, group_id) if can_manage else 0,
-                "has_activity": bool(totals["by_kind"]) or bool(summary["holders"]),
+                "has_activity": (bool(totals["by_kind"]) or bool(summary["holders"])
+                                 or bool(bonds["count"])),
                 "can_manage": can_manage,
             }
 
@@ -556,7 +606,11 @@ async def record_bank_entry(group_id: int):
             422, "Invalid kind",
             f"'kind' must be one of {list(RECORDABLE_KINDS)} (use /bank/transfer to fund an event).",
         )
-    amount = _rule(signed_amount, kind, body.get("amount"))
+    asset = _rule(check_asset, body.get("asset"))
+    _rule(check_asset_kind, asset, kind)
+    if asset == "bond" and _has_holder_fields(body):
+        abort_problem(422, "Not for bonds", "Bonds have no holder; record who gave or got them instead.")
+    amount = _rule(signed_amount, kind, body.get("amount"), asset)
     note = _rule(clean_text, body.get("note"), "note")
     proof = _clean_proof(body)
     status = body.get("status") or "confirmed"
@@ -583,6 +637,7 @@ async def record_bank_entry(group_id: int):
             row = GroupBankEntry(
                 group_id=group_id,
                 kind=kind,
+                asset=asset,
                 amount=amount,
                 status=status,
                 source="staff",
@@ -646,11 +701,19 @@ async def update_bank_entry(group_id: int, entry_id: int):
                     )
             elif "event_name" in body:
                 abort_problem(422, "Not a transfer", "Only a transfer has an event.")
+            asset = _asset(row)
+            if "asset" in body and body.get("asset") != asset:
+                abort_problem(
+                    422, "Asset is fixed",
+                    "Remove this entry and record a new one to change GP to bonds or back.",
+                )
+            if asset == "bond" and _has_holder_fields(body):
+                abort_problem(422, "Not for bonds", "Bonds have no holder.")
             before = _snapshot(row)
             if outside and "event_name" in body:
                 _eid, row.event_label = _rule(transfer_target, None, body.get("event_name"))
             if "amount" in body:
-                row.amount = _rule(signed_amount, row.kind, body.get("amount"))
+                row.amount = _rule(signed_amount, row.kind, body.get("amount"), asset)
             if "note" in body:
                 row.note = _rule(clean_text, body.get("note"), "note")
             if "created_at" in body:
@@ -758,6 +821,8 @@ async def transfer_to_event(group_id: int):
     manage_ids = manageable_guild_ids(user_id)
     body = await json_body()
 
+    if body.get("asset") not in (None, "gp"):
+        abort_problem(422, "Not for bonds", "Only GP can fund an event; record bonds as a payout.")
     event_id, event_name = _rule(transfer_target, body.get("event_id"), body.get("event_name"))
     amount = _rule(signed_amount, "event_transfer", body.get("amount"))
     note = _rule(clean_text, body.get("note"), "note")
@@ -778,6 +843,7 @@ async def transfer_to_event(group_id: int):
             row = GroupBankEntry(
                 group_id=group_id,
                 kind="event_transfer",
+                asset="gp",
                 amount=amount,
                 status="confirmed",
                 source="staff",
@@ -840,6 +906,7 @@ async def transfer_to_event(group_id: int):
             row = GroupBankEntry(
                 group_id=group_id,
                 kind="event_transfer",
+                asset="gp",
                 amount=amount,
                 status="confirmed",
                 source="staff",

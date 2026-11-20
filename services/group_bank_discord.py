@@ -23,6 +23,10 @@ return, a hand-over between them, and synced coffer withdrawals while
 keeps it out of the totals (``services/group_bank.is_held_move``). Names follow ``bank_show_donors``:
 with it off, posts and the board show amounts only.
 
+Bonds (suggestion #253) are their own balance: a bond entry's post says
+"3 bonds" and shows the bond balance, and the board adds a ``Bonds:`` line
+once the clan has recorded any. GP numbers never include them.
+
 Stdlib-only at import time (DB, Redis and Discord are imported lazily), so the
 unit-test conftest can load the real module.
 """
@@ -86,6 +90,17 @@ def gp(amount) -> str:
     return f"{abs(int(amount or 0)):,} gp"
 
 
+def bonds(amount) -> str:
+    """``3 bonds`` / ``1 bond``, always positive like :func:`gp`."""
+    n = abs(int(amount or 0))
+    return f"{n:,} bond" if n == 1 else f"{n:,} bonds"
+
+
+def amount_text(amount, asset: Optional[str] = "gp") -> str:
+    """An amount in its own unit: GP, or a count of bonds."""
+    return bonds(amount) if asset == "bond" else gp(amount)
+
+
 def short_gp(amount) -> str:
     """``5M`` / ``1.25B`` / ``750K`` for dense lists."""
     n = abs(int(amount or 0))
@@ -133,12 +148,14 @@ def board_title(group_name: str) -> str:
 
 
 def activity_line(kind: str, source: Optional[str], amount, name: Optional[str],
-                  event: Optional[str] = None, outside_event: bool = False) -> str:
-    """One sentence for an entry, e.g. ``**Zezima** donated **5,000,000 gp**``.
-    ``event`` names a transfer's event; ``outside_event`` marks one the clan
-    runs outside DropTracker (no prize pot here, just GP set aside for it)."""
+                  event: Optional[str] = None, outside_event: bool = False,
+                  asset: Optional[str] = "gp") -> str:
+    """One sentence for an entry, e.g. ``**Zezima** donated **5,000,000 gp**``
+    (or ``**3 bonds**`` for a bond entry). ``event`` names a transfer's
+    event; ``outside_event`` marks one the clan runs outside DropTracker (no
+    prize pot here, just GP set aside for it)."""
     who = f"**{md_escape(name)}**" if name else _UNNAMED
-    value = f"**{gp(amount)}**"
+    value = f"**{amount_text(amount, asset)}**"
     coffer = source == "coffer"
     if kind == "donation":
         return f"{who} deposited {value} into the coffer" if coffer else f"{who} donated {value}"
@@ -161,17 +178,24 @@ def activity_line(kind: str, source: Optional[str], amount, name: Optional[str],
 def entry_embed(*, group_id: int, group_name: str, kind: str, source: Optional[str],
                 amount, name: Optional[str], balance: int, proof_url: Optional[str],
                 when: Optional[datetime], event: Optional[str] = None,
-                outside_event: bool = False) -> dict:
-    """The activity post for one entry, as an embed dict for the outbox."""
+                outside_event: bool = False, asset: Optional[str] = "gp") -> dict:
+    """The activity post for one entry, as an embed dict for the outbox.
+    ``balance`` is in the entry's own asset: GP, or the bond balance."""
     from utils.site_urls import group_url
 
     inflow = kind == "donation" or (kind == "adjustment" and int(amount or 0) >= 0)
+    is_bond = asset == "bond"
     embed = {
         "title": "Clan bank donation" if kind == "donation" else "Clan bank",
         "url": f"{group_url(group_id)}#bank",
-        "description": activity_line(kind, source, amount, name, event, outside_event) + ".",
+        "description": activity_line(kind, source, amount, name, event, outside_event,
+                                     asset) + ".",
         "color": _COLOR_IN if inflow else _COLOR_OUT,
-        "fields": [{"name": "Bank balance", "value": gp_signed(balance), "inline": True}],
+        "fields": [{
+            "name": "Bond balance" if is_bond else "Bank balance",
+            "value": bonds_signed(balance) if is_bond else gp_signed(balance),
+            "inline": True,
+        }],
         "footer": {"text": f"{group_name} · DropTracker.io"},
     }
     if when is not None:
@@ -184,6 +208,11 @@ def entry_embed(*, group_id: int, group_name: str, kind: str, source: Optional[s
 def gp_signed(amount) -> str:
     n = int(amount or 0)
     return f"-{gp(n)}" if n < 0 else gp(n)
+
+
+def bonds_signed(amount) -> str:
+    n = int(amount or 0)
+    return f"-{bonds(n)}" if n < 0 else bonds(n)
 
 
 def _clip_lines(lines: Iterable[str], limit: int = _FIELD_LIMIT) -> str:
@@ -200,7 +229,8 @@ def board_embed(*, group_id: int, group_name: str, summary: dict,
                 recent: list, show_names: bool) -> dict:
     """The standing board. ``summary`` is the route's ``_summary`` output and
     ``recent`` is ``[{kind, source, amount, rsn, created_at, event_name?,
-    outside_event?}]`` newest first.
+    outside_event?, asset?}]`` newest first. A ``Bonds:`` line joins the
+    balance once the clan has any bond rows (``summary["bonds"]["count"]``).
     Carries no timestamp, so the same bank always builds the same embed."""
     from utils.site_urls import group_url
 
@@ -233,16 +263,22 @@ def board_embed(*, group_id: int, group_name: str, summary: dict,
             lines.append(when + activity_line(
                 r.get("kind"), r.get("source"), r.get("amount"), name,
                 r.get("event_name"), bool(r.get("outside_event")),
+                r.get("asset") or "gp",
             ))
         fields.append({"name": "Recent activity", "value": _clip_lines(lines), "inline": False})
-    has_activity = bool(totals.get("by_kind"))
+    bond_summary = summary.get("bonds") or {}
+    has_bonds = bool(int(bond_summary.get("count") or 0))
+    has_activity = bool(totals.get("by_kind")) or has_bonds
+    if has_activity:
+        description = f"Balance: **{gp_signed(totals.get('balance'))}**"
+        if has_bonds:
+            description += f"\nBonds: **{int(bond_summary.get('balance') or 0):,}**"
+    else:
+        description = "Nothing has been recorded in the bank yet."
     return {
         "title": board_title(group_name),
         "url": f"{group_url(group_id)}#bank",
-        "description": (
-            f"Balance: **{gp_signed(totals.get('balance'))}**"
-            if has_activity else "Nothing has been recorded in the bank yet."
-        ),
+        "description": description,
         "color": _COLOR_BOARD,
         "fields": fields,
         "footer": {"text": "Updates automatically · DropTracker.io"},
@@ -280,11 +316,11 @@ def mark_board_dirty(group_id: int) -> None:
         pass
 
 
-def _balance(session, group_id: int, neutral: bool) -> int:
-    """Confirmed balance, the same number as the route's headline: every
-    confirmed row added up, less held moves (the route's ``_on_balance``).
-    Runs inside the writer's transaction, so it includes the row being
-    confirmed (autoflush)."""
+def _balance(session, group_id: int, neutral: bool, asset: str = "gp") -> int:
+    """Confirmed balance in ``asset``, the same number as the route's
+    headline: every confirmed GP row added up, less held moves (the route's
+    ``_on_balance``), or for ``"bond"`` the bond balance. Runs inside the
+    writer's transaction, so it includes the row being confirmed (autoflush)."""
     from sqlalchemy import func
 
     from db import GroupBankEntry
@@ -292,6 +328,7 @@ def _balance(session, group_id: int, neutral: bool) -> int:
 
     q = session.query(func.coalesce(func.sum(GroupBankEntry.amount), 0)).filter(
         GroupBankEntry.group_id == group_id, GroupBankEntry.status == "confirmed",
+        GroupBankEntry.asset == ("bond" if asset == "bond" else "gp"),
         _on_balance(neutral),
     )
     return int(q.scalar() or 0)
@@ -347,8 +384,12 @@ def queue_entry_posts(session, group_id: int, entries: list) -> int:
         event_names = dict(
             session.query(Event.id, Event.name).filter(Event.id.in_(eids)).all()
         ) if eids else {}
-        balance = _balance(session, group_id, neutral)
+        balances: dict = {}
         for e in wanted:
+            asset = getattr(e, "asset", None) or "gp"
+            if asset not in balances:
+                balances[asset] = _balance(session, group_id, neutral, asset)
+            balance = balances[asset]
             name = (names.get(e.player_id) or e.rsn) if show_names else None
             outside = e.event_id is None and bool(e.event_label)
             event = e.event_label if outside else event_names.get(e.event_id)
@@ -359,7 +400,7 @@ def queue_entry_posts(session, group_id: int, entries: list) -> int:
                     group_id=group_id, group_name=group_name, kind=e.kind,
                     source=e.source, amount=e.amount, name=name, balance=balance,
                     proof_url=e.proof_url, when=e.created_at,
-                    event=event, outside_event=outside,
+                    event=event, outside_event=outside, asset=asset,
                 ),
                 ref_type="group_bank_entry",
                 ref_id=e.id,
@@ -426,7 +467,8 @@ def build_board(session, group_id: int, channel_id: str) -> Optional[dict]:
     recent = [
         {"kind": r["kind"], "source": r["source"], "amount": _money_value(r["amount"]),
          "rsn": r["rsn"], "created_at": r["created_at"],
-         "event_name": r["event_name"], "outside_event": r["outside_event"]}
+         "event_name": r["event_name"], "outside_event": r["outside_event"],
+         "asset": r.get("asset") or "gp"}
         for r in _decorate(session, rows, False)
     ]
     embed = board_embed(group_id=group_id, group_name=group_name, summary=summary,

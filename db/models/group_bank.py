@@ -42,6 +42,11 @@ BANK_ENTRY_STATUSES = ("pending", "confirmed", "rejected", "void")
 # website, self-reported through the Discord /bank command, or synced from an
 # in-game clan coffer broadcast (web144a, data/submissions/clan_broadcast.py).
 BANK_ENTRY_SOURCES = ("staff", "member", "discord", "coffer")
+# group_bank_entries.asset (suggestion #253, web164a): what the row counts.
+# "gp" is the GP ledger; "bond" rows count Old School bonds as their own
+# balance (amount = signed number of bonds, never GP). Every GP aggregate
+# filters asset == "gp"; coffer rows are always GP.
+BANK_ASSETS = ("gp", "bond")
 
 
 class GroupBankEntry(Base):
@@ -56,8 +61,10 @@ class GroupBankEntry(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     group_id = Column(Integer, ForeignKey("groups.group_id"), nullable=False)
     kind = Column(String(16), nullable=False)  # BANK_ENTRY_KINDS
-    # Signed GP. BigInteger: a clan bank passes signed-INT 2.147B easily.
+    # Signed GP (or, for asset "bond", a signed count of bonds). BigInteger:
+    # a clan bank passes signed-INT 2.147B easily.
     amount = Column(BigInteger, nullable=False, default=0)
+    asset = Column(String(8), nullable=False, default="gp", server_default="gp")  # BANK_ASSETS
     status = Column(String(16), nullable=False, default="confirmed")  # BANK_ENTRY_STATUSES
     source = Column(String(16), nullable=False, default="staff")  # BANK_ENTRY_SOURCES
     # The other side of the movement: who donated, or who was paid. NULL

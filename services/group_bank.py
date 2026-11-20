@@ -25,6 +25,20 @@ INFLOW_KINDS = ("donation",)
 OUTFLOW_KINDS = ("withdrawal", "payout", "event_transfer")
 BANK_ENTRY_STATUSES = ("pending", "confirmed", "rejected", "void")
 
+# group_bank_entries.asset (suggestion #253, web164a). "gp" rows are the GP
+# ledger every total, donor list, holder and coffer sync reads; "bond" rows
+# are a separate count of Old School bonds (clans pay prizes in them) whose
+# ``amount`` is a signed number of bonds, never converted into GP. Every GP
+# aggregate must filter asset == "gp".
+BANK_ASSETS = ("gp", "bond")
+DEFAULT_ASSET = "gp"
+# Bonds are a plain count: in, out, or corrected. They are never held by a
+# staff member or moved into an event pot, so no holder or transfer kinds.
+BOND_KINDS = ("donation", "withdrawal", "payout", "adjustment")
+# Far above any clan's bond stash, small enough that a GP figure typed into
+# the bonds field is refused rather than booked.
+MAX_BOND_AMOUNT = 100_000
+
 # Kinds a person can record directly. Transfers into an event pot go through
 # their own route, which writes the matching prize-pot row in the same commit.
 RECORDABLE_KINDS = ("donation", "withdrawal", "payout", "adjustment", "holder_transfer")
@@ -125,29 +139,70 @@ def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def signed_amount(kind: str, value) -> int:
-    """The signed GP stored for ``kind``, from what a person typed.
+def check_asset(value) -> str:
+    """The asset a write is for: ``"gp"`` when unset, else one of BANK_ASSETS."""
+    if value is None:
+        return DEFAULT_ASSET
+    if value not in BANK_ASSETS:
+        raise BankRuleError("Invalid asset", f"'asset' must be one of {list(BANK_ASSETS)}.")
+    return value
 
-    Donations and outflows are entered as a positive number of GP and stored
-    with the kind's sign. An adjustment carries its own sign (an opening
-    balance is positive, a correction may be negative) and must not be 0. A
-    holder transfer is stored positive: it never touches the balance.
+
+def check_asset_kind(asset: str, kind: str) -> None:
+    """Raise unless ``kind`` can be booked in ``asset``: bonds are only
+    donated, withdrawn, paid out or adjusted."""
+    if asset == "bond" and kind not in BOND_KINDS:
+        raise BankRuleError(
+            "Not for bonds",
+            f"Bonds can only be recorded as {', '.join(BOND_KINDS)}; "
+            "holder transfers and event funding are GP only.",
+        )
+
+
+def signed_amount(kind: str, value, asset: str = DEFAULT_ASSET) -> int:
+    """The signed amount stored for ``kind``, from what a person typed: GP, or
+    for ``asset == "bond"`` a number of bonds.
+
+    Donations and outflows are entered as a positive number and stored with
+    the kind's sign. An adjustment carries its own sign (an opening balance
+    is positive, a correction may be negative) and must not be 0. A holder
+    transfer is stored positive: it never touches the balance.
     """
     if kind not in BANK_ENTRY_KINDS:
         raise BankRuleError("Invalid kind", f"'kind' must be one of {list(BANK_ENTRY_KINDS)}.")
+    asset = check_asset(asset)
+    check_asset_kind(asset, kind)
+    unit, most = ("bonds", MAX_BOND_AMOUNT) if asset == "bond" else ("GP", MAX_BANK_AMOUNT - 1)
     if not _is_int(value):
-        raise BankRuleError("Invalid amount", "'amount' must be a whole number of GP.")
+        raise BankRuleError("Invalid amount", f"'amount' must be a whole number of {unit}.")
     if kind == "adjustment":
         if value == 0:
-            raise BankRuleError("Invalid amount", "An adjustment can't be 0 GP.")
-        if abs(value) >= MAX_BANK_AMOUNT:
-            raise BankRuleError("Invalid amount", f"'amount' must be below {MAX_BANK_AMOUNT:,} GP.")
+            raise BankRuleError("Invalid amount", f"An adjustment can't be 0 {unit}.")
+        if abs(value) > most:
+            raise BankRuleError("Invalid amount", f"'amount' must be at most {most:,} {unit}.")
         return value
-    if not (0 < value < MAX_BANK_AMOUNT):
+    if not (0 < value <= most):
         raise BankRuleError(
-            "Invalid amount", f"'amount' must be between 1 and {MAX_BANK_AMOUNT - 1:,} GP."
+            "Invalid amount", f"'amount' must be between 1 and {most:,} {unit}."
         )
     return -value if kind in OUTFLOW_KINDS else value
+
+
+def bond_totals(kind_sums: Iterable) -> dict:
+    """The bond balance from ``(kind, SUM(amount), COUNT(*))`` over confirmed
+    ``asset == "bond"`` rows: ``in`` (donated), ``out`` (paid out or
+    withdrawn, positive), ``balance`` (everything, adjustments included) and
+    ``count`` (rows: the bank shows bonds once a clan has recorded any)."""
+    bonds_in = bonds_out = balance = count = 0
+    for kind, total, rows in kind_sums:
+        total = int(total or 0)
+        count += int(rows or 0)
+        balance += total
+        if kind in INFLOW_KINDS:
+            bonds_in += total
+        elif kind in OUTFLOW_KINDS:
+            bonds_out += -total
+    return {"balance": balance, "in": bonds_in, "out": bonds_out, "count": count}
 
 
 def check_transition(old: str, new: str) -> None:
