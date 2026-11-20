@@ -482,6 +482,36 @@ def refresh_boss_record(npc_id: int, team_size) -> Optional[str]:
         session.close()
 
 
+def _revoke_orphaned_record_slots(session, badge: Badge, live_slots: set,
+                                  dry_run: bool = False) -> int:
+    """Revoke record badges whose (npc, team_size) slot no longer has any PB.
+
+    Converging only walks slots that still have rows, so when a bogus PB is
+    deleted (a 3-second King Black Dragon) or a team-size bracket is merged
+    away, its holder used to keep the badge forever: 55 did on 2026-11-20.
+    Never runs against an empty slot list, which would mean a failed read,
+    not a wiped table.
+    """
+    if not live_slots:
+        return 0
+    held = (
+        session.query(PlayerBadge)
+        .filter(
+            PlayerBadge.badge_id == badge.badge_id,
+            PlayerBadge.group_key == 0,
+            PlayerBadge.status == "active",
+        )
+        .all()
+    )
+    orphans = [a for a in held if a.active_key and a.active_key not in live_slots]
+    for award in orphans:
+        if dry_run:
+            _log(f"DRY-RUN boss_record orphan {award.active_key}: player {award.player_id}")
+        else:
+            revoke_badge(session, award)
+    return len(orphans)
+
+
 def evaluate_boss_records(session, badge: Badge, dry_run: bool = False) -> Dict[str, int]:
     """Converge the held boss-record badge across every clean (npc, team_size)
     slot in ``personal_best``. Returns outcome counts."""
@@ -504,12 +534,15 @@ def evaluate_boss_records(session, badge: Badge, dry_run: bool = False) -> Dict[
         )
         npc_names.update({nid: name for nid, name in rows})
 
-    counts = {"retained": 0, "transferred": 0, "awarded": 0, "skipped": 0}
+    counts = {"retained": 0, "transferred": 0, "awarded": 0, "skipped": 0, "orphaned": 0}
     for npc_id, team_size in slots:
         outcome = _converge_boss_record_slot(
             session, badge, npc_id, team_size, npc_names.get(npc_id), dry_run=dry_run,
         )
         counts[outcome] += 1
+    counts["orphaned"] = _revoke_orphaned_record_slots(
+        session, badge, {f"npc:{n}:{t}" for n, t in slots}, dry_run=dry_run,
+    )
     if not dry_run:
         session.commit()
         _log(f"boss_record: {counts}")

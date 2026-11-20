@@ -471,7 +471,7 @@ def _load_badges(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     rows = session.execute(text("""
         SELECT pb.player_id, b.`key`, b.name, pb.group_id, pb.awarded_at
         FROM player_badges pb JOIN badges b ON b.badge_id = pb.badge_id
-        WHERE pb.player_id IN :ids AND pb.status = 'active'
+        WHERE pb.player_id IN :ids AND pb.status = 'active' AND b.active = 1
         ORDER BY pb.player_id, pb.awarded_at DESC
     """).bindparams(ids=tuple(player_ids)))
 

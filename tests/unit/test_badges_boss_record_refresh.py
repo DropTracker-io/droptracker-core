@@ -88,3 +88,31 @@ def test_no_pb_rows_skips(monkeypatch):
     _session, calls = _wire(monkeypatch, None)
     assert badges.refresh_boss_record(8583, "Solo") == "skipped"
     assert calls == []
+
+
+class _AwardQuery:
+    def __init__(self, awards):
+        self._awards = awards
+
+    def filter(self, *a, **k):
+        return self
+
+    def all(self):
+        return self._awards
+
+
+def test_orphaned_record_slots_are_revoked(monkeypatch):
+    live = SimpleNamespace(active_key="npc:1:Solo", player_id=1, status="active")
+    orphan = SimpleNamespace(active_key="npc:239:Solo", player_id=2, status="active")
+    revoked = []
+    monkeypatch.setattr(badges, "revoke_badge", lambda _s, a: revoked.append(a.active_key))
+    session = SimpleNamespace(query=lambda *_a: _AwardQuery([live, orphan]))
+    badge = SimpleNamespace(badge_id=4)
+    assert badges._revoke_orphaned_record_slots(session, badge, {"npc:1:Solo"}) == 1
+    assert revoked == ["npc:239:Solo"]
+
+
+def test_empty_slot_list_never_revokes(monkeypatch):
+    monkeypatch.setattr(badges, "revoke_badge", lambda *_a: (_ for _ in ()).throw(AssertionError))
+    session = SimpleNamespace(query=lambda *_a: _AwardQuery([]))
+    assert badges._revoke_orphaned_record_slots(session, SimpleNamespace(badge_id=4), set()) == 0
