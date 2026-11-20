@@ -889,10 +889,13 @@ def mirror_broadcast_line(session, relayer_player_id, clan_slug: str, message: s
     """
     if not clan_slug or not str(message or "").strip():
         return 0
+    from utils.clan_broadcasts import dedupe_text, strip_value_husks
+
+    message = strip_value_husks(str(message))
     bound = bridge_bound_groups(session, relayer_player_id, clan_slug)
     if not bound:
         return 0
-    digest = hashlib.sha256(str(message).encode("utf-8")).hexdigest()[:24]
+    digest = hashlib.sha256(dedupe_text(message).encode("utf-8")).hexdigest()[:24]
     hints = broadcast_hints(parsed, message)
     staged = 0
     for group_id, channel_id in bound.items():

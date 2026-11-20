@@ -65,7 +65,10 @@ _TAG_RE = re.compile(r"<[^>]*>")
 #: The name always carries an underscore, which keeps <col=..>, <img=..> and
 #: <str> (strikethrough) out of it.
 _VAR_DEF_RE = re.compile(r"<([a-z]+_[a-z0-9_]+)=([^>]*)>", re.IGNORECASE)
-_VAR_REF_RE = re.compile(r"<([a-z]+_[a-z0-9_]+)>", re.IGNORECASE)
+#: A reference may carry a format suffix after the name ("<num_value_0,1>"):
+#: tolerated so an unknown formatter still yields the bare value rather than
+#: nothing.
+_VAR_REF_RE = re.compile(r"<([a-z]+_[a-z0-9_]+)(?:[,:|][^>]*)?>", re.IGNORECASE)
 
 
 def expand_tag_variables(text: str) -> str:
@@ -83,6 +86,43 @@ def expand_tag_variables(text: str) -> str:
         return text
     return _VAR_REF_RE.sub(lambda m: values.get(m[1].lower(), m[0]), text)
 _WS_RE = re.compile(r"\s+")
+
+#: The empty coin figure older plugin builds relay since 2026-11-18 (see
+#: _VALUE_CLAUSE): " ( coins)". Display-only cleanup for the bridge mirror —
+#: parsing copes with the husk itself.
+_EMPTY_VALUE_RE = re.compile(r" \( ?coins\)")
+
+
+def strip_value_husks(text: str) -> str:
+    """Drop empty " ( coins)" figures so a mirrored line reads naturally."""
+    return _EMPTY_VALUE_RE.sub("", text or "")
+
+
+_HUSK_RE = re.compile(
+    r" \( ?coins\)| reached XP in | worth coins| at (?:killcount|kill count|kills|XP)\b"
+)
+
+
+def has_value_husk(text: str) -> bool:
+    """Did a number go missing from this line (tag-variable stripping)?"""
+    return bool(_HUSK_RE.search(text or ""))
+
+
+#: Every coin figure, full or empty: " (1,234 coins)", " ( coins)".
+_ANY_VALUE_RE = re.compile(r" \( ?[\d,]* ?coins\)")
+
+
+def dedupe_text(text: str) -> str:
+    """The line as the multi-relayer dedupe and the deterministic GUID see it.
+
+    While clanmates run mixed plugin builds one relays "Osmumten's fang
+    (41,000,000 coins)." and another "Osmumten's fang ( coins)." for the same
+    broadcast; keyed on the raw text they would be two drops and two bridge
+    lines. The coin figure is dropped from the key: it never told two real
+    drops apart anyway (the same item prices the same within the window), and
+    quantities, which do, are kept.
+    """
+    return _ANY_VALUE_RE.sub("", text or "")
 
 #: Machine-readable metadata Jagex prefixes to some broadcasts, pipe-terminated:
 #: ``CA_ID:112|hype mann has completed a master combat task: ...``. It is aimed
@@ -208,7 +248,14 @@ def _int(raw, default=1) -> int:
 #: "Twisted bow (1,354,024,290 coins)" and fails to resolve. Items whose real
 #: name ends in parentheses ("Scythe of vitur (uncharged)") are safe: the
 #: clause only ever matches a coin figure or the literal phrase.
-_VALUE_CLAUSE = r"(?: \((?:(?P<value>[\d,]+) coins|very valuable)\))?"
+#:
+#: Since the 2026-11-18 game update the figure arrives EMPTY ("Osmumten's fang
+#: ( coins).") from every plugin build that predates the tag-variable fix: the
+#: number now rides a Jagex tag variable the client's stripper deletes. The
+#: clause must still peel that husk off, or the item fails to resolve and the
+#: drop is lost; an empty figure parses as no figure (value_gp=None) and the
+#: GE price stands alone, exactly like an untradeable.
+_VALUE_CLAUSE = r"(?: \((?:(?P<value>[\d,]*) ?coins|very valuable)\))?"
 
 _ITEM_DROP_RE = re.compile(
     r"^(?P<player>.+?) received a (?:rare )?drop: "
@@ -265,6 +312,10 @@ _PET_RE = re.compile(
     r"feels something weird sneaking into .+? backpack|"
     r"feels like .+? acquired something special): "
     r"(?P<pet>.+?)"
+    # Newer wording puts the milestone before the source ("Hellpuppy at
+    # 1,234 killcount from Cerberus"); since 2026-11-18 the figure can be an
+    # empty husk ("at killcount from Cerberus", see _VALUE_CLAUSE).
+    r"(?: at (?P<count_pre>[\d,]*) ?(?P<unit_pre>killcount|kill count|kills|XP))?"
     r"(?: from (?P<source>.+?))?"
     r"(?: at (?P<count>[\d,]+) (?P<unit>.+?))?\.?$"
 )
@@ -317,8 +368,11 @@ def _clog(m) -> ParsedBroadcast:
 
 def _pet(m) -> ParsedBroadcast:
     extra = {}
-    if m["count"] is not None:
-        extra = {"milestone_count": _int(m["count"]), "milestone_unit": m["unit"]}
+    count, unit = m["count"], m["unit"]
+    if count is None and m["count_pre"]:
+        count, unit = m["count_pre"], m["unit_pre"]
+    if count is not None:
+        extra = {"milestone_count": _int(count), "milestone_unit": unit}
     # "...would have been followed" is the game's duplicate-pet line.
     if "would have been followed" in m.group(0):
         extra["duplicate"] = True
@@ -350,7 +404,12 @@ _LEVEL_RE = re.compile(
     r"(?P<skill>.+?) level(?: of)? (?P<level>[\d,]+)[.!]?$"
 )
 _XP_RE = re.compile(
-    r"^(?P<player>.+?) has reached (?P<xp>[\d,]+) XP in (?P<skill>.+?)\.?$"
+    # The figure may be empty (2026-11-18 tag-variable husk; see _VALUE_CLAUSE).
+    r"^(?P<player>.+?) has reached (?P<xp>[\d,]*) ?XP in (?P<skill>.+?)\.?$"
+)
+# Wilderness loot keys. Classify-only: the key's contents are never named.
+_LOOT_KEY_RE = re.compile(
+    r"^(?P<player>.+?) has opened a loot key worth (?P<value>[\d,]*) ?coins!?$"
 )
 _PB_RE = re.compile(
     r"^(?P<player>.+?) has achieved a new (?P<activity>.+?) personal best: "
@@ -602,6 +661,7 @@ _MATCHERS = (
     (_CA_RE, _combat_achievement),
     (_DIARY_RE, _classified("diary")),
     (_XP_RE, _classified("xp_milestone")),
+    (_LOOT_KEY_RE, _classified("loot_key")),
     (_LEVEL_RE, _classified("level_up")),
     (_TFA_PB_RE, _tfa_pb),
     (_PB_RE, _pb),

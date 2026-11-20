@@ -1373,3 +1373,37 @@ def test_coffer_groups_need_the_sync_flag_and_a_matching_clan(monkeypatch):
         _FakeSession([10, 11, 12, 13, 14]), _FakePlayer(), _clan_slug("The Best Clan")
     )
     assert bound == {10: "confirmed", 11: "pending"}
+
+
+def test_processor_prefers_the_raw_line(monkeypatch):
+    """Plugin 6.1.31+ sends the game's raw line; the server cleans it itself,
+    so a figure the client's stripper lost is recovered here."""
+    seen = {}
+
+    async def fake_auth(_s, _name, _hash, _key):
+        return object(), True, True
+
+    def fake_parse(message):
+        seen["message"] = message
+        return None
+
+    monkeypatch.setattr(cb, "ensure_player_and_auth", fake_auth)
+    monkeypatch.setattr(cb, "parse_broadcast", fake_parse)
+    monkeypatch.setattr(cb, "_mirror_to_bridge", lambda *a, **k: 0)
+    monkeypatch.setattr(cb, "_bound_group_ids", lambda *a, **k: [])
+    monkeypatch.setattr(cb, "_is_bridge_only", lambda _d: False)
+    monkeypatch.setattr(cb, "_stat", lambda *_a: None)
+    monkeypatch.setattr(cb, "select_session_and_flag", lambda s: (object(), True))
+
+    asyncio.run(cb.clan_broadcast_processor({
+        "message": "P received a drop: Whip ( coins).",
+        "raw": "<num_value_0=1,234>P received a drop: Whip (<num_value_0> coins).",
+        "clan_name": "Clan", "player_name": "R", "acc_hash": "1",
+    }))
+    assert seen["message"] == "P received a drop: Whip (1,234 coins)."
+
+    asyncio.run(cb.clan_broadcast_processor({
+        "message": "P received a drop: Whip (5 coins).",
+        "clan_name": "Clan", "player_name": "R", "acc_hash": "1",
+    }))
+    assert seen["message"] == "P received a drop: Whip (5 coins)."

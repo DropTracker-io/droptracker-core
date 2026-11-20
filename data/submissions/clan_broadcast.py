@@ -76,6 +76,7 @@ queue redelivery must be a no-op:
 
 import asyncio
 import hashlib
+import re
 import json
 import time
 from datetime import datetime, timedelta
@@ -88,6 +89,8 @@ from utils.clan_broadcasts import (
     TRACKED_KINDS,
     clan_slug,
     clean_broadcast_text,
+    dedupe_text,
+    has_value_husk,
     parse_broadcast,
 )
 
@@ -232,12 +235,25 @@ def _log_unknown_broadcast(text: str) -> None:
         pass
 
 
+def _log_raw_husk(raw: str) -> None:
+    """Sample-log a raw broadcast whose number did not survive cleaning (once
+    per shape per hour, same privacy footing as _log_unknown_broadcast)."""
+    try:
+        shape = re.sub(r"\d", "0", str(raw))
+        digest = hashlib.sha256(shape.encode("utf-8")).hexdigest()[:16]
+        if redis_client.client.set(f"clanchat:rawhusk:{digest}", "1", nx=True, ex=3600):
+            print(f"[ClanBroadcast] Raw line lost a figure: {raw!r}")
+    except Exception:
+        pass
+
+
 def _clan_slug(clan_name: str) -> str:
     return clan_slug(clan_name)
 
 
 def _deterministic_guid(clan_slug: str, message: str, stamp: datetime) -> str:
     bucket = int(stamp.timestamp() // GUID_BUCKET_SECONDS)
+    message = dedupe_text(message)
     digest = hashlib.sha256(f"{clan_slug}|{message}|{bucket}".encode("utf-8")).hexdigest()
     return f"cc:{digest}"
 
@@ -1057,6 +1073,16 @@ async def clan_broadcast_processor(
 
     _stat("relayed")
     message = clean_broadcast_text(message_raw)
+    # Plugin 6.1.31+ also sends the line exactly as the game delivered it,
+    # tags and all, so a change to Jagex's chat markup (the 2026-11-18 coin
+    # figures, the 2026-10-07 quest names) can be absorbed here instead of
+    # waiting on a Plugin Hub release. The client's own cleaned copy stays
+    # the fallback.
+    raw_line = broadcast_data.get("raw")
+    if raw_line:
+        from_raw = clean_broadcast_text(raw_line)
+        if from_raw:
+            message = from_raw
 
     # Auth runs BEFORE parsing (it used to follow it) because the chat-bridge
     # mirror below depends on it: only an authenticated clanmate's line may
@@ -1073,6 +1099,10 @@ async def clan_broadcast_processor(
         return SubmissionResponse(False, "Missing clan name")
 
     parsed = parse_broadcast(message)
+    if raw_line and has_value_husk(message) and _bound_group_ids(session, relayer, clan_slug):
+        # A figure we still cannot read even from the raw line: sample it so
+        # the markup can be taught to clean_broadcast_text.
+        _log_raw_husk(raw_line)
     mirrored = _mirror_to_bridge(
         session, relayer, clan_slug, message, parsed, _deferred_replay,
         guid=broadcast_data.get("guid"),
@@ -1128,7 +1158,7 @@ async def clan_broadcast_processor(
     # Skipped on deferred replay — the first pass already claimed the line
     # (and marked this key) before parking it.
     if not _deferred_replay:
-        seen_key = f"clanchat:seen:{clan_slug}:{hashlib.sha256(message.encode('utf-8')).hexdigest()[:24]}"
+        seen_key = f"clanchat:seen:{clan_slug}:{hashlib.sha256(dedupe_text(message).encode('utf-8')).hexdigest()[:24]}"
         if not _bundle_is_new(seen_key, RELAY_SEEN_TTL_SECONDS):
             _stat("duplicate_relay")
             return SubmissionResponse(True, "Broadcast already relayed by another clanmate")

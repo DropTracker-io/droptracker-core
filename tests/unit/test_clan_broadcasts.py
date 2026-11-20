@@ -593,3 +593,89 @@ def test_team_names_split():
 def test_rare_drop_wording():
     parsed = parse_broadcast("Someone received a rare drop: Magma mutagen")
     assert parsed == ParsedBroadcast(kind="item_drop", player="Someone", item_name="Magma mutagen")
+
+
+class TestEmptyFigureHusks:
+    """2026-11-18: numbers ride a Jagex tag variable that older plugin builds
+    strip, so lines arrive with empty figures. Items must still resolve."""
+
+    def test_raid_drop_empty_value(self):
+        parsed = parse_broadcast(
+            "Puffy N Pink received special loot from a raid: Osmumten's fang ( coins)."
+        )
+        assert parsed.kind == "raid_drop"
+        assert parsed.item_name == "Osmumten's fang"
+        assert parsed.value_gp is None
+
+    def test_clue_item_empty_value(self):
+        parsed = parse_broadcast("t urbo received a clue item: Fremennik kilt ( coins).")
+        assert parsed.item_name == "Fremennik kilt"
+        assert parsed.value_gp is None
+
+    def test_drop_empty_value_keeps_source(self):
+        parsed = parse_broadcast(
+            "X received a drop: Abyssal whip ( coins) from Abyssal demon."
+        )
+        assert parsed.item_name == "Abyssal whip"
+        assert parsed.extra == {"source": "Abyssal demon"}
+
+    def test_xp_milestone_empty(self):
+        assert parse_broadcast("Lrian has reached XP in Defence.").kind == "xp_milestone"
+
+    def test_loot_key_classified(self):
+        assert parse_broadcast("4JJ3 has opened a loot key worth coins!").kind == "loot_key"
+        assert parse_broadcast(
+            "4JJ3 has opened a loot key worth 1,252,497 coins!"
+        ).kind == "loot_key"
+
+    def test_pet_milestone_before_source(self):
+        parsed = parse_broadcast(
+            "callalilly feels something weird sneaking into her backpack: "
+            "Hellpuppy at killcount from Cerberus."
+        )
+        assert parsed.item_name == "Hellpuppy"
+        assert parsed.extra == {"source": "Cerberus"}
+        parsed = parse_broadcast(
+            "callalilly feels something weird sneaking into her backpack: "
+            "Hellpuppy at 1,234 killcount from Cerberus."
+        )
+        assert parsed.extra["milestone_count"] == 1234
+        assert parsed.extra["source"] == "Cerberus"
+
+    def test_strip_value_husks(self):
+        from utils.clan_broadcasts import strip_value_husks
+
+        assert strip_value_husks(
+            "X received a clue item: Fremennik kilt ( coins)."
+        ) == "X received a clue item: Fremennik kilt."
+        assert strip_value_husks("Y (5 coins)") == "Y (5 coins)"
+
+
+class TestDedupeText:
+    def test_full_and_husked_copies_share_a_key(self):
+        from utils.clan_broadcasts import dedupe_text
+
+        full = "P received special loot from a raid: Osmumten's fang (41,000,000 coins)."
+        husk = "P received special loot from a raid: Osmumten's fang ( coins)."
+        assert dedupe_text(full) == dedupe_text(husk)
+
+    def test_quantity_still_separates(self):
+        from utils.clan_broadcasts import dedupe_text
+
+        assert dedupe_text("P received a drop: 2 x Rune bar (1 coins).") != dedupe_text(
+            "P received a drop: 3 x Rune bar (1 coins)."
+        )
+
+    def test_has_value_husk(self):
+        from utils.clan_broadcasts import has_value_husk
+
+        assert has_value_husk("X received a drop: Whip ( coins).")
+        assert has_value_husk("X has reached XP in Attack.")
+        assert has_value_husk("X has opened a loot key worth coins!")
+        assert not has_value_husk("X received a drop: Whip (1,000 coins).")
+        assert not has_value_husk("X has reached 13,034,431 XP in Attack.")
+
+
+def test_tag_reference_with_format_suffix_expands():
+    raw = "<num_value_0=1,234>X received a drop: Whip (<num_value_0,1> coins)."
+    assert clean_broadcast_text(raw) == "X received a drop: Whip (1,234 coins)."
