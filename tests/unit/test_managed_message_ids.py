@@ -26,7 +26,7 @@ from web_api.common import ProblemException
 import web_api.routes.config as cfg
 
 MESSAGE_KEYS = {"lootboard_message_id", "clan_log_message_id", "pvp_lootboard_message_id",
-                "bank_board_message_id"}
+                "bank_board_message_id", "points_board_message_id"}
 
 
 def test_exactly_the_board_message_ids_are_managed():

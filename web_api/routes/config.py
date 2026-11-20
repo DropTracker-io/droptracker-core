@@ -430,6 +430,8 @@ REPOST_BOARDS = {
     "clan_log": ("clan_log_channel_id", "clan_log_message_id", "clan_log"),
     # services/group_bank_discord stores "<channel_id>:<message_id>".
     "bank_board": ("bank_board_channel_id", "bank_board_message_id", "bank_board"),
+    # services/points_board_discord, same "<channel_id>:<message_id>" ref.
+    "points_board": ("points_board_channel_id", "points_board_message_id", "points_board"),
 }
 
 
@@ -488,6 +490,8 @@ def repost_board(user_id: int, group_id: int, board: str) -> dict:
         try:
             if marker == "clan_log":
                 conn.delete(f"clan_log:{group_id}:posted_hash")
+            elif marker == "points_board":
+                conn.delete(f"points:board:{group_id}:posted_hash")
             elif marker == "bank_board":
                 from services.group_bank_discord import mark_board_dirty
 
