@@ -866,7 +866,7 @@ class TestHealth:
         r = FakeRedis()
         hiscores.record_cycle(r, "running", NOW)
         hiscores.record_health(r, hiscores.OK, "", NOW - timedelta(minutes=1))
-        assert all(ok for ok, _ in self._checks(r).values()) and len(self._checks(r)) == 3
+        assert all(ok for ok, _ in self._checks(r).values()) and len(self._checks(r)) == 4
 
     def test_a_dead_loop_is_reported(self):
         r = FakeRedis()
@@ -963,7 +963,42 @@ class TestHealth:
         hiscores.record_cycle(r, "running", NOW)
         hiscores.record_health(r, hiscores.OK, "", NOW)
         r.hashes[hiscores.HEALTH_KEY] = {k.encode(): v.encode() for k, v in r.hashes[hiscores.HEALTH_KEY].items()}
-        assert len(hiscores.health_checks(r, NOW)) == 3
+        assert len(hiscores.health_checks(r, NOW)) == 4
+
+    def _paced(self, interval, when):
+        r = FakeRedis()
+        hiscores.record_cycle(r, "running", when)
+        hiscores.record_health(r, hiscores.OK, "", when)
+        hiscores._set_interval(r, interval, "test", when)
+        return r
+
+    def test_a_slow_pace_for_hours_is_reported(self):
+        """2026-11-20: every request answered, a twentieth as many, no alert."""
+        r = self._paced(5000, NOW)
+        later = NOW + timedelta(hours=7)
+        hiscores.record_cycle(r, "running", later)
+        ok, detail = self._checks(r, later)["hiscores:pace"]
+        assert not ok and "5000 ms" in detail and "7 hours" in detail
+
+    def test_a_short_slow_spell_is_not(self):
+        r = self._paced(5000, NOW)
+        later = NOW + timedelta(hours=3)
+        hiscores.record_cycle(r, "running", later)
+        assert self._checks(r, later)["hiscores:pace"][0]
+
+    def test_the_clock_restarts_once_the_pace_recovers(self):
+        r = self._paced(5000, NOW)
+        hiscores._set_interval(r, 600, "test", NOW + timedelta(hours=5))
+        hiscores._set_interval(r, 5000, "test", NOW + timedelta(hours=6))
+        later = NOW + timedelta(hours=8)
+        hiscores.record_cycle(r, "running", later)
+        assert self._checks(r, later)["hiscores:pace"][0]
+
+    def test_a_mildly_slow_pace_never_alerts(self):
+        r = self._paced(hiscores.slow_pace_ms(), NOW)
+        later = NOW + timedelta(days=2)
+        hiscores.record_cycle(r, "running", later)
+        assert self._checks(r, later)["hiscores:pace"][0]
 
     def test_recording_never_raises(self):
         r = FakeRedis()

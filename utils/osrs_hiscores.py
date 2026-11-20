@@ -335,6 +335,11 @@ LOOP_STALL_SECONDS = 15 * 60
 # Share of an hour's requests that failed, and how many requests make the
 # share meaningful.
 ERROR_SHARE_MAX = 0.5
+# A pace this slow, for this long, means readings are going stale for everyone
+# who depends on the poller, whatever the cause. On 2026-11-20 nothing said so:
+# every request was being answered, there were just a twentieth as many.
+SLOW_PACE_FACTOR = 3             # times the fastest pace
+SLOW_PACE_SECONDS = 6 * 3600
 ERROR_SHARE_MIN_REQUESTS = 40
 _HOURLY_TTL = 3 * 86400
 
@@ -423,9 +428,9 @@ def recent_counts(redis_conn, now: datetime, hours: int = 2) -> Dict[str, int]:
 def health_checks(redis_conn, now: Optional[datetime] = None) -> list:
     """``[(key, label, ok, detail)]`` for scripts/health_watch.py.
 
-    Empty when the poller has never run here (nothing to judge). Three checks:
-    the loop is alive; the hiscores are answering; and not too many requests
-    are failing. A poller that is switched off, or resting at its daily cap,
+    Empty when the poller has never run here (nothing to judge). Four checks:
+    the loop is alive; the hiscores are answering; not too many requests are
+    failing; and the pace has not been slow for hours. A poller that is switched off, or resting at its daily cap,
     passes: silence it chose is not a fault.
     """
     now = now or datetime.utcnow()
@@ -481,7 +486,23 @@ def health_checks(redis_conn, now: Optional[datetime] = None) -> list:
         f"Answers are still arriving, so this is throttling or an unstable service rather "
         f"than a full block. The poller slows itself down when errors climb "
         f"(now one request per {current_interval(redis_conn)} ms)"))
+
+    interval = current_interval(redis_conn)
+    slow_since = _float(health.get("slow_since"))
+    slow_for = stamp - slow_since if slow_since is not None else 0
+    dragging = interval > slow_pace_ms() and slow_for > SLOW_PACE_SECONDS
+    results.append((
+        "hiscores:pace", "Hiscores poller pace", not dragging,
+        f"the poller has been at one request per {interval} ms or slower for "
+        f"{slow_for / 3600:.0f} hours (normal is {MIN_INTERVAL_MS} ms), so readings are going "
+        f"stale. It slows down when requests fail or are refused and should speed up by "
+        f"itself each clean hour. Recent changes: redis LRANGE {PACE_LOG_KEY} 0 10. If the "
+        f"hiscores are healthy again, set {INTERVAL_KEY} lower by hand"))
     return results
+
+
+def slow_pace_ms() -> int:
+    return MIN_INTERVAL_MS * SLOW_PACE_FACTOR
 
 
 # --------------------------------------------------------------------------- #
@@ -513,6 +534,14 @@ def _set_interval(redis_conn, value: float, reason: str, now: Optional[datetime]
         stamp = (now or datetime.utcnow()).strftime("%Y-%m-%d %H:%M")
         redis_conn.lpush(PACE_LOG_KEY, f"{stamp} {old}ms -> {new}ms: {reason}")
         redis_conn.ltrim(PACE_LOG_KEY, 0, 99)
+        # When the slow spell began, for the pace health check. "" is "not slow".
+        slow = slow_pace_ms()
+        since = _float(_hash(redis_conn, HEALTH_KEY).get("slow_since"))
+        if new > slow and since is None:
+            at = time.time() if now is None else (now - datetime(1970, 1, 1)).total_seconds()
+            redis_conn.hset(HEALTH_KEY, mapping={"slow_since": at})
+        elif new <= slow and since is not None:
+            redis_conn.hset(HEALTH_KEY, mapping={"slow_since": ""})
     return new
 
 
