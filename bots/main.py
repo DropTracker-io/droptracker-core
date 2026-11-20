@@ -695,6 +695,31 @@ async def clan_log_refresh():
             session.close()
 
 
+_points_board_running = False
+
+
+@Task.create(IntervalTrigger(minutes=5))
+async def points_board_updates():
+    """Clan points boards on Discord (suggestion #256,
+    services/points_board_discord): each group's standing top-N message, edited
+    only when the standings it shows changed."""
+    global _points_board_running
+
+    if _points_board_running:
+        return
+    _points_board_running = True
+    try:
+        from services.points_board_discord import refresh_boards
+
+        stats = await refresh_boards(bot)
+        if stats["posted"] or stats["edited"] or stats["failed"]:
+            print(f"Points boards: {stats}")
+    except Exception as e:
+        print(f"Points board refresh error: {e}")
+    finally:
+        _points_board_running = False
+
+
 # Every Nth tick of bank_board_updates sweeps all boards instead of only the
 # dirty ones: picks up a newly chosen channel and any lost dirty mark.
 _BANK_BOARD_FULL_EVERY = 15
@@ -1112,6 +1137,7 @@ async def create_tasks():
     clan_chat_mirror_drain.start()
     clan_log_refresh.start()
     bank_board_updates.start()
+    points_board_updates.start()
     # Lootboard POSTING is user-visible and must stay with the interval tasks
     # above — NEVER gated behind the multi-minute, rate-limited guild-cache /
     # WOM warm-ups below. It previously sat after `await cache_guild_channels()`

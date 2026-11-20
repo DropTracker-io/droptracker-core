@@ -49,6 +49,7 @@ CONFIG_CATEGORIES: List[Dict[str, str]] = [
     {"key": "recaps", "label": "Monthly recaps"},
     {"key": "clan_log", "label": "Clan Log"},
     {"key": "bank", "label": "Clan bank"},
+    {"key": "points_board", "label": "Points board"},
     {"key": "clan_chat", "label": "Clan chat"},
     {"key": "voice", "label": "Voice channel counters"},
     {"key": "hardcore", "label": "Hardcore Worlds"},
@@ -1462,6 +1463,49 @@ GROUP_CONFIG_FIELDS: List[Dict[str, Any]] = [
         "category": "bank",
         "type": "string",
         "help": "Message the bot edits when updating the bank board. Managed automatically.",
+        "default": None,
+        # Written by the bot; see MANAGED_KEYS.
+        "managed": True,
+    },
+
+    # --- Points board ---
+    # The standing top-N clan points message (suggestion #256,
+    # services/points_board_discord). Opt-in by picking a channel; needs the
+    # clan's points system switched on (Points tab).
+    {
+        "key": "points_board_channel_id",
+        "label": "Points board channel",
+        "category": "points_board",
+        "type": "channel",
+        "help": "Keep one message here listing your top clan points earners, with a link to the full leaderboard, updated as points change. Needs your points system turned on. Pick a quiet channel, since the board is edited in place.",
+        "default": None,
+    },
+    {
+        "key": "points_board_size",
+        "label": "Members shown",
+        "category": "points_board",
+        "type": "int",
+        "help": "How many places the board lists, from 3 to 25.",
+        "default": 10,
+        "min": 3,
+        "max": 25,
+    },
+    {
+        "key": "points_board_period",
+        "label": "Points board period",
+        "category": "points_board",
+        "type": "select",
+        "help": "Which standings the board shows. Current season uses whichever leaderboard season is running now, and all-time while none is.",
+        "default": "season",
+        "options": ["season", "all", "month", "week"],
+    },
+    # The board message the bot edits ("<channel_id>:<message_id>").
+    {
+        "key": "points_board_message_id",
+        "label": "Points board message id",
+        "category": "points_board",
+        "type": "string",
+        "help": "Message the bot edits when updating the points board. Managed automatically.",
         "default": None,
         # Written by the bot; see MANAGED_KEYS.
         "managed": True,
