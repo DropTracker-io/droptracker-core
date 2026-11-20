@@ -637,10 +637,10 @@ class TestPace:
     def test_starts_at_the_configured_interval(self):
         assert hiscores.current_interval(FakeRedis()) == hiscores.INTERVAL_MS
 
-    def test_a_clean_hour_goes_a_little_faster(self):
+    def test_a_clean_hour_undoes_a_slow_down(self):
         r = self._started()
         line = self._hour(r, 900, 1, NOW + timedelta(hours=1))
-        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS - hiscores.SPEED_UP_STEP_MS
+        assert hiscores.current_interval(r) == round(hiscores.INTERVAL_MS / hiscores.SLOW_DOWN_FACTOR)
         assert "clean" not in line and str(hiscores.INTERVAL_MS) in line
         assert "clean hour" in r.data[hiscores.PACE_LOG_KEY][0]
 
@@ -654,7 +654,7 @@ class TestPace:
         r = self._started()
         self._hour(r, 900, 0, NOW + timedelta(hours=1))
         assert self._hour(r, 900, 0, NOW + timedelta(hours=1, minutes=30)) is None
-        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS - hiscores.SPEED_UP_STEP_MS
+        assert hiscores.current_interval(r) == round(hiscores.INTERVAL_MS / hiscores.SLOW_DOWN_FACTOR)
 
     def test_too_few_requests_say_nothing(self):
         r = self._started()
@@ -663,8 +663,32 @@ class TestPace:
 
     def test_a_rising_failure_share_slows_down(self):
         r = self._started()
+        r.set(hiscores.INTERVAL_KEY, 600)
         self._hour(r, 950, 50, NOW + timedelta(hours=1))
-        assert hiscores.current_interval(r) == int(hiscores.INTERVAL_MS * hiscores.SLOW_DOWN_FACTOR)
+        assert hiscores.current_interval(r) == 900
+
+    def test_failures_never_slow_past_the_starting_pace(self):
+        """2026-11-20: five hours of 502s took 500 ms to 5.7 s."""
+        r = self._started()
+        r.set(hiscores.INTERVAL_KEY, 600)
+        for hour in range(1, 9):
+            self._hour(r, 900, 100, NOW + timedelta(hours=hour))
+        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS
+
+    def test_failures_do_not_speed_up_a_pace_a_refusal_set(self):
+        r = self._started()
+        r.set(hiscores.INTERVAL_KEY, 8000)
+        self._hour(r, 900, 100, NOW + timedelta(hours=1))
+        assert hiscores.current_interval(r) == 8000
+
+    def test_recovery_from_an_outage_takes_hours_not_days(self):
+        r = self._started()
+        r.set(hiscores.INTERVAL_KEY, hiscores.INTERVAL_MS)
+        hours = 0
+        while hiscores.current_interval(r) > hiscores.MIN_INTERVAL_MS:
+            hours += 1
+            self._hour(r, 900, 0, NOW + timedelta(hours=hours))
+        assert hours <= 5
 
     def test_a_middling_hour_holds(self):
         r = self._started()
@@ -691,7 +715,10 @@ class TestPace:
         assert self._hour(r, 900, 0, NOW + timedelta(hours=2)) is None
         assert hiscores.current_interval(r) == slowed
         self._hour(r, 900, 0, NOW + timedelta(hours=13))
+        # ...and for a week after it, only in small steps.
         assert hiscores.current_interval(r) == slowed - hiscores.SPEED_UP_STEP_MS
+        self._hour(r, 900, 0, NOW + timedelta(days=8))
+        assert hiscores.current_interval(r) == round((slowed - hiscores.SPEED_UP_STEP_MS) / hiscores.SLOW_DOWN_FACTOR)
 
     def test_the_interval_is_capped_both_ways(self):
         r = FakeRedis()

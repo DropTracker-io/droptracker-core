@@ -496,6 +496,13 @@ SLOW_DOWN_FAIL_SHARE = 0.03      # 3% failing is the hiscores struggling, or us 
 SLOW_DOWN_FACTOR = 1.5
 REFUSAL_FACTOR = 2.0             # a 403/429 doubles the interval on the spot
 REFUSAL_QUIET_SECONDS = 12 * 3600  # no speeding up this long after a refusal
+REFUSAL_CAREFUL_SECONDS = 7 * 86400  # and only in small steps for a week after one
+# Errors that are not refusals (502, 504, timeouts) are the hiscores having
+# trouble, not a limit on us. They never slow us past the pace we started at,
+# and a clean hour undoes a whole slow-down. On 2026-11-20 five hours of 502s
+# took the interval from 500 ms to 5.7 s, and at 100 ms an hour it would have
+# taken two days to come back; readings went stale for everyone meanwhile.
+FAILURE_MAX_INTERVAL_MS = max(INTERVAL_MS, MIN_INTERVAL_MS)
 
 
 def _set_interval(redis_conn, value: float, reason: str, now: Optional[datetime] = None) -> int:
@@ -525,9 +532,11 @@ def tune_pace(redis_conn, now: Optional[datetime] = None) -> Optional[str]:
     poller cycle; does something at most once an hour, and only with enough
     requests to judge by. Returns a line describing a change, else None.
 
-    - 3% or more failed: slow down by half again.
-    - at most 0.5% failed, and no refusal in the last 12 hours: 100 ms faster,
-      down to the floor.
+    - 3% or more failed: slow down by half again, but never past the starting
+      pace (only a refusal goes slower than that).
+    - at most 0.5% failed, and no refusal in the last 12 hours: undo one
+      slow-down (at least 100 ms faster), down to the floor. Within a week of
+      a refusal: 100 ms faster only.
     - anything between: hold.
     """
     try:
@@ -553,11 +562,16 @@ def tune_pace(redis_conn, now: Optional[datetime] = None) -> Optional[str]:
         before = current_interval(redis_conn)
         refused_at = _float(health.get("last_refusal"))
         if share >= SLOW_DOWN_FAIL_SHARE:
-            after = _set_interval(redis_conn, before * SLOW_DOWN_FACTOR,
+            slower = min(before * SLOW_DOWN_FACTOR, max(before, FAILURE_MAX_INTERVAL_MS))
+            after = _set_interval(redis_conn, slower,
                                   f"{failed} of {total} requests failed", now)
         elif share <= SPEED_UP_MAX_FAIL_SHARE and (
                 refused_at is None or stamp - refused_at >= REFUSAL_QUIET_SECONDS):
-            after = _set_interval(redis_conn, before - SPEED_UP_STEP_MS,
+            careful = refused_at is not None and stamp - refused_at < REFUSAL_CAREFUL_SECONDS
+            faster = before - SPEED_UP_STEP_MS
+            if not careful:
+                faster = min(faster, before / SLOW_DOWN_FACTOR)
+            after = _set_interval(redis_conn, faster,
                                   f"clean hour ({failed} of {total} failed)", now)
         else:
             after = before
@@ -590,6 +604,10 @@ async def fetch(http, redis_conn, player_name: str, board: str = MAIN_BOARD, *,
     reason = may_request(redis_conn)
     if reason:
         return FetchResult(BLOCKED, board=board, detail=reason)
+    # Several lookups share the one slot per interval, so at a slow pace the
+    # last in line waits several intervals. Giving up early reads as "blocked"
+    # and ends the whole batch.
+    wait_seconds = max(wait_seconds, current_interval(redis_conn) / 1000.0 * 8)
     if not await wait_for_slot(redis_conn, time.monotonic() + wait_seconds):
         return FetchResult(BLOCKED, board=board, detail="no slot")
     record_request(redis_conn)
