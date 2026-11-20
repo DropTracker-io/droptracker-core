@@ -668,6 +668,8 @@ async def achievements(player_id: int):
                 },
                 "quests": quest_counts,
                 "diaries": sorted(diaries.values(), key=lambda d: d["area_id"]),
+                # Suggestion #252: null until the player syncs on 6.1.31+.
+                "music": _music_for(s, player_id),
             }
 
     # Asked for here, on the event loop, so a stale threshold table refreshes
@@ -683,6 +685,35 @@ async def achievements(player_id: int):
     if result is None:
         return problem(404, "Player not found")
     return with_cache_headers(jsonify(result), 60)
+
+
+def _music_for(s, player_id: int):
+    """``{"unlocked", "total"}`` music tracks, decoded from the stored varps
+    with the current registry (so a registry fix applies retroactively), or
+    None when nothing has been synced. Never raises."""
+    try:
+        from db.models import PlayerMusicVarps
+        from services.state_sync import deserialize_varps
+        from utils.music_tracks import decode, load_registry
+
+        row = (
+            s.query(PlayerMusicVarps)
+            .filter(PlayerMusicVarps.player_id == player_id)
+            .first()
+        )
+        if row is None:
+            return None
+        tracks = load_registry(s)
+        if tracks:
+            counts = decode(deserialize_varps(row.varps), tracks)
+            return {"unlocked": counts["unlocked"], "total": counts["total"]}
+        return {"unlocked": row.tracks_unlocked, "total": row.tracks_total}
+    except Exception:
+        try:
+            s.rollback()
+        except Exception:
+            pass
+        return None
 
 
 def _ca_points_block(ca_row, combat) -> dict:

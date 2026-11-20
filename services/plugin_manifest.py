@@ -46,6 +46,8 @@ CACHE_TTL_SECONDS = 300
 CLIENT_SECTIONS = (
     "combat_achievement_varps",
     "quest_ids",
+    # Plugin 6.1.31+ reads these varps on state sync (suggestion #252).
+    "music_varps",
     "sync",
     "team_indicators",
     "pets",
@@ -78,6 +80,24 @@ DEFAULT_SECTIONS: Dict[str, Dict[str, Any]] = {
             "Combat achievement tasks from the game cache: name, tier, monster, "
             "type, and the varp/bit that records completion. The varp/bit pair is "
             "what lets stored varps be decoded into named tasks."
+        ),
+    },
+    "music_varps": {
+        # musicmulti_1.. in order, from scripts/cache/extract-music-tracks.mjs.
+        # Regenerate with music_tracks below after an update adds a varp.
+        "payload": [20, 21, 22, 23, 24, 25, 298, 311, 346, 414, 464, 598, 662, 721, 906, 1009, 1338, 1681, 2065, 2237, 2950, 3418, 3575, 4066, 4411, 4944, 5238, 6014],
+        "description": (
+            "Varps holding music track unlock bits (32 tracks each). The client "
+            "sends them raw; the server decodes them with music_tracks."
+        ),
+    },
+    "music_tracks": {
+        # Server-only (not in CLIENT_SECTIONS). Populated by
+        # scripts/build_manifest.py from scripts/music_tracks.json.
+        "payload": {},
+        "description": (
+            "Music tracks from the game cache: id, name, and the varp/bit that "
+            "records the unlock, plus automatic/hidden/holiday flags."
         ),
     },
     "quest_ids": {

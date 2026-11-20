@@ -144,6 +144,27 @@ class PlayerCombatAchievementVarps(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class PlayerMusicVarps(Base):
+    """Raw music unlock varps from state sync, plus the decoded counts
+    (suggestion #252, web160a).
+
+    Raw for the same reason as :class:`PlayerCombatAchievementVarps`: the track
+    registry (manifest ``music_tracks``, from the game cache) grows with every
+    update, and the bits stay true across a registry fix. The counts are
+    denormalised so a profile or an event never decodes on read.
+    """
+
+    __tablename__ = "player_music_varps"
+    __table_args__ = ({"extend_existing": True},)
+
+    player_id = Column(Integer, ForeignKey("players.player_id"), primary_key=True)
+    # JSON object: {"20": 123456, ...}. Never queried into.
+    varps = Column(Text, nullable=False)
+    tracks_unlocked = Column(Integer, nullable=True)
+    tracks_total = Column(Integer, nullable=True)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class PlayerQuestState(Base):
     """Per-quest status: 0 not started, 1 in progress, 2 finished."""
 

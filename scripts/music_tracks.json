@@ -1,0 +1,8694 @@
+{
+ "varps": [
+  20,
+  21,
+  22,
+  23,
+  24,
+  25,
+  298,
+  311,
+  346,
+  414,
+  464,
+  598,
+  662,
+  721,
+  906,
+  1009,
+  1338,
+  1681,
+  2065,
+  2237,
+  2950,
+  3418,
+  3575,
+  4066,
+  4411,
+  4944,
+  5238,
+  6014
+ ],
+ "tracks": [
+  {
+   "id": 2,
+   "name": "Oh Rats!",
+   "varp": 4066,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2511,
+   "name": "7th Realm",
+   "varp": 346,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2512,
+   "name": "A Farmer's Grind",
+   "varp": 2065,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2513,
+   "name": "Adventure",
+   "varp": 20,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2514,
+   "name": "Al Kharid",
+   "varp": 20,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2515,
+   "name": "Alchemical Attack!",
+   "varp": 2065,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2516,
+   "name": "All's Fairy in Love & War",
+   "varp": 721,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2517,
+   "name": "Alone",
+   "varp": 20,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2518,
+   "name": "Altar Ego",
+   "varp": 1338,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2519,
+   "name": "Alternative Root",
+   "varp": 906,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2520,
+   "name": "Thrall of the Devourer",
+   "varp": 3418,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2521,
+   "name": "Ambient Jungle",
+   "varp": 20,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2522,
+   "name": "Mystics of Nature",
+   "varp": 2065,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2523,
+   "name": "The Ancient Prison",
+   "varp": 2950,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2524,
+   "name": "Anywhere",
+   "varp": 311,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2525,
+   "name": "Arabian",
+   "varp": 20,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2526,
+   "name": "Arabian 2",
+   "varp": 20,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2527,
+   "name": "Arabian 3",
+   "varp": 20,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2528,
+   "name": "Arabique",
+   "varp": 20,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2529,
+   "name": "Itsy Bitsy...",
+   "varp": 2950,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2530,
+   "name": "Arboretum",
+   "varp": 2237,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2531,
+   "name": "Arcane",
+   "varp": 24,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2532,
+   "name": "Not a Moment of Relief",
+   "varp": 2950,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2533,
+   "name": "Armadyl Alliance",
+   "varp": 1009,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2534,
+   "name": "Armageddon",
+   "varp": 1009,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2535,
+   "name": "Army of Darkness",
+   "varp": 20,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2536,
+   "name": "Arrival",
+   "varp": 20,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2537,
+   "name": "Artistry",
+   "varp": 298,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2538,
+   "name": "Ascent",
+   "varp": 1338,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2539,
+   "name": "Assault and Battery",
+   "varp": 662,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2541,
+   "name": "Attack 1",
+   "varp": 20,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2542,
+   "name": "Attack 2",
+   "varp": 20,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2543,
+   "name": "Attack 3",
+   "varp": 20,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2544,
+   "name": "Attack 4",
+   "varp": 20,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2545,
+   "name": "Attack 5",
+   "varp": 20,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2546,
+   "name": "Attack 6",
+   "varp": 20,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2547,
+   "name": "Attention",
+   "varp": 20,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2549,
+   "name": "Autumn Voyage",
+   "varp": 20,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2550,
+   "name": "Aye Car Rum Ba",
+   "varp": 464,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2551,
+   "name": "Aztec",
+   "varp": 298,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2552,
+   "name": "Back to Life",
+   "varp": 662,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2553,
+   "name": "Background",
+   "varp": 20,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2554,
+   "name": "Bait",
+   "varp": 1681,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2555,
+   "name": "Ballad of Enchantment",
+   "varp": 20,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2556,
+   "name": "Bandit Camp",
+   "varp": 298,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2557,
+   "name": "Bandos Battalion",
+   "varp": 1009,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2558,
+   "name": "Cain's Tutorial",
+   "varp": 3418,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2559,
+   "name": "Barb Wire",
+   "varp": 906,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2560,
+   "name": "Barbarianism",
+   "varp": 346,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2561,
+   "name": "Barking Mad",
+   "varp": 1338,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2562,
+   "name": "Baroque",
+   "varp": 20,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2563,
+   "name": "Brain Battle",
+   "varp": 3418,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2564,
+   "name": "Barren Land",
+   "varp": 1681,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2565,
+   "name": "Ballad of the Basilisk",
+   "varp": 2237,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2566,
+   "name": "Fight of the Basilisk",
+   "varp": 2237,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2567,
+   "name": "Jaws of the Basilisk",
+   "varp": 2237,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2568,
+   "name": "Lair of the Basilisk",
+   "varp": 2237,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2569,
+   "name": "Reign of the Basilisk",
+   "varp": 2237,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2570,
+   "name": "On the Frontline",
+   "varp": 2065,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2571,
+   "name": "Beetle Juice",
+   "varp": 662,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2572,
+   "name": "Beneath the Stronghold",
+   "varp": 906,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2573,
+   "name": "The Fremennik Kings",
+   "varp": 3418,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2574,
+   "name": "Beyond",
+   "varp": 20,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2575,
+   "name": "Big Chords",
+   "varp": 20,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2576,
+   "name": "Barbarian Workout",
+   "varp": 2950,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2577,
+   "name": "Blistering Barnacles",
+   "varp": 598,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2578,
+   "name": "Bloodbath",
+   "varp": 1681,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2579,
+   "name": "Bob's on Holiday",
+   "varp": 3418,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2580,
+   "name": "Body Parts",
+   "varp": 346,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2581,
+   "name": "Bone Dance",
+   "varp": 25,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2582,
+   "name": "Bone Dry",
+   "varp": 298,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2583,
+   "name": "Book of Spells",
+   "varp": 20,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2584,
+   "name": "Borderland",
+   "varp": 311,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2585,
+   "name": "Box of Delights",
+   "varp": 2065,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2586,
+   "name": "Breeze",
+   "varp": 298,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2587,
+   "name": "Brew Hoo Hoo!",
+   "varp": 464,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2588,
+   "name": "Brimstail's Scales",
+   "varp": 721,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2589,
+   "name": "Bubble and Squeak",
+   "varp": 464,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2590,
+   "name": "Bunny's Sugar Rush",
+   "varp": 464,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2591,
+   "name": "Burning Desire",
+   "varp": 2065,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2592,
+   "name": "Cabin Fever",
+   "varp": 598,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2593,
+   "name": "The Ruins of Camdozaal",
+   "varp": 2950,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2594,
+   "name": "Race Against the Clock",
+   "varp": 2950,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2595,
+   "name": "Camelot",
+   "varp": 20,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2596,
+   "name": "Castle Wars",
+   "varp": 311,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2597,
+   "name": "Catacombs and Tombs",
+   "varp": 2950,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2598,
+   "name": "Catch Me If You Can",
+   "varp": 464,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2599,
+   "name": "Cave Background",
+   "varp": 20,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2600,
+   "name": "Cave of Beasts",
+   "varp": 346,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2601,
+   "name": "Cave of the Goblins",
+   "varp": 414,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2602,
+   "name": "Cavern",
+   "varp": 20,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2603,
+   "name": "Cellar Song",
+   "varp": 25,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2604,
+   "name": "Chain of Command",
+   "varp": 20,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2605,
+   "name": "Chamber",
+   "varp": 311,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2606,
+   "name": "Chef Surprise",
+   "varp": 662,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2607,
+   "name": "Chickened Out",
+   "varp": 662,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2608,
+   "name": "Chompy Hunt",
+   "varp": 25,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2609,
+   "name": "Elven Guardians",
+   "varp": 2065,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2610,
+   "name": "City of the Dead",
+   "varp": 414,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2611,
+   "name": "Clanliness",
+   "varp": 2950,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2612,
+   "name": "Clan Wars",
+   "varp": 1009,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2613,
+   "name": "Claustrophobia",
+   "varp": 414,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2614,
+   "name": "Close Quarters",
+   "varp": 25,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2615,
+   "name": "Coil",
+   "varp": 721,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2616,
+   "name": "Competition",
+   "varp": 298,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2617,
+   "name": "Complication",
+   "varp": 346,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2618,
+   "name": "Confrontation",
+   "varp": 2950,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2619,
+   "name": "Conspiracy",
+   "varp": 1681,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2620,
+   "name": "Contest",
+   "varp": 298,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2621,
+   "name": "Regal Pomp",
+   "varp": 2950,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2622,
+   "name": "Corporal Punishment",
+   "varp": 464,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2623,
+   "name": "Bane",
+   "varp": 1009,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2624,
+   "name": "Corridors of Power",
+   "varp": 598,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2625,
+   "name": "Courage",
+   "varp": 346,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2626,
+   "name": "Creature Cruelty",
+   "varp": 906,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2627,
+   "name": "Crest of a Wave",
+   "varp": 5238,
+   "bit": 2,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2628,
+   "name": "The Seed of Crwys",
+   "varp": 2065,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2629,
+   "name": "Crystal Castle",
+   "varp": 298,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2630,
+   "name": "Crystal Cave",
+   "varp": 20,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2631,
+   "name": "Crystal Sword",
+   "varp": 20,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2632,
+   "name": "Cursed",
+   "varp": 25,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2633,
+   "name": "Dagannoth Dawn",
+   "varp": 598,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2634,
+   "name": "Dance of Death",
+   "varp": 662,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2635,
+   "name": "Dance of the Meilyr",
+   "varp": 2065,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2636,
+   "name": "Dance of the Undead",
+   "varp": 414,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2637,
+   "name": "Dangerous",
+   "varp": 20,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2638,
+   "name": "Dangerous Road",
+   "varp": 346,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2639,
+   "name": "Dangerous Way",
+   "varp": 414,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2640,
+   "name": "Dark",
+   "varp": 20,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2641,
+   "name": "Darkly Altared",
+   "varp": 24,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2642,
+   "name": "Darkmeyer",
+   "varp": 2237,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2643,
+   "name": "Darkness in the Depths",
+   "varp": 1338,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2644,
+   "name": "Davy Jones' Locker",
+   "varp": 662,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2645,
+   "name": "Dead Can Dance",
+   "varp": 464,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2646,
+   "name": "Dead Quiet",
+   "varp": 25,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2647,
+   "name": "Deadlands",
+   "varp": 311,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2648,
+   "name": "Deep Down",
+   "varp": 311,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2649,
+   "name": "Deep Wildy",
+   "varp": 21,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2650,
+   "name": "Delrith",
+   "varp": 3418,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2651,
+   "name": "Desert Heat",
+   "varp": 464,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2652,
+   "name": "Desert Voyage",
+   "varp": 21,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2653,
+   "name": "The Desolate Mage",
+   "varp": 1338,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2654,
+   "name": "Devils May Care",
+   "varp": 1009,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2655,
+   "name": "Diango's Little Helpers",
+   "varp": 598,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2656,
+   "name": "Dies Irae",
+   "varp": 598,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2657,
+   "name": "Dimension X",
+   "varp": 721,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2658,
+   "name": "Distant Land",
+   "varp": 598,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2659,
+   "name": "Distillery Hilarity",
+   "varp": 662,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2660,
+   "name": "Dogs of War",
+   "varp": 662,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2661,
+   "name": "Domain of the Vampyres",
+   "varp": 2237,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2662,
+   "name": "Don't Panic Zanik",
+   "varp": 2950,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2663,
+   "name": "Doorways",
+   "varp": 21,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2664,
+   "name": "Dorgeshuun City",
+   "varp": 906,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2665,
+   "name": "Dorgeshuun Deep",
+   "varp": 906,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2666,
+   "name": "Dorgeshuun Treaty",
+   "varp": 3418,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2667,
+   "name": "Down and Out",
+   "varp": 1009,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2668,
+   "name": "Down Below",
+   "varp": 346,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2669,
+   "name": "Down to Earth",
+   "varp": 346,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2670,
+   "name": "Relics",
+   "varp": 1338,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2671,
+   "name": "The Forsaken",
+   "varp": 1338,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2672,
+   "name": "Dragontooth Island",
+   "varp": 346,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2673,
+   "name": "Oncoming Foe",
+   "varp": 1338,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2674,
+   "name": "Dream",
+   "varp": 21,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2675,
+   "name": "Dreamstate",
+   "varp": 721,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2677,
+   "name": "The Emir's Arena",
+   "varp": 25,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2678,
+   "name": "Dunjun",
+   "varp": 21,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2679,
+   "name": "Dusk in Yu'biusk",
+   "varp": 2950,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2680,
+   "name": "Dwarf Theme",
+   "varp": 21,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2681,
+   "name": "Dynasty",
+   "varp": 346,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2682,
+   "name": "Eagles' Peak",
+   "varp": 414,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2683,
+   "name": "Easter Jig",
+   "varp": 906,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2684,
+   "name": "Egypt",
+   "varp": 21,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2685,
+   "name": "Eye of the Storm",
+   "varp": 3418,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2686,
+   "name": "Elven Mist",
+   "varp": 298,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2687,
+   "name": "Elven Seed",
+   "varp": 2065,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2688,
+   "name": "Emotion",
+   "varp": 21,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2689,
+   "name": "Emperor",
+   "varp": 21,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2690,
+   "name": "The Enclave",
+   "varp": 2237,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2691,
+   "name": "Escape",
+   "varp": 25,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2692,
+   "name": "Espionage",
+   "varp": 906,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2693,
+   "name": "Awful Anthem",
+   "varp": 3418,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2694,
+   "name": "Etceteria",
+   "varp": 311,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2695,
+   "name": "Everlasting",
+   "varp": 1009,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2696,
+   "name": "Everlasting Fire",
+   "varp": 721,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2697,
+   "name": "Everywhere",
+   "varp": 298,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2698,
+   "name": "Eve's Epinette",
+   "varp": 2237,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2699,
+   "name": "Evil Bob's Island",
+   "varp": 414,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2700,
+   "name": "Expanse",
+   "varp": 21,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2701,
+   "name": "Expecting",
+   "varp": 21,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2702,
+   "name": "Expedition",
+   "varp": 21,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2703,
+   "name": "Exposed",
+   "varp": 298,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2704,
+   "name": "Faerie",
+   "varp": 21,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2705,
+   "name": "The Fairy Dragon",
+   "varp": 3418,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2706,
+   "name": "Faith of the Hefin",
+   "varp": 2065,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2707,
+   "name": "Faithless",
+   "varp": 346,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2708,
+   "name": "Fanfare",
+   "varp": 21,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2709,
+   "name": "Fanfare 2",
+   "varp": 25,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2710,
+   "name": "Fanfare 3",
+   "varp": 21,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2711,
+   "name": "Fangs for the Memory",
+   "varp": 598,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2712,
+   "name": "Far Away",
+   "varp": 414,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2713,
+   "name": "Fe Fi Fo Fum",
+   "varp": 1009,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2714,
+   "name": "Fear and Loathing",
+   "varp": 662,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2715,
+   "name": "Fenkenstrain's Refrain",
+   "varp": 346,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2716,
+   "name": "Fight or Flight",
+   "varp": 414,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2717,
+   "name": "Find My Way",
+   "varp": 311,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2718,
+   "name": "Fire and Brimstone",
+   "varp": 464,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2719,
+   "name": "Fishing",
+   "varp": 21,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2720,
+   "name": "Floating Free",
+   "varp": 906,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2721,
+   "name": "Flute Salad",
+   "varp": 21,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2722,
+   "name": "Food for Thought",
+   "varp": 662,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2723,
+   "name": "Forbidden",
+   "varp": 25,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2724,
+   "name": "Forest",
+   "varp": 298,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2725,
+   "name": "Forever",
+   "varp": 21,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2726,
+   "name": "Forgettable Melody",
+   "varp": 464,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2727,
+   "name": "Forgotten",
+   "varp": 414,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2728,
+   "name": "The Forlorn Homestead",
+   "varp": 24,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2729,
+   "name": "The Forsaken Tower",
+   "varp": 2065,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2730,
+   "name": "A Forgotten Religion",
+   "varp": 2065,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2731,
+   "name": "Lava is Mine",
+   "varp": 1338,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2732,
+   "name": "Preserved",
+   "varp": 1338,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2733,
+   "name": "Preservation",
+   "varp": 1338,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2734,
+   "name": "Fossilised",
+   "varp": 1338,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2735,
+   "name": "Lagoon",
+   "varp": 1338,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2736,
+   "name": "Frogland",
+   "varp": 464,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2737,
+   "name": "Frostbite",
+   "varp": 311,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2738,
+   "name": "Fruits de Mer",
+   "varp": 346,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2739,
+   "name": "Ful to the Brim",
+   "varp": 1681,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2740,
+   "name": "Funny Bunnies",
+   "varp": 662,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2741,
+   "name": "The Dragon Slayer",
+   "varp": 1338,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2742,
+   "name": "Gaol",
+   "varp": 21,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2743,
+   "name": "Garden",
+   "varp": 21,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2744,
+   "name": "Garden of Autumn",
+   "varp": 906,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2745,
+   "name": "Garden of Spring",
+   "varp": 906,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2746,
+   "name": "Garden of Summer",
+   "varp": 906,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2747,
+   "name": "Garden of Winter",
+   "varp": 906,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2748,
+   "name": "Tempest",
+   "varp": 1338,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2749,
+   "name": "The Gauntlet",
+   "varp": 2065,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2750,
+   "name": "Getting Down to Business",
+   "varp": 2065,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2751,
+   "name": "Dogfight",
+   "varp": 3418,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2752,
+   "name": "The Consortium",
+   "varp": 2950,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2753,
+   "name": "The Foundry",
+   "varp": 3418,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2754,
+   "name": "Gill Bill",
+   "varp": 1681,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2755,
+   "name": "Gnome King",
+   "varp": 21,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2756,
+   "name": "Gnome Village",
+   "varp": 21,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2757,
+   "name": "Gnome Village Party",
+   "varp": 4944,
+   "bit": 18,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2758,
+   "name": "Gnome Village 2",
+   "varp": 21,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2759,
+   "name": "Gnomeball",
+   "varp": 21,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2760,
+   "name": "Goblin Game",
+   "varp": 311,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2761,
+   "name": "Goblin Village",
+   "varp": 21,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2762,
+   "name": "Golden Touch",
+   "varp": 598,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2763,
+   "name": "Guardians of the Rift",
+   "varp": 2950,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2764,
+   "name": "The Guardians Prepare",
+   "varp": 2950,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2765,
+   "name": "Greatness",
+   "varp": 21,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2766,
+   "name": "Grimly Fiendish",
+   "varp": 1009,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2767,
+   "name": "Grip of the Talon",
+   "varp": 598,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2768,
+   "name": "Grotto",
+   "varp": 298,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2769,
+   "name": "Scape Ground",
+   "varp": 4944,
+   "bit": 19,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2770,
+   "name": "Grow Grow Grow",
+   "varp": 2065,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2771,
+   "name": "Grumpy",
+   "varp": 25,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2772,
+   "name": "Watch Your Step",
+   "varp": 2237,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2773,
+   "name": "Well Hallowed Air",
+   "varp": 2237,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2774,
+   "name": "H.A.M. and Seek",
+   "varp": 906,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2775,
+   "name": "H.A.M. Attack",
+   "varp": 906,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2776,
+   "name": "H.A.M. Fisted",
+   "varp": 721,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2777,
+   "name": "Harmony",
+   "varp": 21,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2778,
+   "name": "Harmony 2",
+   "varp": 25,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2779,
+   "name": "Haunted Mine",
+   "varp": 298,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2780,
+   "name": "Have a Blast",
+   "varp": 464,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2781,
+   "name": "Have an Ice Day",
+   "varp": 906,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2782,
+   "name": "Head to Head",
+   "varp": 662,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2783,
+   "name": "Heart and Mind",
+   "varp": 25,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2784,
+   "name": "Hells Bells",
+   "varp": 311,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2785,
+   "name": "Hermit",
+   "varp": 25,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2786,
+   "name": "A Thorn in My Side",
+   "varp": 2065,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2787,
+   "name": "Creeping Vines",
+   "varp": 2065,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2788,
+   "name": "High Seas",
+   "varp": 21,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2789,
+   "name": "High Spirits",
+   "varp": 906,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2790,
+   "name": "Hoe Down",
+   "varp": 2065,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2791,
+   "name": "Home Sweet Home",
+   "varp": 662,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2792,
+   "name": "Scape Home",
+   "varp": 4944,
+   "bit": 20,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2793,
+   "name": "Horizon",
+   "varp": 21,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2794,
+   "name": "Country Jig",
+   "varp": 24,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2795,
+   "name": "Beyond the Meadow",
+   "varp": 2950,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2796,
+   "name": "Hypnotised",
+   "varp": 414,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2797,
+   "name": "Iban",
+   "varp": 21,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2798,
+   "name": "Ice Melody",
+   "varp": 25,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2799,
+   "name": "King of the Trolls",
+   "varp": 3418,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2800,
+   "name": "Lament for the Hallowed",
+   "varp": 2237,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2801,
+   "name": "Illusive",
+   "varp": 1009,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2802,
+   "name": "Impetuous",
+   "varp": 906,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2803,
+   "name": "Impulses",
+   "varp": 2950,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2804,
+   "name": "In Between",
+   "varp": 414,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2805,
+   "name": "In the Brine",
+   "varp": 598,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2806,
+   "name": "In the Clink",
+   "varp": 598,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2807,
+   "name": "In the Manor",
+   "varp": 21,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2808,
+   "name": "In the Pits",
+   "varp": 464,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2809,
+   "name": "Inadequacy",
+   "varp": 1009,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2810,
+   "name": "Incantation",
+   "varp": 598,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2811,
+   "name": "Inferno",
+   "varp": 1338,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2812,
+   "name": "Insect Queen",
+   "varp": 298,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2813,
+   "name": "Inspiration",
+   "varp": 21,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2814,
+   "name": "Into the Abyss",
+   "varp": 414,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2815,
+   "name": "Intrepid",
+   "varp": 22,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2816,
+   "name": "Sharp End of the Crystal",
+   "varp": 2065,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2817,
+   "name": "Iorwerth's Lament",
+   "varp": 2065,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2818,
+   "name": "Island Life",
+   "varp": 311,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2819,
+   "name": "Island of the Trolls",
+   "varp": 721,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2820,
+   "name": "Isle of Everywhere",
+   "varp": 721,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2821,
+   "name": "Architects of Prifddinas",
+   "varp": 2065,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2822,
+   "name": "Jester Minute",
+   "varp": 721,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2823,
+   "name": "Jolly R",
+   "varp": 22,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2824,
+   "name": "Joy of the Hunt",
+   "varp": 662,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2825,
+   "name": "Judgement of the Depths",
+   "varp": 2950,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2826,
+   "name": "Jungle Bells",
+   "varp": 906,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2827,
+   "name": "Jungle Hunt",
+   "varp": 662,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2828,
+   "name": "Jungle Island",
+   "varp": 22,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2829,
+   "name": "Jungle Island Xmas",
+   "varp": 906,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2830,
+   "name": "Jungle Troubles",
+   "varp": 464,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2831,
+   "name": "Jungly 1",
+   "varp": 22,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2832,
+   "name": "Jungly 2",
+   "varp": 22,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2833,
+   "name": "Jungly 3",
+   "varp": 22,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2834,
+   "name": "Kanon of Kahlith",
+   "varp": 1681,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2835,
+   "name": "Karamja Jam",
+   "varp": 346,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2836,
+   "name": "The Pharaoh",
+   "varp": 3418,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2837,
+   "name": "Kingdom",
+   "varp": 25,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2838,
+   "name": "The Sinclairs",
+   "varp": 3418,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2839,
+   "name": "Knightly",
+   "varp": 22,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2840,
+   "name": "Knightmare",
+   "varp": 1009,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2841,
+   "name": "Beneath the Kingdom",
+   "varp": 2950,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2842,
+   "name": "The Houses of Kourend",
+   "varp": 2950,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2843,
+   "name": "Kourend the Magnificent",
+   "varp": 414,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2844,
+   "name": "La Mort",
+   "varp": 298,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2845,
+   "name": "Labyrinth",
+   "varp": 662,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2846,
+   "name": "Lair",
+   "varp": 311,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2847,
+   "name": "Lament",
+   "varp": 598,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2848,
+   "name": "Lament of Meiyerditch",
+   "varp": 721,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2849,
+   "name": "Land Down Under",
+   "varp": 598,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2850,
+   "name": "Land of Snow",
+   "varp": 1338,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2851,
+   "name": "Land of the Dwarves",
+   "varp": 414,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2852,
+   "name": "Landlubber",
+   "varp": 25,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2853,
+   "name": "Last Stand",
+   "varp": 598,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2854,
+   "name": "Lasting",
+   "varp": 22,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2855,
+   "name": "Last Man Standing",
+   "varp": 1338,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2856,
+   "name": "Shattered Relics",
+   "varp": 4944,
+   "bit": 21,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2857,
+   "name": "Legend",
+   "varp": 311,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2858,
+   "name": "Legion",
+   "varp": 22,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2859,
+   "name": "Life's a Beach!",
+   "varp": 721,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2860,
+   "name": "Lighthouse",
+   "varp": 311,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2861,
+   "name": "Lightness",
+   "varp": 22,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2862,
+   "name": "Lightwalk",
+   "varp": 22,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2863,
+   "name": "Little Cave of Horrors",
+   "varp": 721,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2864,
+   "name": "The Fires of Lletya",
+   "varp": 2065,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2865,
+   "name": "Lonesome",
+   "varp": 24,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2866,
+   "name": "Long Ago",
+   "varp": 22,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2867,
+   "name": "Long Way Home",
+   "varp": 22,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2868,
+   "name": "Looking Back",
+   "varp": 906,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2869,
+   "name": "Lore and Order",
+   "varp": 1009,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2870,
+   "name": "Lost Soul",
+   "varp": 298,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2871,
+   "name": "Dwarven Domain",
+   "varp": 24,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2872,
+   "name": "Out at the Mines",
+   "varp": 2950,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2873,
+   "name": "Lower Depths",
+   "varp": 1338,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2874,
+   "name": "You Have My Attention",
+   "varp": 2237,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2877,
+   "name": "Lucid Dream",
+   "varp": 1681,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2878,
+   "name": "Lucid Nightmare",
+   "varp": 1681,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2879,
+   "name": "Lullaby",
+   "varp": 22,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2880,
+   "name": "Mad Eadgar",
+   "varp": 298,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2881,
+   "name": "Mage Arena",
+   "varp": 22,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2882,
+   "name": "Magic Dance",
+   "varp": 22,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2883,
+   "name": "Magic Magic Magic",
+   "varp": 906,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2884,
+   "name": "Magical Journey",
+   "varp": 22,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2885,
+   "name": "The Maiden's Sorrow",
+   "varp": 1681,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2886,
+   "name": "The Maiden's Anger",
+   "varp": 1681,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2887,
+   "name": "Major Miner",
+   "varp": 721,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2888,
+   "name": "Making Waves",
+   "varp": 598,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2889,
+   "name": "Malady",
+   "varp": 662,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2890,
+   "name": "March",
+   "varp": 22,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2891,
+   "name": "Marooned",
+   "varp": 311,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2892,
+   "name": "Marzipan",
+   "varp": 298,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2893,
+   "name": "Masquerade",
+   "varp": 346,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2894,
+   "name": "Mastermindless",
+   "varp": 662,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2895,
+   "name": "Mausoleum",
+   "varp": 25,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2896,
+   "name": "Maws Jaws & Claws",
+   "varp": 1009,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2897,
+   "name": "Meddling Kids",
+   "varp": 598,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2898,
+   "name": "Medieval",
+   "varp": 22,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2899,
+   "name": "The Forgotten Tomb",
+   "varp": 3418,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2900,
+   "name": "Mellow",
+   "varp": 22,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2901,
+   "name": "Melodrama",
+   "varp": 311,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2902,
+   "name": "The Maze",
+   "varp": 1009,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2903,
+   "name": "The Gates of Menaphos",
+   "varp": 3418,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2904,
+   "name": "Meridian",
+   "varp": 298,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2905,
+   "name": "Method of Madness",
+   "varp": 662,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2906,
+   "name": "Miles Away",
+   "varp": 22,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2907,
+   "name": "Mind over Matter",
+   "varp": 598,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2909,
+   "name": "Miracle Dance",
+   "varp": 22,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2910,
+   "name": "Mirage",
+   "varp": 414,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2911,
+   "name": "Miscellania",
+   "varp": 311,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2912,
+   "name": "Monkey Badness",
+   "varp": 1338,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2913,
+   "name": "Monkey Trouble",
+   "varp": 1009,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2914,
+   "name": "Monkey Sadness",
+   "varp": 1009,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2915,
+   "name": "Monkey Business",
+   "varp": 1338,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2916,
+   "name": "Scape Ape",
+   "varp": 4944,
+   "bit": 22,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2917,
+   "name": "Servants of Strife",
+   "varp": 2065,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2918,
+   "name": "Monarch Waltz",
+   "varp": 22,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2919,
+   "name": "Monkey Madness",
+   "varp": 311,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2920,
+   "name": "Monster Melee",
+   "varp": 346,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2921,
+   "name": "Moody",
+   "varp": 22,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2922,
+   "name": "Mor Ul Rek",
+   "varp": 1338,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2923,
+   "name": "Morytania",
+   "varp": 25,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2924,
+   "name": "Mouse Trap",
+   "varp": 1009,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2925,
+   "name": "Mudskipper Melody",
+   "varp": 598,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2926,
+   "name": "Museum Medley",
+   "varp": 1681,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2927,
+   "name": "Mutant Medley",
+   "varp": 906,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2928,
+   "name": "My Arm's Journey",
+   "varp": 721,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2929,
+   "name": "Mother Ruckus",
+   "varp": 1681,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2930,
+   "name": "Snowflake & My Arm",
+   "varp": 1681,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2931,
+   "name": "Mythical",
+   "varp": 1338,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2932,
+   "name": "Narnode's Theme",
+   "varp": 346,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2933,
+   "name": "Natural",
+   "varp": 298,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2934,
+   "name": "Dunes of Eternity",
+   "varp": 3418,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2935,
+   "name": "Nether Realm",
+   "varp": 1009,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2936,
+   "name": "Neverland",
+   "varp": 22,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2937,
+   "name": "Newbie Farming",
+   "varp": 2065,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2938,
+   "name": "Newbie Melody",
+   "varp": 5238,
+   "bit": 0,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2939,
+   "name": "Night of the Vampyre",
+   "varp": 721,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2940,
+   "name": "Nightfall",
+   "varp": 22,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2941,
+   "name": "The Bane of Ashihama",
+   "varp": 2237,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2942,
+   "name": "No Pasaran",
+   "varp": 2237,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2943,
+   "name": "No Way Out",
+   "varp": 662,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2944,
+   "name": "Nomad",
+   "varp": 25,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2945,
+   "name": "Norse Code",
+   "varp": 721,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2946,
+   "name": "Nox Irae",
+   "varp": 598,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 2947,
+   "name": "Null and Void",
+   "varp": 662,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2948,
+   "name": "Dance of the Nylocas",
+   "varp": 1681,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2949,
+   "name": "Arachnids of Vampyrium",
+   "varp": 1681,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2950,
+   "name": "Look to the Stars",
+   "varp": 3418,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2951,
+   "name": "Ogre the Top",
+   "varp": 906,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2952,
+   "name": "Fire in the Deep",
+   "varp": 1338,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2953,
+   "name": "On the Up",
+   "varp": 1009,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2954,
+   "name": "On the Wing",
+   "varp": 721,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2955,
+   "name": "On the Shore",
+   "varp": 1338,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2956,
+   "name": "Organ Music 1",
+   "varp": 4944,
+   "bit": 23,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2957,
+   "name": "Organ Music 2",
+   "varp": 4944,
+   "bit": 24,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2958,
+   "name": "Oriental",
+   "varp": 22,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2959,
+   "name": "Out of the Deep",
+   "varp": 311,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2960,
+   "name": "Over to Nardah",
+   "varp": 464,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2961,
+   "name": "Overpass",
+   "varp": 298,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2962,
+   "name": "Overture",
+   "varp": 22,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2963,
+   "name": "Parade",
+   "varp": 22,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2964,
+   "name": "Path of Peril",
+   "varp": 414,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2965,
+   "name": "Pathways",
+   "varp": 346,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2966,
+   "name": "The Penguin Bards",
+   "varp": 3418,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2967,
+   "name": "Penguin Plots",
+   "varp": 3418,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2968,
+   "name": "Pest Control",
+   "varp": 662,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2969,
+   "name": "Welcome to my Nightmare",
+   "varp": 1681,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2970,
+   "name": "The Nightmare Continues",
+   "varp": 1681,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2971,
+   "name": "Pharaoh's Tomb",
+   "varp": 598,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2972,
+   "name": "Phasmatys",
+   "varp": 346,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2973,
+   "name": "Pheasant Peasant",
+   "varp": 464,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2974,
+   "name": "Pick & Shovel",
+   "varp": 1009,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2975,
+   "name": "Pinball Wizard",
+   "varp": 662,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2976,
+   "name": "Pirates of Penance",
+   "varp": 721,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2977,
+   "name": "Pirates of Peril",
+   "varp": 346,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2978,
+   "name": "Down by the Docks",
+   "varp": 24,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2979,
+   "name": "Poles Apart",
+   "varp": 598,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2980,
+   "name": "Prime Time",
+   "varp": 721,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2981,
+   "name": "Principality",
+   "varp": 25,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2982,
+   "name": "Quest",
+   "varp": 22,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2983,
+   "name": "A Taste of Hope",
+   "varp": 1681,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2984,
+   "name": "Rat a Tat Tat",
+   "varp": 464,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2985,
+   "name": "Rat Hunt",
+   "varp": 464,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2986,
+   "name": "Ready for Battle",
+   "varp": 311,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2987,
+   "name": "Regal",
+   "varp": 22,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2988,
+   "name": "Reggae",
+   "varp": 23,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2989,
+   "name": "Reggae 2",
+   "varp": 23,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2990,
+   "name": "Rellekka",
+   "varp": 311,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2991,
+   "name": "Rest in Peace",
+   "varp": 2237,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2992,
+   "name": "A Dangerous Game",
+   "varp": 2237,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2993,
+   "name": "Rhapsody",
+   "varp": 1009,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2994,
+   "name": "Right on Track",
+   "varp": 464,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2995,
+   "name": "Righteousness",
+   "varp": 298,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2996,
+   "name": "Rising Damp",
+   "varp": 721,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2997,
+   "name": "Riverside",
+   "varp": 23,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2998,
+   "name": "Roc and Roll",
+   "varp": 906,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 2999,
+   "name": "Roll the Bones",
+   "varp": 598,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3000,
+   "name": "Romancing the Crone",
+   "varp": 346,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3001,
+   "name": "Romper Chomper",
+   "varp": 414,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3002,
+   "name": "Roots and Flutes",
+   "varp": 1681,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3003,
+   "name": "Rose",
+   "varp": 2950,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3004,
+   "name": "Royale",
+   "varp": 23,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3005,
+   "name": "Rugged Terrain",
+   "varp": 24,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3006,
+   "name": "Rune Essence",
+   "varp": 23,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3007,
+   "name": "Sad Meadow",
+   "varp": 23,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3008,
+   "name": "Saga",
+   "varp": 311,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3009,
+   "name": "Sarachnis",
+   "varp": 2065,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3010,
+   "name": "Sarcophagus",
+   "varp": 346,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3011,
+   "name": "Sarim's Vermin",
+   "varp": 464,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3012,
+   "name": "Scape Cave",
+   "varp": 23,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3013,
+   "name": "Scape Crystal",
+   "varp": 4944,
+   "bit": 25,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3014,
+   "name": "Scape Hunter",
+   "varp": 4944,
+   "bit": 26,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3015,
+   "name": "Scape Main",
+   "varp": 4944,
+   "bit": 27,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3016,
+   "name": "Scape Original",
+   "varp": 4944,
+   "bit": 28,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3017,
+   "name": "Scape Sad",
+   "varp": 23,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3018,
+   "name": "Scape Santa",
+   "varp": 4944,
+   "bit": 29,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3019,
+   "name": "Scape Scared",
+   "varp": 4944,
+   "bit": 30,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3020,
+   "name": "Scape Soft",
+   "varp": 24,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3021,
+   "name": "Scape Wild",
+   "varp": 23,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3022,
+   "name": "Scape Five",
+   "varp": 4944,
+   "bit": 31,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3023,
+   "name": "Scarab",
+   "varp": 346,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3024,
+   "name": "School's Out",
+   "varp": 1009,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3025,
+   "name": "Scorpia Dances",
+   "varp": 1009,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3026,
+   "name": "Scrubfoot's Descent",
+   "varp": 2237,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 3027,
+   "name": "Sea Shanty",
+   "varp": 23,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3028,
+   "name": "Sea Shanty Xmas",
+   "varp": 906,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 3029,
+   "name": "Sea Shanty 2",
+   "varp": 23,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3030,
+   "name": "Sea Minor Shanty",
+   "varp": 2237,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 3031,
+   "name": "Serenade",
+   "varp": 23,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3032,
+   "name": "Serene",
+   "varp": 23,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3033,
+   "name": "Settlement",
+   "varp": 346,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3034,
+   "name": "Shadowland",
+   "varp": 311,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3035,
+   "name": "The Militia",
+   "varp": 24,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3036,
+   "name": "Military Life",
+   "varp": 2950,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3037,
+   "name": "The Forests of Shayzien",
+   "varp": 2950,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3038,
+   "name": "The Walking Dead",
+   "varp": 1338,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3039,
+   "name": "March of the Shayzien",
+   "varp": 1338,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3040,
+   "name": "Shine",
+   "varp": 23,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3041,
+   "name": "Shining",
+   "varp": 25,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3042,
+   "name": "Shining Spirit",
+   "varp": 1009,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3043,
+   "name": "Shipwrecked",
+   "varp": 346,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3044,
+   "name": "Showdown",
+   "varp": 311,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3045,
+   "name": "Sigmund's Showdown",
+   "varp": 721,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3046,
+   "name": "Invader",
+   "varp": 598,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3047,
+   "name": "The Everlasting Slumber",
+   "varp": 2237,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3048,
+   "name": "Slice of Silent Movie",
+   "varp": 906,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3049,
+   "name": "Slice of Station",
+   "varp": 906,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3050,
+   "name": "Slither and Thither",
+   "varp": 598,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3051,
+   "name": "Slug a Bug Ball",
+   "varp": 721,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3052,
+   "name": "Sojourn",
+   "varp": 298,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3053,
+   "name": "Sorceress's Garden",
+   "varp": 3418,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3054,
+   "name": "The Dark Beast Sotetseg",
+   "varp": 1681,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3055,
+   "name": "Power of the Shadow Realm",
+   "varp": 1681,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3056,
+   "name": "Soul Wars",
+   "varp": 2237,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3057,
+   "name": "Soul Fall",
+   "varp": 24,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3058,
+   "name": "Soundscape",
+   "varp": 23,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3059,
+   "name": "Safety in Numbers",
+   "varp": 2237,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3060,
+   "name": "Sphinx",
+   "varp": 414,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3061,
+   "name": "Spirit",
+   "varp": 23,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3062,
+   "name": "Spirits of the Elid",
+   "varp": 464,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3063,
+   "name": "Splendour",
+   "varp": 23,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3064,
+   "name": "Spooky",
+   "varp": 23,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3065,
+   "name": "Spooky 2",
+   "varp": 298,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3066,
+   "name": "Spooky Jungle",
+   "varp": 23,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3068,
+   "name": "The Spymaster",
+   "varp": 3418,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3069,
+   "name": "Stagnant",
+   "varp": 298,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3070,
+   "name": "Stand Up and Be Counted",
+   "varp": 2237,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3071,
+   "name": "Starlight",
+   "varp": 23,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3072,
+   "name": "Start",
+   "varp": 23,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3073,
+   "name": "Still Night",
+   "varp": 23,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3074,
+   "name": "Stillness",
+   "varp": 311,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3075,
+   "name": "Storm Brew",
+   "varp": 662,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3076,
+   "name": "Stranded",
+   "varp": 311,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3077,
+   "name": "Strange Place",
+   "varp": 464,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3078,
+   "name": "Stratosphere",
+   "varp": 298,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3079,
+   "name": "Strength of Saradomin",
+   "varp": 1009,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3080,
+   "name": "Stuck in the Mire",
+   "varp": 2065,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3081,
+   "name": "Subterranea",
+   "varp": 598,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3082,
+   "name": "Sunburn",
+   "varp": 298,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3083,
+   "name": "Superstition",
+   "varp": 346,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3084,
+   "name": "Surok's Theme",
+   "varp": 3418,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3085,
+   "name": "Suspicious",
+   "varp": 311,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3086,
+   "name": "Tale of Keldagrim",
+   "varp": 414,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3087,
+   "name": "Talking Forest",
+   "varp": 23,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3088,
+   "name": "Tarn Razorlor",
+   "varp": 3418,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3089,
+   "name": "Tears of Guthix",
+   "varp": 414,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3090,
+   "name": "Technology",
+   "varp": 311,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3091,
+   "name": "Temple",
+   "varp": 311,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3092,
+   "name": "Temple of Light",
+   "varp": 414,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3093,
+   "name": "Temple of the Eye",
+   "varp": 2950,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3094,
+   "name": "Temple of Tribes",
+   "varp": 2950,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3095,
+   "name": "Tempor of the Storm",
+   "varp": 2237,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3096,
+   "name": "The Terrible Caverns",
+   "varp": 2237,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3097,
+   "name": "The Terrible Tunnels",
+   "varp": 2237,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3098,
+   "name": "That Sullen Hall",
+   "varp": 1009,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3100,
+   "name": "The Angel's Fury",
+   "varp": 2950,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3101,
+   "name": "The Cellar Dwellers",
+   "varp": 464,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3102,
+   "name": "The Chosen",
+   "varp": 464,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3103,
+   "name": "The Fragment",
+   "varp": 2237,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3104,
+   "name": "The Depths",
+   "varp": 662,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3105,
+   "name": "The Desert",
+   "varp": 23,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3106,
+   "name": "The Desolate Isle",
+   "varp": 464,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3107,
+   "name": "The Enchanter",
+   "varp": 598,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3108,
+   "name": "The Far Side",
+   "varp": 414,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3109,
+   "name": "The Galleon",
+   "varp": 721,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3110,
+   "name": "The Genie",
+   "varp": 464,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3111,
+   "name": "The Golem",
+   "varp": 414,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3112,
+   "name": "The Last Shanty",
+   "varp": 721,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3113,
+   "name": "The Lost Melody",
+   "varp": 414,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3114,
+   "name": "The Lost Tribe",
+   "varp": 464,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3115,
+   "name": "The Lunar Isle",
+   "varp": 721,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3116,
+   "name": "The Mad Mole",
+   "varp": 662,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3117,
+   "name": "The Mollusc Menace",
+   "varp": 721,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3118,
+   "name": "The Monsters Below",
+   "varp": 464,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3119,
+   "name": "The Navigator",
+   "varp": 311,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3120,
+   "name": "The Noble Rodent",
+   "varp": 464,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3121,
+   "name": "The Other Side",
+   "varp": 346,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3122,
+   "name": "The Power of Tears",
+   "varp": 414,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3123,
+   "name": "The Quizmaster",
+   "varp": 414,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3124,
+   "name": "The Rogues' Den",
+   "varp": 414,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3125,
+   "name": "The Shadow",
+   "varp": 23,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3126,
+   "name": "The Slayer",
+   "varp": 346,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3127,
+   "name": "The Terrible Tower",
+   "varp": 346,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3128,
+   "name": "The Tower",
+   "varp": 23,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3129,
+   "name": "The Tower of Voices",
+   "varp": 2065,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3130,
+   "name": "The Trade Parade",
+   "varp": 464,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3131,
+   "name": "Theme",
+   "varp": 23,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3132,
+   "name": "Welcome to the Theatre",
+   "varp": 1681,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3133,
+   "name": "Thrall of the Serpent",
+   "varp": 662,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3134,
+   "name": "Throne of the Demon",
+   "varp": 414,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3135,
+   "name": "Time Out",
+   "varp": 298,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3136,
+   "name": "Time to Mine",
+   "varp": 414,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3137,
+   "name": "Tiptoe",
+   "varp": 346,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3138,
+   "name": "Title Fight",
+   "varp": 598,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3139,
+   "name": "Beneath Cursed Sands",
+   "varp": 3418,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3140,
+   "name": "Sands of Time",
+   "varp": 3575,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3141,
+   "name": "Ape-ex Predator",
+   "varp": 3575,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3142,
+   "name": "A Mother's Curse",
+   "varp": 3575,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3143,
+   "name": "Amascut's Promise",
+   "varp": 3575,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3144,
+   "name": "Jaws of Gluttony",
+   "varp": 3575,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3145,
+   "name": "Into the Tombs",
+   "varp": 3418,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3146,
+   "name": "Test of Companionship",
+   "varp": 3575,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3147,
+   "name": "Test of Resourcefulness",
+   "varp": 3575,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3148,
+   "name": "Test of Strength",
+   "varp": 3575,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3149,
+   "name": "Test of Isolation",
+   "varp": 3418,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3150,
+   "name": "Laid to Rest",
+   "varp": 3418,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3151,
+   "name": "Tomb Raider",
+   "varp": 662,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3152,
+   "name": "Tomorrow",
+   "varp": 25,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3153,
+   "name": "Too Many Cooks...",
+   "varp": 662,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3154,
+   "name": "Trahaearn Toil",
+   "varp": 2065,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3155,
+   "name": "Trawler",
+   "varp": 23,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3156,
+   "name": "Trawler Minor",
+   "varp": 23,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3157,
+   "name": "Tree Spirits",
+   "varp": 23,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3158,
+   "name": "Tremble",
+   "varp": 25,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3159,
+   "name": "Tribal",
+   "varp": 24,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3160,
+   "name": "Tribal Background",
+   "varp": 23,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3161,
+   "name": "Tribal 2",
+   "varp": 24,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3162,
+   "name": "Trinity",
+   "varp": 24,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3163,
+   "name": "Troll Shuffle",
+   "varp": 1681,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3164,
+   "name": "Trouble Brewing",
+   "varp": 662,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3165,
+   "name": "Troubled",
+   "varp": 24,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3166,
+   "name": "Troubled Waters",
+   "varp": 1009,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3167,
+   "name": "Twilight",
+   "varp": 25,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3168,
+   "name": "TzHaar!",
+   "varp": 464,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3169,
+   "name": "Ruins of Isolation",
+   "varp": 3418,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3170,
+   "name": "Undead Dungeon",
+   "varp": 906,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3171,
+   "name": "Undercurrent",
+   "varp": 25,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3172,
+   "name": "Underground",
+   "varp": 24,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3173,
+   "name": "Understanding",
+   "varp": 25,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3174,
+   "name": "Unknown Land",
+   "varp": 24,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3175,
+   "name": "Untouchable",
+   "varp": 1009,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3176,
+   "name": "Underground Pass",
+   "varp": 24,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3177,
+   "name": "Upcoming",
+   "varp": 24,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3178,
+   "name": "Upir Likhyi",
+   "varp": 2237,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3179,
+   "name": "Upper Depths",
+   "varp": 1338,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3180,
+   "name": "Vanescula",
+   "varp": 1681,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3181,
+   "name": "Vampyre Assault",
+   "varp": 2237,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3182,
+   "name": "Venomous",
+   "varp": 3418,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3183,
+   "name": "Venture",
+   "varp": 24,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3184,
+   "name": "Venture 2",
+   "varp": 25,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3185,
+   "name": "It's not over 'til...",
+   "varp": 1681,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3186,
+   "name": "The Fat Lady Sings",
+   "varp": 1681,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3187,
+   "name": "The Curtain Closes",
+   "varp": 1681,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3188,
+   "name": "Victory is Mine",
+   "varp": 598,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3189,
+   "name": "Village",
+   "varp": 25,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3190,
+   "name": "Vision",
+   "varp": 24,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3191,
+   "name": "Volcanic Vikings",
+   "varp": 721,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3192,
+   "name": "Voodoo Cult",
+   "varp": 24,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3193,
+   "name": "Voyage",
+   "varp": 24,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3194,
+   "name": "The Waiting Game",
+   "varp": 2237,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3195,
+   "name": "Waking Dream",
+   "varp": 721,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3196,
+   "name": "Wally the Hero",
+   "varp": 3418,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3197,
+   "name": "Wander",
+   "varp": 24,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3198,
+   "name": "Warpath",
+   "varp": 1009,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3199,
+   "name": "Song of the Elves",
+   "varp": 2065,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3200,
+   "name": "What Happens Below...",
+   "varp": 2950,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3201,
+   "name": "Warrior",
+   "varp": 311,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3202,
+   "name": "Warriors' Guild",
+   "varp": 721,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3203,
+   "name": "The Doors of Dinh",
+   "varp": 23,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3204,
+   "name": "Waterfall",
+   "varp": 24,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3205,
+   "name": "Waterlogged",
+   "varp": 298,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3206,
+   "name": "Way of the Enchanter",
+   "varp": 721,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3207,
+   "name": "Way of the Wyrm",
+   "varp": 1681,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3208,
+   "name": "Wayward",
+   "varp": 414,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3209,
+   "name": "We are the Fairies",
+   "varp": 721,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3210,
+   "name": "Lumbering",
+   "varp": 1681,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3211,
+   "name": "Well of Voyage",
+   "varp": 298,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3212,
+   "name": "Morytanian Mystery",
+   "varp": 2237,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3213,
+   "name": "Where Eagles Lair",
+   "varp": 906,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3214,
+   "name": "Wild Isle",
+   "varp": 25,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3215,
+   "name": "Wild Side",
+   "varp": 464,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3216,
+   "name": "Wilderness",
+   "varp": 24,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3217,
+   "name": "Revenants",
+   "varp": 1338,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3218,
+   "name": "Wilderness 2",
+   "varp": 24,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3219,
+   "name": "Wilderness 3",
+   "varp": 24,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3220,
+   "name": "Wildwood",
+   "varp": 346,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3221,
+   "name": "Winter Funfair",
+   "varp": 1338,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 3222,
+   "name": "Ice and Fire",
+   "varp": 1338,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3223,
+   "name": "Witching",
+   "varp": 24,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3224,
+   "name": "Woe of the Wyvern",
+   "varp": 598,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3225,
+   "name": "Wonder",
+   "varp": 24,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3226,
+   "name": "Wonderous",
+   "varp": 24,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3227,
+   "name": "Woodland",
+   "varp": 298,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3228,
+   "name": "A Walk in the Woods",
+   "varp": 2065,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3229,
+   "name": "Work\t Work\t Work",
+   "varp": 906,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3230,
+   "name": "Workshop",
+   "varp": 24,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3231,
+   "name": "Wrath and Ruin",
+   "varp": 662,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3232,
+   "name": "The Part Where You Die",
+   "varp": 2950,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3233,
+   "name": "Predator Xarpus",
+   "varp": 1681,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3234,
+   "name": "Last King of the Yarasa",
+   "varp": 1681,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3235,
+   "name": "Xenophobe",
+   "varp": 598,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3236,
+   "name": "A Festive Party",
+   "varp": 2950,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 3237,
+   "name": "Yesteryear",
+   "varp": 25,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3238,
+   "name": "The Spurned Demon",
+   "varp": 2065,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3239,
+   "name": "Zamorak Zoo",
+   "varp": 1009,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3240,
+   "name": "Zanik's Theme",
+   "varp": 2950,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3241,
+   "name": "Zaros Zeitgeist",
+   "varp": 2950,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3242,
+   "name": "Zealot",
+   "varp": 25,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3243,
+   "name": "Zogre Dance",
+   "varp": 414,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3244,
+   "name": "On Thin Ice",
+   "varp": 1338,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3245,
+   "name": "Zombiism",
+   "varp": 906,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3246,
+   "name": "The Old Ones",
+   "varp": 3575,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3247,
+   "name": "Secrets of the North",
+   "varp": 3575,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3248,
+   "name": "In the Shadows",
+   "varp": 3575,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3249,
+   "name": "More Than Meets the Eye",
+   "varp": 3575,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3358,
+   "name": "The Vault",
+   "varp": 3575,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3359,
+   "name": "The Fallen Empire",
+   "varp": 3575,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": true
+  },
+  {
+   "id": 3360,
+   "name": "Prison Break",
+   "varp": 3575,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3361,
+   "name": "Scar Tissue",
+   "varp": 3575,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3362,
+   "name": "A Worthy Foe",
+   "varp": 3575,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3363,
+   "name": "Colossus of the Deep",
+   "varp": 3575,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3364,
+   "name": "Eye See You",
+   "varp": 3575,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3365,
+   "name": "Blood Rush",
+   "varp": 3575,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3366,
+   "name": "Song of the Silent Choir",
+   "varp": 3575,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3367,
+   "name": "Unturned Stones",
+   "varp": 3575,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3368,
+   "name": "Master of Puppets",
+   "varp": 3575,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": true
+  },
+  {
+   "id": 3369,
+   "name": "His Faithful Servants",
+   "varp": 3575,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": true
+  },
+  {
+   "id": 3370,
+   "name": "Tick Tock",
+   "varp": 3575,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3416,
+   "name": "Strangled",
+   "varp": 3575,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3419,
+   "name": "Bolrie's Diary",
+   "varp": 3575,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3420,
+   "name": "Healin' Feelin'",
+   "varp": 3575,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3421,
+   "name": "The Longramble Scramble",
+   "varp": 3575,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3422,
+   "name": "Storeroom Shuffle",
+   "varp": 3575,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3423,
+   "name": "Terrorbird Tussle",
+   "varp": 3575,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3424,
+   "name": "Waste Defaced",
+   "varp": 3575,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3445,
+   "name": "Dot's Yuletide",
+   "varp": 4066,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 3447,
+   "name": "Children of the Sun",
+   "varp": 4066,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3448,
+   "name": "Plots and Plans",
+   "varp": 4066,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": true
+  },
+  {
+   "id": 3449,
+   "name": "The Burning Sun",
+   "varp": 4066,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3463,
+   "name": "Undead Army",
+   "varp": 4066,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3464,
+   "name": "The Dream Theatre",
+   "varp": 4066,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3465,
+   "name": "Zombie Invasion",
+   "varp": 4066,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3470,
+   "name": "The City of Sun",
+   "varp": 4066,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3471,
+   "name": "The Undying Light",
+   "varp": 4066,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3472,
+   "name": "The Guidance of Ralos",
+   "varp": 4066,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3473,
+   "name": "Under the Mountain",
+   "varp": 4066,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3474,
+   "name": "Ready for the Hunt",
+   "varp": 4066,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3475,
+   "name": "Are You Not Entertained?",
+   "varp": 4066,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3476,
+   "name": "The Moons of Ruin",
+   "varp": 4066,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3527,
+   "name": "Sunny Side Up",
+   "varp": 4066,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 3598,
+   "name": "Black of Knight",
+   "varp": 4066,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3599,
+   "name": "Dangerous Logic",
+   "varp": 4066,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3600,
+   "name": "Temple Desecrated",
+   "varp": 4066,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3601,
+   "name": "The Evil Within",
+   "varp": 4066,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3602,
+   "name": "The Kin",
+   "varp": 4066,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": true
+  },
+  {
+   "id": 3604,
+   "name": "The Route of All Evil",
+   "varp": 4066,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3605,
+   "name": "The Sound of Guthix",
+   "varp": 4066,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": true
+  },
+  {
+   "id": 3607,
+   "name": "Incarceration",
+   "varp": 4066,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3608,
+   "name": "The Route of the Problem",
+   "varp": 4066,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3675,
+   "name": "Noxious Awakening",
+   "varp": 4066,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3733,
+   "name": "Stones of Old",
+   "varp": 4066,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3734,
+   "name": "Emissaries of Twilight",
+   "varp": 4066,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3735,
+   "name": "Isle of Serenity",
+   "varp": 4066,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3736,
+   "name": "Mistrock",
+   "varp": 4066,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3737,
+   "name": "Varlamore's Sunset",
+   "varp": 4066,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3738,
+   "name": "The Guardian of Tapoyauik",
+   "varp": 4411,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3739,
+   "name": "The Feathered Serpent",
+   "varp": 4411,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3740,
+   "name": "Peace and Prosperity",
+   "varp": 4411,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3741,
+   "name": "Creatures of Varlamore",
+   "varp": 4411,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3743,
+   "name": "Prospering Fortune",
+   "varp": 4411,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3744,
+   "name": "Whispering Wind",
+   "varp": 4411,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3745,
+   "name": "A Matter of Intrigue",
+   "varp": 4411,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": true
+  },
+  {
+   "id": 3813,
+   "name": "Lost to Time",
+   "varp": 4066,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3969,
+   "name": "Lamistard's Labyrinth",
+   "varp": 4411,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3970,
+   "name": "The North",
+   "varp": 4411,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3971,
+   "name": "The Heist",
+   "varp": 4411,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3972,
+   "name": "Heavy Security",
+   "varp": 4411,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 3973,
+   "name": "The Plundered Tomb",
+   "varp": 4411,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 4969,
+   "name": "All the Trimmings",
+   "varp": 4944,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": true,
+   "secondary": false
+  },
+  {
+   "id": 5154,
+   "name": "Sign Here",
+   "varp": 4411,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5377,
+   "name": "Call of the Tlati",
+   "varp": 4411,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5378,
+   "name": "Spiritbloom",
+   "varp": 4411,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5379,
+   "name": "Spirit of the Forest",
+   "varp": 4411,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5380,
+   "name": "The Talkasti People",
+   "varp": 4411,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5381,
+   "name": "Teklan",
+   "varp": 4411,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5382,
+   "name": "The Rising Sun",
+   "varp": 4411,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5383,
+   "name": "The Setting Sun",
+   "varp": 4411,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5384,
+   "name": "Truth",
+   "varp": 4411,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5385,
+   "name": "Scorching Horizon",
+   "varp": 4411,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5386,
+   "name": "Over the Mountains",
+   "varp": 4411,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5387,
+   "name": "A Desolate Past",
+   "varp": 4411,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5388,
+   "name": "The Doom",
+   "varp": 4411,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 5389,
+   "name": "Stalkers",
+   "varp": 4411,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7073,
+   "name": "All Aboard",
+   "varp": 4411,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7074,
+   "name": "Set Sail",
+   "varp": 4411,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7075,
+   "name": "Crashing Waves",
+   "varp": 4411,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7076,
+   "name": "Remote Waters",
+   "varp": 4411,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7077,
+   "name": "Into the Blue",
+   "varp": 4411,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7078,
+   "name": "The Eternal Waves",
+   "varp": 4411,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7079,
+   "name": "The Great North",
+   "varp": 4944,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7080,
+   "name": "Echoes of the North",
+   "varp": 4944,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7081,
+   "name": "The Western Seas",
+   "varp": 4944,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7082,
+   "name": "A Sailor's Dream",
+   "varp": 4944,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7083,
+   "name": "Over the Horizon",
+   "varp": 4944,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7084,
+   "name": "Shadow of the Ocean",
+   "varp": 4944,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7085,
+   "name": "Test Your Sails",
+   "varp": 4944,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7086,
+   "name": "Tranquillity",
+   "varp": 4944,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7087,
+   "name": "Mysterious Lands",
+   "varp": 4944,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7088,
+   "name": "Lurking Threats",
+   "varp": 4944,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7089,
+   "name": "Life at Sea",
+   "varp": 4944,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7090,
+   "name": "What the Shell!",
+   "varp": 4944,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7091,
+   "name": "Honkytonky Sea Shanty 2",
+   "varp": 4944,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7092,
+   "name": "Yo Ho Ho!",
+   "varp": 4944,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7093,
+   "name": "The Tortugan Way",
+   "varp": 4944,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7094,
+   "name": "Elder Wisdom",
+   "varp": 4944,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7095,
+   "name": "Below the Conch",
+   "varp": 4944,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7096,
+   "name": "Scape Sail",
+   "varp": 5238,
+   "bit": 1,
+   "automatic": true,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 7132,
+   "name": "Wings of Madness",
+   "varp": 5238,
+   "bit": 21,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 8662,
+   "name": "Boss Moosic",
+   "varp": 5238,
+   "bit": 3,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 13704,
+   "name": "Severed",
+   "varp": 6014,
+   "bit": 1,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 13705,
+   "name": "The Horror",
+   "varp": 6014,
+   "bit": 2,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16223,
+   "name": "Boat 'Em Up",
+   "varp": 5238,
+   "bit": 4,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16224,
+   "name": "Business as Unusual",
+   "varp": 5238,
+   "bit": 5,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16225,
+   "name": "Ocean Depths",
+   "varp": 5238,
+   "bit": 6,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16226,
+   "name": "Cannonballin'",
+   "varp": 5238,
+   "bit": 7,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16393,
+   "name": "Solitude",
+   "varp": 5238,
+   "bit": 8,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16394,
+   "name": "I'm Sorry",
+   "varp": 5238,
+   "bit": 9,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16395,
+   "name": "Hunted",
+   "varp": 5238,
+   "bit": 10,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16396,
+   "name": "The Blood Moon Rises",
+   "varp": 5238,
+   "bit": 11,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16397,
+   "name": "Home",
+   "varp": 5238,
+   "bit": 12,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16399,
+   "name": "Lord of the Larvae",
+   "varp": 5238,
+   "bit": 13,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16400,
+   "name": "Dawn",
+   "varp": 5238,
+   "bit": 14,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16401,
+   "name": "Memories of the Myreque",
+   "varp": 5238,
+   "bit": 15,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16402,
+   "name": "The Bridge",
+   "varp": 5238,
+   "bit": 16,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16408,
+   "name": "Gathering",
+   "varp": 5238,
+   "bit": 17,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16409,
+   "name": "Prey",
+   "varp": 5238,
+   "bit": 18,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16410,
+   "name": "Castle Drakan",
+   "varp": 5238,
+   "bit": 19,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 16411,
+   "name": "Remnants",
+   "varp": 5238,
+   "bit": 20,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17001,
+   "name": "Into the Archive",
+   "varp": 5238,
+   "bit": 22,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17002,
+   "name": "The Archive Guardian",
+   "varp": 5238,
+   "bit": 23,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17003,
+   "name": "Blade of Forgotten Justice",
+   "varp": 5238,
+   "bit": 24,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17004,
+   "name": "Bork's Beats",
+   "varp": 5238,
+   "bit": 25,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17005,
+   "name": "Triple Threat",
+   "varp": 5238,
+   "bit": 26,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17006,
+   "name": "Hellatine",
+   "varp": 5238,
+   "bit": 27,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17007,
+   "name": "Daughter of Darkness",
+   "varp": 5238,
+   "bit": 28,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17008,
+   "name": "Forged Through Fire",
+   "varp": 5238,
+   "bit": 29,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17009,
+   "name": "Artifacts of Old",
+   "varp": 5238,
+   "bit": 30,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17010,
+   "name": "Ascension",
+   "varp": 5238,
+   "bit": 31,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  },
+  {
+   "id": 17194,
+   "name": "Elementary",
+   "varp": 6014,
+   "bit": 0,
+   "automatic": false,
+   "hidden": false,
+   "holiday": false,
+   "secondary": false
+  }
+ ]
+}

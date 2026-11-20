@@ -272,6 +272,10 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
         varps = parse_int_map(
             snapshot.get("ca_varps"), limit=MAX_VARPS, min_key=1, min_value=None
         )
+        # Music unlock varps (plugin 6.1.31+, suggestion #252); raw like CA.
+        music_varps = parse_int_map(
+            snapshot.get("music_varps"), limit=MAX_VARPS, min_key=1, min_value=None
+        )
         # Individually completed task varbits, when the client had a registry.
         raw_tasks = snapshot.get("ca_tasks")
         completed_tasks = []
@@ -314,6 +318,7 @@ def _apply_snapshot(player_name, acc_hash, snapshot):
         _upsert_quests(db_session, player_id, previous_quests, quests)
         _upsert_diaries(db_session, player_id, previous_diaries, diary_tiers)
         _upsert_combat_achievements(db_session, player_id, varps, completed_tasks)
+        _upsert_music(db_session, player_id, music_varps)
 
         db_session.commit()
 
@@ -501,6 +506,40 @@ def _upsert_diaries(db_session, player_id, previous, incoming):
                 )
                 .update({"completed_count": completed})
             )
+
+
+def _upsert_music(db_session, player_id, varps):
+    """Raw music unlock varps plus the decoded counts (suggestion #252).
+
+    In a savepoint and never raising: music is the newest and least important
+    part of a sync, and must not cost a player the rest of it (nor fail every
+    sync if the table is ever missing).
+    """
+    if not varps:
+        return
+    try:
+        from db.models import PlayerMusicVarps
+        from utils.music_tracks import decode, load_registry
+
+        with db_session.begin_nested():
+            row = (
+                db_session.query(PlayerMusicVarps)
+                .filter(PlayerMusicVarps.player_id == player_id)
+                .first()
+            )
+            if row is None:
+                row = PlayerMusicVarps(player_id=player_id, varps="{}")
+                db_session.add(row)
+            merged = deserialize_varps(row.varps)
+            merged.update(varps)
+            row.varps = serialize_varps(merged)
+            tracks = load_registry(db_session)
+            if tracks:
+                counts = decode(merged, tracks)
+                row.tracks_unlocked = counts["unlocked"]
+                row.tracks_total = counts["total"]
+    except Exception as exc:
+        print(f"[state_sync] music varps not stored for player {player_id}: {exc}")
 
 
 def _upsert_combat_achievements(db_session, player_id, varps, completed_tasks=None):

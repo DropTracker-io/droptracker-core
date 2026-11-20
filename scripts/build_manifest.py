@@ -51,12 +51,16 @@ def _load_generated(key):
     browser counts against, and between an update and a rebuild every task
     added by that update is invisible there.
     """
-    if key != "combat_achievement_tasks":
+    # Both extracted from the game cache (scripts/cache/extract-*.mjs), the only
+    # source carrying the varp/bit each task or track lives at — the join that
+    # turns stored varps into named entries.
+    files = {
+        "combat_achievement_tasks": "ca_tasks.json",
+        "music_tracks": "music_tracks.json",
+    }
+    if key not in files:
         return None
-    # Extracted from the game cache by scripts/cache/extract-ca-tasks.mjs, which
-    # is the only source carrying the varp/bit each task lives at — the join
-    # that turns stored varps into named tasks.
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca_tasks.json")
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), files[key])
     try:
         with open(path) as fh:
             return json.load(fh)
