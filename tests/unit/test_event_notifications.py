@@ -540,3 +540,19 @@ class TestBoardTurnEmbed2026:
             "team_name": "Reds", "dice": [], "won": True, "won_by_task": True})
         assert "reached the finish" in spec["title"]
         assert "completed the final tile's task" in spec["description"]
+
+
+class TestSignupPromptCloseTime:
+    """Bug #254: the post must say when sign-ups close (the start unless late
+    sign-ups are on), not when the event ends."""
+
+    def test_uses_signup_close_at(self):
+        spec = _spec("event_signup_prompt",
+                     {"ends_at": 1796014740, "signup_close_at": 1795669200})
+        values = " ".join(str(f.get("value")) for f in spec.get("fields", []))
+        assert "1795669200" in values and "1796014740" not in values
+
+    def test_legacy_payload_falls_back_to_ends_at(self):
+        spec = _spec("event_signup_prompt", {"ends_at": 1796014740})
+        values = " ".join(str(f.get("value")) for f in spec.get("fields", []))
+        assert "1796014740" in values

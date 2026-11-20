@@ -995,9 +995,11 @@ def event_embed_spec(notification_type: str, data: dict, standings=None) -> dict
             f"{how}\n-# One account per person. "
             f"Not linked yet? Sign in at droptracker.io first."
         )
-        ends = _fmt_ts(data.get("ends_at"))
-        if ends:
-            field("Sign-ups close", ends)
+        # When the button stops working (web70a): the event's start unless
+        # late sign-ups are on. ends_at only for payloads queued before then.
+        closes = _fmt_ts(data.get("signup_close_at") or data.get("ends_at"))
+        if closes:
+            field("Sign-ups close", closes)
 
     elif notification_type == "event_activation_failed":
         spec["title"] = f"⚠️ {event_name} could not start"
