@@ -615,6 +615,17 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
         except Exception:
             pass
 
+    # Record badges (bug #250): re-check this boss's record now rather than
+    # at the next hourly badge cycle. Only once the row is committed, since
+    # the check runs on its own session; the cycle covers the rest.
+    if pb_row_changed and not side_world and not use_external_session:
+        try:
+            from services.badges import refresh_boss_record
+
+            await asyncio.to_thread(refresh_boss_record, npc_id, team_size)
+        except Exception as e:
+            debug_print(f"Record badge refresh failed: {e}")
+
     # Site-wide ticker (rt:feed): announce a stored new PB when it lands in
     # the top 25 of its (boss, team-size) board. Best-effort — the rank query
     # only runs on actual PB improvements, never the drop hot path.

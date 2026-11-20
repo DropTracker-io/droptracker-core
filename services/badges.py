@@ -414,6 +414,74 @@ def evaluate_streaks(session, badge: Badge, day: str, days: int, dry_run: bool =
     return awarded
 
 
+def _converge_boss_record_slot(session, badge: Badge, npc_id: int, team_size: str,
+                               npc_name: Optional[str], dry_run: bool = False) -> str:
+    """Give one (npc, team_size) record badge to whoever holds the fastest
+    time now. Returns 'retained' / 'transferred' / 'awarded' / 'skipped'."""
+    from sqlalchemy import text
+
+    row = session.execute(
+        text(
+            "SELECT player_id, personal_best FROM personal_best "
+            "WHERE npc_id = :npc AND team_size = :team AND personal_best > 0 "
+            "AND player_id IS NOT NULL "
+            "ORDER BY personal_best ASC, (precise_timing <=> 0) ASC, date_added ASC, id ASC LIMIT 1"
+        ),
+        {"npc": npc_id, "team": team_size},
+    ).first()
+    if row is None:
+        return "skipped"
+    player_id, pb_ms = int(row[0]), int(row[1])
+    slot_key = f"npc:{npc_id}:{team_size}"
+    context = {
+        "npc_id": npc_id,
+        "npc_name": npc_name,
+        "team_size": team_size,
+        "pb_ms": pb_ms,
+    }
+    if dry_run:
+        _log(
+            f"DRY-RUN boss_record {slot_key}: player {player_id} "
+            f"({npc_name}, {team_size}, {pb_ms}ms)"
+        )
+        return "awarded"
+    return transfer_held_badge(session, badge, slot_key, player_id, context)
+
+
+def refresh_boss_record(npc_id: int, team_size) -> Optional[str]:
+    """Re-check one boss's record badge right after a PB lands (bug #250:
+    a new record waited up to an hour for the cycle). Owns its session and
+    commits; returns the outcome, or None when there is nothing to check.
+    The hourly cycle still converges every slot, so a miss here only delays."""
+    team_size = str(team_size or "").strip()
+    if not npc_id or not _TEAM_SIZE_RE.match(team_size):
+        return None
+    session = Session()
+    try:
+        badges = [b for b, crit in _load_automatic_badges(session)
+                  if crit.get("type") == "boss_record"]
+        if not badges:
+            return None
+        npc_name = (
+            session.query(NpcList.npc_name).filter(NpcList.npc_id == int(npc_id)).scalar()
+        )
+        outcome = None
+        for badge in badges:
+            outcome = _converge_boss_record_slot(
+                session, badge, int(npc_id), team_size, npc_name,
+            )
+        session.commit()
+        if outcome in ("transferred", "awarded"):
+            _log(f"boss_record npc:{npc_id}:{team_size} {outcome} on PB")
+        return outcome
+    except Exception as exc:
+        session.rollback()
+        _log(f"boss_record refresh failed for npc:{npc_id}:{team_size}: {exc}")
+        return None
+    finally:
+        session.close()
+
+
 def evaluate_boss_records(session, badge: Badge, dry_run: bool = False) -> Dict[str, int]:
     """Converge the held boss-record badge across every clean (npc, team_size)
     slot in ``personal_best``. Returns outcome counts."""
@@ -438,34 +506,9 @@ def evaluate_boss_records(session, badge: Badge, dry_run: bool = False) -> Dict[
 
     counts = {"retained": 0, "transferred": 0, "awarded": 0, "skipped": 0}
     for npc_id, team_size in slots:
-        row = session.execute(
-            text(
-                "SELECT player_id, personal_best FROM personal_best "
-                "WHERE npc_id = :npc AND team_size = :team AND personal_best > 0 "
-                "AND player_id IS NOT NULL "
-                "ORDER BY personal_best ASC, (precise_timing <=> 0) ASC, date_added ASC, id ASC LIMIT 1"
-            ),
-            {"npc": npc_id, "team": team_size},
-        ).first()
-        if row is None:
-            counts["skipped"] += 1
-            continue
-        player_id, pb_ms = int(row[0]), int(row[1])
-        slot_key = f"npc:{npc_id}:{team_size}"
-        context = {
-            "npc_id": npc_id,
-            "npc_name": npc_names.get(npc_id),
-            "team_size": team_size,
-            "pb_ms": pb_ms,
-        }
-        if dry_run:
-            _log(
-                f"DRY-RUN boss_record {slot_key}: player {player_id} "
-                f"({npc_names.get(npc_id)}, {team_size}, {pb_ms}ms)"
-            )
-            counts["awarded"] += 1
-            continue
-        outcome = transfer_held_badge(session, badge, slot_key, player_id, context)
+        outcome = _converge_boss_record_slot(
+            session, badge, npc_id, team_size, npc_names.get(npc_id), dry_run=dry_run,
+        )
         counts[outcome] += 1
     if not dry_run:
         session.commit()
