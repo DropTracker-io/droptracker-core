@@ -1438,8 +1438,9 @@ def compose_event_state(session, player_id) -> dict:
             # changes rather than polling a payload this size. Absent when the
             # event has clan-chat team tags turned off (web152a): every plugin
             # build reads a missing stamp as "no badges" and clears them.
+            # Also absent when a badge could not tell anyone apart (bug #255).
             **({"roster_version": _roster_version(session, event.id, teams)}
-               if getattr(event, "team_chat_tags", True) is not False else {}),
+               if chat_badges_apply(event, len(teams)) else {}),
         })
 
     screenshot_item_ids: list = []
@@ -1522,6 +1523,31 @@ def _roster_version(session, event_id, teams) -> str:
     return roster_digest(count, latest, teams)
 
 
+def chat_badges_apply(event, team_count: int) -> bool:
+    """See :func:`chat_badges_apply_for`; reads the flags off an Event row."""
+    return chat_badges_apply_for(
+        getattr(event, "team_chat_tags", True),
+        getattr(event, "formation_mode", None),
+        team_count,
+    )
+
+
+def chat_badges_apply_for(team_chat_tags, formation_mode, team_count: int) -> bool:
+    """Should clan chat be badged with this event's teams at all?
+
+    Badges exist to tell rival teams apart. An event with one team (a
+    BOTW/SOTW whole-clan roster, or a single pool) or one team per player
+    (free-for-all) has no rivals to show, so every clanmate would wear the
+    same badge, red by default — bug #255, where a clan's BOTW "Participants"
+    team badged the whole chat. Off-switch (web152a) still applies.
+    """
+    if team_chat_tags is False or team_chat_tags == 0:
+        return False
+    if (formation_mode or "") == "solo":
+        return False
+    return int(team_count or 0) >= 2
+
+
 def rostered_event_ids(session, player_id) -> list:
     """Live events this player is on a team of, newest first.
 
@@ -1544,7 +1570,23 @@ def rostered_event_ids(session, player_id) -> list:
         .order_by(Event.id.desc())
         .all()
     )
-    return [eid for (eid,) in rows]
+    ids = list(dict.fromkeys(eid for (eid,) in rows))
+    if not ids:
+        return []
+    from sqlalchemy import func
+
+    team_counts = dict(
+        session.query(EventTeam.event_id, func.count(EventTeam.id))
+        .filter(EventTeam.event_id.in_(ids))
+        .group_by(EventTeam.event_id)
+        .all()
+    )
+    modes = dict(
+        session.query(Event.id, Event.formation_mode).filter(Event.id.in_(ids)).all()
+    )
+    # team_chat_tags is already filtered by the query above.
+    return [eid for eid in ids
+            if chat_badges_apply_for(True, modes.get(eid), team_counts.get(eid, 0))]
 
 
 def compose_event_roster(session, player_id, event_id=None) -> dict:
