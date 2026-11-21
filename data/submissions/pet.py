@@ -234,7 +234,11 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     elif existing_pet:
         debug_print(f"Pet {pet_name} already exists for player {player_name}")
 
-    if is_new_pet and attachment_url and not downloaded:
+    # Every pet roll's screenshot is kept, duplicates included: a duplicate
+    # still credits event tasks (see the event hook below) and still posts,
+    # so it needs its proof as much as a first copy does. A replay of a
+    # submission already stored keeps the first copy's image instead.
+    if attachment_url and not downloaded and not replayed:
         try:
             from .common import get_extension_from_content_type, download_player_image
 
@@ -246,7 +250,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                 player=player,
                 attachment_url=attachment_url,
                 file_extension=file_extension,
-                entry_id=existing_pet.id if existing_pet else 0,
+                entry_id=getattr(new_pet or existing_pet, "id", None) or 0,
                 entry_name=pet_name,
             )
             if external_url:
@@ -305,6 +309,9 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                     # `duplicate`, which arrives from the webhook as the STRING
                     # "true"/"false" (both truthy).
                     "is_new_pet": is_new_pet,
+                    # Proof for the completion this credits (event_engine
+                    # reads data.image_url) — duplicates included.
+                    "image_url": dl_path or None,
                 },
                 world_type=world_type, player_name=player_name,
                 # used_api means "came from the plugin" to the events engine
