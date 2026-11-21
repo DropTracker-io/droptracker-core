@@ -12,6 +12,7 @@ the functions under test, so the pure paths never touch them.
 
 import importlib.util
 import json
+from types import SimpleNamespace
 import os
 import sys
 
@@ -690,6 +691,41 @@ class TestTaskScreenshotNames:
     def test_bad_config_never_raises(self):
         assert pn._task_screenshot_names("item_collection", None, None) == set()
         assert pn._task_screenshot_names("loot_sweep", None, {"groups": "junk"}) == set()
+
+
+class TestActiveTaskScreenshotNames(TestTaskScreenshotNames):
+    """The event_state screenshot pool across a team's tasks: every item of an
+    incomplete task, banked or not; nothing from a completed one."""
+
+    @staticmethod
+    def _task(task_id, config, task_type="item_collection", target=None):
+        return SimpleNamespace(id=task_id, type=task_type, target=target,
+                               config=config)
+
+    def test_banked_item_of_active_task_still_screenshots(self):
+        # 2026-11-21: a point_collection tile keeps scoring every Chromium
+        # ingot, so the team's second one must be screenshotted too.
+        task = self._task(3892, json.dumps({
+            "kind": "point_collection",
+            "items": [{"item_name": "Chromium ingot", "points": 1},
+                      {"item_name": "Ultor vestige", "points": 2}]}))
+        progress = {3892: {"progress": 3, "completed": False}}
+        names = pn._active_task_screenshot_names([task], progress)
+        assert names == {"chromium ingot", "ultor vestige"}
+
+    def test_completed_task_contributes_nothing(self):
+        done = self._task(1, {"items": [{"item_name": "Dark claw"}]})
+        live = self._task(2, {"items": [{"item_name": "Unsired"}]})
+        progress = {1: {"completed": True}, 2: {"completed": False}}
+        assert pn._active_task_screenshot_names([done, live], progress) == {"unsired"}
+
+    def test_task_without_progress_is_active(self):
+        task = self._task(5, None, target="Dark Claw")
+        assert pn._active_task_screenshot_names([task], {}) == {"dark claw"}
+
+    def test_bad_config_is_skipped_not_raised(self):
+        task = self._task(6, "{not json", target="Dark Claw")
+        assert pn._active_task_screenshot_names([task], None) == {"dark claw"}
 
 
 class FakeRosterTeam:

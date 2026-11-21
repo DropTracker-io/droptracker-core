@@ -928,6 +928,33 @@ def _task_screenshot_names(task_type, target, config: dict) -> set:
     return names
 
 
+def _active_task_screenshot_names(task_rows, progress_by_task: dict) -> set:
+    """Every item name an incomplete task can be credited by — the plugin
+    force-screenshots these for proof. Items the team already banked stay in:
+    repeatable tasks (``point_collection``, quantity targets) score every copy,
+    and a repeat drop without proof can't be verified (2026-11-21, Frontier PvM:
+    a team's second Chromium ingot scored with no screenshot). Pure."""
+    names: set = set()
+    for task_row in task_rows:
+        state = (progress_by_task or {}).get(task_row.id) or {}
+        if state.get("completed"):
+            continue
+        try:
+            raw_config = task_row.config
+            if isinstance(raw_config, dict):
+                task_config = raw_config
+            elif raw_config:
+                task_config = json.loads(raw_config)
+            else:
+                task_config = {}
+            if not isinstance(task_config, dict):
+                task_config = {}
+        except Exception:
+            task_config = {}
+        names.update(_task_screenshot_names(task_row.type, task_row.target, task_config))
+    return names
+
+
 def _resolve_item_ids(session, names: set) -> list:
     """Item ids for a set of normalized item names (all variants of a name —
     noted/duplicate ids included, so the dropped id always matches client-side).
@@ -1278,28 +1305,9 @@ def compose_event_state(session, player_id) -> dict:
         except Exception as e:
             print(f"[plugin_notifications] credited-item lookup failed: {e}")
 
-        # Items the plugin should force-screenshot for proof: everything an
-        # incomplete task can still be credited by, minus what the team has
-        # already banked for that task. Resolved to ids once, after all events.
-        for task_row in task_rows:
-            state = progress_by_task.get(task_row.id) or {}
-            if state.get("completed"):
-                continue
-            try:
-                raw_config = task_row.config
-                if isinstance(raw_config, dict):
-                    task_config = raw_config
-                elif raw_config:
-                    task_config = json.loads(raw_config)
-                else:
-                    task_config = {}
-                if not isinstance(task_config, dict):
-                    task_config = {}
-            except Exception:
-                task_config = {}
-            screenshot_names.update(
-                _task_screenshot_names(task_row.type, task_row.target, task_config)
-                - (collected_by_task.get(task_row.id) or set()))
+        # Items the plugin should force-screenshot for proof. Resolved to ids
+        # once, after all events.
+        screenshot_names.update(_active_task_screenshot_names(task_rows, progress_by_task))
 
         # The full task list: powers the plugin's task picker (click a task to
         # track it on the HUD instead of the server's focus pick), tooltips
