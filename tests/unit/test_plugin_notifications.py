@@ -692,6 +692,29 @@ class TestTaskScreenshotNames:
         assert pn._task_screenshot_names("item_collection", None, None) == set()
         assert pn._task_screenshot_names("loot_sweep", None, {"groups": "junk"}) == set()
 
+    def test_listed_vestige_adds_gold_ring(self):
+        # A Gold ring from the vestige's boss credits the task AS the vestige.
+        names = pn._task_screenshot_names(
+            "item_collection", None,
+            {"kind": "point_collection",
+             "items": [{"item_name": "Bellator vestige", "points": 2}]})
+        assert names == {"bellator vestige", "gold ring"}
+
+    def test_vestige_target_adds_gold_ring(self):
+        names = pn._task_screenshot_names("item_collection", "Ultor vestige", {})
+        assert "gold ring" in names
+
+    def test_rings_switched_off_adds_no_gold_ring(self):
+        names = pn._task_screenshot_names(
+            "item_collection", None,
+            {"items": ["Magus vestige"], "vestige_rings": False})
+        assert names == {"magus vestige"}
+
+    def test_no_vestige_no_gold_ring(self):
+        names = pn._task_screenshot_names(
+            "item_collection", None, {"items": ["Chromium ingot"]})
+        assert "gold ring" not in names
+
 
 class TestActiveTaskScreenshotNames(TestTaskScreenshotNames):
     """The event_state screenshot pool across a team's tasks: every item of an
@@ -711,7 +734,7 @@ class TestActiveTaskScreenshotNames(TestTaskScreenshotNames):
                       {"item_name": "Ultor vestige", "points": 2}]}))
         progress = {3892: {"progress": 3, "completed": False}}
         names = pn._active_task_screenshot_names([task], progress)
-        assert names == {"chromium ingot", "ultor vestige"}
+        assert names == {"chromium ingot", "ultor vestige", "gold ring"}
 
     def test_completed_task_contributes_nothing(self):
         done = self._task(1, {"items": [{"item_name": "Dark claw"}]})

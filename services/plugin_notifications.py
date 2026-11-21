@@ -903,7 +903,8 @@ def _task_screenshot_names(task_type, target, config: dict) -> set:
     an already-parsed dict. Only item-bearing task types contribute:
 
     - ``item_collection``: the single ``target`` plus every listed name
-      (``items`` / ``any_of`` / ``groups`` / ``paths``),
+      (``items`` / ``any_of`` / ``groups`` / ``paths``), plus Gold ring
+      when a DT2 vestige is listed and ``vestige_rings`` isn't off,
     - ``loot_sweep``: every drop-sourced matcher key (pet entries credit from
       pet submissions, which carry their own screenshot config).
     """
@@ -916,6 +917,14 @@ def _task_screenshot_names(task_type, target, config: dict) -> set:
             target_norm = _norm(target)
             if target_norm:
                 names.add(target_norm)
+            # DT2 pity rolls: a Gold ring from a vestige's boss credits the
+            # task AS that vestige (event_engine._ring_vestige_for_task), so
+            # it needs proof too — unless the task switched rings off.
+            from utils import vestige_rings
+
+            if (vestige_rings.rings_count(config)
+                    and any(vestige_rings.is_vestige(n) for n in names)):
+                names.add(vestige_rings.RING_NAME)
         elif task_type == "loot_sweep":
             from services.loot_sweep import LootSweepConfig
 
