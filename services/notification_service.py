@@ -1269,7 +1269,19 @@ class NotificationService:
         try:
             from utils import image_storage
 
-            return image_storage.key_from_url(image_url)
+            key = image_storage.key_from_url(image_url)
+            if key:
+                return key
+            # Website proof uploads (dt_uploads/, strict minted-key match).
+            # Kept out of key_from_url on purpose: retention trusts that
+            # function's answers as objects it may age out, and proof must
+            # persist.
+            from utils.proof_uploads import trusted_proof_url
+
+            trusted = trusted_proof_url(image_url)
+            if trusted:
+                return trusted.split("/", 3)[3]
+            return None
         except Exception:
             return None
 

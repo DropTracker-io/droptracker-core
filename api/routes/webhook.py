@@ -1174,6 +1174,18 @@ async def _process_manual_submission(req_start):
         # Use the player's existing account hash so authentication passes
         processed_data["acc_hash"] = player.account_hash or placeholder_hash
 
+        # Website proof: the site uploads the screenshot first and forwards its
+        # CDN URL. The processors refuse client URLs on our own host, so mark
+        # one of OUR uploaded objects (strict key match) as already stored —
+        # otherwise every website submission's proof was silently dropped. A
+        # file attached below (Discord /submit) still replaces it.
+        from utils.proof_uploads import trusted_proof_url
+
+        proof_url = trusted_proof_url(data.get("image_url"))
+        if proof_url:
+            processed_data["image_url"] = proof_url
+            processed_data["downloaded"] = True
+
         # Submission API (suggestion #198): only calls forwarded by the data
         # API carry api_* fields. Claim the call (idempotent on external_id),
         # skip a drop the plugin already recorded, and stamp a pre-approved

@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from datetime import datetime
 
 from quart import Blueprint, jsonify
@@ -88,7 +87,7 @@ _SETTABLE_STATUSES = ("pledged", "paid")
 # Matched strictly (web75a) so a caller can never point a ledger row at an
 # arbitrary address — the stored URL is built from B2_CDN_BASE_URL below, not
 # taken from the request body.
-_PROOF_KEY_RE = re.compile(r"^dt_uploads/[0-9a-f]{32}\.(?:png|jpg|webp|gif)$")
+from utils.proof_uploads import PROOF_KEY_RE as _PROOF_KEY_RE  # noqa: E402
 
 # "field absent" vs. an explicit null (= detach the screenshot).
 _UNSET = object()

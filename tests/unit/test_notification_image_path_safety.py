@@ -232,3 +232,14 @@ class TestResolveImageAttachment:
         # Same host, different namespace: key_from_url only owns dt_img/.
         assert Service._b2_image_key(
             "https://video.droptracker.io/videos/123/clip.mp4") is None
+
+    def test_website_proof_uploads_are_readable(self, monkeypatch):
+        # Manual submissions from the website carry their proof as a
+        # dt_uploads/ object; only an exactly-minted key is accepted.
+        monkeypatch.setenv("B2_CDN_BASE_URL", "https://video.droptracker.io")
+        key = "dt_uploads/317d2d3b8abd4aeea9d17ddd09200ad2.png"
+        assert Service._b2_image_key(f"https://video.droptracker.io/{key}") == key
+        for url in ("https://video.droptracker.io/dt_uploads/../../.env",
+                    "https://video.droptracker.io/dt_uploads/abc.png",
+                    f"https://evil.example.com/{key}"):
+            assert Service._b2_image_key(url) is None

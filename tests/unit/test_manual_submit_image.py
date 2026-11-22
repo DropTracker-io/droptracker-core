@@ -168,3 +168,68 @@ class TestManualSubmitImageUrl:
         assert resp.status_code == 200
         assert seen["processed_data"]["downloaded"] is False
         assert seen["processed_data"]["image_url"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Website proof (2026-11-22): the site uploads to B2 first and forwards the
+# CDN URL. The processors refuse client URLs on our host, so every website
+# submission's proof used to vanish; one of OUR minted keys is now trusted.
+# --------------------------------------------------------------------------- #
+CDN = "https://video.droptracker.io"
+WEB_KEY = "dt_uploads/317d2d3b8abd4aeea9d17ddd09200ad2.png"
+
+
+async def _post_drop_json(client, key, monkeypatch, image_url):
+    seen = {}
+
+    async def fake_drop_processor(processed_data, external_session=None):
+        seen["processed_data"] = dict(processed_data)
+        return None
+
+    monkeypatch.setenv("B2_CDN_BASE_URL", CDN)
+    monkeypatch.setattr("data.submissions.drop_processor", fake_drop_processor, raising=False)
+    resp = await client.post(
+        "/manual-submit",
+        headers={MANUAL_SUBMIT_KEY_HEADER: key},
+        json={
+            "submission_type": "drop", "player_name": "Test Player",
+            "item_name": "Unsired", "npc_name": "Abyssal Sire",
+            "value": 0, "quantity": 1, "image_url": image_url,
+        },
+    )
+    return resp, seen
+
+
+class TestWebsiteProof:
+    async def test_our_uploaded_proof_is_kept(self, client, manual_key, monkeypatch):
+        resp, seen = await _post_drop_json(client, manual_key, monkeypatch, f"{CDN}/{WEB_KEY}")
+        assert resp.status_code == 200
+        data = seen["processed_data"]
+        assert data["image_url"] == f"{CDN}/{WEB_KEY}"
+        assert data["downloaded"] is True
+
+    @pytest.mark.parametrize("url", [
+        f"{CDN}/dt_uploads/../../.env",
+        f"{CDN}/dt_img/user-upload/1/drop/x.png",
+        f"{CDN}/dt_uploads/317d2d3b8abd4aeea9d17ddd09200ad2.png?x=1",
+        f"https://evil.example/{WEB_KEY}",
+        f"{CDN}/dt_uploads/NOTHEX.png",
+    ])
+    async def test_anything_else_is_not_trusted(self, client, manual_key, monkeypatch, url):
+        resp, seen = await _post_drop_json(client, manual_key, monkeypatch, url)
+        assert resp.status_code == 200
+        assert seen["processed_data"]["downloaded"] is False
+
+
+class TestTrustedProofUrl:
+    def test_requires_a_configured_cdn(self, monkeypatch):
+        from utils.proof_uploads import trusted_proof_url
+
+        monkeypatch.delenv("B2_CDN_BASE_URL", raising=False)
+        assert trusted_proof_url(f"{CDN}/{WEB_KEY}") is None
+
+    def test_strips_whitespace_and_trailing_base_slash(self, monkeypatch):
+        from utils.proof_uploads import trusted_proof_url
+
+        monkeypatch.setenv("B2_CDN_BASE_URL", CDN + "/")
+        assert trusted_proof_url(f"  {CDN}/{WEB_KEY} ") == f"{CDN}/{WEB_KEY}"
