@@ -521,8 +521,11 @@ regression test, and each would have been invisible in normal use):
   human half — only `time_under` writes one).
 - **The DT2 ring/vestige pity chain double-credited.** `_ring_vestige_for_task`
   rewrites each Gold ring to the vestige name for the synthetic embedded task
-  too, so three drops counted as three items. `_dedupe_vestige_chain` now
-  covers the `task` dialect, rule-scoped like the clog echo.
+  too, so three drops counted as three items. `_dedupe_vestige_chain` covered
+  the `task` dialect, rule-scoped like the clog echo. **Superseded
+  2026-11-22:** the owner ruled every roll counts (1 ring, 2 rings, vestige),
+  so the chain rule is gone everywhere; only the vestige's clog echo is
+  deduped. Loot Sweep's own chain gate is separate and unchanged.
 - **A milestone named the wrong unit** — the label guessed "XP" vs "kills"
   from the step's magnitude, so a 1,000-kill boss milestone read "Every 1,000
   XP". It now reads the race's metric kind.

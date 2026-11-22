@@ -549,22 +549,22 @@ class TestRescreenVestigeRingCredits:
             "auto", "confirmed", "pending")
         assert auto.note is None and confirmed.note is None and pending.note is None
 
-    def test_switch_on_keeps_one_credit_per_chain(self):
-        # While rings were off, this player's vestige itself dropped and
-        # counted: that is the chain's one credit, so the old ring stays out.
+    def test_switch_on_restores_rings_even_after_the_vestige_dropped(self):
+        # Every roll counts (2026-11-22): the vestige that dropped while rings
+        # were off doesn't absorb the old ring credit any more.
         ring = _ledger(1, "Ultor vestige", status="revoked", note=engine.RING_OFF_NOTE)
-        vestige = _ledger(2, "Ultor vestige", source_id=101)
-        s = _S([ring], [vestige])
-        assert engine._rescreen_vestige_ring_credits(s, _RINGS_ON_TASK) == {}
-        assert (ring.status, ring.note) == ("revoked", engine.RING_OFF_NOTE)
+        s = _S([ring], [])
+        assert engine._rescreen_vestige_ring_credits(s, _RINGS_ON_TASK) == {
+            "restored": [1]}
+        assert (ring.status, ring.note) == ("auto", None)
 
-    def test_switch_on_restores_a_chain_once(self):
+    def test_switch_on_restores_every_roll(self):
         first = _ledger(1, "Ultor vestige", status="revoked", note=engine.RING_OFF_NOTE)
         second = _ledger(2, "Ultor vestige", status="revoked", note=engine.RING_OFF_NOTE)
         s = _S([first, second], [])
         assert engine._rescreen_vestige_ring_credits(s, _RINGS_ON_TASK) == {
-            "restored": [1]}
-        assert second.status == "revoked"
+            "restored": [1, 2]}
+        assert second.status == "auto"
 
     def test_switch_on_skips_a_vestige_the_task_no_longer_lists(self):
         task = {**_RINGS_ON_TASK, "target": "Magus vestige"}

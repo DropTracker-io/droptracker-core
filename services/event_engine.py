@@ -48,9 +48,10 @@ v1 evaluation semantics (task doc table):
   OR 500 pts of listed items" — folding its listed items' weighted quantities
   from the shared untagged rows toward a points goal.
   DT2 vestiges: a Gold ring dropped by the vestige's boss credits a task
-  that lists the vestige AS that vestige, one unit per drop (2-ring stacks
-  are the same roll chain), deduped once per (task, team, player, vestige)
-  across rings/vestige/clog (:data:`VESTIGE_BOSSES`). A task with
+  that lists the vestige AS that vestige, one unit per drop (a 2-ring stack
+  is one roll). Every roll counts — 1 ring, 2 rings and the vestige each
+  credit once (owner, 2026-11-22); only the vestige's clog echo is deduped
+  against its drop (:data:`VESTIGE_BOSSES`). A task with
   ``config.vestige_rings = false`` opts out: rings never credit it and its
   vestiges count like any other item (:mod:`utils.vestige_rings`), which is
   also how a task that lists Gold ring itself behaves.
@@ -768,8 +769,11 @@ def _item_source_npcs(task: dict, item_name) -> frozenset:
 # 2× Gold ring instead of the vestige. For events, a ring dropped by the
 # vestige's boss counts AS that vestige when the task lists it (hitting the
 # roll is the achievement) — one unit regardless of stack size (the 2-ring
-# stack is the SAME vestige's second roll), deduped so one player's
-# ring/ring/vestige chain credits a task once (_dedupe_vestige_chain).
+# stack is ONE roll). Each roll is its own credit: 1 ring, 2 rings and the
+# vestige score three times while the task is open (owner, 2026-11-22; it
+# used to collapse the whole chain to one credit, so nothing after a
+# player's first ring could score that vestige for the rest of the event).
+# The vestige's collection-log echo is still deduped against its drop.
 # On by default; a task opts out with config.vestige_rings = false. The shared
 # definitions live in utils.vestige_rings (the validator reads them too).
 VESTIGE_RING_NAME = _vr.RING_NAME
@@ -5970,65 +5974,6 @@ def _dedupe_clog_echo(session, task: dict, team_id, player_id,
     return remaining if remaining > 0 else None
 
 
-def _dedupe_vestige_chain(session, task: dict, team_id, player_id, kind,
-                          matched_target, bonus=None) -> bool:
-    """True when this vestige credit may record; False when the player's
-    ring/vestige chain already credited it (item_collection only).
-
-    The DT2 pity mechanic makes the 1-ring, 2-ring and vestige drops (plus
-    the vestige's clog echo) sightings of the SAME vestige-in-progress,
-    spread over days — so one (task, team, player, vestige) credits ONCE,
-    with no time window (unlike the 10-minute drop↔clog echo). Trade-off: a
-    second full vestige cycle by the same player inside one event won't
-    auto-credit again (astronomically rare; admins can award manually —
-    manual rows neither block nor are blocked here).
-
-    Competition ``task`` bonus rules need this for the same reason they need
-    the clog-echo dedupe: ``_ring_vestige_for_task`` rewrites each Gold ring
-    drop to the vestige name for the synthetic embedded task too, so a
-    three-drop pity chain would count as three items toward the rule. Scoped
-    to the candidate's own rule tag — every rule on a competition shares one
-    task id, so an unscoped lookup would let one rule's chain silence
-    another's.
-    """
-    ttype = task.get("type")
-    if ttype not in ("item_collection", "competition") or player_id is None:
-        return True
-    if ttype == "competition" and (bonus or {}).get("type") != "task":
-        return True
-    if kind not in ("drop", "clog"):
-        return True
-    target_norm = _norm(matched_target)
-    if target_norm not in _VESTIGE_NORMS:
-        return True
-    if not _ring_chain_applies(_bonus_rule_task(task, bonus)
-                               if ttype == "competition" else task):
-        # Rings never credit this task as a vestige, so there is no ring
-        # chain to collapse: the vestige is an ordinary item (the drop↔clog
-        # echo dedupe still covers its clog), and a second one counts again.
-        return True
-    from db.models import EventCompletion
-
-    query = (
-        session.query(EventCompletion)
-        .filter(EventCompletion.task_id == task["id"],
-                EventCompletion.team_id == team_id,
-                EventCompletion.player_id == player_id,
-                EventCompletion.source_type.in_(("drop", "clog")),
-                EventCompletion.status.in_(("auto", "confirmed", "manual", "pending")))
-    )
-    if ttype == "competition":
-        from services.competition import bonus_note
-        query = query.filter(EventCompletion.note == bonus_note(
-            "task", int((bonus or {}).get("rule_id") or 0)))
-    prior = query.all()
-    return not any(
-        _norm(r.matched_target) == target_norm
-        and (r.source_type or "") in ("drop", "clog")
-        for r in prior
-    )
-
-
 def _ls_vestige_sighting(task: dict, data: dict) -> Optional[tuple]:
     """``(vestige, step)`` when a loot_sweep drop is a step of a DT2 vestige
     chain (services.loot_sweep.vestige_chain_sighting), else None. Cheap
@@ -6084,10 +6029,9 @@ def _loot_sweep_vestige_gate(session, task: dict, player_id,
 
 
 def _ring_chain_applies(task: dict) -> bool:
-    """Whether a Gold ring can credit this task AS a vestige, which is what
-    makes one player's ring/ring/vestige a single chain: rings aren't switched
-    off (``config.vestige_rings``), and Gold ring isn't listed itself (a
-    listed ring only ever credits as a ring)."""
+    """Whether a Gold ring can credit this task AS a vestige: rings aren't
+    switched off (``config.vestige_rings``), and Gold ring isn't listed itself
+    (a listed ring only ever credits as a ring)."""
     return (_vr.rings_count(task.get("config"))
             and item_match_quantity(task, VESTIGE_RING_NAME, 1) is None)
 
@@ -6141,12 +6085,6 @@ def record_match(session, redis_conn, event: dict, task: dict, team_id: int,
     if progress_row is not None and progress_row.completed:
         return None
 
-    # Vestige chain (rings + vestige + its clog = one acquisition, no time
-    # window) — strictly stronger than the drop↔clog echo below for these.
-    if not _dedupe_vestige_chain(session, task, team_id, player_id,
-                                 envelope.get("kind"), matched_target,
-                                 bonus=bonus):
-        return None
     chain_note = None
     if task.get("type") == "loot_sweep" and bonus is None:
         chain_ok, chain_note = _loot_sweep_vestige_gate(session, task, player_id, envelope)
@@ -6840,8 +6778,8 @@ def _rescreen_vestige_ring_credits(session, task: dict) -> dict:
       its clog keep counting.
     - Switched ON: rows carrying that note come back as they were (``pending``
       from rejected; ``confirmed`` when an admin had confirmed it, else
-      ``auto``) unless the player's chain has credited that vestige since, the
-      task no longer lists it, or it now lists Gold ring itself. Rings that
+      ``auto``) unless the task no longer lists that vestige, or it now lists
+      Gold ring itself. Rings that
       dropped while it was off were never recorded, so they stay uncounted.
 
     Returns ``{"revoked": [...], "rejected": [...]}`` or ``{"restored": [...]}``
@@ -6890,30 +6828,17 @@ def _rescreen_vestige_ring_credits(session, task: dict) -> dict:
               .all())
     if not marked:
         return {}
-    # The same chain the matcher enforces with rings on: one credit per
-    # (team, player, vestige) across drop and clog rows. Manual awards are
-    # outside it, exactly as in _dedupe_vestige_chain.
-    credited = {
-        (r.team_id, r.player_id, _norm(r.matched_target))
-        for r in (session.query(EventCompletion)
-                  .filter(EventCompletion.task_id == task["id"],
-                          EventCompletion.source_type.in_(("drop", "clog")),
-                          EventCompletion.status.in_(
-                              ("auto", "confirmed", "manual", "pending")))
-                  .all())
-        if _norm(r.matched_target) in _VESTIGE_NORMS
-    }
+    # Every roll is its own credit (2026-11-22), so each ring row the switch
+    # took back comes back — only a vestige the task no longer lists stays out.
     restored = []
     for row in marked:
-        key = (row.team_id, row.player_id, _norm(row.matched_target))
-        if key in credited or item_match_quantity(task, row.matched_target, 1) is None:
+        if item_match_quantity(task, row.matched_target, 1) is None:
             continue
         if row.status == "rejected":
             row.status = "pending"
         else:
             row.status = "confirmed" if row.acted_by_user_id is not None else "auto"
         row.note = None
-        credited.add(key)
         restored.append(row.id)
     if not restored:
         return {}

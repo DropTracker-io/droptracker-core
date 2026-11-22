@@ -348,85 +348,41 @@ class TestPbUniqueAdvance:
             s, times, 4, _Row(rid=None, player_id=5)) is True
 
 
-class TestVestigeChainDedupe:
-    """_dedupe_vestige_chain — one player's ring/ring/vestige/clog chain
-    credits a (task, team, vestige) once, no time window. The fake session
-    stands for the SQL-side task/team/player/status filters; the name and
-    source_type checks are python-side."""
+class TestEveryVestigeRollCounts:
+    """Owner ruling, 2026-11-22: each DT2 vestige roll — 1 Gold ring, 2 Gold
+    rings, the vestige — credits the vestige on its own. The old chain rule
+    (_dedupe_vestige_chain) collapsed a player's whole chain to ONE credit,
+    so after their first ring nothing could score that vestige again for the
+    rest of the event. Only the vestige's clog echo is still deduped."""
 
-    TASK = {"id": 7, "type": "item_collection", "target_value": 2,
-            "config": {"kind": "any_of",
-                       "items": ["Ultor vestige", "Venator vestige"]}}
+    TASK = {"id": 7, "type": "item_collection", "target_value": 5,
+            "config": {"kind": "point_collection",
+                       "items": [{"item_name": "Ultor vestige", "points": 2}]}}
 
-    def test_second_ring_credit_is_blocked(self):
-        s = _Session([_Row("Ultor vestige", rid=10)])
-        assert engine._dedupe_vestige_chain(
-            s, self.TASK, 4, 9, "drop", "Ultor vestige") is False
+    def test_chain_rule_is_gone(self):
+        import inspect
 
-    def test_vestige_clog_weeks_after_ring_is_blocked(self):
-        # Outside the 10-minute drop↔clog echo window — the chain rule has none.
-        s = _Session([_Row("Ultor vestige", rid=10)])
-        assert engine._dedupe_vestige_chain(
-            s, self.TASK, 4, 9, "clog", "ultor  VESTIGE") is False
+        assert not hasattr(engine, "_dedupe_vestige_chain")
+        assert "_dedupe_vestige_chain" not in inspect.getsource(engine.record_match)
 
-    def test_a_different_vestige_still_credits(self):
-        s = _Session([_Row("Ultor vestige", rid=10)])
-        assert engine._dedupe_vestige_chain(
-            s, self.TASK, 4, 9, "drop", "Venator vestige") is True
+    def test_second_roll_credits_the_vestige_again(self):
+        # Vendusz, Frontier bingo: 1 ring at 12:33 credited Ultor; the 2-ring
+        # drop at 13:44 is the next roll and must credit it again.
+        assert engine._ring_vestige_for_task(
+            self.TASK, "Gold ring", "Vardorvis") == "Ultor vestige"
+        assert engine.item_match_quantity(self.TASK, "Ultor vestige", 1) == 2
 
-    def test_manual_awards_do_not_block(self):
-        s = _Session([_Row("Ultor vestige", source_type="manual", rid=10)])
-        assert engine._dedupe_vestige_chain(
-            s, self.TASK, 4, 9, "drop", "Ultor vestige") is True
+    def test_two_ring_stack_is_one_roll(self):
+        # A 2-ring stack is a single roll: one vestige's worth, not two.
+        assert engine._ring_vestige_for_task(
+            self.TASK, "Gold ring", "Vardorvis") == "Ultor vestige"
 
-    def test_non_vestige_items_unaffected(self):
-        s = _Session([_Row("Bones", rid=10)])
-        assert engine._dedupe_vestige_chain(
-            s, self.TASK, 4, 9, "drop", "Bones") is True
-
-    def test_first_credit_passes(self):
-        s = _Session([])
-        assert engine._dedupe_vestige_chain(
-            s, self.TASK, 4, 9, "drop", "Ultor vestige") is True
-
-    def test_rings_off_task_has_no_chain(self):
-        # With rings switched off a vestige is an ordinary item: the player's
-        # SECOND vestige is a second vestige, not an echo of the first.
-        task = {**self.TASK, "config": {**self.TASK["config"],
-                                        "vestige_rings": False}}
-        s = _Session([_Row("Ultor vestige", rid=10)])
-        assert engine._dedupe_vestige_chain(
-            s, task, 4, 9, "drop", "Ultor vestige") is True
-
-    def test_a_task_listing_gold_ring_itself_has_no_chain(self):
-        # A listed ring credits as a ring, never as the vestige, so a
-        # player's second vestige is simply a second vestige.
-        task = {**self.TASK, "config": {
-            "kind": "point_collection",
-            "items": [{"item_name": "Gold ring", "points": 5},
-                      {"item_name": "Ultor vestige", "points": 50}]}}
-        s = _Session([_Row("Ultor vestige", rid=10)])
-        assert engine._dedupe_vestige_chain(
-            s, task, 4, 9, "drop", "Ultor vestige") is True
-
-    @staticmethod
-    def _competition(rule_config):
-        return {"id": 7, "type": "competition", "competition": {"task_rules": [
-            {"id": 2, "task": {"type": "item_collection",
-                               "target": "Ultor vestige", "config": rule_config}},
-        ]}}
-
-    def test_competition_rule_keeps_the_chain_by_default(self):
-        s = _Session([_Row("Ultor vestige", rid=10)])
-        assert engine._dedupe_vestige_chain(
-            s, self._competition({}), 4, 9, "drop", "Ultor vestige",
-            bonus={"rule_id": 2, "type": "task"}) is False
-
-    def test_competition_rule_with_rings_off_has_no_chain(self):
-        s = _Session([_Row("Ultor vestige", rid=10)])
-        assert engine._dedupe_vestige_chain(
-            s, self._competition({"vestige_rings": False}), 4, 9, "drop",
-            "Ultor vestige", bonus={"rule_id": 2, "type": "task"}) is True
+    def test_vestige_clog_echo_still_deduped_against_its_drop(self):
+        # The vestige's own collection-log slot is the same acquisition as
+        # its drop; that dedupe is independent of the removed chain rule.
+        s = _Session([_Row("Ultor vestige", source_type="drop", rid=10)])
+        assert engine._dedupe_clog_echo(
+            s, self.TASK, 4, 9, "clog", "Ultor vestige", 1) is None
 
 
 class TestClogEchoDedupe:
