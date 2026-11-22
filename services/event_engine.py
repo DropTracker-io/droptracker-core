@@ -1597,14 +1597,22 @@ def match_task_all(task: dict, envelope: dict) -> list:
                 # validator refuses those embedded types; this is the second
                 # lock on the same door.
                 continue
-            matches.append({
+            bonus_match = {
                 "mode": "count",
                 # Credit UNITS, not points: the fold converts at
                 # ``points`` per ``need`` (services/competition.py).
                 "quantity": max(int(hit.get("quantity") or 1), 1),
                 "matched_target": hit.get("matched_target"),
                 "bonus": {"rule_id": rule.get("id"), "type": "task"},
-            })
+            }
+            if embedded.get("type") == "skill_target":
+                # A race's "Reach level N" bonus is an ACHIEVEMENT: it pays
+                # for crossing the level during the event, never for already
+                # being there. match_task only sees the current level (a
+                # state), so the apply layer checks the start-of-event XP —
+                # see _reached_level_during_event.
+                bonus_match["reach_level"] = _safe_level(embedded.get("target_value"))
+            matches.append(bonus_match)
         return matches
     metric_paths = _metric_paths(task)
     if not metric_paths:
@@ -2777,6 +2785,33 @@ def _fold_xp_baseline(redis_conn, event_id: int, player_id: int, skill, xp,
         return xp - prev
     except Exception:
         return 0
+
+
+def _safe_level(value) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reached_level_during_event(level: int, xp, start_xp) -> bool:
+    """Whether a player whose XP stood at ``start_xp`` when the event began
+    (or at their last report inside it) has since crossed ``level``.
+
+    ``start_xp`` None means nothing shows where the player started — the
+    first report of the event is baseline-only (PRD D10), so it never pays.
+    A level-up missed that way is recovered by the WOM reconciler, whose
+    envelopes carry the window-start XP."""
+    from utils.xp_history import xp_for_level
+
+    if level <= 0 or start_xp is None:
+        return False
+    try:
+        xp, start_xp = int(xp or 0), int(start_xp)
+    except (TypeError, ValueError):
+        return False
+    need = xp_for_level(level)
+    return start_xp < need <= xp
 
 
 def _window_start_for(event: dict, seq):
@@ -6304,6 +6339,19 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
         bingo_board = event.get("has_bingo") and event.get("kind") != "board_game"
 
         xp_delta = None  # baseline folded at most once per (event, envelope)
+        # The XP baseline as it stood BEFORE this envelope folds it: the
+        # player's XP at their previous report in this event (None on the
+        # first). Read up front — the fold may write the key in place.
+        xp_prev = None
+        if envelope.get("kind") == "experience":
+            _skill = (envelope.get("data") or {}).get("skill")
+            if _skill:
+                try:
+                    _raw = redis_conn.get(_xp_baseline_key(
+                        event_id, player_id, f"{_skill}{wscope}"))
+                    xp_prev = int(_raw) if _raw is not None else None
+                except Exception:
+                    xp_prev = None
         for task in state.tasks_by_event.get(event_id, []):
             if board_task_id is not None and task["id"] != board_task_id:
                 continue
@@ -6408,6 +6456,17 @@ def handle_envelope(session, redis_conn, state: MatcherState, envelope: dict,
                     if xp_delta <= 0:
                         continue
                     quantity = xp_delta
+                if match.get("reach_level") is not None:
+                    # Where the player started: WOM's window-start XP when the
+                    # envelope carries an honest one, else the race's own
+                    # baseline before this report (never below the start
+                    # XP). A player already at the level never qualifies.
+                    start_xp = xp_prev
+                    if wom_seed_ok and data.get("xp_start") is not None:
+                        start_xp = data.get("xp_start")
+                    if not _reached_level_during_event(
+                            match["reach_level"], data.get("xp"), start_xp):
+                        continue
                 outcome = record_match(
                     session, redis_conn, event, task, team_id, player_id,
                     quantity, envelope, cells=state.cells_by_task.get(task["id"]),
