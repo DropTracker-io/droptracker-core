@@ -512,18 +512,22 @@ def slow_pace_ms() -> int:
 TUNE_EVERY_SECONDS = 3600
 TUNE_MIN_REQUESTS = 200          # fewer than this says nothing about a failure share
 SPEED_UP_STEP_MS = 100           # how much faster after a clean hour
-SPEED_UP_MAX_FAIL_SHARE = 0.005  # "clean": at most 0.5% of requests failed
-SLOW_DOWN_FAIL_SHARE = 0.03      # 3% failing is the hiscores struggling, or us being throttled
+SPEED_UP_MAX_FAIL_SHARE = 0.02   # "clean": under 2% failed. The hiscores drop about 1% on a normal day
+SLOW_DOWN_FAIL_SHARE = 0.05      # 5% failing is the hiscores struggling, or us being throttled
 SLOW_DOWN_FACTOR = 1.5
 REFUSAL_FACTOR = 2.0             # a 403/429 doubles the interval on the spot
 REFUSAL_QUIET_SECONDS = 12 * 3600  # no speeding up this long after a refusal
 REFUSAL_CAREFUL_SECONDS = 7 * 86400  # and only in small steps for a week after one
 # Errors that are not refusals (502, 504, timeouts) are the hiscores having
-# trouble, not a limit on us. They never slow us past the pace we started at,
-# and a clean hour undoes a whole slow-down. On 2026-11-20 five hours of 502s
-# took the interval from 500 ms to 5.7 s, and at 100 ms an hour it would have
-# taken two days to come back; readings went stale for everyone meanwhile.
-FAILURE_MAX_INTERVAL_MS = max(INTERVAL_MS, MIN_INTERVAL_MS)
+# trouble, not a limit on us: they drop about one request in ten for a few
+# hours most evenings (US time), and did so just the same at one request per
+# 2 s as at one per 0.5 s (2026-11-22 00:00-05:00 UTC against the 21st). So
+# slowing down buys nothing and costs readings. We ease off to half speed
+# while it lasts, as a courtesy, and no further; only a refusal goes slower.
+# History: on 2026-11-20 the old rule went 500 ms -> 5.7 s and needed two days
+# to return; the first fix still allowed 2 s, where a 0.5-3% "hold" band then
+# pinned it for 14 hours and tripped the pace alert on the 22nd.
+FAILURE_MAX_INTERVAL_MS = MIN_INTERVAL_MS * 2
 
 
 def _set_interval(redis_conn, value: float, reason: str, now: Optional[datetime] = None) -> int:
@@ -561,9 +565,9 @@ def tune_pace(redis_conn, now: Optional[datetime] = None) -> Optional[str]:
     poller cycle; does something at most once an hour, and only with enough
     requests to judge by. Returns a line describing a change, else None.
 
-    - 3% or more failed: slow down by half again, but never past the starting
-      pace (only a refusal goes slower than that).
-    - at most 0.5% failed, and no refusal in the last 12 hours: undo one
+    - 5% or more failed: slow down by half again, but never past half speed
+      (only a refusal goes slower than that).
+    - under 2% failed, and no refusal in the last 12 hours: undo one
       slow-down (at least 100 ms faster), down to the floor. Within a week of
       a refusal: 100 ms faster only.
     - anything between: hold.

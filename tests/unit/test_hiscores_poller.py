@@ -667,13 +667,23 @@ class TestPace:
         self._hour(r, 950, 50, NOW + timedelta(hours=1))
         assert hiscores.current_interval(r) == 900
 
-    def test_failures_never_slow_past_the_starting_pace(self):
+    def test_failures_never_slow_past_half_speed(self):
         """2026-11-20: five hours of 502s took 500 ms to 5.7 s."""
         r = self._started()
         r.set(hiscores.INTERVAL_KEY, 600)
         for hour in range(1, 9):
             self._hour(r, 900, 100, NOW + timedelta(hours=hour))
-        assert hiscores.current_interval(r) == hiscores.INTERVAL_MS
+        assert hiscores.current_interval(r) == hiscores.MIN_INTERVAL_MS * 2
+        # ...so server errors alone can never trip the slow-pace alert.
+        assert hiscores.current_interval(r) <= hiscores.slow_pace_ms()
+
+    def test_the_everyday_error_rate_does_not_hold_the_pace_down(self):
+        """2026-11-21: about 1% of requests failing pinned a slowed pace for 14 hours."""
+        r = self._started()
+        r.set(hiscores.INTERVAL_KEY, 1000)
+        self._hour(r, 3500, 35, NOW + timedelta(hours=1))
+        self._hour(r, 3500, 35, NOW + timedelta(hours=2))
+        assert hiscores.current_interval(r) == hiscores.MIN_INTERVAL_MS
 
     def test_failures_do_not_speed_up_a_pace_a_refusal_set(self):
         r = self._started()
@@ -692,7 +702,7 @@ class TestPace:
 
     def test_a_middling_hour_holds(self):
         r = self._started()
-        assert self._hour(r, 985, 15, NOW + timedelta(hours=1)) is None
+        assert self._hour(r, 970, 30, NOW + timedelta(hours=1)) is None
         assert hiscores.current_interval(r) == hiscores.INTERVAL_MS
 
     def test_a_refusal_doubles_the_interval_at_once(self):
