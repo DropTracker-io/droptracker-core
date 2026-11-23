@@ -617,6 +617,33 @@ def resolve_event_channel(channels_by_kind: dict, notification_type: str) -> Opt
     return str(channel_id) if channel_id else None
 
 
+def pending_review_fallback_channel(session, event) -> Optional[str]:
+    """Where an ``event_pending`` card goes when the event itself has no
+    Admin/Announcements channel: the hosting clan's manual-review channel
+    (``channel_id_to_post_manual_review``), or None.
+
+    A clan that reviews manual drops in Discord expects the event's
+    awaiting-review cards there too; without this they were skipped outright
+    and a staff member's own manual drop (which the clan policy trusts, so it
+    never posts a clan card) reached nobody (Frontier PvM, 2026-11-22).
+    Respects the event's own toggle for review pings."""
+    group_id = getattr(event, "group_id", None)
+    if not group_id:
+        return None
+    try:
+        if not should_send_event_message(
+                effective_message_config(getattr(event, "message_config", None)),
+                "event_pending"):
+            return None
+        from utils import group_config as gc
+
+        value = gc.get(session, int(group_id), "channel_id_to_post_manual_review")
+    except Exception:
+        return None
+    value = str(value or "").strip()
+    return value if value.isdigit() else None
+
+
 def load_event_channels(session, event_id: int, group_id=None) -> dict:
     """{kind: channel_id} for one event (lazy db import — see module docstring).
 

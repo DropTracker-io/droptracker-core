@@ -3530,6 +3530,15 @@ class NotificationService:
                         destinations.append({"channel_id": channel_id, "ping": True})
                 skip_reason = 'skipped: no event channel configured (or muted)'
 
+            # Awaiting-review cards with nowhere to go fall back to the
+            # hosting clan's manual-review channel (services/event_notifications).
+            if notification_type == 'event_pending' and not destinations:
+                from services.event_notifications import pending_review_fallback_channel
+
+                fallback_cid = pending_review_fallback_channel(db_session, event)
+                if fallback_cid:
+                    destinations.append({"channel_id": fallback_cid, "ping": True})
+
             # Per-team Discord channels (web53a) — additive destinations with
             # the team's auto-created role as the ping. Deduped against the
             # event/clan channels so a team channel doubling as e.g. the

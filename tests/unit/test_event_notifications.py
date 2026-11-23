@@ -556,3 +556,38 @@ class TestSignupPromptCloseTime:
         spec = _spec("event_signup_prompt", {"ends_at": 1796014740})
         values = " ".join(str(f.get("value")) for f in spec.get("fields", []))
         assert "1796014740" in values
+
+
+# --------------------------------------------------------------------------- #
+# Awaiting-review fallback (2026-11-22): an event with no Admin/Announcements
+# channel sends its event_pending cards to the host clan's review channel.
+# --------------------------------------------------------------------------- #
+class TestPendingReviewFallback:
+    from types import SimpleNamespace as _NS
+
+    @staticmethod
+    def _call(event, value, monkeypatch):
+        import utils.group_config as gc
+
+        monkeypatch.setattr(gc, "get", lambda s, gid, key, default=None:
+                            value if key == "channel_id_to_post_manual_review" else default)
+        return en.pending_review_fallback_channel(object(), event)
+
+    def test_host_clan_review_channel_is_used(self, monkeypatch):
+        event = self._NS(group_id=190, message_config=None)
+        assert self._call(event, "1569018156968714321", monkeypatch) == "1569018156968714321"
+
+    def test_no_host_clan_no_fallback(self, monkeypatch):
+        assert self._call(self._NS(group_id=None, message_config=None), "1", monkeypatch) is None
+
+    def test_no_or_junk_channel_no_fallback(self, monkeypatch):
+        event = self._NS(group_id=190, message_config=None)
+        assert self._call(event, None, monkeypatch) is None
+        assert self._call(event, "general", monkeypatch) is None
+
+    def test_muted_review_pings_stay_muted(self, monkeypatch):
+        import json
+
+        event = self._NS(group_id=190, message_config=json.dumps(
+            {"toggles": {"event_pending": False}}))
+        assert self._call(event, "1569018156968714321", monkeypatch) is None
