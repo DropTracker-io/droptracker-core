@@ -175,6 +175,8 @@ def client(monkeypatch):
         return _Decision()
 
     monkeypatch.setattr(auth, "authenticate_request", _authenticate)
+    monkeypatch.setattr(npcs, "ehb_tables", lambda _s: (
+        {"main": {"zulrah": 46.0}, "ironman": {}}, {}))
     monkeypatch.setattr(serving, "SessionLocal", lambda: _Session())
     monkeypatch.setattr(serving, "check_and_charge", _charge)
     monkeypatch.setattr(serving, "Concurrency", _Slot)
@@ -207,7 +209,11 @@ class TestRoutes:
         assert body["count"] == len(_ROWS)
         assert [n["npc_id"] for n in body["npcs"]] == sorted(r[0] for r in _ROWS)
         assert body["npcs"][0] == {"npc_id": 2042, "name": "Zulrah",
-                                   "synthetic": False, "wom_metric": "zulrah"}
+                                   "synthetic": False, "wom_metric": "zulrah",
+                                   "ehb": {"kills_per_hour": 46.0,
+                                           "kills_per_hour_ironman": None,
+                                           "source": "wom", "method": None,
+                                           "sample_size": None}}
         assert client.charged == [npcs.NPC_LIST_COST]
 
     @pytest.mark.asyncio
@@ -233,6 +239,7 @@ class TestRoutes:
         assert body["wiki_url"].endswith("/Theatre_of_Blood")
         assert body["icon_url"].endswith("/npcdb/13699.png")
         assert body["drop_table"] == {"source": None, "source_npc_id": None, "items": []}
+        assert "ehb" in body
 
     @pytest.mark.asyncio
     async def test_an_unknown_id_is_a_404(self, client):
@@ -254,3 +261,64 @@ class TestPersonalBestsCarryTheName:
             {"npc_id": 2042, "npc_name": "Zulrah", "team_size": "Solo", "best_ms": 61000},
             {"npc_id": 99999, "npc_name": None, "team_size": "Solo", "best_ms": 50000},
         ]
+
+
+class TestEhb:
+    """Ticket #411: kills per efficient hour on every NPC row."""
+
+    WOM = {"main": {"zulrah": 46.0}, "ironman": {"zulrah": 40.0}}
+    DERIVED = {
+        2042: (42.4, "pb_median", 900),        # WOM-priced: ours must not win
+        2: (239.5, "kc_sessions", 200),        # Aberrant spectre, WOM-unpriced
+        2216: (28.6, "drop_gaps", 199),        # Sergeant Strongstack, a bodyguard
+    }
+
+    def test_wom_rate_wins_over_ours(self):
+        e = npcs.ehb_entry(2042, "Zulrah", "zulrah", self.WOM, self.DERIVED)
+        assert e == {"kills_per_hour": 46.0, "kills_per_hour_ironman": 40.0,
+                     "source": "wom", "method": None, "sample_size": None}
+
+    def test_unpriced_npc_gets_our_estimate_labelled(self):
+        e = npcs.ehb_entry(2, "Aberrant spectre", None, self.WOM, self.DERIVED)
+        assert e["source"] == "droptracker"
+        assert e["kills_per_hour"] == 239.5
+        assert (e["method"], e["sample_size"]) == ("kc_sessions", 200)
+        assert e["kills_per_hour_ironman"] is None
+
+    def test_bodyguards_and_unknowns_are_null(self):
+        assert npcs.ehb_entry(2216, "Sergeant Strongstack", None, self.WOM, self.DERIVED) is None
+        assert npcs.ehb_entry(1, "Man", None, self.WOM, self.DERIVED) is None
+
+    def test_marker_rows_are_not_published(self):
+        session = types.SimpleNamespace(
+            execute=lambda *_a, **_k: types.SimpleNamespace(fetchall=lambda: [
+                (13741, 59.0, "partial_gaps", 102, "Fortis Colosseum"),
+                (2, 239.5, "kc_sessions", 200, "Aberrant spectre"),
+                (9, 0, "drop_gaps", 5, "Goblin")]),
+            rollback=lambda: None)
+        got = npcs._derived_ehb_rates(session)
+        assert got[2] == (239.5, "kc_sessions", 200)
+        assert 13741 not in got and 9 not in got
+
+    def test_other_ids_of_a_measured_monster_share_its_rate(self):
+        derived = {2: (239.5, "kc_sessions", 200),
+                   ("name", __import__("utils.npc_names", fromlist=["x"]).npc_match_key("Aberrant spectre")):
+                       (239.5, "kc_sessions", 200)}
+        e = npcs.ehb_entry(3, "Aberrant spectre", None, self.WOM, derived)
+        assert e["kills_per_hour"] == 239.5 and e["source"] == "droptracker"
+
+    def test_unreadable_table_costs_only_the_estimates(self):
+        rolled = []
+
+        def boom(*_a, **_k):
+            raise RuntimeError("denied")
+
+        session = types.SimpleNamespace(execute=boom, rollback=lambda: rolled.append(1))
+        assert npcs._derived_ehb_rates(session) == {}
+        assert rolled == [1]
+
+    def test_row_carries_ehb_and_defaults_to_null(self, monkeypatch):
+        monkeypatch.setattr(sect, "_boss_metric_of", lambda name: "zulrah" if name == "Zulrah" else None)
+        npcs._wom_metric_cache.clear()
+        assert npcs.npc_row(2042, "Zulrah", (self.WOM, self.DERIVED))["ehb"]["source"] == "wom"
+        assert npcs.npc_row(2042, "Zulrah")["ehb"] is None

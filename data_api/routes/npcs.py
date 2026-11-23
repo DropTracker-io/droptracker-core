@@ -16,6 +16,13 @@ droptracker.io NPC page uses: the wiki import put each family's table on one
 member (the CoX table on the base raid, ToB's on Hard Mode), so a mode or
 spelling variant borrows its nearest relative's and says which one.
 
+Each NPC also carries ``ehb``: how many kills an efficient hour is worth
+(ticket #411). Wise Old Man's published boss rate wins when there is one; for
+everything WOM does not price (slayer monsters, newer bosses, raid entry
+modes, Doom levels) it is DropTracker's own estimate from
+``npc_ehb_rates`` (``scripts/compute_npc_ehb_rates.py``), labelled with how
+it was measured. The same order Bingo EHB prices event effort with.
+
 Game data, not player data: any valid key may read it, at a flat cost.
 """
 from __future__ import annotations
@@ -57,6 +64,14 @@ WIKI_BASE = "https://oldschool.runescape.wiki/w"
 
 _wom_metric_cache: dict = {}
 
+#: ``npc_ehb_rates`` is recomputed by hand, rarely; WOM's table weekly.
+_EHB_TTL = 3600
+_ehb_cache: dict = {"at": 0.0, "derived": None, "wom": None}
+
+#: ``npc_ehb_rates`` methods whose figure is not "kills per hour" — a
+#: completion-marker row counts partial attempts — and so is never published.
+_UNPUBLISHED_METHODS = frozenset({"partial_gaps"})
+
 
 def _wom_metric(npc_name: str):
     """The NPC's Wise Old Man boss slug, or None. Memoised: names never change
@@ -69,12 +84,119 @@ def _wom_metric(npc_name: str):
     return _wom_metric_cache[npc_name]
 
 
-def npc_row(npc_id: int, name: str) -> dict:
+def _wom_ehb_rates() -> dict:
+    """``{"main": {slug: kph}, "ironman": {...}}`` from the local copy of WOM's
+    rate table (``utils.efficiency``, no network)."""
+    try:
+        from utils.efficiency import ehb_rates
+
+        return {"main": ehb_rates("main"), "ironman": ehb_rates("ironman")}
+    except Exception:
+        log.exception("data_api npcs: WOM EHB rates unavailable")
+        return {"main": {}, "ironman": {}}
+
+
+def _derived_ehb_rates(session) -> dict:
+    """``{npc_id: (kph, method, sample_size)}`` from ``npc_ehb_rates``, plus
+    the same entries under ``("name", npc_match_key(name))``.
+
+    The estimate is computed for one id per monster, but ``npc_list`` holds
+    every game id of it (Aberrant spectre is 2..7); the name key lets the
+    other ids answer with it. A read failure costs the estimates, never the
+    endpoint.
+    """
+    try:
+        rows = session.execute(text(
+            "SELECT r.npc_id, r.rate_kph, r.method, r.sample_size, n.npc_name "
+            "FROM npc_ehb_rates r LEFT JOIN npc_list n ON n.npc_id = r.npc_id"
+        )).fetchall()
+    except Exception:
+        log.exception("data_api npcs: npc_ehb_rates unreadable")
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        return {}
+    from utils.npc_names import npc_match_key
+
+    out: dict = {}
+    by_name: dict = {}
+    for nid, kph, method, n, name in rows:
+        if not kph or float(kph) <= 0 or method in _UNPUBLISHED_METHODS:
+            continue
+        entry = (float(kph), method, int(n or 0))
+        out[int(nid)] = entry
+        key = npc_match_key(name) if name else None
+        # Two measured ids under one name: the better-sampled one speaks.
+        if key and (key not in by_name or entry[2] > by_name[key][2]):
+            by_name[key] = entry
+    out.update({("name", k): v for k, v in by_name.items()})
+    return out
+
+
+def ehb_tables(session) -> tuple:
+    """``(wom, derived)`` rate tables, cached per process for an hour."""
+    now = time.monotonic()
+    if _ehb_cache["derived"] is None or now - _ehb_cache["at"] > _EHB_TTL:
+        _ehb_cache["wom"] = _wom_ehb_rates()
+        _ehb_cache["derived"] = _derived_ehb_rates(session)
+        _ehb_cache["at"] = now
+    return _ehb_cache["wom"], _ehb_cache["derived"]
+
+
+def ehb_entry(npc_id: int, name: str, wom_metric, wom: dict, derived: dict):
+    """The NPC's kills-per-efficient-hour, or None when nothing prices it.
+
+    WOM's rate for the NPC's metric first (a derived rate never overrides a
+    published one), then ours. Boss bodyguards (the GWD sergeants...) are
+    None: their kills come with the boss's, whose rate already covers the
+    room, so pricing them separately bills one trip several times.
+    """
+    try:
+        from services.event_effort import is_bodyguard
+
+        if name and is_bodyguard(name):
+            return None
+    except Exception:
+        pass
+    if wom_metric:
+        main = (wom.get("main") or {}).get(wom_metric)
+        if main:
+            iron = (wom.get("ironman") or {}).get(wom_metric)
+            return {
+                "kills_per_hour": float(main),
+                "kills_per_hour_ironman": float(iron) if iron else None,
+                "source": "wom",
+                "method": None,
+                "sample_size": None,
+            }
+    found = derived.get(int(npc_id))
+    if not found and name:
+        from utils.npc_names import npc_match_key
+
+        found = derived.get(("name", npc_match_key(name)))
+    if found:
+        kph, method, sample = found
+        return {
+            "kills_per_hour": round(kph, 1),
+            "kills_per_hour_ironman": None,
+            "source": "droptracker",
+            "method": method,
+            "sample_size": sample,
+        }
+    return None
+
+
+def npc_row(npc_id: int, name: str, ehb_rates: tuple | None = None) -> dict:
+    """``ehb_rates`` is :func:`ehb_tables`' pair; omitted, ``ehb`` is null."""
+    metric = _wom_metric(name) if name else None
+    wom, derived = ehb_rates or ({}, {})
     return {
         "npc_id": int(npc_id),
         "name": name or None,
         "synthetic": int(npc_id) >= SYNTHETIC_NPC_ID_FLOOR,
-        "wom_metric": _wom_metric(name) if name else None,
+        "wom_metric": metric,
+        "ehb": ehb_entry(npc_id, name, metric, wom, derived),
     }
 
 
@@ -236,7 +358,8 @@ async def list_npcs():
                                lambda raw: sect.resolve_npc_ids(session, raw))
         else:
             rows = sorted(rows, key=lambda r: r[0])
-        npcs = [npc_row(nid, nm) for nid, nm in rows]
+        rates = ehb_tables(session)
+        npcs = [npc_row(nid, nm, rates) for nid, nm in rows]
         return {"count": len(npcs), "npcs": npcs}
 
     filtered = name is not None or query is not None
@@ -248,8 +371,8 @@ async def list_npcs():
 
 @npcs_bp.route("/npcs/<int:npc_id>", methods=["GET"])
 async def get_npc(npc_id: int):
-    """One NPC: its name, whether the id is the game's, its WOM slug, and the
-    wiki drop table."""
+    """One NPC: its name, whether the id is the game's, its WOM slug, its EHB
+    rate, and the wiki drop table."""
 
     def build(session):
         rows = sect._npc_rows(session)
@@ -263,7 +386,7 @@ async def get_npc(npc_id: int):
             if row is None:
                 return None
             name = row[0] or ""
-        body = npc_row(npc_id, name)
+        body = npc_row(npc_id, name, ehb_tables(session))
         body["icon_url"] = f"{IMG_BASE}/npcdb/{npc_id}.png"
         body["wiki_url"] = f"{WIKI_BASE}/{quote(name.replace(' ', '_'))}" if name else None
         body["drop_table"] = _drop_table(session, npc_id, name, rows)
