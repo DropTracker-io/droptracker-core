@@ -1,9 +1,9 @@
 {
  "source": {
   "repo": "https://github.com/wise-old-man/wise-old-man",
-  "commit": "0c48ccf0f29b487642df2200c196d396f57fa0b1",
+  "commit": "d7e0db40fdd5eff39a13f8ba88e71202fee8396b",
   "license": "MIT, Copyright (c) 2020 Ruben Amendoeira",
-  "synced_at": "2026-11-17T21:30:22Z"
+  "synced_at": "2026-11-23T00:02:46Z"
  },
  "skills": [
   "overall",
@@ -3453,6 +3453,17 @@
       "startExp": 13034431,
       "rate": 411393,
       "description": "Artefacts with firemaking (225k thieving & 360k firemaking)"
+     }
+    ],
+    "bonuses": []
+   },
+   {
+    "skill": "slayer",
+    "methods": [
+     {
+      "startExp": 0,
+      "rate": 40000,
+      "description": "Partner slayer"
      }
     ],
     "bonuses": []
