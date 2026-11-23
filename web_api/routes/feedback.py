@@ -61,6 +61,13 @@ logger = logging.getLogger("web_api.feedback")
 
 TITLE_MAX = 120
 TEXT_MAX = 500
+# A response needs words, not only a score: at least one of the two answers must
+# be this long. Of the first 20 responses 18 were a bare score (mostly 10s),
+# which says nothing about why and cannot be quoted. Short on purpose: it rules
+# out an empty box and "good", not a real sentence. Mirrors FEEDBACK_TEXT_MIN in
+# the web repo (packages/api-types/src/feedback.ts); the form enforces it first,
+# this is the wall behind it.
+TEXT_MIN = 15
 RATING_MIN, RATING_MAX = 1, 10
 ATTRIBUTIONS = ("clan", "full", "anon")
 SNOOZE = timedelta(days=14)
@@ -280,6 +287,9 @@ def validate_answer(body: dict) -> dict:
         if len(text) > TEXT_MAX:
             abort_problem(422, "Too long", f"'{label}' must be {TEXT_MAX} characters or fewer.")
         out[key] = text or None
+    if max(len(out["liked_text"] or ""), len(out["improve_text"] or "")) < TEXT_MIN:
+        abort_problem(422, "Say a little more",
+                      f"Tell us why in a sentence or two: at least {TEXT_MIN} characters in one of the answers.")
     attribution = body.get("attribution") or "clan"
     if attribution not in ATTRIBUTIONS:
         abort_problem(422, "Invalid attribution", "attribution must be clan, full or anon.")

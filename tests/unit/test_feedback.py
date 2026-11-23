@@ -242,17 +242,46 @@ def test_outbox_accepts_feedback_buttons(monkeypatch):
 
 # ── answer validation ────────────────────────────────────────────────────────
 
+WORDS = "The loot boards keep everyone busy."
+
+
 class TestValidateAnswer:
     def _v(self, **body):
         from web_api.routes.feedback import validate_answer
 
-        return validate_answer({"rating": 8, **body})
+        # A valid answer needs words; tests that are about something else get some.
+        return validate_answer({"rating": 8, "liked_text": WORDS, **body})
 
     def test_defaults(self):
         out = self._v()
-        assert out == {"rating": 8, "liked_text": None, "improve_text": None, "attribution": "clan",
+        assert out == {"rating": 8, "liked_text": WORDS, "improve_text": None, "attribution": "clan",
                        "quote_consent": False, "contact_ok": False, "request_id": None,
                        "group_id": None}
+
+    @pytest.mark.parametrize("body", [
+        {"liked_text": None},
+        {"liked_text": ""},
+        {"liked_text": "   \n  "},
+        {"liked_text": "good"},
+        {"liked_text": "x" * 14},
+        # Two short halves do not add up to one real answer.
+        {"liked_text": "great", "improve_text": "nothing"},
+    ])
+    def test_a_score_on_its_own_is_refused(self, body):
+        from web_api.common import ProblemException
+
+        with pytest.raises(ProblemException) as err:
+            self._v(**body)
+        assert err.value.status == 422
+
+    @pytest.mark.parametrize("body", [
+        {"liked_text": "x" * 15},
+        {"liked_text": None, "improve_text": "More boss filters please."},
+        {"liked_text": "  The event boards saved us hours.  "},
+    ])
+    def test_either_answer_can_carry_the_words(self, body):
+        out = self._v(**body)
+        assert max(len(out["liked_text"] or ""), len(out["improve_text"] or "")) >= 15
 
     @pytest.mark.parametrize("rating", [0, 11, -1, None, "", True, "x"])
     def test_rating_must_be_1_to_10(self, rating):
@@ -268,7 +297,7 @@ class TestValidateAnswer:
     def test_text_is_trimmed_and_capped(self):
         from web_api.common import ProblemException
 
-        assert self._v(liked_text="  hi  ")["liked_text"] == "hi"
+        assert self._v(liked_text="  hi there, it works well  ")["liked_text"] == "hi there, it works well"
         assert self._v(liked_text="x" * 500)["liked_text"] == "x" * 500
         with pytest.raises(ProblemException):
             self._v(improve_text="x" * 501)
