@@ -158,6 +158,16 @@ def _decide_drop(s, parsed: dict, facts: dict):
                           "discord_user_id": facts["discord_id"]}),
     ))
     s.commit()
+    # One decision settles both queues: the same drop's pending completions in
+    # events this clan hosts follow it (services/review_link).
+    if action in ("approve", "reject"):
+        try:
+            from services.review_link import settle_event_for_clan_decision
+
+            settle_event_for_clan_decision(s, drop_id, group_id, action, user_id,
+                                           via="clan_review_discord")
+        except Exception as e:
+            print(f"[review_buttons] event mirror failed for drop {drop_id}: {e}")
     who = f"<@{facts['discord_id']}>"
     # Counted after the commit above, so it reflects this decision.
     left = _pending_drop_count(s, group_id) if action != "undo" else None
@@ -222,6 +232,48 @@ def _decide_event(s, parsed: dict, facts: dict):
     return True, core.with_backlog(f"❌ Rejected by {who}", left), None
 
 
+def _decide_hold(s, parsed: dict, facts: dict):
+    """``(ok, status_line_or_error, undo_custom_id)`` for a held manual
+    clog/pb/ca/pet notification (services/manual_hold_review). Same reviewers
+    as a held drop."""
+    from db.models import AuditLog, Group
+    from services import manual_hold_review as mhr
+
+    group_id, notif_id, action = parsed["group_id"], parsed["notification_id"], parsed["action"]
+    group = s.query(Group).filter(Group.group_id == group_id).first()
+    if group is None:
+        return False, "That group no longer exists.", None
+    user_id = _linked_user_id(s, facts["discord_id"])
+    if not core.may_review(
+            interaction_guild_id=facts["guild_id"], group_guild_id=group.guild_id,
+            is_group_admin=_is_group_admin(s, user_id, [group_id]),
+            member_permissions=facts["permissions"], member_role_ids=facts["roles"],
+            review_role_id=_review_role(s, group_id)):
+        return False, _NOT_ALLOWED, None
+    handler = {"approve": mhr.approve, "reject": mhr.reject, "undo": mhr.undo}[action]
+    try:
+        result = handler(s, notif_id, group_id, reviewer_user_id=user_id)
+    except mhr.HoldReviewError as e:
+        s.rollback()
+        return False, e.detail, None
+    s.add(AuditLog(
+        actor_user_id=user_id,
+        group_id=group_id,
+        action=f"manual_submission.{action}",
+        target=f"notification_queue.{notif_id}.group.{group_id}",
+        before=result.get("previous_status", "pending"),
+        after=json.dumps({"status": result["status"], "via": "discord",
+                          "discord_user_id": facts["discord_id"]}),
+    ))
+    s.commit()
+    who = f"<@{facts['discord_id']}>"
+    if action == "approve":
+        return True, f"✅ Approved by {who} — posting it now.", core.hold_custom_id("undo", group_id, notif_id)
+    if action == "reject":
+        return True, f"❌ Rejected by {who}", core.hold_custom_id("undo", group_id, notif_id)
+    return True, f"↩️ {who} took that back. It's waiting for review again.", None
+
+
 def decide(parsed: dict, facts: dict):
     """Run one click in its own session (called in a worker thread)."""
     from db.models.base import Session
@@ -230,6 +282,8 @@ def decide(parsed: dict, facts: dict):
     try:
         if parsed["kind"] == "drop":
             return _decide_drop(s, parsed, facts)
+        if parsed["kind"] == "hold":
+            return _decide_hold(s, parsed, facts)
         return _decide_event(s, parsed, facts)
     except Exception:
         s.rollback()
@@ -293,7 +347,11 @@ class ReviewButtons(Extension):
             return
         message = data.get("message") or {}
         if parsed["action"] == "undo":
-            edit = core.undone_message(message, text, parsed["group_id"], parsed["drop_id"])
+            if parsed["kind"] == "hold":
+                edit = core.undone_message(message, text, parsed["group_id"],
+                                           parsed["notification_id"], kind="hold")
+            else:
+                edit = core.undone_message(message, text, parsed["group_id"], parsed["drop_id"])
         else:
             edit = core.decided_message(message, text, undo_id)
         edit["allowed_mentions"] = {"parse": []}

@@ -222,7 +222,88 @@ def manual_notification_suppressed_groups(session, player, group_ids,
                                             trusted_group_ids=trusted_group_ids))
 
 
+def manual_notification_split(session, player, group_ids,
+                              trusted_group_ids=()) -> tuple:
+    """``(excluded, held)`` group-id sets for a MANUAL non-drop submission
+    (clog / pb / ca / pet).
+
+    ``excluded`` (block / authorized_only) never announce it and award no
+    points, as before. ``held`` (confirm) used to be silently suppressed too,
+    with nothing for staff to approve — a pet received on mobile simply never
+    posted (2026-11-22). Held groups now get the notification written as
+    ``held`` plus a review card; approving releases it
+    (services/manual_hold_review). Like a held drop, a held entry earns no
+    group points."""
+    moderation = manual_moderation_for_player(session, player, group_ids,
+                                              trusted_group_ids=trusted_group_ids)
+    held = {gid for gid, (status, _p) in moderation.items() if status == "pending"}
+    excluded = set(moderation) - held
+    return excluded, held
+
+
 REVIEW_CHANNEL_KEY = "channel_id_to_post_manual_review"
+
+
+def hold_review_buttons(group_id, notification_id) -> list:
+    """Approve / Reject for a held non-drop notification
+    (``dtrv:n:<action>:<group>:<notification_id>``) plus the website queue."""
+    queue = {"label": "Open the review queue",
+             "url": f"https://www.droptracker.io/groups/{int(group_id)}/submissions"}
+    return [
+        {"label": "Approve", "custom_id": f"dtrv:n:a:{int(group_id)}:{int(notification_id)}",
+         "style": "success"},
+        {"label": "Reject", "custom_id": f"dtrv:n:r:{int(group_id)}:{int(notification_id)}",
+         "style": "danger"},
+        queue,
+    ]
+
+
+_HOLD_NOUNS = {"clog": "a collection log slot", "pb": "a personal best",
+               "ca": "a combat achievement", "pet": "a pet"}
+
+
+def hold_summary(notification_type: str, data: dict) -> str:
+    """One line naming what a held non-drop notification is about."""
+    data = data or {}
+    noun = _HOLD_NOUNS.get(notification_type, "a submission")
+    if notification_type == "pet":
+        what = data.get("pet_name")
+    elif notification_type == "ca":
+        what = data.get("task_name") or data.get("task")
+    elif notification_type == "pb":
+        boss, t = data.get("npc_name") or data.get("boss_name"), data.get("time_formatted") or data.get("kill_time")
+        what = f"{boss} ({t})" if boss and t else boss
+    else:
+        what = data.get("item_name")
+    return f"{noun}: **{what}**" if what else noun
+
+
+def notify_pending_hold_review(session, group_id, notification_id, notification_type,
+                               data: dict, flush: bool = True) -> bool:
+    """Post the review card for a held non-drop notification to the group's
+    manual-review channel (via ``discord_outbox``). Groups without one review
+    on the website only. Best-effort; the caller owns the commit."""
+    if not group_id or not notification_id:
+        return False
+    from utils import group_config as gc
+    from services.discord_outbox import enqueue
+
+    channel_id = gc.get(session, int(group_id), REVIEW_CHANNEL_KEY)
+    if not channel_id:
+        return False
+    player_name = (data or {}).get("player_name") or "A player"
+    content = (
+        f"\U0001F50D **Manual submission awaiting review** — `{player_name}` "
+        f"submitted {hold_summary(notification_type, data)}. "
+        f"Approve to post it, or reject it, below or on the website."
+    )
+    enqueue(session, channel_id=str(channel_id), content=content,
+            kind="message", ref_type="manual_hold_review",
+            ref_id=int(notification_id), commit=False,
+            components=hold_review_buttons(group_id, notification_id))
+    if flush:
+        session.flush()
+    return True
 
 
 def review_buttons(group_id, drop_id) -> list:

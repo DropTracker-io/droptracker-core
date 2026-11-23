@@ -118,8 +118,24 @@ def bump(event_id: int) -> None:
         pass
 
 
+def _settle_clan(s, ev, comp, action: str, actor_user_id) -> None:
+    """One decision settles both queues (services/review_link): the hosting
+    clan's pending review row for the same manual drop follows this one.
+    Best-effort — the event decision has already committed."""
+    try:
+        from services.review_link import settle_clan_for_event_decision
+
+        settle_clan_for_event_decision(s, ev, comp, action, actor_user_id)
+    except Exception as e:
+        try:
+            s.rollback()
+        except Exception:
+            pass
+        print(f"[event_review] clan mirror failed for completion {comp.id}: {e}")
+
+
 def confirm(s, ev, completion_id: int, actor_user_id: Optional[int],
-            audit_extra: Optional[dict] = None):
+            audit_extra: Optional[dict] = None, settle_clan: bool = True):
     """pending -> confirmed, applied exactly like an automatic completion.
     Commits. Returns the before/after score receipt (or None)."""
     from db.models import AuditLog, EventTask
@@ -161,11 +177,14 @@ def confirm(s, ev, completion_id: int, actor_user_id: Optional[int],
     ))
     s.commit()
     publish_pending_update(s, ev, comp)
+    if settle_clan:
+        _settle_clan(s, ev, comp, "approve", actor_user_id)
     return score_change
 
 
 def reject(s, ev, completion_id: int, actor_user_id: Optional[int],
-           note: Optional[str] = None, audit_extra: Optional[dict] = None) -> None:
+           note: Optional[str] = None, audit_extra: Optional[dict] = None,
+           settle_clan: bool = True) -> None:
     """pending -> rejected: no side effects, note stored. Commits."""
     from db.models import AuditLog
 
@@ -186,3 +205,5 @@ def reject(s, ev, completion_id: int, actor_user_id: Optional[int],
     ))
     s.commit()
     publish_pending_update(s, ev, comp)
+    if settle_clan:
+        _settle_clan(s, ev, comp, "reject", actor_user_id)

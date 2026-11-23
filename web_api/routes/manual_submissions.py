@@ -8,6 +8,8 @@ queue and the approve/reject actions.
   POST   /api/v1/groups/{gid}/manual-submissions/{drop_id}/approve
   POST   /api/v1/groups/{gid}/manual-submissions/{drop_id}/reject
   POST   /api/v1/groups/{gid}/manual-submissions/{drop_id}/undo
+  POST   /api/v1/groups/{gid}/manual-submissions/entries/{notification_id}/{approve|reject|undo}
+         held manual clog / pb / ca / pet announcements (services/manual_hold_review)
 
 Auth: group admin. Approving retro-applies the group's leaderboard credit and
 releases the (gated) group notification; rejecting leaves the drop withheld
@@ -95,7 +97,14 @@ async def list_manual_submissions(group_id: int):
             assert_group_admin(s, user_id, group_id, manage_ids)
             pending = _query(s, group_id, ("pending",))
             recent = _query(s, group_id, ("approved", "rejected"), limit=_RECENT_LIMIT)
-            return {"pending": pending, "recent": recent, "pending_count": len(pending)}
+            # Held manual clog/pb/ca/pet announcements (services/manual_hold_review):
+            # a separate list, so a client that predates them is unaffected.
+            from services.manual_hold_review import pending_items
+
+            entries = pending_items(s, group_id)
+            return {"pending": pending, "recent": recent,
+                    "pending_entries": entries,
+                    "pending_count": len(pending) + len(entries)}
 
     return private_no_store(jsonify(await asyncio.to_thread(_load)))
 
@@ -133,6 +142,16 @@ def _review(group_id: int, drop_id: int, action: str):
             after=result["status"],
         ))
         s.commit()
+        # One decision settles both queues: the same drop's pending
+        # completions in events this clan hosts follow it (services/review_link).
+        if action in ("approve", "reject"):
+            try:
+                from services.review_link import settle_event_for_clan_decision
+
+                result["events_settled"] = settle_event_for_clan_decision(
+                    s, drop_id, group_id, action, user_id, via="clan_review")
+            except Exception as e:
+                print(f"[manual_submissions] event mirror failed for drop {drop_id}: {e}")
         return result
 
 
@@ -155,3 +174,40 @@ async def undo_manual_submission(group_id: int, drop_id: int):
     and removes the Discord announcement it released."""
     result = await asyncio.to_thread(_review, group_id, drop_id, "undo")
     return private_no_store(jsonify(result))
+
+
+def _review_hold(group_id: int, notification_id: int, action: str):
+    """approve | reject | undo one held clog/pb/ca/pet announcement, under the
+    same group-admin check as held drops; audited."""
+    from services import manual_hold_review as mhr
+
+    handlers = {"approve": mhr.approve, "reject": mhr.reject, "undo": mhr.undo}
+    user_id = current_user_id()
+    manage_ids = manageable_guild_ids(user_id)
+    with db_session() as s:
+        assert_group_admin(s, user_id, group_id, manage_ids)
+        try:
+            result = handlers[action](s, notification_id, group_id, reviewer_user_id=user_id)
+        except mhr.HoldReviewError as e:
+            abort_problem(e.status, e.title, e.detail)
+        s.add(AuditLog(
+            actor_user_id=user_id,
+            group_id=group_id,
+            action=f"manual_submission.{action}",
+            target=f"notification_queue.{notification_id}.group.{group_id}",
+            before=result.get("previous_status", "pending"),
+            after=result["status"],
+        ))
+        s.commit()
+        return result
+
+
+@manual_submissions_bp.post(
+    "/groups/<int:group_id>/manual-submissions/entries/<int:notification_id>/<action>")
+async def review_manual_entry(group_id: int, notification_id: int, action: str):
+    """Approve / reject / undo a held manual clog, PB, CA or pet announcement."""
+    if action not in ("approve", "reject", "undo"):
+        abort_problem(404, "Not found", f"Unknown action '{action}'.")
+    result = await asyncio.to_thread(_review_hold, group_id, notification_id, action)
+    return private_no_store(jsonify(result))
+

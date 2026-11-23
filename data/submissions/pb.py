@@ -741,12 +741,14 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
 
         # Per-group manual policy (suggestion #45): suppress this group's
         # notification for a manual submission it doesn't trust (non-drop
-        # types are notification-only — no leaderboard, no review queue).
+        # types have no leaderboard). block/authorized_only drop it; confirm
+        # HOLDS it for review (manual_notification_split, manual_hold_review).
         manual_suppressed = set()
+        manual_held = set()
         if pb_data.get("intake_source") == "manual" and not side_world:
             try:
-                from .manual_policy import manual_notification_suppressed_groups
-                manual_suppressed = manual_notification_suppressed_groups(
+                from .manual_policy import manual_notification_split
+                manual_suppressed, manual_held = manual_notification_split(
                     session, player, group_ids,
                     trusted_group_ids=trusted_group_ids(pb_data),
                 )
@@ -765,7 +767,8 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                 "total_points_awarded": 0,
                 "awarded_members": [],
             }
-            if side_world:
+            if side_world or group_id in manual_held:
+                # A held manual entry earns no group points, like a held drop.
                 # TODO: award group points for seasonal PBs once award_points_in_leagues
                 # config key is supported. Check group config for "award_points_in_leagues"
                 # before calling check_and_award_points with the seasonal entry_id.
@@ -840,6 +843,7 @@ async def pb_processor(pb_data, external_session=None, world_type="main"):
                     notification_data,
                     group_id,
                     existing_session=session if use_external_session else None,
+                    held=group_id in manual_held,
                 )
 
         # Personal submission DM (supporter perk): queued once per PB,

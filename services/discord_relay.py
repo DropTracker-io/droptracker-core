@@ -543,7 +543,7 @@ def target_in_group(custom_id: str, group_id: int) -> bool:
             parsed = rbc.parse_custom_id(custom_id)
             if parsed is None:
                 return False
-            if parsed.get("kind") == "drop":
+            if parsed.get("kind") in ("drop", "hold"):
                 return int(parsed.get("group_id") or 0) == group_id
             from db.models import EventCompletion
 

@@ -348,10 +348,11 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
     # notification for a manual submission it doesn't trust. NB pet_data
     # ["source"] is the pet's NPC — the intake marker is "intake_source".
     manual_suppressed = set()
+    manual_held = set()
     if pet_data.get("intake_source") == "manual" and not side_world:
         try:
-            from .manual_policy import manual_notification_suppressed_groups
-            manual_suppressed = manual_notification_suppressed_groups(
+            from .manual_policy import manual_notification_split
+            manual_suppressed, manual_held = manual_notification_split(
                 session, player, [g.group_id for g in player_groups],
                 trusted_group_ids=trusted_group_ids(pet_data),
             )
@@ -370,7 +371,8 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
             "total_points_awarded": 0,
             "awarded_members": [],
         }
-        if side_world:
+        if side_world or group_id in manual_held:
+            # A held manual entry earns no group points, like a held drop.
             # TODO: award group points for seasonal pets once award_points_in_leagues
             # config key is supported.
             pass
@@ -476,6 +478,7 @@ async def pet_processor(pet_data, external_session=None, world_type="main"):
                 notification_data,
                 group_id,
                 existing_session=session if use_external_session else None,
+                held=group_id in manual_held,
             )
             debug_print(f"Created pet notification for group {group_id}")
 

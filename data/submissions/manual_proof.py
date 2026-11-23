@@ -148,6 +148,69 @@ def latest_batch(rows, window_seconds: int = 120) -> list:
     return [r for r in stamped if r["created_at"] >= cutoff]
 
 
+_SOURCES_SQL = text(
+    "SELECT source_type, source_id, submission_guid FROM web_event_completions "
+    "WHERE id IN :completion_ids AND player_id IN :player_ids"
+).bindparams(
+    bindparam("completion_ids", expanding=True),
+    bindparam("player_ids", expanding=True),
+)
+
+#: Where each submission type keeps its own screenshot, keyed by the id an
+#: event completion stores as ``source_id``. Pets have no image column; their
+#: proof reaches the held announcement below.
+_SOURCE_IMAGE_SQL = {
+    "drop": "UPDATE drops SET image_url = :url WHERE drop_id = :sid",
+    "clog": "UPDATE collection SET image_url = :url WHERE log_id = :sid",
+    "pb": "UPDATE personal_best SET image_url = :url WHERE id = :sid",
+    "ca": "UPDATE combat_achievement SET image_url = :url WHERE id = :sid",
+}
+
+_HELD_NOTIFICATION_SQL = text(
+    "UPDATE notification_queue SET data = JSON_SET(data, '$.image_url', :url) "
+    "WHERE status = 'held' AND player_id IN :player_ids "
+    "  AND JSON_UNQUOTE(JSON_EXTRACT(data, '$.guid')) IN :guids "
+    "  AND (JSON_EXTRACT(data, '$.image_url') IS NULL "
+    "       OR JSON_UNQUOTE(JSON_EXTRACT(data, '$.image_url')) IN ('', 'null'))"
+).bindparams(
+    bindparam("player_ids", expanding=True),
+    bindparam("guids", expanding=True),
+)
+
+
+def propagate_proof_to_sources(session, completion_ids, player_ids, proof_url: str) -> dict:
+    """A late screenshot belongs to the SUBMISSION, not just its event row
+    (owner, 2026-11-23): also give it to the drop / clog / PB / CA row it came
+    from (what the clan review queue and an approved announcement read) and to
+    a held clog/pb/ca/pet announcement awaiting review. Only fills an empty
+    image, only on the submitter's own rows. Caller commits."""
+    ids = [int(cid) for cid in (completion_ids or []) if cid]
+    owners = [int(pid) for pid in (player_ids or []) if pid]
+    if not ids or not owners or not proof_url:
+        return {"sources": 0, "held": 0}
+    url = str(proof_url)[:_PROOF_URL_MAX]
+    rows = session.execute(_SOURCES_SQL, {"completion_ids": ids, "player_ids": owners}).fetchall()
+    sources, guids = 0, set()
+    for source_type, source_id, guid in rows:
+        if guid:
+            guids.add(str(guid).split("#", 1)[0])
+        sql = _SOURCE_IMAGE_SQL.get(source_type or "")
+        if not sql or source_id is None:
+            continue
+        result = session.execute(
+            text(sql + " AND player_id IN :player_ids "
+                 "AND (image_url IS NULL OR image_url = '')").bindparams(
+                bindparam("player_ids", expanding=True)),
+            {"url": url, "sid": int(source_id), "player_ids": owners})
+        sources += int(getattr(result, "rowcount", 0) or 0)
+    held = 0
+    if guids:
+        result = session.execute(_HELD_NOTIFICATION_SQL,
+                                 {"url": url, "player_ids": owners, "guids": sorted(guids)})
+        held = int(getattr(result, "rowcount", 0) or 0)
+    return {"sources": sources, "held": held}
+
+
 def attach_proof_url(session, completion_ids, player_ids, proof_url: str) -> int:
     """Set ``proof_url`` on the given still-pending rows; returns how many were
     written. The ownership + status filters are re-applied in the UPDATE, so a
@@ -165,8 +228,16 @@ def attach_proof_url(session, completion_ids, player_ids, proof_url: str) -> int
             "player_ids": owners,
         },
     )
+    updated = int(getattr(result, "rowcount", 0) or 0)
+    if updated:
+        # Best-effort: the event row is the one the player was asked about.
+        try:
+            with session.begin_nested():
+                propagate_proof_to_sources(session, ids, owners, proof_url)
+        except Exception as e:
+            print(f"[manual_proof] proof propagation failed: {e}")
     session.commit()
-    return int(getattr(result, "rowcount", 0) or 0)
+    return updated
 
 
 # ── Awaiting-proof registry ───────────────────────────────────────────────────

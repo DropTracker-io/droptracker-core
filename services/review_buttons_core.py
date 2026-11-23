@@ -4,6 +4,8 @@ Review messages carry Approve / Reject (and, after a decision, Undo) buttons:
 
     dtrv:m:<a|r|u>:<group_id>:<drop_id>   held manual drop (drop_group_moderation),
                                           posted by data/submissions/manual_policy.py
+    dtrv:n:<a|r|u>:<group_id>:<notif_id>  held manual clog/pb/ca/pet notification
+                                          (services/manual_hold_review)
     dtrv:e:<a|r>:<completion_id>          pending event completion, on the
                                           "awaiting review" card the notification
                                           service posts
@@ -38,6 +40,9 @@ def parse_custom_id(custom_id) -> Optional[dict]:
         if len(parts) == 4 and parts[0] == "m" and parts[1] in ACTIONS:
             return {"kind": "drop", "action": ACTIONS[parts[1]],
                     "group_id": int(parts[2]), "drop_id": int(parts[3])}
+        if len(parts) == 4 and parts[0] == "n" and parts[1] in ACTIONS:
+            return {"kind": "hold", "action": ACTIONS[parts[1]],
+                    "group_id": int(parts[2]), "notification_id": int(parts[3])}
         if len(parts) == 3 and parts[0] == "e" and parts[1] in ("a", "r"):
             return {"kind": "event", "action": ACTIONS[parts[1]],
                     "completion_id": int(parts[2])}
@@ -192,6 +197,21 @@ def with_backlog(status_line: str, remaining) -> str:
     return f"{status_line} · {remaining:,} more are waiting for review"
 
 
+def hold_custom_id(action: str, group_id: int, notification_id: int) -> str:
+    code = {v: k for k, v in ACTIONS.items()}[action]
+    return f"{PREFIX}n:{code}:{int(group_id)}:{int(notification_id)}"
+
+
+def hold_review_buttons(group_id: int, notification_id: int) -> list:
+    """Approve / Reject row restored on a held non-drop card after an Undo."""
+    return [{"type": 1, "components": [
+        {"type": 2, "style": 3, "label": "Approve",
+         "custom_id": hold_custom_id("approve", group_id, notification_id)},
+        {"type": 2, "style": 4, "label": "Reject",
+         "custom_id": hold_custom_id("reject", group_id, notification_id)},
+    ]}]
+
+
 def drop_review_buttons(group_id: int, drop_id: int) -> list:
     """Approve / Reject row restored on a manual-review ping after an Undo."""
     return [{"type": 1, "components": [
@@ -202,10 +222,13 @@ def drop_review_buttons(group_id: int, drop_id: int) -> list:
     ]}]
 
 
-def undone_message(message: dict, status_line: str, group_id: int, drop_id: int) -> dict:
+def undone_message(message: dict, status_line: str, group_id: int, drop_id: int,
+                   kind: str = "drop") -> dict:
     """A manual-review ping after Undo: back to Approve / Reject, with a line
     saying who took the decision back. (Event cards have no Undo: a
     confirmed completion is corrected by revoking it on the site.)"""
     edit = decided_message(message, status_line)
-    edit["components"] = drop_review_buttons(group_id, drop_id) + list(edit.get("components") or [])
+    buttons = (hold_review_buttons(group_id, drop_id) if kind == "hold"
+               else drop_review_buttons(group_id, drop_id))
+    edit["components"] = buttons + list(edit.get("components") or [])
     return edit

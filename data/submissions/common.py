@@ -2012,8 +2012,14 @@ def dev_instance_skips_group(db_session, group_id) -> bool:
         return True  # no guild at all: nowhere on this instance to post it
 
 
-async def create_notification(notification_type, player_id, data, group_id=None, existing_session=None):
-    """Create a notification queue entry."""
+async def create_notification(notification_type, player_id, data, group_id=None, existing_session=None,
+                              held: bool = False):
+    """Create a notification queue entry.
+
+    ``held``: a manual non-drop submission the group's ``confirm`` policy holds
+    for review. The row is written as ``held`` (the sender only drains
+    ``pending``) and a review card goes to the group's review channel;
+    approving flips it to ``pending`` (services/manual_hold_review)."""
 
     if notification_type in _suppressed_notification_types.get():
         return None
@@ -2130,7 +2136,7 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         player_id=player_id,
         data=json.dumps(data),
         group_id=group_id if group_id != 0 else None,
-        status="pending",
+        status="held" if (held and group_id) else "pending",
     )
     
     # uix_notification_unique: an identical row (type, player, group, data)
@@ -2159,6 +2165,16 @@ async def create_notification(notification_type, player_id, data, group_id=None,
         )
         return None
     notification_id = notification.id
+    if held and group_id and notification_id:
+        try:
+            from .manual_policy import notify_pending_hold_review
+
+            notify_pending_hold_review(db_session, group_id, notification_id,
+                                       notification_type, data, flush=use_existing_session)
+            if not use_existing_session:
+                db_session.commit()
+        except Exception as e:
+            print(f"[ManualPolicy] review card for held {notification_type} failed: {e}")
     if debug_test:
         await log_to_file(f"Debug test: Created notification for group {group_id}: {notification_id}")
     return notification_id
