@@ -64,27 +64,38 @@ _TAG_RE = re.compile(r"<[^>]*>")
 #: Both halves are tags, so _TAG_RE alone deletes the quest name outright.
 #: The name always carries an underscore, which keeps <col=..>, <img=..> and
 #: <str> (strikethrough) out of it.
-_VAR_DEF_RE = re.compile(r"<([a-z]+_[a-z0-9_]+)=([^>]*)>", re.IGNORECASE)
-#: A reference may carry a format suffix after the name ("<num_value_0,1>"):
-#: tolerated so an unknown formatter still yields the bare value rather than
-#: nothing.
-_VAR_REF_RE = re.compile(r"<([a-z]+_[a-z0-9_]+)(?:[,:|][^>]*)?>", re.IGNORECASE)
+#: Definitions and references in document order, so one pass can resolve each
+#: reference against the definition that precedes it. A reference may carry a
+#: format suffix after the name ("<int_0:spacer>", "<num_value_0,1>"):
+#: tolerated so an unknown formatter still yields the bare value.
+_VAR_TOKEN_RE = re.compile(
+    r"<(?P<def>[a-z]+_[a-z0-9_]+)=(?P<val>[^>]*)>"
+    r"|<(?P<ref>[a-z]+_[a-z0-9_]+)(?:[,:|][^>]*)?>",
+    re.IGNORECASE,
+)
 
 
 def expand_tag_variables(text: str) -> str:
     """Drop ``<name=value>`` variable definitions and substitute each
-    ``<name>`` reference with its value. Undefined references are left for
-    the tag stripper."""
+    ``<name>`` reference with the value most recently defined BEFORE it.
+    Undefined references are left for the tag stripper.
+
+    Order matters: since the 2026-11-18 update Jagex reuses one name, redefining
+    it in front of every use (``<int_0=12><int_0:spacer> x Oathplate
+    shards<int_0=1679772> (<int_0:spacer> coins)``). Collecting every
+    definition first let the coin total overwrite the quantity, recording
+    1,679,772 shards (2026-11-24)."""
     values = {}
 
-    def _define(m):
-        values[m[1].lower()] = m[2]
-        return ""
+    def _token(m):
+        if m["def"] is not None:
+            values[m["def"].lower()] = m["val"]
+            return ""
+        return values.get(m["ref"].lower(), m[0])
 
-    text = _VAR_DEF_RE.sub(_define, text)
-    if not values:
-        return text
-    return _VAR_REF_RE.sub(lambda m: values.get(m[1].lower(), m[0]), text)
+    return _VAR_TOKEN_RE.sub(_token, text)
+
+
 _WS_RE = re.compile(r"\s+")
 
 #: The empty coin figure older plugin builds relay since 2026-11-18 (see

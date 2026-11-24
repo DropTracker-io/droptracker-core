@@ -679,3 +679,22 @@ class TestDedupeText:
 def test_tag_reference_with_format_suffix_expands():
     raw = "<num_value_0=1,234>X received a drop: Whip (<num_value_0,1> coins)."
     assert clean_broadcast_text(raw) == "X received a drop: Whip (1,234 coins)."
+
+
+def test_redefined_tag_variable_resolves_to_the_preceding_definition():
+    # Captured from a 6.1.30 relayer on 2026-11-24: one name, redefined before
+    # each use. Collecting definitions first made the quantity read 1,679,772.
+    raw = (
+        "<img=2> Nilaga received a drop: <int_0=12><int_0:spacer> x Oathplate "
+        "shards<int_0=1679772> (<int_0:spacer> coins) from Yama."
+    )
+    text = clean_broadcast_text(raw)
+    assert text == "Nilaga received a drop: 12 x Oathplate shards (1679772 coins) from Yama."
+    parsed = parse_broadcast(text)
+    assert parsed.item_name == "Oathplate shards"
+    assert parsed.quantity == 12
+    assert parsed.value_gp == 1679772
+
+
+def test_reference_before_any_definition_is_left_for_the_stripper():
+    assert clean_broadcast_text("X <int_0:spacer> y<int_0=5> <int_0>") == "X y 5"
