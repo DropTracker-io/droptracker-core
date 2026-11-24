@@ -1,0 +1,889 @@
+{
+ "source": "RuneLite net.runelite.api.Quest",
+ "retired": [
+  2,
+  21
+ ],
+ "quests": [
+  {
+   "id": 0,
+   "name": "Animal Magnetism"
+  },
+  {
+   "id": 1,
+   "name": "Another Slice of H.A.M."
+  },
+  {
+   "id": 3,
+   "name": "The Ascent of Arceuus"
+  },
+  {
+   "id": 4,
+   "name": "Alfred Grimhand's Barcrawl"
+  },
+  {
+   "id": 5,
+   "name": "Bear Your Soul"
+  },
+  {
+   "id": 6,
+   "name": "Below Ice Mountain"
+  },
+  {
+   "id": 7,
+   "name": "Between a Rock..."
+  },
+  {
+   "id": 8,
+   "name": "Big Chompy Bird Hunting"
+  },
+  {
+   "id": 9,
+   "name": "Biohazard"
+  },
+  {
+   "id": 10,
+   "name": "Black Knights' Fortress"
+  },
+  {
+   "id": 11,
+   "name": "Bone Voyage"
+  },
+  {
+   "id": 12,
+   "name": "Cabin Fever"
+  },
+  {
+   "id": 13,
+   "name": "Client of Kourend"
+  },
+  {
+   "id": 14,
+   "name": "Clock Tower"
+  },
+  {
+   "id": 15,
+   "name": "Cold War"
+  },
+  {
+   "id": 16,
+   "name": "Contact!"
+  },
+  {
+   "id": 17,
+   "name": "Cook's Assistant"
+  },
+  {
+   "id": 18,
+   "name": "The Corsair Curse"
+  },
+  {
+   "id": 19,
+   "name": "Creature of Fenkenstrain"
+  },
+  {
+   "id": 20,
+   "name": "Curse of the Empty Lord"
+  },
+  {
+   "id": 22,
+   "name": "Darkness of Hallowvale"
+  },
+  {
+   "id": 23,
+   "name": "Death Plateau"
+  },
+  {
+   "id": 24,
+   "name": "Death to the Dorgeshuun"
+  },
+  {
+   "id": 25,
+   "name": "Demon Slayer"
+  },
+  {
+   "id": 26,
+   "name": "The Depths of Despair"
+  },
+  {
+   "id": 27,
+   "name": "Desert Treasure I"
+  },
+  {
+   "id": 28,
+   "name": "Devious Minds"
+  },
+  {
+   "id": 29,
+   "name": "The Dig Site"
+  },
+  {
+   "id": 30,
+   "name": "Doric's Quest"
+  },
+  {
+   "id": 31,
+   "name": "Dragon Slayer I"
+  },
+  {
+   "id": 32,
+   "name": "Dragon Slayer II"
+  },
+  {
+   "id": 33,
+   "name": "Dream Mentor"
+  },
+  {
+   "id": 34,
+   "name": "Druidic Ritual"
+  },
+  {
+   "id": 35,
+   "name": "Dwarf Cannon"
+  },
+  {
+   "id": 36,
+   "name": "Eadgar's Ruse"
+  },
+  {
+   "id": 37,
+   "name": "Eagles' Peak"
+  },
+  {
+   "id": 38,
+   "name": "Elemental Workshop I"
+  },
+  {
+   "id": 39,
+   "name": "Elemental Workshop II"
+  },
+  {
+   "id": 40,
+   "name": "Enakhra's Lament"
+  },
+  {
+   "id": 41,
+   "name": "The Enchanted Key"
+  },
+  {
+   "id": 42,
+   "name": "Enlightened Journey"
+  },
+  {
+   "id": 43,
+   "name": "Enter the Abyss"
+  },
+  {
+   "id": 44,
+   "name": "Ernest the Chicken"
+  },
+  {
+   "id": 45,
+   "name": "The Eyes of Glouphrie"
+  },
+  {
+   "id": 46,
+   "name": "Fairytale I - Growing Pains"
+  },
+  {
+   "id": 47,
+   "name": "Fairytale II - Cure a Queen"
+  },
+  {
+   "id": 48,
+   "name": "Family Crest"
+  },
+  {
+   "id": 49,
+   "name": "Family Pest"
+  },
+  {
+   "id": 50,
+   "name": "The Feud"
+  },
+  {
+   "id": 51,
+   "name": "Fight Arena"
+  },
+  {
+   "id": 52,
+   "name": "Fishing Contest"
+  },
+  {
+   "id": 53,
+   "name": "Forgettable Tale..."
+  },
+  {
+   "id": 54,
+   "name": "The Forsaken Tower"
+  },
+  {
+   "id": 55,
+   "name": "The Fremennik Exiles"
+  },
+  {
+   "id": 56,
+   "name": "The Fremennik Isles"
+  },
+  {
+   "id": 57,
+   "name": "The Fremennik Trials"
+  },
+  {
+   "id": 58,
+   "name": "Garden of Tranquillity"
+  },
+  {
+   "id": 59,
+   "name": "The General's Shadow"
+  },
+  {
+   "id": 60,
+   "name": "Gertrude's Cat"
+  },
+  {
+   "id": 61,
+   "name": "Getting Ahead"
+  },
+  {
+   "id": 62,
+   "name": "Ghosts Ahoy"
+  },
+  {
+   "id": 63,
+   "name": "The Giant Dwarf"
+  },
+  {
+   "id": 64,
+   "name": "Goblin Diplomacy"
+  },
+  {
+   "id": 65,
+   "name": "The Golem"
+  },
+  {
+   "id": 66,
+   "name": "The Grand Tree"
+  },
+  {
+   "id": 67,
+   "name": "The Great Brain Robbery"
+  },
+  {
+   "id": 68,
+   "name": "Grim Tales"
+  },
+  {
+   "id": 69,
+   "name": "The Hand in the Sand"
+  },
+  {
+   "id": 70,
+   "name": "Haunted Mine"
+  },
+  {
+   "id": 71,
+   "name": "Hazeel Cult"
+  },
+  {
+   "id": 72,
+   "name": "Heroes' Quest"
+  },
+  {
+   "id": 73,
+   "name": "Holy Grail"
+  },
+  {
+   "id": 74,
+   "name": "Horror from the Deep"
+  },
+  {
+   "id": 75,
+   "name": "Icthlarin's Little Helper"
+  },
+  {
+   "id": 76,
+   "name": "Imp Catcher"
+  },
+  {
+   "id": 77,
+   "name": "In Aid of the Myreque"
+  },
+  {
+   "id": 78,
+   "name": "In Search of Knowledge"
+  },
+  {
+   "id": 79,
+   "name": "In Search of the Myreque"
+  },
+  {
+   "id": 80,
+   "name": "Jungle Potion"
+  },
+  {
+   "id": 81,
+   "name": "A Kingdom Divided"
+  },
+  {
+   "id": 82,
+   "name": "King's Ransom"
+  },
+  {
+   "id": 83,
+   "name": "The Knight's Sword"
+  },
+  {
+   "id": 84,
+   "name": "Lair of Tarn Razorlor"
+  },
+  {
+   "id": 85,
+   "name": "Legends' Quest"
+  },
+  {
+   "id": 86,
+   "name": "Lost City"
+  },
+  {
+   "id": 87,
+   "name": "The Lost Tribe"
+  },
+  {
+   "id": 88,
+   "name": "Lunar Diplomacy"
+  },
+  {
+   "id": 89,
+   "name": "Mage Arena I"
+  },
+  {
+   "id": 90,
+   "name": "Mage Arena II"
+  },
+  {
+   "id": 91,
+   "name": "Making Friends with My Arm"
+  },
+  {
+   "id": 92,
+   "name": "Making History"
+  },
+  {
+   "id": 93,
+   "name": "Merlin's Crystal"
+  },
+  {
+   "id": 94,
+   "name": "Misthalin Mystery"
+  },
+  {
+   "id": 95,
+   "name": "Monkey Madness I"
+  },
+  {
+   "id": 96,
+   "name": "Monkey Madness II"
+  },
+  {
+   "id": 97,
+   "name": "Monk's Friend"
+  },
+  {
+   "id": 98,
+   "name": "Mountain Daughter"
+  },
+  {
+   "id": 99,
+   "name": "Mourning's End Part I"
+  },
+  {
+   "id": 100,
+   "name": "Mourning's End Part II"
+  },
+  {
+   "id": 101,
+   "name": "Murder Mystery"
+  },
+  {
+   "id": 102,
+   "name": "My Arm's Big Adventure"
+  },
+  {
+   "id": 103,
+   "name": "Nature Spirit"
+  },
+  {
+   "id": 104,
+   "name": "A Night at the Theatre"
+  },
+  {
+   "id": 105,
+   "name": "Observatory Quest"
+  },
+  {
+   "id": 106,
+   "name": "Olaf's Quest"
+  },
+  {
+   "id": 107,
+   "name": "One Small Favour"
+  },
+  {
+   "id": 108,
+   "name": "Pirate's Treasure"
+  },
+  {
+   "id": 109,
+   "name": "Plague City"
+  },
+  {
+   "id": 110,
+   "name": "A Porcine of Interest"
+  },
+  {
+   "id": 111,
+   "name": "Priest in Peril"
+  },
+  {
+   "id": 112,
+   "name": "Prince Ali Rescue"
+  },
+  {
+   "id": 113,
+   "name": "The Queen of Thieves"
+  },
+  {
+   "id": 114,
+   "name": "Rag and Bone Man I"
+  },
+  {
+   "id": 115,
+   "name": "Rag and Bone Man II"
+  },
+  {
+   "id": 116,
+   "name": "Ratcatchers"
+  },
+  {
+   "id": 117,
+   "name": "Recipe for Disaster"
+  },
+  {
+   "id": 118,
+   "name": "Recruitment Drive"
+  },
+  {
+   "id": 119,
+   "name": "Regicide"
+  },
+  {
+   "id": 120,
+   "name": "The Restless Ghost"
+  },
+  {
+   "id": 121,
+   "name": "Romeo & Juliet"
+  },
+  {
+   "id": 122,
+   "name": "Roving Elves"
+  },
+  {
+   "id": 123,
+   "name": "Royal Trouble"
+  },
+  {
+   "id": 124,
+   "name": "Rum Deal"
+  },
+  {
+   "id": 125,
+   "name": "Rune Mysteries"
+  },
+  {
+   "id": 126,
+   "name": "Scorpion Catcher"
+  },
+  {
+   "id": 127,
+   "name": "Sea Slug"
+  },
+  {
+   "id": 128,
+   "name": "Shades of Mort'ton"
+  },
+  {
+   "id": 129,
+   "name": "Shadow of the Storm"
+  },
+  {
+   "id": 130,
+   "name": "Sheep Herder"
+  },
+  {
+   "id": 131,
+   "name": "Sheep Shearer"
+  },
+  {
+   "id": 132,
+   "name": "Shield of Arrav"
+  },
+  {
+   "id": 133,
+   "name": "Shilo Village"
+  },
+  {
+   "id": 134,
+   "name": "Sins of the Father"
+  },
+  {
+   "id": 135,
+   "name": "Skippy and the Mogres"
+  },
+  {
+   "id": 136,
+   "name": "The Slug Menace"
+  },
+  {
+   "id": 137,
+   "name": "Song of the Elves"
+  },
+  {
+   "id": 138,
+   "name": "A Soul's Bane"
+  },
+  {
+   "id": 139,
+   "name": "Spirits of the Elid"
+  },
+  {
+   "id": 140,
+   "name": "Swan Song"
+  },
+  {
+   "id": 141,
+   "name": "Tai Bwo Wannai Trio"
+  },
+  {
+   "id": 142,
+   "name": "A Tail of Two Cats"
+  },
+  {
+   "id": 143,
+   "name": "Tale of the Righteous"
+  },
+  {
+   "id": 144,
+   "name": "A Taste of Hope"
+  },
+  {
+   "id": 145,
+   "name": "Tears of Guthix"
+  },
+  {
+   "id": 146,
+   "name": "Temple of Ikov"
+  },
+  {
+   "id": 147,
+   "name": "Throne of Miscellania"
+  },
+  {
+   "id": 148,
+   "name": "The Tourist Trap"
+  },
+  {
+   "id": 149,
+   "name": "Tower of Life"
+  },
+  {
+   "id": 150,
+   "name": "Tree Gnome Village"
+  },
+  {
+   "id": 151,
+   "name": "Tribal Totem"
+  },
+  {
+   "id": 152,
+   "name": "Troll Romance"
+  },
+  {
+   "id": 153,
+   "name": "Troll Stronghold"
+  },
+  {
+   "id": 154,
+   "name": "Underground Pass"
+  },
+  {
+   "id": 155,
+   "name": "Vampyre Slayer"
+  },
+  {
+   "id": 156,
+   "name": "Wanted!"
+  },
+  {
+   "id": 157,
+   "name": "Watchtower"
+  },
+  {
+   "id": 158,
+   "name": "Waterfall Quest"
+  },
+  {
+   "id": 159,
+   "name": "What Lies Below"
+  },
+  {
+   "id": 160,
+   "name": "Witch's House"
+  },
+  {
+   "id": 161,
+   "name": "Witch's Potion"
+  },
+  {
+   "id": 162,
+   "name": "X Marks the Spot"
+  },
+  {
+   "id": 163,
+   "name": "Zogre Flesh Eaters"
+  },
+  {
+   "id": 164,
+   "name": "The Frozen Door"
+  },
+  {
+   "id": 165,
+   "name": "Land of the Goblins"
+  },
+  {
+   "id": 166,
+   "name": "Hopespear's Will"
+  },
+  {
+   "id": 167,
+   "name": "Temple of the Eye"
+  },
+  {
+   "id": 168,
+   "name": "Beneath Cursed Sands"
+  },
+  {
+   "id": 169,
+   "name": "Sleeping Giants"
+  },
+  {
+   "id": 180,
+   "name": "The Garden of Death"
+  },
+  {
+   "id": 2306,
+   "name": "Into the Tombs"
+  },
+  {
+   "id": 2307,
+   "name": "Recipe for Disaster - Another Cook's Quest"
+  },
+  {
+   "id": 2308,
+   "name": "Recipe for Disaster - Mountain Dwarf"
+  },
+  {
+   "id": 2309,
+   "name": "Recipe for Disaster - Wartface & Bentnoze"
+  },
+  {
+   "id": 2310,
+   "name": "Recipe for Disaster - Pirate Pete"
+  },
+  {
+   "id": 2311,
+   "name": "Recipe for Disaster - Lumbridge Guide"
+  },
+  {
+   "id": 2312,
+   "name": "Recipe for Disaster - Evil Dave"
+  },
+  {
+   "id": 2313,
+   "name": "Recipe for Disaster - Skrach Uglogwee"
+  },
+  {
+   "id": 2314,
+   "name": "Recipe for Disaster - Sir Amik Varze"
+  },
+  {
+   "id": 2315,
+   "name": "Recipe for Disaster - King Awowogei"
+  },
+  {
+   "id": 2316,
+   "name": "Recipe for Disaster - Culinaromancer"
+  },
+  {
+   "id": 2338,
+   "name": "Secrets of the North"
+  },
+  {
+   "id": 2343,
+   "name": "Desert Treasure II - The Fallen Empire"
+  },
+  {
+   "id": 3250,
+   "name": "His Faithful Servants"
+  },
+  {
+   "id": 3425,
+   "name": "The Path of Glouphrie"
+  },
+  {
+   "id": 3450,
+   "name": "Children of the Sun"
+  },
+  {
+   "id": 3451,
+   "name": "Barbarian Training"
+  },
+  {
+   "id": 3466,
+   "name": "Defender of Varrock"
+  },
+  {
+   "id": 3467,
+   "name": "While Guthix Sleeps"
+  },
+  {
+   "id": 3512,
+   "name": "Twilight's Promise"
+  },
+  {
+   "id": 3513,
+   "name": "At First Light"
+  },
+  {
+   "id": 3514,
+   "name": "Perilous Moons"
+  },
+  {
+   "id": 3515,
+   "name": "The Ribbiting Tale of a Lily Pad Labour Dispute"
+  },
+  {
+   "id": 3710,
+   "name": "The Heart of Darkness"
+  },
+  {
+   "id": 3711,
+   "name": "Death on the Isle"
+  },
+  {
+   "id": 3712,
+   "name": "Meat and Greet"
+  },
+  {
+   "id": 3713,
+   "name": "Ethically Acquired Antiquities"
+  },
+  {
+   "id": 3937,
+   "name": "The Curse of Arrav"
+  },
+  {
+   "id": 5189,
+   "name": "The Final Dawn"
+  },
+  {
+   "id": 5190,
+   "name": "Shadows of Custodia"
+  },
+  {
+   "id": 5191,
+   "name": "Scrambled!"
+  },
+  {
+   "id": 5194,
+   "name": "Vale Totems"
+  },
+  {
+   "id": 7103,
+   "name": "Pandemonium"
+  },
+  {
+   "id": 7104,
+   "name": "Prying Times"
+  },
+  {
+   "id": 7105,
+   "name": "Current Affairs"
+  },
+  {
+   "id": 7106,
+   "name": "Troubled Tortugans"
+  },
+  {
+   "id": 7107,
+   "name": "The Red Reef"
+  },
+  {
+   "id": 7133,
+   "name": "Fallen From Grace"
+  },
+  {
+   "id": 9643,
+   "name": "Learning the Ropes"
+  },
+  {
+   "id": 9645,
+   "name": "The Ides of Milk"
+  },
+  {
+   "id": 13708,
+   "name": "A New Leaf"
+  },
+  {
+   "id": 13730,
+   "name": "Rag and Bone Man III"
+  },
+  {
+   "id": 16414,
+   "name": "The Blood Moon Rises"
+  },
+  {
+   "id": 16971,
+   "name": "A Ruff Situation"
+  },
+  {
+   "id": 16972,
+   "name": "Crab Quest"
+  },
+  {
+   "id": 17027,
+   "name": "The Fractured Archive"
+  },
+  {
+   "id": 17229,
+   "name": "Daddy's Home"
+  },
+  {
+   "id": 17230,
+   "name": "Mudfoot's Big Adventure"
+  },
+  {
+   "id": 17231,
+   "name": "The Writing's on the Wall"
+  },
+  {
+   "id": 17315,
+   "name": "A Shell of a Friend"
+  },
+  {
+   "id": 17316,
+   "name": "The Birds and the Wasps"
+  }
+ ]
+}

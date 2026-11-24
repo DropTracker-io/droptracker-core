@@ -614,11 +614,12 @@ async def achievements(player_id: int):
                 .filter(PlayerQuestState.player_id == player_id)
                 .all()
             )
-            quest_counts = {"not_started": 0, "in_progress": 0, "finished": 0}
-            for row in quest_rows:
-                key = QUEST_STATE_NAMES.get(row.state)
-                if key:
-                    quest_counts[key] += 1
+            # Every quest by name (suggestion #258). The counts are counts
+            # of the list, so retired ids are out of both.
+            from utils.quests import count_states, quest_list
+
+            quests_by_state = quest_list({row.quest_id: row.state for row in quest_rows})
+            quest_counts = {**count_states(quests_by_state), "list": quests_by_state}
 
             diary_rows = (
                 s.query(PlayerDiaryTier)

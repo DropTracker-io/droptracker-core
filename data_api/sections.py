@@ -338,9 +338,16 @@ GRANDMASTER_QUESTS = (
 
 
 def _load_quests(session, player_ids: List[int], ctx) -> Dict[int, dict]:
-    """Quest counts by state, plus quest points and grandmaster completions.
+    """Every quest's state, counts by state, quest points and grandmaster
+    completions.
 
-    The counts come from account sync. Quest points do not: the snapshot does
+    ``list`` holds one ``{"id", "name", "state"}`` per quest the player's
+    client reported (suggestion #258), named from ``data/quests.json`` and in
+    the in-game list's order; the counts are counts of that list, so the two
+    always agree. Ids the game has retired are left out of both, and a quest
+    newer than the name file appears with a null name (``utils/quests.py``).
+
+    The list and counts come from account sync. Quest points do not: the snapshot does
     not carry the game's quest-point varp, so they are read from the quest
     completion notifications, each of which records the player's quest points
     and the game's total at that moment. The *highest* recorded value is used,
@@ -353,24 +360,38 @@ def _load_quests(session, player_ids: List[int], ctx) -> Dict[int, dict]:
     ``grandmaster_quests`` likewise lists only those completed with the plugin
     running (and every one of them is implied by ``quest_cape``).
     """
+    from utils.quests import count_states, quest_list
+
     ids = tuple(player_ids)
+    # One row per player, not one per quest: 100 players are 22,000 quest
+    # rows, and fetching those one by one cost five times what this does. A
+    # player's whole string is about 1.3 KB against MariaDB's 1 MB
+    # group_concat_max_len, so it cannot truncate.
     rows = session.execute(text("""
-        SELECT player_id, state, COUNT(*) FROM player_quest_states
-        WHERE player_id IN :ids GROUP BY player_id, state
+        SELECT player_id, GROUP_CONCAT(quest_id, ':', state)
+        FROM player_quest_states
+        WHERE player_id IN :ids GROUP BY player_id
     """).bindparams(ids=ids))
 
     def blank():
         return {"not_started": 0, "in_progress": 0, "finished": 0,
                 "quest_points": None, "total_quest_points": None,
-                "quest_points_at": None, "quest_cape": False, "grandmaster_quests": []}
+                "quest_points_at": None, "quest_cape": False, "grandmaster_quests": [],
+                "list": []}
+
+    states: Dict[int, Dict[int, int]] = {}
+    for player_id, packed in rows:
+        by_quest = states.setdefault(int(player_id), {})
+        for pair in str(packed or "").split(","):
+            quest_id, _, state = pair.partition(":")
+            if quest_id and state:
+                by_quest[int(quest_id)] = int(state)
 
     out: Dict[int, dict] = {}
-    labels = {0: "not_started", 1: "in_progress", 2: "finished"}
-    for player_id, state, count in rows:
-        entry = out.setdefault(int(player_id), blank())
-        label = labels.get(int(state))
-        if label:
-            entry[label] = int(count)
+    for player_id, by_quest in states.items():
+        entry = out.setdefault(player_id, blank())
+        entry["list"] = quest_list(by_quest)
+        entry.update(count_states(entry["list"]))
 
     # Highest quest points per player, and the total recorded alongside it.
     best = session.execute(text("""
@@ -940,8 +961,14 @@ _SECTIONS = (
             "with the points still needed and progress through the current "
             "tier (%). Points refresh on every task completion; "
             "tasks_completed comes from account sync."),
-    Section("quests", 4, _load_quests,
-            "Quest counts by state (account sync), plus quest_points and "
+    # 20 since the per-quest list (2026-11-24): ~1 ms and ~14 KB per player
+    # with serialisation, measured over 100 synced players. Was 4.
+    Section("quests", 20, _load_quests,
+            "Every quest's state from account sync: list holds one "
+            "{id, name, state} per quest (state is not_started, in_progress "
+            "or finished; miniquests included; name is null for a quest "
+            "newer than our name list), with counts by state beside it. "
+            "Empty for a player who has not synced. Plus quest_points and "
             "total_quest_points from quest-completion notifications — null until "
             "the player completes a quest with the plugin — quest_cape, and the "
             "grandmaster quests completed with the plugin running."),

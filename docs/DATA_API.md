@@ -233,7 +233,7 @@ members — the two are different answers and are reported differently.
 | `stats` | 2 | Experience in all 24 skills, and the total |
 | `clog` | 2 | Collection log progress (obtained / total) |
 | `combat_achievements` | 1 | Points, the tier they reach, and the next tier with the points still needed — see below |
-| `quests` | 2 | Counts by state; `quest_points`, `total_quest_points` and `quest_cape` from quest-completion notifications (null until the player completes a quest with the plugin); `grandmaster_quests` completed with the plugin running |
+| `quests` | 20 | `list`: every quest and miniquest as `{id, name, state}` (`state` is `not_started`, `in_progress` or `finished`; `name` is null for a quest newer than our name list), in the in-game order, from account sync (empty until the player syncs); counts by state; `quest_points`, `total_quest_points` and `quest_cape` from quest-completion notifications (null until the player completes a quest with the plugin); `grandmaster_quests` completed with the plugin running |
 | `diaries` | 2 | Completion counts per area and tier |
 | `points` | 2 | Lifetime points earned |
 | `badges` | 2 | Currently held badges |
