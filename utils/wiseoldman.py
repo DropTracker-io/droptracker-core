@@ -575,6 +575,60 @@ async def check_user_by_id(uid: int, *, force_refresh: bool = False):
         print(f"Error checking user by id {uid}: {str(e)}")
         return None, None, None, -1
 
+_REDIS_WOM_ID_STATUS_PREFIX = "wom:id_status:v1:"
+_WOM_ID_STATUS_TTL = {"alive": 6 * 3600, "gone": 24 * 3600}
+
+
+async def wom_id_status(uid) -> str:
+    """Whether a stored WOM player id still names a live record.
+
+    Returns ``"alive"``, ``"gone"`` or ``"unknown"``. ``"gone"`` is only ever a
+    positive answer from WOM: a 404 (WOM archives the record that held a name when
+    it approves another account's change to that name) or the empty placeholder
+    record ``_is_degenerate_wom_player`` describes. Anything else -- a timeout, a
+    5xx, the rate limiter saying no, an unexpected payload -- is ``"unknown"``, so
+    a caller deciding whether to abandon an id can treat only a confirmed answer
+    as permission. Cached in Redis (``unknown`` is not cached).
+    """
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return "unknown"
+    key = f"{_REDIS_WOM_ID_STATUS_PREFIX}{uid}"
+    try:
+        cached = redis_client.client.get(key)
+        if cached is not None:
+            cached = cached.decode() if isinstance(cached, bytes) else str(cached)
+            if cached in _WOM_ID_STATUS_TTL:
+                return cached
+    except Exception as e:
+        logger.debug("WOM id-status cache read failed for %s: %s", uid, e)
+
+    if not await limiter.wait():
+        return "unknown"
+    try:
+        await client.start()
+        _log_wom_call("players.get_details_by_id", player_id=uid, purpose="id_status")
+        result = await client.players.get_details_by_id(player_id=uid)
+        if result.is_ok:
+            player = result.unwrap()
+            if player is None:
+                return "unknown"
+            status = "gone" if _is_degenerate_wom_player(player) else "alive"
+        elif _is_not_found(result):
+            status = "gone"
+        else:
+            return "unknown"
+    except Exception as e:
+        logger.debug("WOM id-status lookup failed for %s: %s", uid, e)
+        return "unknown"
+    try:
+        redis_client.client.setex(key, _WOM_ID_STATUS_TTL[status], status)
+    except Exception as e:
+        logger.debug("WOM id-status cache write failed for %s: %s", uid, e)
+    return status
+
+
 async def check_group_by_id(wom_group_id: int, *, force_refresh: bool = False):
     """ Searches for a group on WiseOldMan by a passed group ID 
         Returns group_name, member_count and members (list)    

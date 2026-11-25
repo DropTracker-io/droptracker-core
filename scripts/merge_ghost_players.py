@@ -74,6 +74,13 @@ PAIRS = [
     # clogs, CAs and PBs from 2026-07-27 on. Real row 7151 owns all the history
     # (120,357 drops); the ghost owns the clan memberships and the event-46 signup.
     (5756095, 7151, 1098, 534037, "Wimi", "Wimi (ghost wom 534037 -> real 7151; real held dead wom 796802 and was renamed to 'unknown')"),
+    # --- 2026-11-25: ticket 550. A name swap between a main (Sir Con) and an alt
+    # (now Mr Con) left this roster stub for "mr con" in Team Memes with a NULL
+    # wom_id after the alt's plugin row (5773020, hash -7941922783673216550) took
+    # its id. A NULL-wom_id row is never removed by the roster sync, so it would
+    # have stayed a phantom member forever. No adopt_wom_id: the alt's current
+    # id is uncertain and the roster's name fallback sets it on the next sync.
+    (5781212, 5773020, None, None, None, "mr con (stub wom NULL -> alt 5773020; ticket 550 name swap)"),
 ]
 
 # Tables handled with bespoke unique-key dedup; excluded from the generic reassign.

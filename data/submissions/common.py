@@ -67,6 +67,7 @@ from utils.account_types import VALID_ACCOUNT_TYPES
 from utils.ge_value import get_true_item_value
 import osrs_api
 from utils.wiseoldman import (
+    wom_id_status,
     check_user_by_id,
     check_user_by_username,
     check_group_by_id,
@@ -480,6 +481,43 @@ class RawDropData:
 
     def __init__(self) -> None:
         pass
+
+
+async def _hash_row_keeps_its_wom_record(player_by_hash, resolved_wom_id) -> bool:
+    """True when a plugin-authed row must keep its own WOM id rather than take the
+    id WOM returned for the name it just submitted.
+
+    A WOM record follows its account across renames: WOM approves a name change by
+    renaming the account's existing record, and archives whatever record held the
+    new name before. So when the account hash already maps to a row with a live
+    WOM id, and the submitted name resolves to a *different* id, that other id is
+    the name's previous holder (or a placeholder WOM minted for the name) -- never
+    this account. The window is the gap between the rename in game and WOM
+    approving it, and two accounts swapping names fall into it from both sides.
+
+    Taking the other id there is what split ticket 550 (2026-11-25): a main and
+    its alt swapped names, each row re-pinned itself to the other's record, the
+    main's borrowed record was then archived (404), and the hourly clan sync --
+    which matches members by ``players.wom_id`` -- evicted the main from its clan
+    while the alt's row held the main's live id. A later submission could also
+    land on the other account's row and fail auth on the hash mismatch.
+
+    The row only gives its id up when WOM positively confirms the id is gone
+    (``wom_id_status`` == "gone"); an uncertain answer keeps it, because an
+    identity must not move on data we could not verify.
+    """
+    if player_by_hash is None or resolved_wom_id is None:
+        return False
+    if _is_temp_account_hash(getattr(player_by_hash, "account_hash", None)):
+        return False
+    held = _to_int_or_none(getattr(player_by_hash, "wom_id", None))
+    if held is None or held == int(resolved_wom_id):
+        return False
+    try:
+        status = await wom_id_status(held)
+    except Exception:
+        status = "unknown"
+    return status != "gone"
 
 
 def _is_temp_account_hash(hash_value) -> bool:
@@ -1009,6 +1047,23 @@ async def ensure_player_and_auth(session, player_name, account_hash, auth_key, w
             wom_ehb = _extract_ehb_from_wom_player(wom_player)
     except (TypeError, ValueError):
         expected_wom_id = None
+
+    if expected_wom_id is not None and await _hash_row_keeps_its_wom_record(
+            player_by_hash, expected_wom_id):
+        # The name changed hands; this account's record is the one it already
+        # holds (see the helper). Keep it, and drop the stats WOM returned for
+        # the name -- they belong to the other account. The display name stays:
+        # it is the RSN this account just submitted, in WOM's spelling.
+        logger.log_sync(
+            "info",
+            f"ensure_player_and_auth: '{player_name}' resolves to WOM {expected_wom_id} "
+            f"but hash owner {player_by_hash.player_id} holds live WOM "
+            f"{player_by_hash.wom_id}; keeping it (name changed hands)",
+        )
+        expected_wom_id = int(player_by_hash.wom_id)
+        wom_log_slots = None
+        wom_total_level = None
+        wom_ehb = None
 
     if expected_wom_id is not None:
         # Prefer canonical WOM row over hash/name-resolved rows.
