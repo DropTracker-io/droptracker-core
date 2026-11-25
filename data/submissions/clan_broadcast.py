@@ -1697,6 +1697,56 @@ async def _process_chat_pb(
     )
 
 
+#: The name the plugin sends when it saw a pet but could not read which one.
+UNNAMED_PLUGIN_PET = "Unknown Pet"
+
+
+def _unnamed_pet_group_ids(rows) -> set:
+    """Groups among ``(group_id, data_json)`` queue rows that were sent a
+    plugin pet post with no pet name. Clan-broadcast rows never count."""
+    out = set()
+    for gid, raw in rows:
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+        except Exception:
+            continue
+        if data.get("via_clan_broadcast"):
+            continue
+        if str(data.get("pet_name") or "").strip() == UNNAMED_PLUGIN_PET:
+            out.add(gid)
+    return out
+
+
+def _groups_told_unnamed_pet(session, player_id, stamp) -> set:
+    """Groups that already posted this player's pet as "Unknown Pet".
+
+    The plugin names a pet from the clan broadcast it sees, and since the
+    2026-11-18 update it can fail to (the pronoun its pattern needs is a
+    stripped tag variable). It then posts "Unknown Pet" and records nothing,
+    because that name resolves to no item. ``_plugin_copy_exists`` keys on the
+    pet row, so it sees no plugin copy, and the broadcast would post the
+    same pet a second time, correctly named (ticket 544). The broadcast still
+    records the pet; only that second post is skipped, in those groups.
+    """
+    try:
+        from db.models import NotificationQueue
+
+        since = stamp - timedelta(seconds=PLUGIN_COPY_LOOKBACK_SECONDS)
+        rows = (
+            session.query(NotificationQueue.group_id, NotificationQueue.data)
+            .filter(
+                NotificationQueue.player_id == player_id,
+                NotificationQueue.notification_type == "pet",
+                NotificationQueue.created_at >= since,
+            )
+            .all()
+        )
+    except Exception as e:
+        debug_print(f"[ClanBroadcast] unnamed plugin pet lookup failed: {e}")
+        return set()
+    return _unnamed_pet_group_ids(rows)
+
+
 async def _process_chat_pet(
     session, use_external_session, parsed, subject, subject_group_ids,
     bound_groups, cc_guid, stamp, message,
@@ -1753,9 +1803,13 @@ async def _process_chat_pet(
     # The broadcast line itself says whether it is a duplicate.
     pet_is_duplicate = is_duplicate(is_new_pet, bool(parsed.extra.get("duplicate")))
     enabled = _notify_enabled_groups(session, subject_group_ids, "notify_pets")
+    already_told = _groups_told_unnamed_pet(session, subject.player_id, stamp)
     notified = 0
     for gid in sorted(set(subject_group_ids)):
         if gid not in enabled:
+            continue
+        if gid in already_told:
+            _stat("pet_unnamed_plugin_copy")
             continue
         if pet_is_duplicate and not group_announces_duplicate(session, gid, parsed.item_name):
             continue
