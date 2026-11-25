@@ -236,6 +236,122 @@ def _autoclose_changed_text(exempt: bool, changed_by: str) -> str:
     )
 
 
+# --- Scheduled close (web166a) ---------------------------------------------
+# Staff leave a final reply, then `/close hours:` (or the welcome card's
+# "Close in 12h" button) schedules the close. The notice carries a "Keep open"
+# button for the opener or any ticket staff; otherwise the 5-minute sweep
+# archives the ticket once the time passes, replies or not.
+SCHEDULED_CLOSE_DEFAULT_HOURS = 12
+SCHEDULED_CLOSE_MAX_HOURS = 168
+SCHEDULE_CLOSE_CUSTOM_ID = "ticket_schedule_close"
+# Suffixed with the schedule's token, so a superseded notice's button can't
+# cancel a newer schedule.
+KEEP_OPEN_CUSTOM_ID_PREFIX = "ticket_keep_open:"
+
+
+def _close_token(close_at) -> str:
+    """Stable id for one schedule: its close time as unix seconds."""
+    return str(int(close_at.timestamp()))
+
+
+def _scheduled_close_at(now: datetime, hours: int) -> datetime:
+    # Whole seconds: MySQL DATETIME rounds fractions, which would change
+    # the token between the notice and the stored row.
+    return (now + timedelta(hours=hours)).replace(microsecond=0)
+
+
+def _scheduled_close_due(status, close_at, now) -> bool:
+    """Pure sweep rule: an open ticket whose scheduled close time has passed."""
+    return status == "open" and close_at is not None and close_at <= now
+
+
+def _apply_schedule_close(channel_id, hours: int, scheduler_discord_id, now: datetime):
+    """DB half of scheduling a close (runs in a worker thread).
+
+    Returns (outcome, ticket_id, close_at, opener_discord_id); outcome is
+    'not_ticket', 'not_open', 'scheduled' or 'rescheduled'. A pending
+    inactivity warning is dropped: the schedule replaces it.
+    """
+    s = Session()
+    try:
+        ticket = s.query(Ticket).filter(Ticket.channel_id == str(channel_id)).first()
+        if ticket is None:
+            return "not_ticket", None, None, None
+        if ticket.status != "open":
+            return "not_open", ticket.ticket_id, None, None
+        outcome = "rescheduled" if ticket.scheduled_close_at is not None else "scheduled"
+        scheduler = s.query(User).filter(User.discord_id == str(scheduler_discord_id)).first()
+        opener = s.query(User.discord_id).filter(User.user_id == ticket.created_by).first()
+        close_at = _scheduled_close_at(now, hours)
+        ticket.scheduled_close_at = close_at
+        ticket.scheduled_close_by = scheduler.user_id if scheduler is not None else None
+        ticket.inactivity_warned_at = None
+        s.commit()
+        opener_id = str(opener[0]) if opener and opener[0] else None
+        return outcome, ticket.ticket_id, close_at, opener_id
+    except Exception:
+        s.rollback()
+        raise
+    finally:
+        s.close()
+
+
+def _apply_keep_open(channel_id, token: str, author_discord_id, author_is_staff: bool):
+    """DB half of the notice's "Keep open" button (runs in a worker thread).
+
+    Returns 'not_ticket', 'not_open', 'stale' (nothing scheduled, or this
+    notice was replaced by a newer schedule), 'forbidden' (not the opener or
+    ticket staff) or 'cancelled'.
+    """
+    s = Session()
+    try:
+        ticket = s.query(Ticket).filter(Ticket.channel_id == str(channel_id)).first()
+        if ticket is None:
+            return "not_ticket"
+        if ticket.status != "open":
+            return "not_open"
+        if ticket.scheduled_close_at is None or _close_token(ticket.scheduled_close_at) != token:
+            return "stale"
+        if not author_is_staff:
+            opener = s.query(User.discord_id).filter(User.user_id == ticket.created_by).first()
+            if not (opener and opener[0] and str(opener[0]) == str(author_discord_id)):
+                return "forbidden"
+        ticket.scheduled_close_at = None
+        ticket.scheduled_close_by = None
+        # Kept open on purpose: give it a full inactivity window from now.
+        ticket.date_updated = datetime.now()
+        s.commit()
+        return "cancelled"
+    except Exception:
+        s.rollback()
+        raise
+    finally:
+        s.close()
+
+
+def _scheduled_close_notice(close_at, scheduled_by: str, opener_discord_id, rescheduled: bool):
+    """(content, components, allowed_mentions) for the public close notice."""
+    ts_ = _close_token(close_at)
+    opener_ping = f"<@{opener_discord_id}> " if opener_discord_id else ""
+    head = "This ticket's close time has changed" if rescheduled else "This ticket is scheduled to close"
+    content = (
+        f"🔒 **{head}: <t:{ts_}:F> (<t:{ts_}:R>).**\n\n"
+        f"{opener_ping}If you still need help, press **Keep open** below. "
+        "Otherwise the ticket will be archived and closed automatically. "
+        "You can always open a new one.\n"
+        f"-# Scheduled by {scheduled_by}. Replying alone doesn't cancel it. "
+        "Staff can run `/close` to close it right away."
+    )
+    components = [
+        ActionRow(
+            Button(label="Keep open", emoji="📌", style=ButtonStyle.SUCCESS,
+                   custom_id=f"{KEEP_OPEN_CUSTOM_ID_PREFIX}{ts_}"),
+        )
+    ]
+    allowed = AllowedMentions(users=[str(opener_discord_id)] if opener_discord_id else [])
+    return content, components, allowed
+
+
 _LOGO_MEDIA = UnfurledMediaItem(url="https://www.droptracker.io/img/droptracker-small.gif")
 
 # Per-type copy for the welcome card. Unknown types fall back to _DEFAULT_TYPE_META.
@@ -379,6 +495,8 @@ def build_ticket_welcome(ticket_type: str, ticket_id: int, author_mention: str, 
             ),
             ActionRow(
                 Button(label="Close Ticket", style=ButtonStyle.DANGER, custom_id="close_ticket"),
+                Button(label=f"Close in {SCHEDULED_CLOSE_DEFAULT_HOURS}h", emoji="⏳",
+                       style=ButtonStyle.SECONDARY, custom_id=SCHEDULE_CLOSE_CUSTOM_ID),
                 Button(label="Mute/Unmute Pings", emoji="🔕", style=ButtonStyle.SECONDARY,
                        custom_id=PINGS_TOGGLE_CUSTOM_ID),
                 Button(label="Docs", style=ButtonStyle.URL, url="https://www.droptracker.io/docs"),
@@ -886,9 +1004,16 @@ class Tickets(Extension):
         now = datetime.now()
         to_warn = []   # (ticket_id, channel_id, created_by)
         to_close = []  # ticket_id
+        scheduled_due = []  # ticket_id
         s = Session()
         try:
             for t in s.query(Ticket).filter(Ticket.status == "open").all():
+                if t.scheduled_close_at is not None:
+                    # A scheduled close owns this ticket's ending; no idle
+                    # warning on top of it. It applies even with /autoclose off.
+                    if _scheduled_close_due(t.status, t.scheduled_close_at, now):
+                        scheduled_due.append(t.ticket_id)
+                    continue
                 decision = _inactivity_decision(
                     t.status, t.date_updated or t.date_added, t.inactivity_warned_at, now,
                     exempt=t.autoclose_exempt,
@@ -907,6 +1032,12 @@ class Tickets(Extension):
                 await self._warn_inactive(ticket_id, channel_id, created_by)
             except Exception as e:
                 print(f"[tickets] inactivity warn failed ({ticket_id}): {e}")
+
+        for ticket_id in scheduled_due:
+            try:
+                await self._close_scheduled(ticket_id)
+            except Exception as e:
+                print(f"[tickets] scheduled close failed ({ticket_id}): {e}")
 
         for ticket_id in to_close:
             # Re-check under a fresh read: a reply may have landed since the
@@ -1072,6 +1203,102 @@ class Tickets(Extension):
         finally:
             s.close()
 
+    async def _close_scheduled(self, ticket_id: int):
+        """Archive a ticket whose scheduled close time passed.
+
+        Re-read first: someone may have pressed Keep open (or rescheduled)
+        since the scan.
+        """
+        s = Session()
+        try:
+            row = (
+                s.query(Ticket.status, Ticket.scheduled_close_at, Ticket.scheduled_close_by)
+                .filter(Ticket.ticket_id == ticket_id)
+                .first()
+            )
+            if row is None or not _scheduled_close_due(row[0], row[1], datetime.now()):
+                return
+            closer_id = row[2]
+            closer_name = "staff"
+            if closer_id is not None:
+                closer = s.query(User.username).filter(User.user_id == closer_id).first()
+                if closer and closer[0]:
+                    closer_name = closer[0]
+        finally:
+            s.close()
+        await close_and_archive(
+            self.bot,
+            ticket_id,
+            closed_by_user_id=closer_id,
+            closed_by_name=f"{closer_name} (scheduled close)",
+            reason="closed on schedule; nobody pressed Keep open",
+        )
+
+    async def _schedule_close(self, ctx, hours: int):
+        """Shared by `/close hours:` and the welcome card's button."""
+        if not _author_has_staff_role(ctx.author, TICKET_CLOSER_ROLE_IDS):
+            return await ctx.send(
+                ":warning: Only staff who can close tickets can schedule a close.", ephemeral=True
+            )
+        try:
+            outcome, ticket_id, close_at, opener_id = await asyncio.to_thread(
+                _apply_schedule_close, ctx.channel_id, hours, ctx.author.id, datetime.now()
+            )
+        except Exception as e:
+            print(f"[tickets] schedule close failed (channel {ctx.channel_id}): {e}")
+            return await ctx.send(":warning: Couldn't schedule the close. Please try again.", ephemeral=True)
+        if outcome == "not_ticket":
+            return await ctx.send(
+                ":warning: This is not a ticket channel owned by the DropTracker ticket system.",
+                ephemeral=True,
+            )
+        if outcome == "not_open":
+            return await ctx.send("This ticket is already being closed.", ephemeral=True)
+        content, components, allowed = _scheduled_close_notice(
+            close_at,
+            ctx.author.display_name or ctx.author.username,
+            opener_id,
+            rescheduled=(outcome == "rescheduled"),
+        )
+        # Public, so the opener sees it and the mirror records it.
+        await ctx.send(content, components=components, allowed_mentions=allowed)
+
+    async def _keep_open(self, ctx, token: str):
+        """The close notice's Keep open button: the opener or ticket staff."""
+        try:
+            outcome = await asyncio.to_thread(
+                _apply_keep_open, ctx.channel_id, token, ctx.author.id,
+                _author_has_staff_role(ctx.author),
+            )
+        except Exception as e:
+            print(f"[tickets] keep-open failed (channel {ctx.channel_id}): {e}")
+            return await ctx.send(":warning: Couldn't update this ticket. Please try again.", ephemeral=True)
+        if outcome == "not_ticket":
+            return await ctx.send(
+                ":warning: This is not a ticket channel owned by the DropTracker ticket system.",
+                ephemeral=True,
+            )
+        if outcome == "not_open":
+            return await ctx.send("This ticket is already being closed.", ephemeral=True)
+        if outcome == "stale":
+            return await ctx.send(
+                "That scheduled close was already cancelled or replaced by a newer one.", ephemeral=True
+            )
+        if outcome == "forbidden":
+            return await ctx.send(
+                "Only the person who opened this ticket or staff can keep it open.", ephemeral=True
+            )
+        name = ctx.author.display_name or ctx.author.username
+        try:
+            # Retire this notice's button so it can't be pressed again.
+            await ctx.edit_origin(components=[])
+        except Exception as e:
+            print(f"[tickets] keep-open notice edit failed (channel {ctx.channel_id}): {e}")
+        await ctx.channel.send(
+            f"📌 **{name} kept this ticket open.** The scheduled close is cancelled.",
+            allowed_mentions=AllowedMentions.none(),
+        )
+
     async def _reap_orphaned(self, ticket_id: int):
         """Close an open ticket whose Discord channel no longer exists.
 
@@ -1139,6 +1366,11 @@ class Tickets(Extension):
             await self._notify_opposing(ticket, message)
         except Exception as e:
             print(f"[tickets] notify-opposing failed (ticket {ticket_id}): {e}")
+        if ticket.scheduled_close_at is not None:
+            try:
+                await self._nudge_scheduled_close(ticket, message)
+            except Exception as e:
+                print(f"[tickets] scheduled-close nudge failed (ticket {ticket_id}): {e}")
         if was_pending_autoclose:
             # This reply cancelled the pending auto-close (upsert_message already
             # cleared the flag + reset the clock) — confirm it, and leave the
@@ -1149,6 +1381,23 @@ class Tickets(Extension):
                 )
             except Exception as e:
                 print(f"[tickets] keep-open confirmation failed (ticket {ticket_id}): {e}")
+
+    async def _nudge_scheduled_close(self, ticket, message):
+        """The opener replied while a close is scheduled: a reply doesn't
+        cancel it, so remind them (once per schedule) where the button is."""
+        if str(message.author.id) != str(self._opener_discord_id(ticket.created_by)):
+            return
+        token = _close_token(ticket.scheduled_close_at)
+        if not redis_client.set(f"ticket:close_nudge:{ticket.ticket_id}:{token}", "1",
+                                nx=True, ex=SCHEDULED_CLOSE_MAX_HOURS * 3600):
+            return
+        await message.channel.send(
+            f"⏳ This ticket is still scheduled to close <t:{token}:R>. "
+            "If you still need help, press **Keep open**.",
+            components=[ActionRow(Button(label="Keep open", emoji="📌", style=ButtonStyle.SUCCESS,
+                                         custom_id=f"{KEEP_OPEN_CUSTOM_ID_PREFIX}{token}"))],
+            allowed_mentions=AllowedMentions.none(),
+        )
 
     async def _notify_opposing(self, ticket, message):
         """Ghost-ping the *other* side of the conversation, then delete the ping.
@@ -1185,8 +1434,18 @@ class Tickets(Extension):
         except Exception as e:
             print(f"[tickets] ghost-ping delete failed: {e}")
     @slash_command(name="close",
-                   description="Close a ticket")
-    async def close_ticket(self, ctx: SlashContext):
+                   description="Close a ticket now, or schedule it to close in a number of hours")
+    @slash_option(
+        name="hours",
+        description="Close after this many hours unless the opener or staff press Keep open (empty = close now)",
+        required=False,
+        opt_type=OptionType.INTEGER,
+        min_value=1,
+        max_value=SCHEDULED_CLOSE_MAX_HOURS,
+    )
+    async def close_ticket(self, ctx: SlashContext, hours: int = None):
+        if hours is not None:
+            return await self._schedule_close(ctx, int(hours))
         author = ctx.author
         author_roles = author.roles
         can_close = False
@@ -1340,6 +1599,14 @@ class Tickets(Extension):
 
             if custom_id == PINGS_TOGGLE_CUSTOM_ID:
                 await self._change_pings(event.ctx, "toggle")
+                return
+
+            if custom_id == SCHEDULE_CLOSE_CUSTOM_ID:
+                await self._schedule_close(event.ctx, SCHEDULED_CLOSE_DEFAULT_HOURS)
+                return
+
+            if custom_id.startswith(KEEP_OPEN_CUSTOM_ID_PREFIX):
+                await self._keep_open(event.ctx, custom_id[len(KEEP_OPEN_CUSTOM_ID_PREFIX):])
                 return
 
             if "close_ticket" in custom_id:

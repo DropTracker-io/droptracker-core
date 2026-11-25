@@ -35,6 +35,12 @@ class Ticket(Base):
     # either direction: not the opener when staff reply, not staff when the
     # opener (or anyone else) posts.
     pings_muted = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Scheduled close (web166a), set by staff with `/close hours:` or the
+    # welcome card's "Close in 12h" button. The 5-minute sweep archives the
+    # ticket once this passes unless someone presses the notice's "Keep open"
+    # button (which clears it). Replies alone don't cancel it.
+    scheduled_close_at = Column(DateTime, nullable=True)
+    scheduled_close_by = Column(Integer, nullable=True)
 
 
 class TicketMessage(Base):
