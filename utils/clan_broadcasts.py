@@ -110,7 +110,7 @@ def strip_value_husks(text: str) -> str:
 
 
 _HUSK_RE = re.compile(
-    r" \( ?coins\)| reached XP in | worth coins| at (?:killcount|kill count|kills|XP)\b"
+    r" \( ?coins\)| reached XP in | worth coins| at (?:killcount|kill count|kills|XP|completions)\b"
 )
 
 
@@ -133,7 +133,17 @@ def dedupe_text(text: str) -> str:
     drops apart anyway (the same item prices the same within the window), and
     quantities, which do, are kept.
     """
-    return _ANY_VALUE_RE.sub("", text or "")
+    text = _ANY_VALUE_RE.sub("", text or "")
+    pet = _PET_RE.match(text)
+    if pet:
+        # A pet line is keyed by who got which pet, and nothing else. Mixed
+        # builds relay one broadcast as "Orion at 165 completions" and "Orion
+        # at completions" (and may disagree on the stripped pronoun), which
+        # posted the pet twice -- once with no count (2026-11-25, Potato Skins).
+        # Nobody receives the same pet twice within one GUID bucket.
+        dup = " (duplicate)" if "would have been followed" in text else ""
+        return f"{pet['player']} pet: {pet['pet']}{dup}"
+    return text
 
 #: Machine-readable metadata Jagex prefixes to some broadcasts, pipe-terminated:
 #: ``CA_ID:112|hype mann has completed a master combat task: ...``. It is aimed
@@ -319,16 +329,24 @@ _CLOG_RE = re.compile(
 # Hueycoatl." No pet's name contains " from ".
 _PET_RE = re.compile(
     r"^(?P<player>.+?) "
+    # The pronoun ("his backpack", "she's acquired") has been a tag variable
+    # since the 2026-11-18 update and arrives stripped from every plugin build
+    # ("sneaking into backpack", "feels like acquired"), so the pronoun slot is
+    # optional. Requiring a word there dropped those pets silently. The
+    # "followed" wording survives without it ("like being followed").
     r"(?:has a funny feeling like .+? followed|"
-    r"feels something weird sneaking into .+? backpack|"
-    r"feels like .+? acquired something special): "
+    r"feels something weird sneaking into (?:.+? )?backpack|"
+    r"feels like (?:.+? )?acquired something special): "
     r"(?P<pet>.+?)"
     # Newer wording puts the milestone before the source ("Hellpuppy at
-    # 1,234 killcount from Cerberus"); since 2026-11-18 the figure can be an
-    # empty husk ("at killcount from Cerberus", see _VALUE_CLAUSE).
-    r"(?: at (?P<count_pre>[\d,]*) ?(?P<unit_pre>killcount|kill count|kills|XP))?"
+    # 1,234 killcount from Cerberus"). Since 2026-11-18 the figure can be an
+    # empty husk from older plugin builds ("at killcount from Cerberus",
+    # "Orion at completions"), and the unit is whatever the activity counts
+    # ("rift searches", "completions"), so neither is enumerated. No pet's name
+    # contains " at " or " from ".
+    r"(?: at (?P<count_pre>[\d,]*) ?(?P<unit_pre>[^.]+?)(?= from ))?"
     r"(?: from (?P<source>.+?))?"
-    r"(?: at (?P<count>[\d,]+) (?P<unit>.+?))?\.?$"
+    r"(?: at (?P<count>[\d,]*) ?(?P<unit>[^.]+?))?\.?$"
 )
 
 
@@ -380,9 +398,10 @@ def _clog(m) -> ParsedBroadcast:
 def _pet(m) -> ParsedBroadcast:
     extra = {}
     count, unit = m["count"], m["unit"]
-    if count is None and m["count_pre"]:
+    if not count and m["count_pre"]:
         count, unit = m["count_pre"], m["unit_pre"]
-    if count is not None:
+    # An empty figure ("at completions") is a husk, not a milestone.
+    if count:
         extra = {"milestone_count": _int(count), "milestone_unit": unit}
     # "...would have been followed" is the game's duplicate-pet line.
     if "would have been followed" in m.group(0):

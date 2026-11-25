@@ -698,3 +698,64 @@ def test_redefined_tag_variable_resolves_to_the_preceding_definition():
 
 def test_reference_before_any_definition_is_left_for_the_stripper():
     assert clean_broadcast_text("X <int_0:spacer> y<int_0=5> <int_0>") == "X y 5"
+
+
+# ── Pets after the 2026-11-18 tag-variable update (pronoun + figure stripped) ──
+# Mixed plugin builds relayed one duplicate-pet broadcast two ways, which posted
+# it twice, once titled "Orion at completions" (2026-11-25, Potato Skins).
+
+from utils.clan_broadcasts import dedupe_text as _dedupe_text  # noqa: E402
+
+_ORION_FULL = "Potato Skins has a funny feeling like would have been followed: Orion at 165 completions."
+_ORION_HUSK = "Potato Skins has a funny feeling like would have been followed: Orion at completions."
+
+
+def test_pet_husk_figure_is_not_part_of_the_pet_name():
+    parsed = parse_broadcast(_ORION_HUSK)
+    assert parsed.kind == "pet"
+    assert parsed.item_name == "Orion"
+    assert parsed.extra == {"duplicate": True}
+
+
+def test_pet_full_figure_with_an_unlisted_unit():
+    parsed = parse_broadcast(_ORION_FULL)
+    assert parsed.item_name == "Orion"
+    assert parsed.extra == {"milestone_count": 165, "milestone_unit": "completions",
+                            "duplicate": True}
+
+
+def test_mixed_build_relays_of_one_pet_share_a_dedupe_key():
+    assert _dedupe_text(_ORION_FULL) == _dedupe_text(_ORION_HUSK)
+
+
+def test_pronoun_difference_does_not_split_the_dedupe_key():
+    assert (_dedupe_text("Rift Runner feels something weird sneaking into her backpack: Beaver at 5 XP.")
+            == _dedupe_text("Rift Runner feels something weird sneaking into backpack: Beaver at XP."))
+
+
+def test_duplicate_and_first_pet_keys_differ():
+    assert (_dedupe_text("A B has a funny feeling like being followed: Orion at 5 completions.")
+            != _dedupe_text(_ORION_FULL.replace("Potato Skins", "A B")))
+
+
+@pytest.mark.parametrize("line,pet,extra", [
+    ("GUMBYPUNK feels something weird sneaking into backpack: Baby chinchompa at XP.",
+     "Baby chinchompa", {}),
+    ("Irysca feels like acquired something special: Abyssal orphan", "Abyssal orphan", {}),
+    ("TheElotesMan feels something weird sneaking into backpack: Gull at 11 kills from Shellbane Gryphon.",
+     "Gull", {"milestone_count": 11, "milestone_unit": "kills", "source": "Shellbane Gryphon"}),
+    ("Cerb Guy feels something weird sneaking into backpack: Hellpuppy at killcount from Cerberus.",
+     "Hellpuppy", {"source": "Cerberus"}),
+])
+def test_pet_lines_without_a_pronoun_parse(line, pet, extra):
+    """Real lines from the consumer journal that fell to 'Unknown broadcast
+    shape' (pet silently lost) because the pronoun slot was required."""
+    parsed = parse_broadcast(line)
+    assert parsed is not None and parsed.kind == "pet"
+    assert parsed.item_name == pet
+    assert parsed.extra == extra
+
+
+def test_non_pet_lines_keep_their_dedupe_text():
+    line = "Bob received a drop: 3 x Dragon bones (1,200 coins)."
+    assert _dedupe_text(line) == "Bob received a drop: 3 x Dragon bones."
